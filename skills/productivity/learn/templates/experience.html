@@ -519,7 +519,7 @@ function resetModuleState(){
   S.ranSim=false; S.simMode='fixed'; S.simResult=null;
   S.ownChoice=null; S._reason=''; S.reflectionShown=false;
   S.fixPick=null; S._traceBeat=null;
-  S._lastChap=undefined;
+  S._lastChap=undefined; S._lastBeatId=undefined;
 }
 
 /* ============================ C4 MODEL ============================
@@ -890,7 +890,7 @@ const CURRICULUM = {
 
         own:[{ type:'decide', id:'fail-own',
           title:'Pick the failure you can live with.',
-          lede:'Your keying choice from earlier still stands — now defend it under partition. Decide the fallback and say why; this becomes the record an on-call engineer reads at 3am.',
+          lede:'Decide the fallback and say why; this becomes the record an on-call engineer reads at 3am.',
           prompt:'When the store is unreachable, you…',
           options:[
             {v:'fail to local counting', t:'Fail to local counting', d:'bounded N×cap, self-heals — looser limit, no outage.'},
@@ -899,7 +899,25 @@ const CURRICULUM = {
           reasonLabel:'Why? (one line — this is your ADR)',
           reasonPlaceholder:'e.g. our backend can absorb a brief N×cap, so we degrade locally rather than risk an outage…',
           adr:'a4',
-          cta:'Record my decision' }]
+          cta:'Record my decision' },
+          /* The single genuine cross-aspect callback (Q6): degrading to LOCAL
+             counts means each instance keys requests on its own — so the keying
+             choice you made for anonymous traffic now decides the blast radius
+             of the partition. Resurfaces the real `key-own` decision by id. */
+          { type:'callback', id:'fail-callback',
+            refId:'key-own', refModule:'Keying strategy',
+            title:'Does your keying choice survive the partition?',
+            lede:'Local fallback means every instance counts on its own. Under that split, the way you key <i>anonymous</i> traffic decides who shares a bucket when there’s no shared store to keep them honest.',
+            tension:'Coarser anonymous keys spread one abuser across instances during the split; tighter keys contain the damage but punish shared NATs harder. Same trade-off you set in Keying — now with no global counter behind it.',
+            prompt:'Under local fallback, your anonymous keying…',
+            options:[
+              {v:'still holds — keep it', t:'Holds — keep the keying as-is', d:'the partition doesn’t change the trade-off you already weighed.'},
+              {v:'tighten under partition', t:'Tighten it while degraded', d:'narrow anonymous buckets during fallback to cap the blast radius, relax when the store returns.'}
+            ],
+            reasonLabel:'Why? (one line — this is your ADR)',
+            reasonPlaceholder:'e.g. the keying still holds because anonymous traffic is already coarse and a brief N×cap is survivable…',
+            adr:'a4',
+            cta:'Reconcile and master' }]
       }
     },
 
@@ -1074,6 +1092,24 @@ function recomputeUnlocks(){
   });
 }
 function masteredCount(){ return CURRICULUM.modules.filter(m=>S.progress[m.id]==='mastered').length; }
+/* ---- FADING SCAFFOLD (Q6): later in the curriculum the player offers less
+   hand-holding. The scaffold LEVEL is keyed purely off how many modules are
+   mastered — the more you've earned, the more the engine trusts you and the
+   fewer nudges it shows. Three bands: 'full' (just starting), 'light', 'lean'.
+   showHint() lets renderers drop the small inline nudges once scaffold thins. */
+function scaffoldLevel(){
+  const n=masteredCount();
+  if(n>=4) return 'lean';
+  if(n>=2) return 'light';
+  return 'full';
+}
+const SCAFFOLD_META={
+  full:{label:'full guidance', sub:'every nudge shown'},
+  light:{label:'lighter guidance', sub:'fewer hints — you’ve earned it'},
+  lean:{label:'lean guidance', sub:'minimal nudges — you know the shape'}
+};
+/* full = show all hints; light = keep them; lean = drop the small inline nudges. */
+function showHint(){ return scaffoldLevel()!=='lean'; }
 function setMastered(id){
   S.progress[id]='mastered';
   recomputeUnlocks();
@@ -1753,6 +1789,16 @@ function render(){
 function renderModule(){
   const beats=moduleBeats();
   const cur=beats[S.chapter]||beats[0];
+  // Own-slot beats (decide/callback) each capture a FRESH choice + reason. A
+  // module's own slot can hold several (e.g. capstone's two calls, or a decide
+  // followed by a callback), so when we land on a NEW own beat reset the per-beat
+  // input state — otherwise the previous call's selection leaks the seal button
+  // open with a stale value.
+  const ownish = cur.beat.type==='decide' || cur.beat.type==='callback';
+  if(ownish && S._lastBeatId!==cur.beat.id){
+    S.ownChoice=null; S._reason=''; S.reflectionShown=false;
+  }
+  S._lastBeatId=cur.beat.id;
   // rail
   const cl=document.getElementById('chaplist');
   cl.innerHTML = beats.map((b,i)=>{
@@ -1771,7 +1817,8 @@ function renderModule(){
   document.getElementById('kicker').textContent = `${m.label} · ${String(S.chapter+1).padStart(2,'0')} · ${curMeta.k}`;
   const rl=document.getElementById('railLesson'); if(rl) rl.textContent=m.label;
   const rs=document.getElementById('railSub'); if(rs) rs.textContent=m.kick+' — '+m.desc;
-  const rf=document.getElementById('railFoot'); if(rf) rf.innerHTML=`${beats.length} chapters · ${m.capstone?'capstone — all your calls':'productive failure + C4 zoom'}<br>focus: ${(m.scene.focus||[]).join(', ')||'—'} @ ${ZNAME[m.scene.level]}<br>every choice → a decision record`;
+  const sc=scaffoldLevel(), scm=SCAFFOLD_META[sc];
+  const rf=document.getElementById('railFoot'); if(rf) rf.innerHTML=`${beats.length} chapters · ${m.capstone?'capstone — all your calls':'productive failure + C4 zoom'}<br>focus: ${(m.scene.focus||[]).join(', ')||'—'} @ ${ZNAME[m.scene.level]}<br>every choice → a decision record<br><span style="color:var(--accent)">scaffold: ${scm.label}</span> — ${scm.sub}`;
   document.getElementById('barfill').style.width = (beats.length>1?(S.chapter)/(beats.length-1)*100:100)+'%';
   // stage — render the current beat through the type REGISTRY
   const renderer=BEAT_REGISTRY[cur.beat.type] || (()=>`<p class="lede">Unknown beat: ${esc(cur.beat.type)}</p>`);
@@ -1811,7 +1858,8 @@ const BEAT_REGISTRY = {
   breakit:  panePractice,
   trace:    paneTrace,
   fixit:    paneFixit,
-  decide:   paneOwn
+  decide:   paneOwn,
+  callback: paneCallback
 };
 /* The active module's confront choices — re-read live so reveal/path helpers
    resolve against whatever module is playing. */
@@ -1820,9 +1868,11 @@ function curChoices(){ return activeModule().slots.confront.choices; }
 /* Engine navigation is generic now: a beat's "continue" button just calls
    advance() to the NEXT chapter, so panes never hardcode a chapter index.     */
 function continueBtn(b, hint){
+  // FADING SCAFFOLD (Q6): the small inline nudge drops away at the leanest band.
+  const showNudge = hint && showHint();
   return `<div class="actions">
     <button class="btn" onclick="advance()">${esc(b.cta||'Continue')} <span class="arr">→</span></button>
-    ${hint?`<span class="hint">${hint}</span>`:''}
+    ${showNudge?`<span class="hint">${hint}</span>`:''}
   </div>`;
 }
 
@@ -1955,6 +2005,52 @@ function paneOwn(b){
   return `
   <h1 class="title">${b.title}</h1>
   <p class="lede">${b.lede}</p>
+  <div class="card">
+    <div class="label">${b.prompt}</div>
+    ${b.options.map(o=>`<button class="choice" aria-pressed="${chosen===o.v}" onclick="pickOwn('${o.v}')"><span class="pick"></span><span class="ctxt"><b>${o.t}</b><span>${o.d}</span></span></button>`).join('\n    ')}
+    <div style="margin-top:16px">
+      <div class="label">${b.reasonLabel}</div>
+      <textarea id="reason" placeholder="${esc(b.reasonPlaceholder||'')}" oninput="syncReason()">${esc(S._reason||'')}</textarea>
+    </div>
+    <div class="actions" style="margin-top:18px">
+      <button class="btn" id="sealbtn" ${chosen?'':'disabled'} onclick="seal()">${esc(b.cta)} <span class="arr">→</span></button>
+      <span class="hint">${chosen?'Writes your decision to the log.':'Pick an option to continue.'}</span>
+    </div>
+  </div>
+  <div id="reflectbox">${S.reflectionShown?reflectionHTML():''}</div>
+  `;
+}
+/* OWN · callback — a first-class beat (Q6) that RESURFACES a real prior decision
+   from S.decisions by its stable authored id ("in Keying you chose X — does it
+   still hold here?"). It reuses the own machinery (pickOwn + seal), so the
+   learner's response is itself recorded keyed by this beat's id. The referenced
+   decision is genuine cross-module state: it persists across modules and is
+   keyed by the prior decide beat's authored id. If the learner never made that
+   decision (e.g. tested out of the prior module), the beat degrades gracefully
+   to the canonical authored choice and still asks the question. */
+function callbackPrior(b){
+  const rec=S.decisions[b.refId];                // the real prior decision, if any
+  if(rec) return {choice:rec.choice, reason:rec.reason||'', live:true};
+  // fallback: pull the authored default from the referenced module's decide beat
+  const refMod=CURRICULUM.modules.find(m=>(m.slots.own||[]).some(x=>x.id===b.refId));
+  const refBeat=refMod && (refMod.slots.own||[]).find(x=>x.id===b.refId);
+  const def=refBeat && refBeat.options && refBeat.options[0];
+  return {choice:def?def.v:(b.fallbackChoice||'your earlier call'), reason:'', live:false};
+}
+function paneCallback(b){
+  const prior=callbackPrior(b);
+  const chosen=S.ownChoice;
+  const priorLine = prior.live
+    ? `In <b>${esc(b.refModule)}</b> you chose <b>${esc(prior.choice)}</b>${prior.reason?` — “${esc(prior.reason)}”`:''}.`
+    : `In <b>${esc(b.refModule)}</b> the standing call is <b>${esc(prior.choice)}</b>.`;
+  return `
+  <h1 class="title">${b.title}</h1>
+  <p class="lede">${b.lede}</p>
+  <div class="card" style="border-color:var(--gold); background:var(--gold-bg)">
+    <div class="label" style="color:var(--gold)">↩ Callback · ${esc(b.refModule)}</div>
+    <p style="margin:0; font-size:14.5px">${priorLine}</p>
+    <p style="margin:8px 0 0; font-size:14.5px; color:var(--ink-soft)">${b.tension||'Does that choice still hold under what you’ve just learned?'}</p>
+  </div>
   <div class="card">
     <div class="label">${b.prompt}</div>
     ${b.options.map(o=>`<button class="choice" aria-pressed="${chosen===o.v}" onclick="pickOwn('${o.v}')"><span class="pick"></span><span class="ctxt"><b>${o.t}</b><span>${o.d}</span></span></button>`).join('\n    ')}
