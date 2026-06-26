@@ -414,7 +414,7 @@ function nodeSVG(n){
         ${n.desc?`<div class="c4desc">${esc(n.desc)}</div>`:''}
         ${hint}
       </div>`;
-  return `<foreignObject class="c4fo" x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h+30}">
+  return `<foreignObject class="c4fo" data-node="${n.id}" data-scope="${n.scope}" x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h+60}">
     <div xmlns="http://www.w3.org/1999/xhtml" style="width:${n.w}px;min-height:${n.h}px">${inner}</div>
   </foreignObject>`;
 }
@@ -455,9 +455,9 @@ function sceneSVG(zid){
     const ins=m.nodes.filter(n=>n.scope==='in');
     const minX=Math.min(...ins.map(n=>n.x))-34, minY=Math.min(...ins.map(n=>n.y))-86;
     const maxX=Math.max(...ins.map(n=>n.x+n.w))+34, maxY=Math.max(...ins.map(n=>n.y+n.h))+32;
-    bound=`<rect class="c4bound" x="${minX}" y="${minY}" width="${maxX-minX}" height="${maxY-minY}" rx="24"/>
-      <text class="c4boundlbl" x="${minX+26}" y="${minY+40}">${esc(m.boundary.name)}</text>
-      <text class="c4boundtype" x="${minX+26}" y="${minY+62}">[${esc(m.boundary.type)}]</text>`;
+    bound=`<rect class="c4bound" data-bound x="${minX}" y="${minY}" width="${maxX-minX}" height="${maxY-minY}" rx="24"/>
+      <text class="c4boundlbl" data-boundlbl x="${minX+26}" y="${minY+40}">${esc(m.boundary.name)}</text>
+      <text class="c4boundtype" data-boundtype x="${minX+26}" y="${minY+62}">[${esc(m.boundary.type)}]</text>`;
   }
   // paint order: boundary -> edge lines -> nodes -> edge labels (labels always on top)
   return `<svg viewBox="0 0 ${FRAME_W} ${FRAME_H}">${C4DEFS}
@@ -547,7 +547,33 @@ function settleActive(z){
     void e.offsetWidth; e.style.transition='';
   });
 }
-function initC4(){ if(!document.getElementById('scenewrap')) return; settleActive(S.zoom); paintCrumbs(); }
+/* Boxes use min-height and grow when text wraps, so their RENDERED height can
+   exceed the declared n.h. Recompute each boundary from the actual mounted box
+   geometry so a component can never leak outside its container boundary. */
+const PAD={x:34, top:86, bot:32};
+function fitBoundaries(){
+  document.querySelectorAll('#scenewrap .scene').forEach(scene=>{
+    const rect=scene.querySelector('rect.c4bound'); if(!rect) return;
+    const ins=[...scene.querySelectorAll('foreignObject[data-scope="in"]')];
+    if(!ins.length) return;
+    let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+    ins.forEach(fo=>{
+      const x=parseFloat(fo.getAttribute('x')), y=parseFloat(fo.getAttribute('y'));
+      const w=parseFloat(fo.getAttribute('width'));
+      const inner=fo.firstElementChild;
+      const h=inner?inner.offsetHeight:parseFloat(fo.getAttribute('height'));
+      minX=Math.min(minX,x); minY=Math.min(minY,y);
+      maxX=Math.max(maxX,x+w); maxY=Math.max(maxY,y+h);
+    });
+    const bx=minX-PAD.x, by=minY-PAD.top, bw=(maxX+PAD.x)-(minX-PAD.x), bh=(maxY+PAD.bot)-(minY-PAD.top);
+    rect.setAttribute('x',bx); rect.setAttribute('y',by);
+    rect.setAttribute('width',bw); rect.setAttribute('height',bh);
+    const lbl=scene.querySelector('text[data-boundlbl]'), typ=scene.querySelector('text[data-boundtype]');
+    if(lbl){ lbl.setAttribute('x',bx+26); lbl.setAttribute('y',by+40); }
+    if(typ){ typ.setAttribute('x',bx+26); typ.setAttribute('y',by+62); }
+  });
+}
+function initC4(){ if(!document.getElementById('scenewrap')) return; settleActive(S.zoom); fitBoundaries(); paintCrumbs(); }
 
 /* One adjacent hop. The clicked box grows to fill the frame (and the detail unfolds
    from inside it); zoom-out is the exact reverse, collapsing the detail back into its box.
