@@ -29,7 +29,7 @@ These split on one axis — who can invoke them. **User-invoked** skills are rea
 - **[handover](./skills/productivity/handover/SKILL.md)** — Fully delegate a task to a subagent: the main agent only provides context (via a handoff doc) and reports results; the subagent does all the work.
 - **[handover-loop](./skills/productivity/handover-loop/SKILL.md)** — `handover` wrapped in an adversarial review loop: each round a fresh subagent does the work, the main agent reviews the real diff, looping until the review is clean.
 - **[handoff](./skills/productivity/handoff/SKILL.md)** — Compact the current conversation into a handoff document so another agent can continue the work. _Vendored from Matt Pocock's repo._
-- **[teach](./skills/productivity/teach/SKILL.md)** — Problem-first, fail-forward lesson on a system, concept, or codebase: five phases (orient, confront, reveal, practice, own it), leaving C4 diagrams and ADRs in the repo.
+- **[learn](./skills/productivity/learn/SKILL.md)** — Problem-first, fail-forward lesson on a system, concept, or codebase: five phases (orient, confront, reveal, practice, own it), leaving C4 diagrams and ADRs in the repo.
 
 **Model-invoked**
 

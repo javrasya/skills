@@ -1,17 +1,18 @@
 ---
-name: teach
+name: learn
 description: >-
   Guided, hands-on learning journey for a system, concept, codebase, or
-  component. Use when the user types /teach <topic>, asks to deeply understand
-  or learn how something works, wants to be onboarded to a repo, or says they
-  learn by doing rather than by reading. Turns a topic into a problem-first,
+  component. Use when the user runs /learn with a topic, asks to deeply
+  understand or learn how something works, wants onboarding to a repo, or says
+  they learn by doing rather than reading. Turns a topic into a problem-first,
   fail-forward lesson and leaves C4 diagrams and ADRs in the repo.
+argument-hint: "[topic]"
 ---
 
-# /teach — learn it the way you'd actually learn it
+# /learn — learn it the way you'd actually learn it
 
 Topic: $ARGUMENTS
-If empty, ask what to teach, or offer to teach this repo end to end.
+If empty, ask what to learn, or offer to teach this repo end to end.
 
 Repo grounding — read this before teaching, never explain code you haven't read:
 - Files:    !`git ls-files 2>/dev/null | head -60`
