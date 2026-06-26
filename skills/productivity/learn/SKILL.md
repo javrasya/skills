@@ -101,19 +101,18 @@ When the user wants more than terminal output — "make it interactive", "give m
 What the experience carries (all five phases live in one screen):
 
 - **Three columns:** left = chapter rail (the 5 phases), center = stage, right = margin holding the **path** (history of what was tried) and the **decision log** (ADRs).
-- **One C4 diagram that deepens by zoom**, not five separate diagrams. Click a highlighted box to fly one level in (Context → Container → Component); breadcrumbs + "zoom out" to go back. The horizontal axis is lesson progress; zoom is depth — exactly the two-axis model.
+- **One real C4 diagram that deepens by zoom**, not five separate diagrams. It uses genuine C4 grammar (see `[[c4-model]]` in CONTEXT.md): every box carries a type tag (`[Person]`/`[Software System]`/`[Container: tech]`/`[Component: tech]`) + description; people use a distinct glyph; in-scope is blue, external grey; relationships are directional dashed arrows labelled with intent + `[technology]`; each level auto-renders a **title** and a **legend**. Diving into a box turns it into a dashed **boundary** with its children inside and outside actors projected onto the edge (Context → Container → Component). Breadcrumbs + "zoom out" go back. **Do not** drift toward Kruchten's 4+1 views — this is C4 (four nested zoom levels of one model), not four orthogonal views.
 - **The reveal is gated:** the user must commit a guess in CONFRONT before REVEAL unlocks (productive failure). Keep this — it is the heart of the method.
 - **A live simulator in PRACTICE** that lets them break it and watch the failure mode.
 - **Every decision becomes an ADR** in the margin as they go; the OWN-IT choice writes their own ADR with their reasoning.
 
 To retarget it to a new topic, edit only the data — the shell, CSS, zoom engine, and gating logic stay:
 
-1. `CHAPTERS` — usually leave as the five phases.
-2. `sceneContext()` / `sceneContainer()` / `sceneComponent()` — the three C4 levels. Use `node(x,y,w,h,title,sub,opts)` and `arrow(...)`; mark the box that zooms with `{zoom:'container'}` / `{zoom:'component'}`, and the decision box with `{adr:'aN'}`. Ground every box in the real code you read.
-3. `ANCHOR` — point each deeper level at the box it lives inside (so the zoom pivots on the right spot).
-4. `CHOICES` + `paneConfront`/`paneReveal` — the prediction options and the contrast against reality.
-5. The simulator (`fireBurst`, `updateReadout`, `panePractice`) — rebuild the "break it" interaction for this topic, or simplify to a stepped trace if a live sim doesn't fit.
-6. `ADR_LIB` + `paneOwn` — the decisions, including the one the user makes.
+1. `MODEL` — the **only** thing you must rewrite for the C4 diagram. It is one object with three keys (`context`/`container`/`component`), each holding `level`, `scope`, an optional `boundary` ({name,type}), `nodes`, and `edges`. Per node: `kind` (`person`/`system`/`container`/`component`), `scope` (`in` = the thing being decomposed at this level, `ext` = external actor), `tech` (rendered as `[Container: tech]`; omit at context level), `into` (the level id this box zooms into — makes it the clickable boundary target), `adr` (clicking flashes that ADR), `store:true` (draw as a data store), and `x,y,w,h` in the 680×380 frame. Per edge: `from`, `to`, `label` (intent verb phrase), `tech` (protocol — required between containers). Ground every element in the real code you read. The title, legend, person glyph, scope colours, boundary box, and zoom anchors are all **derived from `MODEL`** — you don't touch them.
+2. `CHAPTERS` — usually leave as the five phases.
+3. `CHOICES` + `paneConfront`/`paneReveal` — the prediction options and the contrast against reality.
+4. The simulator (`fireBurst`, `updateReadout`, `panePractice`) — rebuild the "break it" interaction for this topic, or simplify to a stepped trace if a live sim doesn't fit.
+5. `ADR_LIB` + `paneOwn` — the decisions, including the one the user makes. Keys here must match the `adr:` keys you used in `MODEL`.
 
 Save the result somewhere the user can open it (e.g. `docs/diagrams/<topic>.html` or a temp path) and tell them the path. The HTML mode complements the artifacts above — it does not replace the `CONTEXT.md`/ADR/learning-log writing.
 

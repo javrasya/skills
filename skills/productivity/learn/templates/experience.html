@@ -14,6 +14,10 @@
     --line:#E4DBC9; --line-soft:#EEE7D8;
     --accent:#0E7C63; --accent-ink:#0A4A3B; --accent-bg:#DEEFE9;
     --warn:#C2521E; --warn-ink:#7E3413; --warn-bg:#F6E2D6;
+    --c4-in-fill:#DCEBFF; --c4-in-stroke:#3B6FB0;
+    --c4-ext-fill:#ECEAE6; --c4-ext-stroke:#9A9484;
+    --c4-person-fill:#E7F3EC; --c4-person-stroke:#3E8E63;
+    --c4-ring:rgba(59,111,176,.22);
     --display:'Fraunces',Georgia,'Times New Roman',serif;
     --sans:'IBM Plex Sans',-apple-system,BlinkMacSystemFont,system-ui,sans-serif;
     --mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -25,6 +29,10 @@
       --line:#322D23; --line-soft:#2A2620;
       --accent:#36B597; --accent-ink:#86D9C6; --accent-bg:#10332A;
       --warn:#E0764D; --warn-ink:#F0AB8C; --warn-bg:#2D1A11;
+      --c4-in-fill:#15324F; --c4-in-stroke:#5E92CC;
+      --c4-ext-fill:#262219; --c4-ext-stroke:#6F6856;
+      --c4-person-fill:#12352A; --c4-person-stroke:#4FA579;
+      --c4-ring:rgba(94,146,204,.28);
     }
   }
   *{box-sizing:border-box}
@@ -131,6 +139,35 @@
   .nsub{font-size:11px; fill:var(--ink-faint)}
   .diagram .legend{font-size:12px; color:var(--ink-faint); margin-top:8px; display:flex; gap:16px; flex-wrap:wrap; align-items:center}
   .diagram .legend i{display:inline-block; width:9px; height:9px; border-radius:3px; margin-right:6px; vertical-align:-1px}
+
+  /* ---- C4 grammar ---- */
+  .c4title{font-family:var(--mono); font-size:11px; letter-spacing:.07em; text-transform:uppercase; color:var(--ink-soft); font-weight:500; margin-bottom:7px}
+  .c4fo{overflow:visible}
+  .c4node{box-sizing:border-box; width:100%; height:100%; border:1.5px solid var(--c4-in-stroke); background:var(--c4-in-fill);
+    border-radius:11px; padding:9px 12px; display:flex; flex-direction:column; gap:1px; position:relative; font-family:var(--sans); line-height:1.32}
+  .c4node.ext{border-color:var(--c4-ext-stroke); background:var(--c4-ext-fill); border-style:solid}
+  .c4node.person{border-color:var(--c4-person-stroke); background:var(--c4-person-fill); padding-top:11px}
+  .c4node .c4head{position:absolute; top:-15px; left:50%; transform:translateX(-50%); width:26px; height:26px; border-radius:50%;
+    background:var(--c4-person-fill); border:1.5px solid var(--c4-person-stroke)}
+  .c4node.store{border-bottom-width:4px}
+  .c4name{font-weight:600; font-size:14px; color:var(--ink); letter-spacing:-.005em}
+  .c4type{font-family:var(--mono); font-size:9.5px; color:var(--ink-faint); letter-spacing:.01em}
+  .c4desc{font-size:11px; color:var(--ink-soft); margin-top:2px}
+  .c4node.hot{cursor:pointer; transition:box-shadow .16s, border-color .16s}
+  .c4node.hot:hover{box-shadow:0 0 0 4px var(--c4-ring); border-color:var(--accent)}
+  .c4hint{font-family:var(--mono); font-size:9px; color:var(--accent); margin-top:auto; padding-top:4px}
+  .c4bound{fill:none; stroke:var(--ink-faint); stroke-width:1.4; stroke-dasharray:7 5}
+  .c4boundlbl{font-family:var(--mono); font-size:11px; fill:var(--ink-soft); font-weight:500}
+  .c4boundtype{font-family:var(--mono); font-size:9px; fill:var(--ink-faint)}
+  .edge{stroke:var(--ink-faint); stroke-width:1.4; stroke-dasharray:5 4; fill:none}
+  .edgebg{fill:var(--paper-2)}
+  .edgelbl{font-family:var(--sans); font-size:10.5px; fill:var(--ink-soft)}
+  .edgetech{font-family:var(--mono); font-size:9px; fill:var(--ink-faint)}
+  .legend .lg-in{background:var(--c4-in-fill); border:1.5px solid var(--c4-in-stroke)}
+  .legend .lg-ext{background:var(--c4-ext-fill); border:1.5px solid var(--c4-ext-stroke)}
+  .legend .lg-person{background:var(--c4-person-fill); border:1.5px solid var(--c4-person-stroke); border-radius:50%}
+  .legend .lg-bound{background:transparent; border:1.4px dashed var(--ink-faint); border-radius:2px}
+  .legend .lg-rel{width:15px; height:0; border-top:1.6px dashed var(--ink-faint); border-radius:0; margin-bottom:3px}
 
   /* ---------- confront choices ---------- */
   .choice{display:flex; gap:14px; align-items:flex-start; border:1.5px solid var(--line); background:var(--panel);
@@ -284,82 +321,169 @@ const CHAPTERS = [
   {k:'Own it',       sub:'Make the call'}
 ];
 
-/* ============================ C4 SCENES ============================ */
-function node(x,y,w,h,title,sub,opts={}){
-  const hot = opts.zoom||opts.adr;
-  const cls = hot? 'nz':'';
-  const handler = opts.zoom? `onclick="zoomTo('${opts.zoom}')"` : (opts.adr? `onclick="flashAdr('${opts.adr}')"`:'');
-  const fill = opts.tone==='accent'? 'var(--accent-bg)' : opts.tone==='warn'? 'var(--warn-bg)' : 'var(--panel)';
-  const stroke = opts.tone==='accent'? 'var(--accent)' : opts.tone==='warn'? 'var(--warn)' : 'var(--line)';
-  const tag = opts.zoom? `<text class="ztag" x="${x+12}" y="${y+h-9}">click to zoom in ↘</text>`
-            : opts.adr? `<text class="ztag" x="${x+12}" y="${y+h-9}">why? ↘</text>` : '';
-  return `<g class="${cls}" ${handler}>
-    <rect class="nbx" x="${x}" y="${y}" width="${w}" height="${h}" rx="11" fill="${fill}" stroke="${stroke}" stroke-width="1.4"/>
-    <text class="ntitle" x="${x+12}" y="${y+ (sub?23:h/2+4)}" fill="var(--ink)">${title}</text>
-    ${sub?`<text class="nsub" x="${x+12}" y="${y+40}">${sub}</text>`:''}
-    ${tag}
-  </g>`;
-}
-function arrow(x1,y1,x2,y2,label){
-  return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="var(--ink-faint)" stroke-width="1.4" marker-end="url(#ah)"/>
-    ${label?`<text x="${(x1+x2)/2}" y="${(y1+y2)/2-6}" text-anchor="middle" class="nsub">${label}</text>`:''}`;
-}
-const DEFS = `<defs><marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="var(--ink-faint)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>`;
+/* ============================ C4 MODEL ============================
+   ONE static model rendered at three zoom levels (System Context ->
+   Container -> Component). To retarget the lesson, edit MODEL only:
+   - kind: 'person' | 'system' | 'container' | 'component'
+   - scope: 'in'  (the thing in scope at this level) or 'ext' (external actor)
+   - tech:  technology string -> rendered as "[Container: tech]" (omit at L1)
+   - into:  level id this box zooms into (makes it a clickable boundary target)
+   - adr:   decision key -> clicking the box flashes that ADR
+   - store: true -> draw as a data store (thick bottom border)
+   Coordinates live in a 680x380 design space; x,y = top-left.            */
+const FRAME_W=680, FRAME_H=380;
 
-function sceneContext(){
-  return `<svg viewBox="0 0 640 360">${DEFS}
-    ${arrow(140,92,200,92)}
-    ${arrow(360,92,420,92,'allowed?')}
-    ${arrow(290,128,290,196)}
-    ${node(20,66,120,52,'Engineer','calls the API')}
-    ${node(200,62,160,60,'API service','your app','')}
-    ${node(420,62,180,60,'Rate limiter','the gatekeeper',{zoom:'container',tone:'accent'})}
-    ${node(200,200,200,64,'Counter store','how many, how recent',{adr:'a2'})}
-    <text x="300" y="330" text-anchor="middle" class="nsub">One job: let the right traffic through, shed the rest — before it hits anything expensive.</text>
-  </svg>`;
-}
-function sceneContainer(){
-  return `<svg viewBox="0 0 640 360">${DEFS}
-    ${arrow(170,96,210,96)}
-    ${arrow(380,96,420,96)}
-    ${arrow(300,132,300,206)}
-    ${arrow(500,126,500,206,'')}
-    ${node(30,68,140,56,'API gateway','edge / routing')}
-    ${node(210,64,170,64,'Limiter service','decides allow / deny',{zoom:'component',tone:'accent'})}
-    ${node(420,68,170,56,'Backend','protected work')}
-    ${node(210,210,180,62,'Redis','shared atomic counters',{adr:'a2',tone:'accent'})}
-    ${node(430,210,160,62,'Config','limits per route',{})}
-    <text x="320" y="335" text-anchor="middle" class="nsub">Counters live in Redis, not in memory — every instance must see the same tally.</text>
-  </svg>`;
-}
-function sceneComponent(){
-  return `<svg viewBox="0 0 640 360">${DEFS}
-    ${arrow(160,92,196,92)}
-    ${arrow(372,92,408,92)}
-    ${arrow(300,124,300,200)}
-    ${node(24,64,136,56,'Key resolver','user? IP? route?',{adr:'a3'})}
-    ${node(196,60,176,64,'Window counter','requests in last 60s',{adr:'a1',tone:'accent'})}
-    ${node(408,64,180,56,'Redis ops','INCR · EXPIRE')}
-    ${node(196,204,250,64,'Verdict','under limit → allow · over → 429',{tone:'warn'})}
-    <text x="320" y="332" text-anchor="middle" class="nsub">A sliding window counts the trailing 60 seconds, so the minute boundary stops being a loophole.</text>
-  </svg>`;
-}
-const SCENES = {context:sceneContext, container:sceneContainer, component:sceneComponent};
+const MODEL = {
+  context:{
+    level:'System Context', scope:'API Platform',
+    boundary:null,
+    nodes:[
+      {id:'eng', kind:'person', scope:'ext', name:'API Consumer', desc:'Calls your API over the internet.', x:36,y:150,w:150,h:84},
+      {id:'plat', kind:'system', scope:'in', name:'API Platform', desc:'Serves the API and protects it from overload.', x:268,y:150,w:172,h:92, into:'container', hint:'click to zoom in ↘'},
+      {id:'down', kind:'system', scope:'ext', name:'Downstream Services', desc:'The expensive work the platform guards.', x:520,y:60,w:148,h:90},
+      {id:'store',kind:'system', scope:'ext', name:'Counter Store', desc:'Shared request tallies.', store:true, x:520,y:236,w:148,h:88, adr:'a2'},
+    ],
+    edges:[
+      {from:'eng', to:'plat', label:'Makes API requests to'},
+      {from:'plat',to:'down', label:'Forwards allowed traffic to'},
+      {from:'plat',to:'store',label:'Reads & writes counts'},
+    ]
+  },
+  container:{
+    level:'Container', scope:'API Platform',
+    boundary:{name:'API Platform', type:'Software System'},
+    nodes:[
+      {id:'eng', kind:'person', scope:'ext', name:'API Consumer', desc:'Calls the API.', x:24,y:158,w:128,h:78},
+      {id:'gw',  kind:'container', scope:'in', name:'API Gateway', tech:'Envoy', desc:'Edge routing & TLS.', x:196,y:60,w:150,h:84},
+      {id:'lim', kind:'container', scope:'in', name:'Limiter Service', tech:'Go', desc:'Decides allow / deny.', x:196,y:236,w:150,h:88, into:'component', hint:'click to zoom in ↘'},
+      {id:'back',kind:'container', scope:'in', name:'Backend', tech:'Java', desc:'Protected work.', x:392,y:60,w:142,h:84},
+      {id:'redis',kind:'container',scope:'in', name:'Redis', tech:'Redis', desc:'Atomic shared counters.', store:true, x:392,y:236,w:142,h:88, adr:'a2'},
+    ],
+    edges:[
+      {from:'eng', to:'gw',  label:'Requests', tech:'HTTPS'},
+      {from:'gw',  to:'lim', label:'Checks limit', tech:'gRPC'},
+      {from:'gw',  to:'back',label:'Forwards if allowed', tech:'HTTP'},
+      {from:'lim', to:'redis',label:'INCR / EXPIRE', tech:'RESP'},
+    ]
+  },
+  component:{
+    level:'Component', scope:'Limiter Service',
+    boundary:{name:'Limiter Service', type:'Container: Go'},
+    nodes:[
+      {id:'gw',  kind:'container', scope:'ext', name:'API Gateway', tech:'Envoy', desc:'Asks: allow this call?', x:30,y:158,w:140,h:84},
+      {id:'key', kind:'component', scope:'in', name:'Key Resolver', tech:'Go pkg', desc:'user? IP? route?', x:214,y:58,w:158,h:84, adr:'a3'},
+      {id:'win', kind:'component', scope:'in', name:'Window Counter', tech:'Go pkg', desc:'Counts the trailing 60s.', x:214,y:236,w:158,h:88, adr:'a1'},
+      {id:'verdict',kind:'component',scope:'in',name:'Verdict', tech:'Go pkg', desc:'Under limit → allow · over → 429.', x:418,y:146,w:170,h:96},
+      {id:'redis',kind:'container',scope:'ext', name:'Redis', tech:'Redis', desc:'Atomic counters.', store:true, x:610,y:236,w:60,h:88, adr:'a2', clip:true},
+    ],
+    edges:[
+      {from:'gw', to:'key',  label:'Allow this call?'},
+      {from:'key',to:'win',  label:'Count for key'},
+      {from:'win',to:'redis',label:'INCR / EXPIRE', tech:'RESP'},
+      {from:'win',to:'verdict',label:'Current count'},
+    ]
+  }
+};
+
 const ZORDER = ['context','container','component'];
-const ZNAME  = {context:'Context', container:'Container', component:'Component'};
+const ZNAME  = {context:'System Context', container:'Container', component:'Component'};
+const CHAP_ZOOM={0:'context',2:'container',3:'component'};
 
+const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+function typeLabel(n){
+  if(n.kind==='person') return 'Person';
+  if(n.kind==='system') return 'Software System';
+  if(n.kind==='container') return n.tech?`Container: ${n.tech}`:'Container';
+  if(n.kind==='component') return n.tech?`Component: ${n.tech}`:'Component';
+  return '';
+}
+function nodeSVG(n){
+  const cls=['c4node', n.scope==='ext'?'ext':'', n.kind==='person'?'person':'',
+             n.store?'store':'', (n.into||n.adr)?'hot':''].filter(Boolean).join(' ');
+  const handler = n.into? `onclick="zoomTo('${n.into}')"` : (n.adr? `onclick="flashAdr('${n.adr}')"`:'');
+  const head = n.kind==='person'? `<div class="c4head"></div>`:'';
+  const hint = n.into? `<div class="c4hint">${esc(n.hint||'click to zoom in ↘')}</div>`
+             : (n.adr? `<div class="c4hint">why? ↘</div>`:'');
+  // clip: a sliver node sitting on the frame edge (a neighbour projected onto the boundary)
+  const inner = n.clip
+    ? `<div class="c4node ext store" style="width:${n.w*2.2}px"><div class="c4name">${esc(n.name)}</div><div class="c4type">[${esc(typeLabel(n))}]</div></div>`
+    : `<div class="${cls}" ${handler}>${head}
+        <div class="c4name">${esc(n.name)}</div>
+        <div class="c4type">[${esc(typeLabel(n))}]</div>
+        ${n.desc?`<div class="c4desc">${esc(n.desc)}</div>`:''}
+        ${hint}
+      </div>`;
+  return `<foreignObject class="c4fo" x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}">
+    <div xmlns="http://www.w3.org/1999/xhtml" style="width:${n.w}px;height:${n.h}px">${inner}</div>
+  </foreignObject>`;
+}
+function center(n){return {x:n.x+n.w/2, y:n.y+n.h/2};}
+// edge endpoints clipped to box borders so the dashed line meets the rectangle edge
+function clipToBox(n,tx,ty){
+  const c=center(n), dx=tx-c.x, dy=ty-c.y;
+  const hw=n.w/2, hh=n.h/2;
+  const sx=dx?hw/Math.abs(dx):Infinity, sy=dy?hh/Math.abs(dy):Infinity;
+  const t=Math.min(sx,sy);
+  return {x:c.x+dx*t, y:c.y+dy*t};
+}
+function edgeSVG(e,byId){
+  const a=byId[e.from], b=byId[e.to]; if(!a||!b) return '';
+  const ca=center(a), cb=center(b);
+  const p1=clipToBox(a,cb.x,cb.y), p2=clipToBox(b,ca.x,ca.y);
+  const mx=(p1.x+p2.x)/2, my=(p1.y+p2.y)/2;
+  const lbl=esc(e.label||''), tech=e.tech?`[${esc(e.tech)}]`:'';
+  const wlbl=lbl.length*5.6, wtech=tech.length*5.4;
+  const w=Math.max(wlbl,wtech)+10, h=tech?28:17;
+  return `<path class="edge" d="M ${p1.x} ${p1.y} L ${p2.x} ${p2.y}" marker-end="url(#c4ah)"/>
+    ${lbl||tech?`<rect class="edgebg" x="${mx-w/2}" y="${my-h/2}" width="${w}" height="${h}" rx="4"/>`:''}
+    ${lbl?`<text class="edgelbl" x="${mx}" y="${my+(tech?-2:4)}" text-anchor="middle">${lbl}</text>`:''}
+    ${tech?`<text class="edgetech" x="${mx}" y="${my+11}" text-anchor="middle">${tech}</text>`:''}`;
+}
+function sceneSVG(zid){
+  const m=MODEL[zid];
+  const byId={}; m.nodes.forEach(n=>byId[n.id]=n);
+  // boundary box wraps the in-scope nodes
+  let bound='';
+  if(m.boundary){
+    const ins=m.nodes.filter(n=>n.scope==='in');
+    const minX=Math.min(...ins.map(n=>n.x))-22, minY=Math.min(...ins.map(n=>n.y))-30;
+    const maxX=Math.max(...ins.map(n=>n.x+n.w))+22, maxY=Math.max(...ins.map(n=>n.y+n.h))+18;
+    bound=`<rect class="c4bound" x="${minX}" y="${minY}" width="${maxX-minX}" height="${maxY-minY}" rx="16"/>
+      <text class="c4boundlbl" x="${minX+14}" y="${minY+20}">${esc(m.boundary.name)}</text>
+      <text class="c4boundtype" x="${minX+14}" y="${minY+33}">[${esc(m.boundary.type)}]</text>`;
+  }
+  return `<svg viewBox="0 0 ${FRAME_W} ${FRAME_H}">${C4DEFS}
+    ${bound}
+    ${m.edges.map(e=>edgeSVG(e,byId)).join('')}
+    ${m.nodes.map(nodeSVG).join('')}
+  </svg>`;
+}
+const C4DEFS=`<defs><marker id="c4ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1.5L8 5L2 8.5" fill="none" stroke="var(--ink-faint)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>`;
+
+function c4Title(zid){const m=MODEL[zid]; return `${ZNAME[zid]} diagram · ${esc(m.scope)}`;}
+function c4Legend(zid){
+  const m=MODEL[zid];
+  const has=k=>m.nodes.some(n=>(k==='person'?n.kind==='person':k==='ext'?(n.scope==='ext'&&n.kind!=='person'):n.scope==='in'));
+  const items=[];
+  if(has('in')) items.push(`<span><i class="lg-in"></i>in scope</span>`);
+  if(has('ext')) items.push(`<span><i class="lg-ext"></i>external</span>`);
+  if(has('person')) items.push(`<span><i class="lg-person"></i>person</span>`);
+  if(m.boundary) items.push(`<span><i class="lg-bound"></i>boundary</span>`);
+  items.push(`<span><i class="lg-rel"></i>relationship →</span>`);
+  return items.join('');
+}
 function c4Block(){
   return `<div class="diagram">
+    <div class="c4title" id="c4title">${c4Title(S.zoom)}</div>
     <div class="crumbs" id="crumbs"></div>
     <div class="scene-wrap" id="scenewrap">
-      <div class="scene" data-z="context">${sceneContext()}</div>
-      <div class="scene" data-z="container">${sceneContainer()}</div>
-      <div class="scene" data-z="component">${sceneComponent()}</div>
+      <div class="scene" data-z="context">${sceneSVG('context')}</div>
+      <div class="scene" data-z="container">${sceneSVG('container')}</div>
+      <div class="scene" data-z="component">${sceneSVG('component')}</div>
     </div>
-    <div class="legend"><span><i style="background:var(--accent)"></i>zoom in here</span><span><i style="background:var(--warn)"></i>the decision point</span><span>tap a box for the “why”</span></div>
+    <div class="legend" id="c4legend">${c4Legend(S.zoom)}</div>
   </div>`;
 }
-const CHAP_ZOOM={0:'context',2:'container',3:'component'};
 
 function paintCrumbs(){
   const cr=document.getElementById('crumbs'); if(!cr) return;
@@ -373,17 +497,26 @@ function paintCrumbs(){
   html+=`<span class="spacer"></span>`;
   if(idx>0) html+=`<button class="zoutbtn" ${zooming?'disabled':''} onclick="zoomTo('${ZORDER[idx-1]}')">↖ zoom out</button>`;
   cr.innerHTML=html;
+  const t=document.getElementById('c4title'); if(t) t.textContent=c4Title(S.zoom);
+  const lg=document.getElementById('c4legend'); if(lg) lg.innerHTML=c4Legend(S.zoom);
 }
 
 /* A zoom anchor = the box (in the OUTER level) that the INNER level lives inside.
-   Keyed by the inner level. cx/cy = that box's centre as a fraction of the 640x360 frame. */
-function anchorFrom(x,y,w,h){
-  const s=Math.min(3.1, Math.max(2.5, 640/w));
-  return {cx:(x+w/2)/640, cy:(y+h/2)/360, s};
+   Derived from MODEL: find, in the outer level, the node whose `into` is this
+   inner level. cx/cy = that box's centre as a fraction of the frame. */
+function anchorForInner(innerId){
+  for(const zid of ZORDER){
+    const host=MODEL[zid].nodes.find(n=>n.into===innerId);
+    if(host){
+      const s=Math.min(3.2, Math.max(2.5, FRAME_W/host.w));
+      return {cx:(host.x+host.w/2)/FRAME_W, cy:(host.y+host.h/2)/FRAME_H, s};
+    }
+  }
+  return {cx:.5, cy:.5, s:2.8};
 }
 const ANCHOR = {
-  container: anchorFrom(420,62,180,60),   /* "Rate limiter" box, drawn in Context  */
-  component: anchorFrom(210,64,170,64)    /* "Limiter service" box, drawn in Container */
+  container: anchorForInner('container'),
+  component: anchorForInner('component')
 };
 let zooming=false;
 const reducedM = ()=>window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -464,7 +597,12 @@ const ADR_LIB = {
     rows:[['Context','The limiter runs on many gateway instances; the tally must be shared and survive a restart.'],
           ['Decision','Keep counts in <b>Redis</b> with atomic INCR/EXPIRE.'],
           ['Alternatives','In-memory per instance — fastest, but the real ceiling becomes N×100. Sticky sessions — fragile when scaling.'],
-          ['Consequence','One network hop on the hot path; a correct <b>global</b> limit. Pipeline / pre-check to soften the cost.']]}
+          ['Consequence','One network hop on the hot path; a correct <b>global</b> limit. Pipeline / pre-check to soften the cost.']]},
+  a3:{id:'ADR-0003', title:'What identifies a caller (the limit key)', pill:'accepted',
+    rows:[['Context','The Key Resolver must decide whose budget a request spends — per user, per IP, or per route.'],
+          ['Decision','Key the window by <b>resolved user ID</b> where authenticated, falling back to client IP for anonymous routes.'],
+          ['Alternatives','IP only — simple but unfair behind NAT/office gateways. Route only — coarse, lets one user starve others.'],
+          ['Consequence','Fair per-user budgets; needs identity resolved before the limiter runs on authed routes.']]}
 };
 function addAdr(key){
   if(S.adrs.find(a=>a.key===key)) return;
