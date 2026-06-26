@@ -14,6 +14,7 @@
     --line:#E4DBC9; --line-soft:#EEE7D8;
     --accent:#0E7C63; --accent-ink:#0A4A3B; --accent-bg:#DEEFE9;
     --warn:#C2521E; --warn-ink:#7E3413; --warn-bg:#F6E2D6;
+    --gold:#B8893B; --gold-bg:#F4E9D2;
     --c4-in-fill:#DCEBFF; --c4-in-stroke:#3B6FB0;
     --c4-ext-fill:#ECEAE6; --c4-ext-stroke:#9A9484;
     --c4-person-fill:#E7F3EC; --c4-person-stroke:#3E8E63;
@@ -29,6 +30,7 @@
       --line:#322D23; --line-soft:#2A2620;
       --accent:#36B597; --accent-ink:#86D9C6; --accent-bg:#10332A;
       --warn:#E0764D; --warn-ink:#F0AB8C; --warn-bg:#2D1A11;
+      --gold:#D6A85A; --gold-bg:#2C2212;
       --c4-in-fill:#15324F; --c4-in-stroke:#5E92CC;
       --c4-ext-fill:#262219; --c4-ext-stroke:#6F6856;
       --c4-person-fill:#12352A; --c4-person-stroke:#4FA579;
@@ -46,16 +48,35 @@
   ::selection{background:var(--accent-bg)}
 
   /* ---------- progress bar ---------- */
-  #bar{position:fixed; top:0; left:0; right:0; height:3px; background:var(--line-soft); z-index:60}
+  #bar{position:absolute; top:0; left:0; right:0; height:3px; background:var(--line-soft); z-index:60}
   #bar > i{display:block; height:100%; width:0; background:var(--accent); transition:width .6s cubic-bezier(.2,.7,.2,1)}
+
+  /* ========================= SCREENS (Q9) =========================
+     The MAP is home/resting state; selecting an unlocked node zooms INTO the
+     module (transform-origin = that node's centre) and the module screen takes
+     the full viewport. Closing zooms back OUT to the same node. Both screens
+     are fixed, full-bleed, and cross-fade via opacity + scale.                */
+  #map{position:fixed; inset:0; z-index:10; display:flex; flex-direction:column; background:var(--paper);
+    transition:opacity .5s ease, transform .55s cubic-bezier(.55,0,.3,1)}
+  #map.gone{opacity:0; pointer-events:none; transform:scale(.94)}
+  #moduleScreen{position:fixed; inset:0; z-index:20; opacity:0; transform:scale(1.14); pointer-events:none;
+    transform-origin:50% 50%; background:var(--paper);
+    transition:opacity .5s ease, transform .55s cubic-bezier(.2,.7,.2,1)}
+  #moduleScreen.show{opacity:1; transform:none; pointer-events:auto}
+  @media (prefers-reduced-motion: reduce){
+    #map,#moduleScreen{transition:opacity .001ms!important; transform:none!important}
+  }
 
   /* ---------- shell ---------- */
   #app{display:grid; grid-template-columns:262px minmax(0,1fr) 332px; height:100%; padding-top:3px}
   @media (max-width:1040px){ #app{grid-template-columns:1fr} }
 
   /* ---------- left rail / chapters ---------- */
-  #rail{border-right:1px solid var(--line); padding:30px 22px; overflow:auto; background:var(--paper)}
+  #rail{border-right:1px solid var(--line); padding:24px 22px 30px; overflow:auto; background:var(--paper)}
   #rail .brand{font-family:var(--mono); font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-faint)}
+  .backmap{display:inline-flex; align-items:center; gap:8px; font-family:var(--mono); font-size:11px; letter-spacing:.06em;
+    text-transform:uppercase; color:var(--ink-faint); padding:7px 12px; margin:0 -8px 14px; border-radius:99px; transition:.18s}
+  .backmap:hover{background:var(--paper-2); color:var(--accent)}
   #rail .lesson{font-family:var(--display); font-size:25px; line-height:1.12; font-weight:600; margin:10px 0 4px; letter-spacing:-.01em}
   #rail .sub{font-size:13px; color:var(--ink-soft); margin-bottom:26px}
   .chap{display:flex; gap:13px; padding:11px 10px; border-radius:9px; margin:2px -10px; transition:background .2s; position:relative}
@@ -96,12 +117,10 @@
       padding:7px 13px; border-radius:99px; font-size:12.5px; font-weight:500}
     .dec-toggle b{font-family:var(--mono); background:var(--accent); color:#fff; border-radius:99px; padding:0 7px; font-size:11px}
   }
-  /* TEMP dev module switcher + mandatory reset (Step 2) */
-  .devmod-wrap{display:inline-flex; align-items:center; gap:7px; font-family:var(--mono); font-size:10.5px; letter-spacing:.08em;
-    text-transform:uppercase; color:var(--ink-faint); border:1px dashed var(--line); border-radius:99px; padding:5px 6px 5px 12px; background:var(--paper-2)}
-  .devmod-wrap select{font-family:var(--sans); font-size:12.5px; color:var(--ink); background:var(--panel); border:1px solid var(--line);
-    border-radius:99px; padding:5px 10px; cursor:pointer}
-  .devmod-wrap select:focus{outline:none; border-color:var(--accent)}
+  /* back-to-map controls (replace the Step-2 dev module switcher) */
+  .backmap-top{display:inline-flex; align-items:center; gap:7px; font-family:var(--mono); font-size:12px; letter-spacing:.04em;
+    color:var(--ink-soft); border:1px solid var(--line); background:var(--panel); border-radius:99px; padding:6px 14px; transition:.16s}
+  .backmap-top:hover{border-color:var(--accent); color:var(--accent)}
   .resetbtn{border:1px solid var(--line); background:var(--panel); color:var(--ink-soft); border-radius:99px;
     padding:6px 13px; font-size:12.5px; font-weight:500; transition:.16s}
   .resetbtn:hover{border-color:var(--warn); color:var(--warn)}
@@ -318,18 +337,126 @@
   #mclose{display:none} #scrim{display:none}
   @media (max-width:1040px){ #scrim{display:block} }
 
+  /* ========================= MAP (skill-tree) ========================= */
+  .maphead{padding:32px 52px 8px; position:relative; z-index:2; flex:none}
+  @media (max-width:1040px){ .maphead{padding:22px 18px 6px} }
+  #map .brand{font-family:var(--mono); font-size:12px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-faint)}
+  .maptitle{font-family:var(--display); font-weight:600; font-size:clamp(28px,4.2vw,44px); letter-spacing:-.02em; margin:6px 0 4px; line-height:1.02}
+  .mapsub{font-size:16px; color:var(--ink-soft); max-width:64ch; margin:0}
+  .mapmeta{display:flex; gap:24px; margin-top:16px; font-family:var(--mono); font-size:12px; color:var(--ink-faint); align-items:center; flex-wrap:wrap}
+  .mapmeta b{color:var(--accent); font-weight:500}
+  .mapmeta i{font-style:normal; color:var(--ink-soft)}
+
+  .canvas-wrap{flex:1; position:relative; overflow:hidden; min-height:0}
+  #tree{width:100%; height:100%; display:block}
+
+  /* skill-tree edges (prereq lines) */
+  .tedge{fill:none; stroke:var(--line); stroke-width:2}
+  .tedge.lit{stroke:var(--accent); stroke-width:2.6; stroke-dasharray:none}
+  .tedge.locked{stroke:var(--line-soft); stroke-dasharray:5 6}
+
+  /* skill-tree nodes (foreignObject cards) */
+  .tnode{width:100%; min-height:100%; border-radius:15px; padding:15px 17px; position:relative;
+    border:1.6px solid var(--line); background:var(--panel); cursor:pointer;
+    transition:transform .22s cubic-bezier(.2,.7,.2,1), box-shadow .22s, border-color .22s;
+    display:flex; flex-direction:column; gap:3px; overflow:hidden}
+  .tnode:hover{transform:translateY(-3px); box-shadow:0 14px 30px -16px rgba(0,0,0,.4)}
+  .tnode .tk{font-family:var(--mono); font-size:9.5px; letter-spacing:.13em; text-transform:uppercase; color:var(--ink-faint)}
+  .tnode .tn{font-family:var(--display); font-weight:600; font-size:18px; line-height:1.1; letter-spacing:-.01em}
+  .tnode .td{font-size:12.5px; color:var(--ink-soft); line-height:1.4}
+  .tnode .tbadge{position:absolute; top:12px; right:13px; font-family:var(--mono); font-size:9px; letter-spacing:.08em;
+    text-transform:uppercase; padding:3px 8px; border-radius:99px; white-space:nowrap}
+
+  .tnode.mastered{border-color:var(--accent); background:linear-gradient(160deg,var(--accent-bg),var(--panel) 80%)}
+  .tnode.mastered .tbadge{background:var(--accent); color:#fff}
+  .tnode.active{border-color:var(--accent); box-shadow:0 0 0 4px var(--accent-bg), 0 14px 30px -18px rgba(0,0,0,.4)}
+  .tnode.active .tbadge{background:var(--accent-bg); color:var(--accent-ink)}
+  .tnode.available .tbadge{background:var(--gold-bg); color:var(--gold)}
+  .tnode.locked{cursor:default; opacity:.62; border-style:dashed; background:var(--paper-2)}
+  .tnode.locked:hover{transform:none; box-shadow:none}
+  .tnode.locked .tn{color:var(--ink-faint)}
+  .tnode.locked .tbadge{background:transparent; border:1px solid var(--line); color:var(--ink-faint)}
+  .tnode.capstone{border-width:2px}
+  .tnode.capstone .tn{font-style:italic}
+  .lockrow{display:flex; align-items:center; gap:8px; margin-top:auto; padding-top:9px; flex-wrap:wrap}
+  .testout{font-family:var(--mono); font-size:10.5px; color:var(--accent); border:1px solid var(--accent);
+    padding:3px 10px; border-radius:99px; background:transparent; transition:.18s; cursor:pointer}
+  .testout:hover{background:var(--accent); color:#fff}
+  .needs{font-family:var(--mono); font-size:10px; color:var(--ink-faint)}
+  .tnode .ring{position:absolute; bottom:13px; right:14px; display:flex; gap:3px}
+  .tnode .ring i{width:6px; height:6px; border-radius:50%; background:var(--line); display:block}
+  .tnode .ring i.on{background:var(--accent)}
+
+  .maplegend{position:absolute; bottom:20px; left:52px; display:flex; gap:16px; z-index:3; flex-wrap:wrap;
+    background:var(--panel); border:1px solid var(--line); border-radius:99px; padding:9px 18px;
+    font-family:var(--mono); font-size:11px; color:var(--ink-soft); box-shadow:0 8px 24px -16px rgba(0,0,0,.4)}
+  .maplegend span{display:flex; align-items:center; gap:6px}
+  .maplegend i{width:11px; height:11px; border-radius:3px; display:block; border:1.4px solid; box-sizing:border-box}
+  .lg-master{background:var(--accent-bg); border-color:var(--accent)}
+  .lg-active{background:var(--accent-bg); border-color:var(--accent); border-width:2.4px}
+  .lg-avail{background:var(--panel); border-color:var(--gold)}
+  .lg-lock{background:var(--paper-2); border-color:var(--line); border-style:dashed}
+  @media (max-width:1040px){ .maplegend{left:18px; right:18px; bottom:14px; justify-content:center} }
+
+  /* ===== test-out calibration overlay (Q5) ===== */
+  #calib{position:fixed; inset:0; z-index:70; display:none; place-items:center; padding:24px;
+    background:rgba(10,8,4,.42); opacity:0; transition:opacity .28s}
+  #calib.open{display:grid; opacity:1}
+  .calibcard{background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:26px 28px;
+    max-width:560px; width:100%; box-shadow:0 30px 80px -30px rgba(0,0,0,.6); animation:rise .4s both}
+  .calibcard .ck{font-family:var(--mono); font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--gold); margin-bottom:8px}
+  .calibcard h2{font-family:var(--display); font-weight:600; font-size:24px; line-height:1.1; margin:0 0 8px; letter-spacing:-.01em}
+  .calibcard p{color:var(--ink-soft); font-size:14.5px; margin:0 0 16px}
+  .calibcard .verdict-msg{font-size:14px; border-left:3px solid var(--line); padding:6px 0 6px 14px; margin:4px 0 0}
+  .calibcard .verdict-msg.good{border-color:var(--accent); color:var(--ink)}
+  .calibcard .verdict-msg.bad{border-color:var(--warn); color:var(--ink)}
+
+  /* ===== toast ===== */
+  .toast{position:fixed; bottom:26px; left:50%; transform:translateX(-50%) translateY(20px); z-index:90;
+    background:var(--ink); color:var(--paper); font-size:13px; padding:11px 20px; border-radius:99px; opacity:0;
+    transition:.3s; pointer-events:none; box-shadow:0 12px 30px -12px rgba(0,0,0,.5); max-width:min(86vw,520px); text-align:center}
+  .toast.on{opacity:1; transform:translateX(-50%) translateY(0)}
+
   @media (prefers-reduced-motion: reduce){
     *{animation-duration:.001ms!important; transition-duration:.001ms!important}
   }
 </style>
 </head>
 <body>
+
+<!-- ===================== MAP (home / resting state, Q9) ===================== -->
+<div id="map">
+  <div class="maphead">
+    <div class="brand">/learn · skill map</div>
+    <div class="maptitle" id="mapTitle">Rate limiting</div>
+    <div class="mapsub">Six aspects, one architecture. Master each to unlock the next — earn your way to the capstone, where you design the whole limiter yourself.</div>
+    <div class="mapmeta">
+      <span><b id="mapMastered">0</b> <i>of <span id="mapTotal">6</span> mastered</i></span>
+      <span><b id="mapDecisions">0</b> <i>decisions logged</i></span>
+      <span><i>click an unlocked aspect to zoom in</i></span>
+      <button class="resetbtn" onclick="resetAll()" title="Reset all progress, mastery and decisions" style="margin-left:auto">↺ Reset</button>
+    </div>
+  </div>
+  <div class="canvas-wrap">
+    <svg id="tree" preserveAspectRatio="xMidYMid meet"></svg>
+    <div class="maplegend">
+      <span><i class="lg-master"></i> mastered</span>
+      <span><i class="lg-active"></i> in progress</span>
+      <span><i class="lg-avail"></i> available</span>
+      <span><i class="lg-lock"></i> locked</span>
+      <span style="color:var(--accent)">━ unlocked path</span>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== MODULE (zooms in from a map node, Q9) ============== -->
+<div id="moduleScreen">
 <div id="bar"><i id="barfill"></i></div>
 
 <div id="app">
   <!-- LEFT: chapters -->
   <nav id="rail">
-    <div class="brand">/learn · interactive</div>
+    <button class="backmap" onclick="toMap()">← skill map</button>
     <div class="lesson" id="railLesson">Rate&nbsp;limiting</div>
     <div class="sub" id="railSub">Learn it by trying, failing, and deciding — not by reading.</div>
     <div class="rail-chaps" id="chaplist"></div>
@@ -341,10 +468,7 @@
     <div class="stage-head">
       <div class="kicker" id="kicker">Orient</div>
       <div style="display:flex; align-items:center; gap:10px">
-        <label class="devmod-wrap" title="Step 2 dev affordance — switch module (skill map lands in Step 3)">
-          <span>module</span>
-          <select id="devmod"></select>
-        </label>
+        <button class="backmap-top" onclick="toMap()" title="Back to the skill map">⊞ skill map</button>
         <button class="resetbtn" onclick="resetAll()" title="Reset all progress, mastery and decisions">↺ Reset</button>
         <button class="dec-toggle" onclick="openMargin()">Decisions <b id="decCountM">0</b></button>
       </div>
@@ -364,6 +488,13 @@
   </aside>
 </div>
 <div id="scrim" onclick="closeMargin()"></div>
+</div>
+
+<!-- test-out calibration overlay (Q5) -->
+<div id="calib" aria-hidden="true">
+  <div class="calibcard" id="calibcard"></div>
+</div>
+<div id="toast" class="toast"></div>
 
 <script>
 /* ============================ STATE ============================
@@ -371,13 +502,15 @@
    resetModuleState) are wiped when the active module changes; cross-module
    state (path, adrs, decisions) persists so decisions carry across the map.   */
 const S = {
+  screen:'map',                                // 'map' (home) | 'module' (Q9)
   chapter:0, maxUnlocked:0,
   zoom:'context', zoomReached:'context',
   flowStep:0,                                  // trace beat step pointer
   guess:null, committed:false,
   ranSim:false, simMode:'fixed', simResult:null,
   ownChoice:null, _reason:'', reflectionShown:false,
-  path:[], adrs:[], decisions:{}
+  path:[], adrs:[], decisions:{},
+  progress:{}                                  // moduleId -> locked|available|active|mastered
 };
 /* Wipe the interaction state that is scoped to one module (called on switch). */
 function resetModuleState(){
@@ -924,6 +1057,134 @@ const CURRICULUM = {
    verifier switch modules until the real map ships in Step 3. */
 let activeIndex = 0;
 function activeModule(){ return CURRICULUM.modules[activeIndex]; }
+function moduleById(id){ return CURRICULUM.modules.find(m=>m.id===id); }
+function indexOfId(id){ return CURRICULUM.modules.findIndex(m=>m.id===id); }
+
+/* ============================ PROGRESS / UNLOCK GRAPH (Q5) ============================
+   S.progress[id] in {locked, available, active, mastered}. A module is
+   AVAILABLE once every prereq is mastered; until then it is LOCKED. Entering a
+   module makes it ACTIVE; sealing it (or passing a test-out check) makes it
+   MASTERED, which can cascade-unlock downstream modules. */
+function prereqsMet(m){ return m.prereqs.every(p=>S.progress[p]==='mastered'); }
+function recomputeUnlocks(){
+  CURRICULUM.modules.forEach(m=>{
+    const cur=S.progress[m.id];
+    if(cur==='mastered' || cur==='active') return;       // sticky
+    S.progress[m.id]= prereqsMet(m) ? 'available' : 'locked';
+  });
+}
+function masteredCount(){ return CURRICULUM.modules.filter(m=>S.progress[m.id]==='mastered').length; }
+function setMastered(id){
+  S.progress[id]='mastered';
+  recomputeUnlocks();
+  persist();
+}
+
+/* ============================ MAP: AUTO TIERED-DAG LAYOUT (Q4) ============================
+   tier(m) = longest prereq chain back to a root (a module with no prereqs).
+   Roots sit at tier 0; each module is one past its deepest prereq. Within a tier
+   the modules are spread evenly across the height. An optional per-module {x,y}
+   (in TREE_W×TREE_H space) overrides the auto position to nudge the layout.    */
+const TREE_W=1320, TREE_H=560, NODE_W=250, NODE_H=164;
+function computeTiers(){
+  const tier={}, mods=CURRICULUM.modules;
+  const depth=(id,seen)=>{
+    if(tier[id]!=null) return tier[id];
+    if(seen.has(id)) return 0;                 // cycle guard (authoring error)
+    seen.add(id);
+    const m=moduleById(id);
+    const d = (!m.prereqs.length) ? 0 : 1+Math.max(...m.prereqs.map(p=>depth(p,seen)));
+    seen.delete(id);
+    return tier[id]=d;
+  };
+  mods.forEach(m=>depth(m.id,new Set()));
+  return tier;
+}
+/* Auto position each node; respect per-module x,y override. */
+function layoutTree(){
+  const tier=computeTiers();
+  const maxTier=Math.max(0,...Object.values(tier));
+  const byTier={};
+  CURRICULUM.modules.forEach(m=>{ (byTier[tier[m.id]]=byTier[tier[m.id]]||[]).push(m); });
+  const padX=40, padY=30;
+  const colSpan = maxTier>0 ? (TREE_W-NODE_W-2*padX)/maxTier : 0;
+  const pos={};
+  Object.keys(byTier).forEach(t=>{
+    const col=byTier[t], n=col.length;
+    const x = padX + (+t)*colSpan;
+    const usableH = TREE_H-NODE_H-2*padY;        // even spread within the tier
+    col.forEach((m,i)=>{
+      const autoY = n<=1 ? (TREE_H-NODE_H)/2 : padY + i*(usableH/(n-1));
+      pos[m.id]={ x:(m.x!=null?m.x:x), y:(m.y!=null?m.y:autoY) };
+    });
+  });
+  return pos;
+}
+
+/* Curved prereq edge from prereq (left) to module (right). */
+function treeEdgePath(pos,fromId,toId){
+  const a=pos[fromId], b=pos[toId];
+  const sx=a.x+NODE_W, sy=a.y+NODE_H/2, tx=b.x, ty=b.y+NODE_H/2;
+  const mx=(sx+tx)/2;
+  return `M ${sx} ${sy} C ${mx} ${sy} ${mx} ${ty} ${tx} ${ty}`;
+}
+
+/* ============================ MAP RENDER ============================
+   The map is a concept-graph skill-tree (Q3): modules are nodes, prereq edges
+   are curved lines. Node colour = S.progress state (Q5). A lit edge means the
+   prereq is mastered (the path is "open"). Locked nodes are unclickable but
+   offer a "test out" calibration escape hatch. */
+function renderMap(){
+  const svg=document.getElementById('tree'); if(!svg) return;
+  recomputeUnlocks();
+  svg.setAttribute('viewBox',`0 0 ${TREE_W} ${TREE_H}`);
+  const pos=layoutTree();
+  let edges='', nodes='';
+  CURRICULUM.modules.forEach(m=>{
+    m.prereqs.forEach(p=>{
+      const lit = S.progress[p]==='mastered';
+      const cls = lit?'tedge lit':(S.progress[m.id]==='locked'?'tedge locked':'tedge');
+      edges += `<path class="${cls}" d="${treeEdgePath(pos,p,m.id)}"/>`;
+    });
+  });
+  const beatTotal=m=>{ // how many slots a module exposes (for the progress ring)
+    return ['orient','confront','reveal','practice','own'].reduce((n,s)=>{
+      const v=m.slots[s]; return n + (v? (Array.isArray(v)?v.length:1) : 0); },0);
+  };
+  CURRICULUM.modules.forEach(m=>{
+    const st=S.progress[m.id]||'locked';
+    const locked = st==='locked';
+    const badge={mastered:'mastered', active:'in progress', available:'available', locked:'locked'}[st];
+    const total=Math.max(1,beatTotal(m));
+    const isActive = st==='active' && indexOfId(m.id)===activeIndex;
+    const frac = st==='mastered'?1 : (isActive? Math.min(1,(S.maxUnlocked+1)/total) : 0);
+    const dots = Math.min(5,total);
+    const onCount = Math.round(frac*dots);
+    const ring = `<div class="ring">${Array.from({length:dots}).map((_,i)=>`<i class="${i<onCount?'on':''}"></i>`).join('')}</div>`;
+    let foot=ring;
+    if(locked){
+      const need=m.prereqs.filter(p=>S.progress[p]!=='mastered').map(p=>moduleById(p).label);
+      foot=`<div class="lockrow"><button class="testout" onclick="event.stopPropagation();testOut('${m.id}')">test out ↗</button>
+        <span class="needs">needs ${need.join(' + ')||'prereqs'}</span></div>`;
+    }
+    const cls=['tnode',st,m.capstone?'capstone':''].filter(Boolean).join(' ');
+    const onclick = locked? '' : `onclick="enterModule('${m.id}')"`;
+    const p=pos[m.id];
+    nodes += `<foreignObject x="${p.x}" y="${p.y}" width="${NODE_W}" height="${NODE_H}">
+      <div xmlns="http://www.w3.org/1999/xhtml" class="${cls}" ${onclick}>
+        <div class="tk">${esc(m.kick)} · ${esc(ZNAME[m.level]||m.level)}</div>
+        <div class="tn">${esc(m.label)}</div>
+        <div class="td">${esc(m.desc)}</div>
+        <span class="tbadge">${badge}</span>
+        ${foot}
+      </div></foreignObject>`;
+  });
+  svg.innerHTML = edges + nodes;
+  const mc=document.getElementById('mapMastered'); if(mc) mc.textContent=masteredCount();
+  const mt=document.getElementById('mapTotal'); if(mt) mt.textContent=CURRICULUM.modules.length;
+  const md=document.getElementById('mapDecisions'); if(md) md.textContent=Object.keys(S.decisions).length;
+  const tt=document.getElementById('mapTitle'); if(tt) tt.textContent=CURRICULUM.system;
+}
 
 /* A module's slot order is engine-enforced, but practice/own are optional and
    may be absent — so the player derives the present slots PER MODULE. Each
@@ -1477,10 +1738,19 @@ function renderMargin(){
   const dm=document.getElementById('decCountM'); if(dm) dm.textContent=n;
 }
 
+/* ============================ RENDER DISPATCH ============================
+   New axis S.screen splits the player into two screens: the MAP (home/skill-
+   tree) and the MODULE (today's single-screen beat flow). render() routes to
+   the screen currently in view; transitions (enterModule/toMap) flip S.screen
+   and animate the zoom. */
+function render(){
+  if(S.screen==='map') renderMap(); else renderModule();
+}
+
 /* ============================ CHAPTER CONTENT ============================
    "Chapters" are now the active module's flattened beats (one per chapter). The
    rail labels group by slot; consecutive beats in the same slot share a label.  */
-function render(){
+function renderModule(){
   const beats=moduleBeats();
   const cur=beats[S.chapter]||beats[0];
   // rail
@@ -1710,7 +1980,10 @@ function reflectionHTML(){
     <div class="reflect" style="margin-top:14px">
       <div class="r"><div class="rl">You guessed</div><div class="rt">${choices[g]?choices[g].t:'—'}</div></div>
       <div class="r"><div class="rl">You decided</div><div class="rt">${decided?`<b>${esc(decided)}</b> — recorded with your reasoning.`:'—'}</div></div>
-      <div class="r"><div class="rl">Next</div><div class="rt">Use the <span style="font-family:var(--mono)">module ▾</span> switcher (top-right) to play another aspect. The skill-map navigation lands in Step 3.</div></div>
+      <div class="r"><div class="rl">Next</div><div class="rt">This aspect is now <b style="color:var(--accent)">mastered</b> on the map, and any aspect it gated has unlocked.</div></div>
+    </div>
+    <div class="actions" style="margin-top:18px">
+      <button class="btn" onclick="toMap()">← Back to the skill map <span class="arr">↗</span></button>
     </div>
   </div>`;
 }
@@ -1728,7 +2001,7 @@ function revealLocked(targetChapter){
 function go(i){
   if(i>S.maxUnlocked) return;
   if(revealLocked(i)) return;                  // productive-failure gate
-  S.chapter=i; render();
+  S.chapter=i; renderModule();
   const st=document.getElementById('stage'); if(st) st.scrollTo({top:0,behavior:'smooth'});
 }
 /* Advance to the NEXT chapter (no hardcoded index). Side effect: when we cross
@@ -1752,7 +2025,7 @@ function commitGuess(){
     const cb=activeModule().slots.confront;
     const choices=curChoices();
     logPath(cb.commitPath ? cb.commitPath(S.guess) : `First instinct: <b>${choices[S.guess].t.toLowerCase()}</b>`);
-    render();
+    renderModule();
   }
 }
 
@@ -1809,8 +2082,8 @@ function updateReadout(allowed){
 function pickFix(v){ S.fixPick=v; const beats=moduleBeats(); const b=beats[S.chapter].beat;
   const opt=b.options.find(o=>o.v===v);
   if(opt && opt.correct) logPath(`Fixed the key: <b>${esc(opt.t.toLowerCase())}</b>`);
-  render(); }
-function pickOwn(v){ S.ownChoice=v; const sb=document.getElementById('sealbtn'); if(sb) sb.disabled=false; render(); }
+  renderModule(); }
+function pickOwn(v){ S.ownChoice=v; const sb=document.getElementById('sealbtn'); if(sb) sb.disabled=false; renderModule(); }
 function syncReason(){ const t=document.getElementById('reason'); if(t) S._reason=t.value; }
 function seal(){
   if(!S.ownChoice) return;
@@ -1820,9 +2093,11 @@ function seal(){
   const b=beats[S.chapter].beat;                 // the active decide beat
   addMyAdr(b.id, b.adr, S.ownChoice, reason);
   logPath(`Your call: <b>${esc(S.ownChoice)}</b>`);
-  // last chapter of the module? seal it with a reflection; else just advance.
+  // last chapter of the module? master it + seal it with a reflection; else advance.
   const last = S.chapter===beats.length-1;
   if(last){
+    setMastered(activeModule().id);              // mark mastered → cascade-unlock downstream (Q5)
+    logPath(`<b>${esc(activeModule().label)}</b> mastered`);
     S.reflectionShown=true;
     document.getElementById('reflectbox').innerHTML=reflectionHTML();
     document.getElementById('barfill').style.width='100%';
@@ -1836,31 +2111,129 @@ function seal(){
 function openMargin(){ document.getElementById('margin').classList.add('open'); document.getElementById('scrim').classList.add('open'); }
 function closeMargin(){ document.getElementById('margin').classList.remove('open'); document.getElementById('scrim').classList.remove('open'); }
 
-/* ---- TEMP dev affordance (Step 2): a module <select> so the verifier can
-   exercise all six. Replaced by the skill-map navigation in Step 3. ---- */
-function switchModule(idx){
-  idx=+idx; if(idx===activeIndex) return;
+/* ============================ SCREEN NAVIGATION (Q9) ============================
+   One spatial metaphor end-to-end: the MAP is home; selecting an unlocked node
+   ZOOMS INTO it (transform-origin = that node's centre) and the module screen
+   takes the full viewport. Closing zooms back OUT to the same node. */
+let _zoomOrigin='50% 50%';
+function nodeOriginPct(id){
+  const pos=layoutTree()[id]; if(!pos) return '50% 50%';
+  return `${((pos.x+NODE_W/2)/TREE_W*100).toFixed(2)}% ${((pos.y+NODE_H/2)/TREE_H*100).toFixed(2)}%`;
+}
+function enterModule(id, force){
+  const idx=indexOfId(id); if(idx<0) return;
+  if(S.progress[id]==='locked' && !force) return;   // hard gate (Q5); test-out fail may force-open
   stopFlowPlay();
   activeIndex=idx;
+  if(S.progress[id]!=='mastered') S.progress[id]='active';
   resetModuleState();
-  const sel=document.getElementById('devmod'); if(sel) sel.value=String(idx);
-  render();
+  _zoomOrigin=nodeOriginPct(id);
+  S.screen='module';
+  renderModule();
+  const ms=document.getElementById('moduleScreen');
+  const mp=document.getElementById('map');
+  ms.style.transformOrigin=_zoomOrigin;
+  mp.classList.add('gone');
+  requestAnimationFrame(()=>ms.classList.add('show'));
   const st=document.getElementById('stage'); if(st) st.scrollTo({top:0,behavior:'auto'});
 }
-function buildModuleSwitcher(){
-  const sel=document.getElementById('devmod'); if(!sel) return;
-  sel.innerHTML=CURRICULUM.modules.map((m,i)=>`<option value="${i}" ${i===activeIndex?'selected':''}>${esc(m.kick)} · ${esc(m.label)}</option>`).join('');
-  sel.onchange=e=>switchModule(e.target.value);
+function toMap(){
+  stopFlowPlay();
+  S.screen='map';
+  const ms=document.getElementById('moduleScreen');
+  const mp=document.getElementById('map');
+  ms.style.transformOrigin=_zoomOrigin;             // zoom OUT to the same node
+  ms.classList.remove('show');
+  mp.classList.remove('gone');
+  renderMap();
+}
+
+/* ---- TEST OUT (Q5): a locked node's escape hatch — a single calibration check
+   (depth:'quick', one info+verify beat). PASS = mark mastered + cascade unlock;
+   FAIL = open the full module. The check is authored on the module as
+   `testout:{prompt, choices:{key:{t,d,correct?}}, passNote, failNote}`; if a
+   module declares none, we synthesise one from its confront beat. ---- */
+function calibFor(m){
+  if(m.testout) return m.testout;
+  const c=m.slots.confront;
+  // derive a quick check from the confront beat: the "good" reveal verdict is correct
+  const rv=m.slots.reveal&&m.slots.reveal.verdicts||{};
+  const choices={};
+  Object.entries(c.choices).forEach(([k,v])=>{ choices[k]={t:v.t, d:v.d, correct:!!(rv[k]&&rv[k].good)}; });
+  return {prompt:c.prompt||'Pick the production-grade answer',
+    info:`Quick calibration for <b>${esc(m.label)}</b> — answer correctly to skip ahead.`,
+    choices,
+    passNote:'Calibrated. Marked mastered — downstream aspects unlock.',
+    failNote:'Not quite — opening the full module so you can build the intuition.'};
+}
+let _calibModule=null;
+function testOut(id){
+  const m=moduleById(id); if(!m) return;
+  _calibModule=id;
+  const t=calibFor(m);
+  const card=document.getElementById('calibcard');
+  card.innerHTML=`
+    <div class="ck">Test out · quick check</div>
+    <h2>${esc(m.label)}</h2>
+    <p>${t.info||'One question. Pass to skip ahead; miss it and the full module opens.'}</p>
+    <div class="card" style="margin:0">
+      <div class="label">${esc(t.prompt)}</div>
+      ${Object.entries(t.choices).map(([k,c])=>`
+        <button class="choice" aria-pressed="false" onclick="calibPick('${k}')">
+          <span class="pick"></span><span class="ctxt"><b>${esc(c.t)}</b><span>${esc(c.d)}</span></span>
+        </button>`).join('')}
+    </div>
+    <div class="verdict-msg" id="calibmsg" style="display:none"></div>
+    <div class="actions" style="margin-top:18px">
+      <button class="btn ghost" onclick="closeCalib()">Cancel</button>
+    </div>`;
+  const overlay=document.getElementById('calib');
+  overlay.classList.add('open'); overlay.setAttribute('aria-hidden','false');
+}
+function calibPick(k){
+  const m=moduleById(_calibModule); if(!m) return;
+  const t=calibFor(m);
+  const correct=!!t.choices[k].correct;
+  document.querySelectorAll('#calibcard .choice').forEach(b=>b.disabled=true);
+  const msg=document.getElementById('calibmsg');
+  msg.style.display='block';
+  msg.className='verdict-msg '+(correct?'good':'bad');
+  msg.innerHTML=correct? (t.passNote||'Passed.') : (t.failNote||'Not quite.');
+  setTimeout(()=>{
+    closeCalib();
+    if(correct){
+      setMastered(m.id);
+      logPath(`Tested out of <b>${esc(m.label)}</b>`);
+      renderMap();
+      toast(`${m.label} mastered — downstream unlocked.`);
+    } else {
+      enterModule(m.id, true);                       // fail → open the full module (escape hatch lifts the gate)
+    }
+  }, 1100);
+}
+function closeCalib(){
+  const overlay=document.getElementById('calib');
+  overlay.classList.remove('open'); overlay.setAttribute('aria-hidden','true');
+}
+
+/* ---- toast (transient confirmations) ---- */
+let _toastT;
+function toast(msg){
+  const t=document.getElementById('toast'); if(!t) return;
+  t.textContent=msg; t.classList.add('on');
+  clearTimeout(_toastT); _toastT=setTimeout(()=>t.classList.remove('on'),3200);
 }
 
 /* ---- PERSISTENCE (Q8): cross-module decisions persist in localStorage, wrapped
    in try/catch with a silent in-memory fallback (sandboxed file:// may block it).
    We persist only the durable record — the learner's decisions — not transient
    per-chapter UI state. RESET wipes both stored + in-memory state. ---- */
-const STORE_KEY='learn.ratelimiting.v2';
+const STORE_KEY='learn.ratelimiting.v3';
 let _mem=null;                                  // in-memory fallback bucket
 function persist(){
-  const data={decisions:S.decisions};
+  // durable record: the learner's decisions + per-module mastery (Q8)
+  const mastered=CURRICULUM.modules.filter(m=>S.progress[m.id]==='mastered').map(m=>m.id);
+  const data={decisions:S.decisions, mastered};
   try{ localStorage.setItem(STORE_KEY, JSON.stringify(data)); }
   catch(e){ _mem=data; }
 }
@@ -1868,22 +2241,31 @@ function loadPersisted(){
   let data=null;
   try{ const raw=localStorage.getItem(STORE_KEY); if(raw) data=JSON.parse(raw); }
   catch(e){ data=_mem; }
-  if(data && data.decisions){ S.decisions=data.decisions; }
+  if(data){
+    if(data.decisions){ S.decisions=data.decisions; }
+    if(Array.isArray(data.mastered)){ data.mastered.forEach(id=>{ if(moduleById(id)) S.progress[id]='mastered'; }); }
+  }
 }
-/* MANDATORY reset button. Clears progress, mastery and decisions everywhere. */
+/* MANDATORY reset button (Q8). Clears progress, mastery and decisions everywhere. */
 function resetAll(){
-  stopFlowPlay();
+  stopFlowPlay(); closeCalib();
   try{ localStorage.removeItem(STORE_KEY); }catch(e){}
   _mem=null;
-  S.path=[]; S.adrs=[]; S.decisions={};
+  S.path=[]; S.adrs=[]; S.decisions={}; S.progress={};
   activeIndex=0; resetModuleState();
-  buildModuleSwitcher();
-  render();
-  const st=document.getElementById('stage'); if(st) st.scrollTo({top:0,behavior:'auto'});
+  recomputeUnlocks();
+  // back to the map as the resting state
+  S.screen='map';
+  const ms=document.getElementById('moduleScreen'); ms.classList.remove('show');
+  const mp=document.getElementById('map'); mp.classList.remove('gone');
+  render(); renderMargin();
+  toast('Progress reset.');
 }
 
+/* boot: derive the unlock graph from persisted mastery, then paint the map home */
 loadPersisted();
-buildModuleSwitcher();
+recomputeUnlocks();
+renderMargin();
 render();
 </script>
 </body>
