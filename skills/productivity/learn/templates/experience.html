@@ -1125,7 +1125,8 @@ function setMastered(id){
    Roots sit at tier 0; each module is one past its deepest prereq. Within a tier
    the modules are spread evenly across the height. An optional per-module {x,y}
    (in TREE_W×TREE_H space) overrides the auto position to nudge the layout.    */
-const TREE_W=1320, TREE_H=560, NODE_W=250, NODE_H=164;
+const NODE_W=250, NODE_H=164;
+const GAP_X=120, GAP_Y=46, PAD_X=48, PAD_Y=40;   // pitch is node+gap, so columns/rows never overlap
 function computeTiers(){
   const tier={}, mods=CURRICULUM.modules;
   const depth=(id,seen)=>{
@@ -1140,24 +1141,30 @@ function computeTiers(){
   mods.forEach(m=>depth(m.id,new Set()));
   return tier;
 }
-/* Auto position each node; respect per-module x,y override. */
+/* Auto position each node; respect per-module x,y override. Canvas size is
+   DERIVED from the tier counts so N nodes never overlap: column pitch and row
+   pitch are each (node + gap), and each tier's column is centred vertically. */
 function layoutTree(){
   const tier=computeTiers();
   const maxTier=Math.max(0,...Object.values(tier));
   const byTier={};
   CURRICULUM.modules.forEach(m=>{ (byTier[tier[m.id]]=byTier[tier[m.id]]||[]).push(m); });
-  const padX=40, padY=30;
-  const colSpan = maxTier>0 ? (TREE_W-NODE_W-2*padX)/maxTier : 0;
+  const pitchX=NODE_W+GAP_X, pitchY=NODE_H+GAP_Y;
+  // tallest tier drives canvas height; tier count drives width
+  const maxRows=Math.max(1,...Object.values(byTier).map(c=>c.length));
+  const W = PAD_X*2 + maxTier*pitchX + NODE_W;
+  const H = PAD_Y*2 + (maxRows-1)*pitchY + NODE_H;
   const pos={};
   Object.keys(byTier).forEach(t=>{
     const col=byTier[t], n=col.length;
-    const x = padX + (+t)*colSpan;
-    const usableH = TREE_H-NODE_H-2*padY;        // even spread within the tier
+    const x = PAD_X + (+t)*pitchX;
+    const colH = (n-1)*pitchY;                   // height this column actually spans
+    const top = (H-NODE_H-colH)/2;               // centre the column in the canvas
     col.forEach((m,i)=>{
-      const autoY = n<=1 ? (TREE_H-NODE_H)/2 : padY + i*(usableH/(n-1));
-      pos[m.id]={ x:(m.x!=null?m.x:x), y:(m.y!=null?m.y:autoY) };
+      pos[m.id]={ x:(m.x!=null?m.x:x), y:(m.y!=null?m.y:top + i*pitchY) };
     });
   });
+  pos._W=W; pos._H=H;                            // canvas dims travel with the result
   return pos;
 }
 
@@ -1177,8 +1184,8 @@ function treeEdgePath(pos,fromId,toId){
 function renderMap(){
   const svg=document.getElementById('tree'); if(!svg) return;
   recomputeUnlocks();
-  svg.setAttribute('viewBox',`0 0 ${TREE_W} ${TREE_H}`);
   const pos=layoutTree();
+  svg.setAttribute('viewBox',`0 0 ${pos._W} ${pos._H}`);
   let edges='', nodes='';
   CURRICULUM.modules.forEach(m=>{
     m.prereqs.forEach(p=>{
@@ -2223,8 +2230,8 @@ function closeMargin(){ document.getElementById('margin').classList.remove('open
    takes the full viewport. Closing zooms back OUT to the same node. */
 let _zoomOrigin='50% 50%';
 function nodeOriginPct(id){
-  const pos=layoutTree()[id]; if(!pos) return '50% 50%';
-  return `${((pos.x+NODE_W/2)/TREE_W*100).toFixed(2)}% ${((pos.y+NODE_H/2)/TREE_H*100).toFixed(2)}%`;
+  const all=layoutTree(); const pos=all[id]; if(!pos) return '50% 50%';
+  return `${((pos.x+NODE_W/2)/all._W*100).toFixed(2)}% ${((pos.y+NODE_H/2)/all._H*100).toFixed(2)}%`;
 }
 function enterModule(id, force){
   const idx=indexOfId(id); if(idx<0) return;
