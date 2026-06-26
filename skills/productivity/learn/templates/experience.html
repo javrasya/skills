@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>/learn — rate limiting</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#FAF6EE; --paper-2:#F3ECDE; --panel:#FFFFFF;
+    --ink:#1A1814; --ink-soft:#56503F; --ink-faint:#8C8472;
+    --line:#E4DBC9; --line-soft:#EEE7D8;
+    --accent:#0E7C63; --accent-ink:#0A4A3B; --accent-bg:#DEEFE9;
+    --warn:#C2521E; --warn-ink:#7E3413; --warn-bg:#F6E2D6;
+    --display:'Fraunces',Georgia,'Times New Roman',serif;
+    --sans:'IBM Plex Sans',-apple-system,BlinkMacSystemFont,system-ui,sans-serif;
+    --mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --paper:#15130E; --paper-2:#1E1B14; --panel:#211D16;
+      --ink:#EEE8DA; --ink-soft:#B6AE9C; --ink-faint:#7E7666;
+      --line:#322D23; --line-soft:#2A2620;
+      --accent:#36B597; --accent-ink:#86D9C6; --accent-bg:#10332A;
+      --warn:#E0764D; --warn-ink:#F0AB8C; --warn-bg:#2D1A11;
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    font-family:var(--sans); color:var(--ink); background:var(--paper);
+    -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+    line-height:1.62; font-size:15px;
+  }
+  button{font-family:inherit; cursor:pointer; color:inherit}
+  ::selection{background:var(--accent-bg)}
+
+  /* ---------- progress bar ---------- */
+  #bar{position:fixed; top:0; left:0; right:0; height:3px; background:var(--line-soft); z-index:60}
+  #bar > i{display:block; height:100%; width:0; background:var(--accent); transition:width .6s cubic-bezier(.2,.7,.2,1)}
+
+  /* ---------- shell ---------- */
+  #app{display:grid; grid-template-columns:262px minmax(0,1fr) 332px; height:100%; padding-top:3px}
+  @media (max-width:1040px){ #app{grid-template-columns:1fr} }
+
+  /* ---------- left rail / chapters ---------- */
+  #rail{border-right:1px solid var(--line); padding:30px 22px; overflow:auto; background:var(--paper)}
+  #rail .brand{font-family:var(--mono); font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-faint)}
+  #rail .lesson{font-family:var(--display); font-size:25px; line-height:1.12; font-weight:600; margin:10px 0 4px; letter-spacing:-.01em}
+  #rail .sub{font-size:13px; color:var(--ink-soft); margin-bottom:26px}
+  .chap{display:flex; gap:13px; padding:11px 10px; border-radius:9px; margin:2px -10px; transition:background .2s; position:relative}
+  .chap[data-state="active"]{background:var(--paper-2)}
+  .chap[data-on="1"]{cursor:pointer}
+  .chap[data-on="1"]:hover{background:var(--paper-2)}
+  .chap[data-state="locked"]{opacity:.42; cursor:not-allowed}
+  .chap .dot{flex:none; width:26px; height:26px; border-radius:50%; border:1.5px solid var(--line);
+    display:grid; place-items:center; font-family:var(--mono); font-size:11px; color:var(--ink-faint);
+    background:var(--paper); transition:.25s}
+  .chap[data-state="active"] .dot{border-color:var(--accent); color:var(--accent); box-shadow:0 0 0 4px var(--accent-bg)}
+  .chap[data-state="done"] .dot{border-color:var(--accent); background:var(--accent); color:#fff}
+  @media (prefers-color-scheme: dark){ .chap[data-state="done"] .dot{color:#11130f} }
+  .chap .ct{min-width:0}
+  .chap .ck{font-family:var(--mono); font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-faint)}
+  .chap .cn{font-size:14.5px; font-weight:500; margin-top:1px}
+  .chap[data-state="locked"] .cn::after{content:" ·"; }
+  #rail .foot{margin-top:26px; padding-top:18px; border-top:1px solid var(--line-soft); font-family:var(--mono); font-size:11px; color:var(--ink-faint); line-height:1.7}
+
+  @media (max-width:1040px){
+    #rail{border-right:none; border-bottom:1px solid var(--line); padding:18px 16px 14px; position:sticky; top:3px; z-index:30}
+    #rail .foot{display:none}
+    .rail-chaps{display:flex; gap:8px; overflow:auto; margin:0 -16px; padding:4px 16px; scrollbar-width:none}
+    .rail-chaps::-webkit-scrollbar{display:none}
+    .chap{flex:none; margin:0; width:auto; padding:8px 12px; border:1px solid var(--line); border-radius:99px; gap:8px}
+    .chap .ct .ck{display:none}
+    .chap .cn{font-size:13px}
+  }
+
+  /* ---------- center stage ---------- */
+  #stage{overflow:auto; padding:34px 46px 90px; position:relative}
+  @media (max-width:1040px){ #stage{padding:22px 18px 90px} }
+  .stage-head{display:flex; align-items:center; justify-content:space-between; gap:14px; margin-bottom:8px}
+  .kicker{font-family:var(--mono); font-size:11px; letter-spacing:.16em; text-transform:uppercase; color:var(--accent); font-weight:500}
+  .dec-toggle{display:none}
+  @media (max-width:1040px){
+    .dec-toggle{display:inline-flex; align-items:center; gap:7px; border:1px solid var(--line); background:var(--panel);
+      padding:7px 13px; border-radius:99px; font-size:12.5px; font-weight:500}
+    .dec-toggle b{font-family:var(--mono); background:var(--accent); color:#fff; border-radius:99px; padding:0 7px; font-size:11px}
+  }
+  h1.title{font-family:var(--display); font-weight:600; font-size:clamp(28px,4vw,42px); line-height:1.05; letter-spacing:-.02em; margin:.1em 0 .35em}
+  .lede{font-size:17px; color:var(--ink-soft); max-width:60ch; margin:0 0 22px}
+  .panes{position:relative}
+  .pane{animation:rise .5s cubic-bezier(.2,.7,.2,1) both}
+  @keyframes rise{from{opacity:0; transform:translateY(14px)} to{opacity:1; transform:none}}
+
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:22px 24px}
+  .card + .card{margin-top:16px}
+  .label{font-family:var(--mono); font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-faint); margin-bottom:9px}
+
+  .btn{display:inline-flex; align-items:center; gap:9px; border:1px solid var(--ink); background:var(--ink); color:var(--paper);
+    padding:11px 20px; border-radius:99px; font-size:14px; font-weight:500; transition:.18s}
+  .btn:hover{transform:translateY(-1px)}
+  .btn:disabled{opacity:.4; cursor:not-allowed; transform:none}
+  .btn.ghost{background:transparent; color:var(--ink); border-color:var(--line)}
+  .btn.ghost:hover{border-color:var(--ink-faint); background:var(--paper-2)}
+  .btn .arr{transition:transform .2s}
+  .btn:not(:disabled):hover .arr{transform:translateX(3px)}
+  .actions{display:flex; gap:12px; align-items:center; margin-top:26px; flex-wrap:wrap}
+  .hint{font-size:13px; color:var(--ink-faint)}
+
+  /* ---------- C4 diagram ---------- */
+  .diagram{background:var(--paper-2); border:1px solid var(--line); border-radius:14px; padding:14px 16px 16px; margin:4px 0 6px}
+  .crumbs{display:flex; align-items:center; gap:8px; font-family:var(--mono); font-size:12px; margin-bottom:6px; flex-wrap:wrap}
+  .crumbs button{border:none; background:none; padding:2px 4px; color:var(--ink-faint); border-radius:6px}
+  .crumbs button.on{color:var(--ink); font-weight:500}
+  .crumbs button:not(.on):not(:disabled):hover{color:var(--accent)}
+  .crumbs button:disabled{color:var(--ink-faint); opacity:.45; cursor:default}
+  .crumbs .sep{color:var(--line); }
+  .crumbs .spacer{flex:1}
+  .zoutbtn{border:1px solid var(--line)!important; padding:3px 10px!important; color:var(--ink-soft)!important; background:var(--panel)!important}
+  .scene-wrap{position:relative; width:100%; aspect-ratio:16/9; min-height:230px; overflow:hidden; border-radius:10px; background:var(--paper-2)}
+  .scene{position:absolute; inset:0; opacity:0; pointer-events:none; transform-origin:0 0; will-change:transform,opacity;
+         transition:transform .58s cubic-bezier(.45,.02,.18,1), opacity .42s ease}
+  .scene svg{width:100%; height:100%; display:block}
+  .nz{cursor:pointer}
+  .nz .nbx{transition:.18s}
+  .nz:hover .nbx{filter:brightness(.97)}
+  .ztag{font-family:var(--mono); font-size:9px; fill:var(--accent)}
+  .ntitle{font-weight:500; font-size:13px}
+  .nsub{font-size:11px; fill:var(--ink-faint)}
+  .diagram .legend{font-size:12px; color:var(--ink-faint); margin-top:8px; display:flex; gap:16px; flex-wrap:wrap; align-items:center}
+  .diagram .legend i{display:inline-block; width:9px; height:9px; border-radius:3px; margin-right:6px; vertical-align:-1px}
+
+  /* ---------- confront choices ---------- */
+  .choice{display:flex; gap:14px; align-items:flex-start; border:1.5px solid var(--line); background:var(--panel);
+    border-radius:12px; padding:15px 17px; margin-top:11px; transition:.16s; text-align:left; width:100%}
+  .choice:hover{border-color:var(--ink-faint)}
+  .choice[aria-pressed="true"]{border-color:var(--accent); background:var(--accent-bg)}
+  .choice .pick{flex:none; width:20px; height:20px; border-radius:50%; border:1.5px solid var(--line-soft); margin-top:2px; transition:.16s}
+  .choice[aria-pressed="true"] .pick{border-color:var(--accent); background:var(--accent); box-shadow:inset 0 0 0 3px var(--accent-bg)}
+  .choice .ctxt b{display:block; font-weight:500; font-size:15px; margin-bottom:1px}
+  .choice .ctxt span{font-size:13.5px; color:var(--ink-soft)}
+  .locknote{display:flex; align-items:center; gap:9px; font-size:13px; color:var(--ink-faint); margin-top:18px; font-family:var(--mono)}
+
+  /* reveal / contrast */
+  .verdict{display:grid; grid-template-columns:1fr 1fr; gap:14px; margin:6px 0 4px}
+  @media (max-width:560px){ .verdict{grid-template-columns:1fr} }
+  .vcell{border:1px solid var(--line); border-radius:12px; padding:16px 18px; background:var(--panel)}
+  .vcell.you{border-color:var(--warn); background:var(--warn-bg)}
+  .vcell.real{border-color:var(--accent); background:var(--accent-bg)}
+  .vcell .vh{font-family:var(--mono); font-size:11px; letter-spacing:.1em; text-transform:uppercase; margin-bottom:7px}
+  .vcell.you .vh{color:var(--warn-ink)} .vcell.real .vh{color:var(--accent-ink)}
+  .vcell p{margin:0; font-size:14px} .vcell .big{font-family:var(--display); font-size:18px; font-weight:600; margin-bottom:4px}
+
+  /* ---------- simulator ---------- */
+  .sim{margin:4px 0}
+  .sim .simbar{display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:14px}
+  .seg{display:inline-flex; border:1px solid var(--line); border-radius:99px; padding:3px; background:var(--paper-2)}
+  .seg button{border:none; background:none; padding:7px 15px; border-radius:99px; font-size:13px; font-weight:500; color:var(--ink-soft)}
+  .seg button.on{background:var(--ink); color:var(--paper)}
+  .track{position:relative; height:118px; border:1px solid var(--line); border-radius:12px; background:var(--panel); overflow:hidden}
+  .boundary{position:absolute; top:0; bottom:22px; left:50%; width:2px; background:repeating-linear-gradient(var(--ink-faint) 0 5px,transparent 5px 10px); opacity:.6}
+  .boundary span{position:absolute; top:6px; left:8px; font-family:var(--mono); font-size:10px; color:var(--ink-faint); white-space:nowrap}
+  .window{position:absolute; top:0; bottom:22px; background:var(--accent-bg); opacity:.5; transition:left .2s linear}
+  .axis{position:absolute; left:0; right:0; bottom:0; height:22px; border-top:1px solid var(--line-soft); font-family:var(--mono); font-size:10px; color:var(--ink-faint)}
+  .axis .t{position:absolute; bottom:4px; transform:translateX(-50%)}
+  .req{position:absolute; width:11px; height:11px; border-radius:50%; bottom:34px; transform:translateY(8px) scale(.4); opacity:0;
+       transition:transform .45s cubic-bezier(.2,.8,.2,1), opacity .3s, background .2s}
+  .req.in{transform:none; opacity:1}
+  .req.ok{background:var(--accent)} .req.blocked{background:var(--warn)}
+  .readout{display:flex; gap:22px; margin-top:14px; flex-wrap:wrap}
+  .ro{display:flex; flex-direction:column}
+  .ro .rk{font-family:var(--mono); font-size:10px; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-faint)}
+  .ro .rv{font-family:var(--display); font-size:24px; font-weight:600; line-height:1.1}
+  .ro .rv.bad{color:var(--warn)} .ro .rv.good{color:var(--accent)}
+  .simverdict{margin-top:16px; border-left:3px solid var(--line); padding:6px 0 6px 16px; font-size:14.5px; color:var(--ink-soft); transition:.2s}
+  .simverdict.bad{border-color:var(--warn)} .simverdict.good{border-color:var(--accent)}
+  .simverdict b{color:var(--ink); font-weight:600}
+
+  /* own it */
+  textarea{width:100%; font-family:var(--sans); font-size:14.5px; color:var(--ink); background:var(--panel);
+    border:1.5px solid var(--line); border-radius:11px; padding:13px 15px; resize:vertical; min-height:84px; line-height:1.55}
+  textarea:focus{outline:none; border-color:var(--accent)}
+  .reflect{display:grid; gap:10px; margin-top:6px}
+  .reflect .r{display:flex; gap:12px; align-items:baseline}
+  .reflect .r .rl{font-family:var(--mono); font-size:11px; color:var(--ink-faint); flex:none; width:104px; text-transform:uppercase; letter-spacing:.06em}
+  .reflect .r .rt{font-size:14.5px}
+  .done-seal{display:inline-flex; align-items:center; gap:10px; font-family:var(--display); font-size:18px; font-weight:600; color:var(--accent); margin-top:8px}
+
+  /* ---------- right margin: decisions + history ---------- */
+  #margin{border-left:1px solid var(--line); background:var(--paper); overflow:auto; padding:26px 22px}
+  #margin h3{font-family:var(--mono); font-size:11px; letter-spacing:.13em; text-transform:uppercase; color:var(--ink-faint); margin:0 0 4px; font-weight:500}
+  #margin .mlede{font-size:12.5px; color:var(--ink-faint); margin:0 0 18px}
+  .path{list-style:none; margin:0 0 24px; padding:0; position:relative}
+  .path::before{content:""; position:absolute; left:5px; top:6px; bottom:6px; width:1.5px; background:var(--line)}
+  .path li{position:relative; padding:0 0 13px 22px; font-size:13px; color:var(--ink-soft)}
+  .path li::before{content:""; position:absolute; left:0; top:5px; width:11px; height:11px; border-radius:50%; background:var(--paper); border:2px solid var(--accent)}
+  .path li b{color:var(--ink); font-weight:500}
+  .path .empty{padding-left:0; color:var(--ink-faint); font-style:italic}
+  .path .empty::before{display:none}
+
+  .adr{border:1px solid var(--line); border-radius:12px; padding:14px 15px; margin-bottom:12px; background:var(--panel); animation:rise .45s both}
+  .adr.flash{animation:flash 1.1s ease}
+  @keyframes flash{0%,100%{box-shadow:0 0 0 0 transparent} 22%{box-shadow:0 0 0 4px var(--accent-bg); border-color:var(--accent)}}
+  .adr .ah{display:flex; align-items:center; gap:8px; margin-bottom:8px}
+  .adr .aid{font-family:var(--mono); font-size:11px; color:var(--ink-faint)}
+  .adr .pill{font-family:var(--mono); font-size:10px; padding:1px 8px; border-radius:99px; background:var(--accent-bg); color:var(--accent-ink); letter-spacing:.04em}
+  .adr .pill.mine{background:var(--warn-bg); color:var(--warn-ink)}
+  .adr .at{font-family:var(--display); font-size:16px; font-weight:600; line-height:1.18; margin-bottom:9px}
+  .adr dl{margin:0; display:grid; grid-template-columns:auto 1fr; gap:3px 10px}
+  .adr dt{font-family:var(--mono); font-size:9.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-faint); padding-top:3px}
+  .adr dd{margin:0; font-size:13px; color:var(--ink-soft); padding-bottom:5px}
+  .adr dd b{color:var(--ink); font-weight:500}
+  .madr-empty{font-size:13px; color:var(--ink-faint); font-style:italic; border:1px dashed var(--line); border-radius:11px; padding:16px; text-align:center}
+
+  @media (max-width:1040px){
+    #margin{position:fixed; top:0; right:0; bottom:0; width:min(380px,90vw); border-left:1px solid var(--line);
+      transform:translateX(101%); transition:transform .34s cubic-bezier(.2,.7,.2,1); z-index:50; box-shadow:-20px 0 50px rgba(0,0,0,.14); padding-top:54px}
+    #margin.open{transform:none}
+    #mclose{display:block; position:absolute; top:14px; right:16px; border:1px solid var(--line); background:var(--panel); border-radius:99px; width:32px; height:32px; font-size:18px; line-height:1}
+    #scrim{position:fixed; inset:0; background:rgba(10,8,4,.34); opacity:0; pointer-events:none; transition:opacity .3s; z-index:45}
+    #scrim.open{opacity:1; pointer-events:auto}
+  }
+  #mclose{display:none} #scrim{display:none}
+  @media (max-width:1040px){ #scrim{display:block} }
+
+  @media (prefers-reduced-motion: reduce){
+    *{animation-duration:.001ms!important; transition-duration:.001ms!important}
+  }
+</style>
+</head>
+<body>
+<div id="bar"><i id="barfill"></i></div>
+
+<div id="app">
+  <!-- LEFT: chapters -->
+  <nav id="rail">
+    <div class="brand">/learn · interactive</div>
+    <div class="lesson">Rate&nbsp;limiting</div>
+    <div class="sub">Learn it by trying, failing, and deciding — not by reading.</div>
+    <div class="rail-chaps" id="chaplist"></div>
+    <div class="foot">5 chapters · built around<br>productive failure + C4 zoom<br>every choice → a decision record</div>
+  </nav>
+
+  <!-- CENTER: stage -->
+  <main id="stage">
+    <div class="stage-head">
+      <div class="kicker" id="kicker">Chapter 01 · Orient</div>
+      <button class="dec-toggle" onclick="openMargin()">Decisions <b id="decCountM">0</b></button>
+    </div>
+    <div class="panes" id="panes"></div>
+  </main>
+
+  <!-- RIGHT: decisions + history -->
+  <aside id="margin">
+    <button id="mclose" onclick="closeMargin()" aria-label="Close">&times;</button>
+    <h3>Your path</h3>
+    <p class="mlede">A trail of what you tried.</p>
+    <ul class="path" id="pathlist"></ul>
+    <h3>Decision log</h3>
+    <p class="mlede">The "why" behind the build — captured as you go.</p>
+    <div id="adrlist"></div>
+  </aside>
+</div>
+<div id="scrim" onclick="closeMargin()"></div>
+
+<script>
+/* ============================ STATE ============================ */
+const S = {
+  chapter:0, maxUnlocked:0,
+  zoom:'context', zoomReached:'context',
+  guess:null, committed:false,
+  ranSim:false, simMode:'fixed', simResult:null,
+  keyChoice:null, reflectionShown:false,
+  path:[], adrs:[]
+};
+
+const CHAPTERS = [
+  {k:'Orient',       sub:'Map the territory'},
+  {k:'Confront',     sub:'Try it before you’re told'},
+  {k:'Reveal',       sub:'See the why'},
+  {k:'Practice',     sub:'Break it on purpose'},
+  {k:'Own it',       sub:'Make the call'}
+];
+
+/* ============================ C4 SCENES ============================ */
+function node(x,y,w,h,title,sub,opts={}){
+  const hot = opts.zoom||opts.adr;
+  const cls = hot? 'nz':'';
+  const handler = opts.zoom? `onclick="zoomTo('${opts.zoom}')"` : (opts.adr? `onclick="flashAdr('${opts.adr}')"`:'');
+  const fill = opts.tone==='accent'? 'var(--accent-bg)' : opts.tone==='warn'? 'var(--warn-bg)' : 'var(--panel)';
+  const stroke = opts.tone==='accent'? 'var(--accent)' : opts.tone==='warn'? 'var(--warn)' : 'var(--line)';
+  const tag = opts.zoom? `<text class="ztag" x="${x+12}" y="${y+h-9}">click to zoom in ↘</text>`
+            : opts.adr? `<text class="ztag" x="${x+12}" y="${y+h-9}">why? ↘</text>` : '';
+  return `<g class="${cls}" ${handler}>
+    <rect class="nbx" x="${x}" y="${y}" width="${w}" height="${h}" rx="11" fill="${fill}" stroke="${stroke}" stroke-width="1.4"/>
+    <text class="ntitle" x="${x+12}" y="${y+ (sub?23:h/2+4)}" fill="var(--ink)">${title}</text>
+    ${sub?`<text class="nsub" x="${x+12}" y="${y+40}">${sub}</text>`:''}
+    ${tag}
+  </g>`;
+}
+function arrow(x1,y1,x2,y2,label){
+  return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="var(--ink-faint)" stroke-width="1.4" marker-end="url(#ah)"/>
+    ${label?`<text x="${(x1+x2)/2}" y="${(y1+y2)/2-6}" text-anchor="middle" class="nsub">${label}</text>`:''}`;
+}
+const DEFS = `<defs><marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="var(--ink-faint)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>`;
+
+function sceneContext(){
+  return `<svg viewBox="0 0 640 360">${DEFS}
+    ${arrow(140,92,200,92)}
+    ${arrow(360,92,420,92,'allowed?')}
+    ${arrow(290,128,290,196)}
+    ${node(20,66,120,52,'Engineer','calls the API')}
+    ${node(200,62,160,60,'API service','your app','')}
+    ${node(420,62,180,60,'Rate limiter','the gatekeeper',{zoom:'container',tone:'accent'})}
+    ${node(200,200,200,64,'Counter store','how many, how recent',{adr:'a2'})}
+    <text x="300" y="330" text-anchor="middle" class="nsub">One job: let the right traffic through, shed the rest — before it hits anything expensive.</text>
+  </svg>`;
+}
+function sceneContainer(){
+  return `<svg viewBox="0 0 640 360">${DEFS}
+    ${arrow(170,96,210,96)}
+    ${arrow(380,96,420,96)}
+    ${arrow(300,132,300,206)}
+    ${arrow(500,126,500,206,'')}
+    ${node(30,68,140,56,'API gateway','edge / routing')}
+    ${node(210,64,170,64,'Limiter service','decides allow / deny',{zoom:'component',tone:'accent'})}
+    ${node(420,68,170,56,'Backend','protected work')}
+    ${node(210,210,180,62,'Redis','shared atomic counters',{adr:'a2',tone:'accent'})}
+    ${node(430,210,160,62,'Config','limits per route',{})}
+    <text x="320" y="335" text-anchor="middle" class="nsub">Counters live in Redis, not in memory — every instance must see the same tally.</text>
+  </svg>`;
+}
+function sceneComponent(){
+  return `<svg viewBox="0 0 640 360">${DEFS}
+    ${arrow(160,92,196,92)}
+    ${arrow(372,92,408,92)}
+    ${arrow(300,124,300,200)}
+    ${node(24,64,136,56,'Key resolver','user? IP? route?',{adr:'a3'})}
+    ${node(196,60,176,64,'Window counter','requests in last 60s',{adr:'a1',tone:'accent'})}
+    ${node(408,64,180,56,'Redis ops','INCR · EXPIRE')}
+    ${node(196,204,250,64,'Verdict','under limit → allow · over → 429',{tone:'warn'})}
+    <text x="320" y="332" text-anchor="middle" class="nsub">A sliding window counts the trailing 60 seconds, so the minute boundary stops being a loophole.</text>
+  </svg>`;
+}
+const SCENES = {context:sceneContext, container:sceneContainer, component:sceneComponent};
+const ZORDER = ['context','container','component'];
+const ZNAME  = {context:'Context', container:'Container', component:'Component'};
+
+function c4Block(){
+  return `<div class="diagram">
+    <div class="crumbs" id="crumbs"></div>
+    <div class="scene-wrap" id="scenewrap">
+      <div class="scene" data-z="context">${sceneContext()}</div>
+      <div class="scene" data-z="container">${sceneContainer()}</div>
+      <div class="scene" data-z="component">${sceneComponent()}</div>
+    </div>
+    <div class="legend"><span><i style="background:var(--accent)"></i>zoom in here</span><span><i style="background:var(--warn)"></i>the decision point</span><span>tap a box for the “why”</span></div>
+  </div>`;
+}
+const CHAP_ZOOM={0:'context',2:'container',3:'component'};
+
+function paintCrumbs(){
+  const cr=document.getElementById('crumbs'); if(!cr) return;
+  const idx=ZORDER.indexOf(S.zoom);
+  let html='';
+  ZORDER.forEach((z,i)=>{
+    const reachable=i<=ZORDER.indexOf(S.zoomReached);
+    if(i>0) html+=`<span class="sep">›</span>`;
+    html+=`<button class="${z===S.zoom?'on':''}" ${reachable&&!zooming?`onclick="zoomTo('${z}')"`:'disabled'}>${ZNAME[z]}</button>`;
+  });
+  html+=`<span class="spacer"></span>`;
+  if(idx>0) html+=`<button class="zoutbtn" ${zooming?'disabled':''} onclick="zoomTo('${ZORDER[idx-1]}')">↖ zoom out</button>`;
+  cr.innerHTML=html;
+}
+
+/* A zoom anchor = the box (in the OUTER level) that the INNER level lives inside.
+   Keyed by the inner level. cx/cy = that box's centre as a fraction of the 640x360 frame. */
+function anchorFrom(x,y,w,h){
+  const s=Math.min(3.1, Math.max(2.5, 640/w));
+  return {cx:(x+w/2)/640, cy:(y+h/2)/360, s};
+}
+const ANCHOR = {
+  container: anchorFrom(420,62,180,60),   /* "Rate limiter" box, drawn in Context  */
+  component: anchorFrom(210,64,170,64)    /* "Limiter service" box, drawn in Container */
+};
+let zooming=false;
+const reducedM = ()=>window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+function sceneEl(z){ return document.querySelector(`#scenewrap .scene[data-z="${z}"]`); }
+function setPose(el,p,animate){
+  if(!animate) el.style.transition='none';
+  el.style.transformOrigin=`${p.ox*100}% ${p.oy*100}%`;
+  el.style.transform = p.scale===1?'none':`scale(${p.scale})`;
+  el.style.opacity=p.opacity;
+  if(!animate){ void el.offsetWidth; el.style.transition=''; }
+}
+function settleActive(z){
+  document.querySelectorAll('#scenewrap .scene').forEach(e=>{
+    const on=e.dataset.z===z;
+    e.style.transition='none';
+    e.style.transform='none'; e.style.transformOrigin='0 0'; e.style.opacity=on?1:0;
+    e.style.pointerEvents=on?'auto':'none'; e.style.zIndex=on?2:0;
+    void e.offsetWidth; e.style.transition='';
+  });
+}
+function initC4(){ if(!document.getElementById('scenewrap')) return; settleActive(S.zoom); paintCrumbs(); }
+
+/* One adjacent hop. The clicked box grows to fill the frame (and the detail unfolds
+   from inside it); zoom-out is the exact reverse, collapsing the detail back into its box.
+   Both scenes pivot about the SAME point, so the eye never loses the spot. */
+function zoomStep(fromZ,toZ,done){
+  const iF=ZORDER.indexOf(fromZ), iT=ZORDER.indexOf(toZ);
+  const A=ANCHOR[ZORDER[Math.max(iF,iT)]];
+  const goingIn=iT>iF;
+  const shallow=sceneEl(ZORDER[Math.min(iF,iT)]);
+  const deep=sceneEl(ZORDER[Math.max(iF,iT)]);
+  if(!shallow||!deep||reducedM()){ settleActive(toZ); done&&done(); return; }
+  document.querySelectorAll('#scenewrap .scene').forEach(e=>{ if(e!==shallow&&e!==deep){ e.style.opacity=0; e.style.pointerEvents='none'; e.style.zIndex=0; }});
+  shallow.style.zIndex=2; deep.style.zIndex=2; shallow.style.pointerEvents='none'; deep.style.pointerEvents='none';
+  if(goingIn){
+    setPose(shallow,{scale:1,ox:A.cx,oy:A.cy,opacity:1},false);
+    setPose(deep,{scale:1/A.s,ox:A.cx,oy:A.cy,opacity:0},false);
+    requestAnimationFrame(()=>requestAnimationFrame(()=>{
+      setPose(shallow,{scale:A.s,ox:A.cx,oy:A.cy,opacity:0},true);
+      setPose(deep,{scale:1,ox:A.cx,oy:A.cy,opacity:1},true);
+    }));
+  } else {
+    setPose(deep,{scale:1,ox:A.cx,oy:A.cy,opacity:1},false);
+    setPose(shallow,{scale:A.s,ox:A.cx,oy:A.cy,opacity:0},false);
+    requestAnimationFrame(()=>requestAnimationFrame(()=>{
+      setPose(deep,{scale:1/A.s,ox:A.cx,oy:A.cy,opacity:0},true);
+      setPose(shallow,{scale:1,ox:A.cx,oy:A.cy,opacity:1},true);
+    }));
+  }
+  setTimeout(()=>{ settleActive(toZ); done&&done(); }, 640);
+}
+
+function zoomADR(z){ if(z==='container') addAdr('a2'); if(z==='component'){ addAdr('a2'); addAdr('a1'); } }
+
+/* Walks one hop at a time, so even a 2-level jump reads as a continuous flight. */
+function zoomTo(z){
+  if(zooming || !document.getElementById('scenewrap')) return;
+  if(ZORDER.indexOf(z)>ZORDER.indexOf(S.zoomReached)) S.zoomReached=z;
+  zoomADR(z);
+  let i=ZORDER.indexOf(S.zoom); const j=ZORDER.indexOf(z);
+  if(i===j){ paintCrumbs(); return; }
+  const dir=j>i?1:-1, hops=[];
+  while(i!==j){ hops.push([ZORDER[i],ZORDER[i+dir]]); i+=dir; }
+  S.zoom=z; zooming=true; paintCrumbs();
+  let k=0;
+  (function run(){ if(k>=hops.length){ zooming=false; paintCrumbs(); return; } const [a,b]=hops[k++]; zoomStep(a,b,run); })();
+}
+
+/* ============================ DECISIONS ============================ */
+const ADR_LIB = {
+  a1:{id:'ADR-0001', title:'Sliding window over fixed window', pill:'accepted',
+    rows:[['Context','Cap each user at <b>100 req/min</b>. A counter that resets on the minute is the obvious first build.'],
+          ['Decision','Count the <b>trailing 60 seconds</b> (sliding) instead of a calendar-minute bucket.'],
+          ['Alternatives','Fixed window — simplest, but a 2× burst across the boundary. Token bucket — smooth with intentional bursts; a fine swap.'],
+          ['Consequence','Kills the boundary burst; a little more bookkeeping than a plain counter.']]},
+  a2:{id:'ADR-0002', title:'Counters in Redis, not in memory', pill:'accepted',
+    rows:[['Context','The limiter runs on many gateway instances; the tally must be shared and survive a restart.'],
+          ['Decision','Keep counts in <b>Redis</b> with atomic INCR/EXPIRE.'],
+          ['Alternatives','In-memory per instance — fastest, but the real ceiling becomes N×100. Sticky sessions — fragile when scaling.'],
+          ['Consequence','One network hop on the hot path; a correct <b>global</b> limit. Pipeline / pre-check to soften the cost.']]}
+};
+function addAdr(key){
+  if(S.adrs.find(a=>a.key===key)) return;
+  S.adrs.push({key, ...ADR_LIB[key]});
+  renderMargin();
+}
+function addMyAdr(choice, reason){
+  const k='mine';
+  const obj={key:k, id:'ADR-0003', title:`Key the limit by ${choice}`, pill:'your call', mine:true,
+    rows:[['Context','Same user behind one IP, or many users behind a shared IP (office, NAT) — the key decides who shares a budget.'],
+          ['Decision',`Identify each caller by <b>${choice}</b>.`],
+          ['Your reason', reason && reason.trim() ? reason.trim() : '—']]};
+  const ex=S.adrs.find(a=>a.key===k);
+  if(ex) Object.assign(ex,obj); else S.adrs.push(obj);
+  renderMargin();
+}
+function flashAdr(key){
+  if(ADR_LIB[key] && !S.adrs.find(a=>a.key===key)) addAdr(key);
+  openMargin();
+  setTimeout(()=>{
+    const el=document.getElementById('adr-'+key);
+    if(el){ el.scrollIntoView({behavior:'smooth',block:'center'}); el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash'); }
+  },60);
+}
+function logPath(text){ if(!S.path.includes(text)){ S.path.push(text); renderMargin(); } }
+
+function renderMargin(){
+  const p=document.getElementById('pathlist');
+  p.innerHTML = S.path.length? S.path.map(t=>`<li>${t}</li>`).join('')
+    : `<li class="empty">Nothing yet — start in Chapter 01.</li>`;
+  const a=document.getElementById('adrlist');
+  a.innerHTML = S.adrs.length? S.adrs.map(d=>`
+    <div class="adr" id="adr-${d.key}">
+      <div class="ah"><span class="aid">${d.id}</span><span class="pill ${d.mine?'mine':''}">${d.pill}</span></div>
+      <div class="at">${d.title}</div>
+      <dl>${d.rows.map(r=>`<dt>${r[0]}</dt><dd>${r[1]}</dd>`).join('')}</dl>
+    </div>`).join('')
+    : `<div class="madr-empty">No decisions recorded yet.<br>Each chapter adds one.</div>`;
+  const n=S.adrs.length;
+  const dm=document.getElementById('decCountM'); if(dm) dm.textContent=n;
+}
+
+/* ============================ CHAPTER CONTENT ============================ */
+function render(){
+  // rail
+  const cl=document.getElementById('chaplist');
+  cl.innerHTML = CHAPTERS.map((c,i)=>{
+    let st = i===S.chapter?'active' : i<=S.maxUnlocked? (i<S.chapter?'done':'idle') : 'locked';
+    if(i<S.maxUnlocked && i!==S.chapter) st='done';
+    if(i<=S.maxUnlocked && i>S.chapter) st='idle';
+    if(i===S.chapter) st='active';
+    const on = (i<=S.maxUnlocked && i!==S.chapter)?1:0;
+    return `<div class="chap" data-state="${st}" data-on="${on}" ${on?`onclick="go(${i})"`:''}>
+      <div class="dot">${i<S.chapter || (i<S.maxUnlocked&&i!==S.chapter)?'✓':String(i+1).padStart(2,'0')}</div>
+      <div class="ct"><div class="ck">${c.sub}</div><div class="cn">${c.k}</div></div>
+    </div>`;
+  }).join('');
+  // header
+  document.getElementById('kicker').textContent = `Chapter ${String(S.chapter+1).padStart(2,'0')} · ${CHAPTERS[S.chapter].k}`;
+  document.getElementById('barfill').style.width = ((S.chapter)/(CHAPTERS.length-1)*100)+'%';
+  // stage
+  document.getElementById('panes').innerHTML = `<div class="pane" key="${S.chapter}">${PANE[S.chapter]()}</div>`;
+  if(document.getElementById('scenewrap')){
+    if(S._lastChap!==S.chapter && CHAP_ZOOM[S.chapter]){
+      S.zoom=CHAP_ZOOM[S.chapter];
+      if(ZORDER.indexOf(S.zoom)>ZORDER.indexOf(S.zoomReached)) S.zoomReached=S.zoom;
+    }
+    initC4();
+  }
+  if(S.chapter===3) wireSim();
+  S._lastChap=S.chapter;
+  renderMargin();
+}
+
+const PANE = [paneOrient, paneConfront, paneReveal, panePractice, paneOwn];
+
+function paneOrient(){
+  return `
+  <h1 class="title">Where does a limiter even sit?</h1>
+  <p class="lede">Before any code: get the shape of the thing. A rate limiter is a gatekeeper that stands in front of expensive work and decides what gets through. Here it is at a glance — <b>zoom in</b> when you’re ready for more detail.</p>
+  ${c4Block()}
+  <p class="hint" style="margin-top:14px">This same diagram deepens as you go: one level of detail at a time, so it never dumps the whole system on you at once.</p>
+  <div class="actions">
+    <button class="btn" onclick="advance(1)">I’ve got the shape <span class="arr">→</span></button>
+    <span class="hint">Next: you try the core problem yourself.</span>
+  </div>`;
+}
+
+const CHOICES = {
+  fixed:{t:'A counter per user that resets every minute', d:'count++ on each request; wipe it at the top of the minute.'},
+  log:{t:'Store a timestamp for every request', d:'keep the last 60s of timestamps and count them.'},
+  bucket:{t:'Refill a bucket of tokens over time', d:'each request spends a token; tokens drip back at a steady rate.'}
+};
+function paneConfront(){
+  const committed=S.committed;
+  return `
+  <h1 class="title">Your turn first.</h1>
+  <p class="lede">The rule: <b>100 requests per minute, per user</b>. Don’t look for the “right” answer — reach for your <i>first instinct</i>. Picking, even wrongly, is what makes the next chapter land. (Research calls this productive failure; you’ll feel why in a second.)</p>
+  <div class="card">
+    <div class="label">How would you count & enforce it?</div>
+    ${Object.entries(CHOICES).map(([k,c])=>`
+      <button class="choice" aria-pressed="${S.guess===k}" ${committed?'disabled':''} onclick="pick('${k}')">
+        <span class="pick"></span>
+        <span class="ctxt"><b>${c.t}</b><span>${c.d}</span></span>
+      </button>`).join('')}
+  </div>
+  ${committed? `<div class="actions">
+      <button class="btn" onclick="advance(2)">See how this plays out <span class="arr">→</span></button>
+      <span class="hint">Your instinct is logged — now let’s test it.</span>
+    </div>`
+   : `<div class="locknote">🔒 The reveal stays locked until you commit a guess. That’s the whole point.</div>`}
+  `;
+}
+
+function paneReveal(){
+  const g=S.guess||'fixed';
+  const map={
+    fixed:{big:'The common first answer.', p:'A resetting counter is clean and fast — and it has one famous hole you’ll see in the next chapter.', good:false},
+    log:{big:'Exact, but heavy.', p:'Timestamps give a perfect count, but you store one entry per request. Accurate, memory-hungry at scale.', good:true},
+    bucket:{big:'Smooth & burst-friendly.', p:'Token buckets shape traffic nicely and even allow controlled bursts — a great production choice.', good:true}
+  };
+  const v=map[g];
+  return `
+  <h1 class="title">Your instinct, met with reality.</h1>
+  <p class="lede">No answer here is “dumb” — each trades something. Here’s what you reached for, against what production systems converge on.</p>
+  <div class="verdict">
+    <div class="vcell you">
+      <div class="vh">You reached for</div>
+      <p class="big">${CHOICES[g].t}</p>
+      <p>${v.big} ${v.p}</p>
+    </div>
+    <div class="vcell real">
+      <div class="vh">Where it lands</div>
+      <p class="big">Sliding window</p>
+      <p>Count the <b>trailing 60s</b> rather than a calendar minute. It keeps the simplicity of a counter while closing the boundary loophole.</p>
+    </div>
+  </div>
+  <p class="lede" style="margin-top:18px">You’re now one level deeper. The limiter has opened up into a gateway, a service, and a shared counter store — and the trail up top still shows exactly where you are. <b>Tap Redis</b> for why it’s Redis, or zoom back out to re-orient anytime.</p>
+  ${c4Block()}
+  <div class="actions">
+    <button class="btn" onclick="advance(3)">Now break it <span class="arr">→</span></button>
+    <span class="hint">A decision was just written to your log. →</span>
+  </div>`;
+}
+
+function panePractice(){
+  return `
+  <h1 class="title">Break it on purpose.</h1>
+  <p class="lede">Theory is cheap; failure teaches. Below is a live minute. Fire a <b>burst of requests right across the minute boundary</b> and watch what the two designs do. The failure <i>is</i> the lesson.</p>
+  <div class="card sim">
+    <div class="simbar">
+      <span class="label" style="margin:0">Windowing</span>
+      <div class="seg" id="simseg">
+        <button data-m="fixed" class="on" onclick="setSim('fixed')">Fixed window</button>
+        <button data-m="sliding" onclick="setSim('sliding')">Sliding window</button>
+      </div>
+      <button class="btn ghost" id="firebtn" onclick="fireBurst()">▶ Fire 200 across the boundary</button>
+    </div>
+    <div class="track" id="track">
+      <div class="window" id="simwin"></div>
+      <div class="boundary"><span>minute resets →</span></div>
+      <div class="axis"><span class="t" style="left:25%">:30</span><span class="t" style="left:50%">:00</span><span class="t" style="left:75%">:30</span></div>
+    </div>
+    <div class="readout">
+      <div class="ro"><span class="rk">Allowed in ~2s</span><span class="rv" id="roAllow">—</span></div>
+      <div class="ro"><span class="rk">Intended ceiling</span><span class="rv">100</span></div>
+      <div class="ro"><span class="rk">Verdict</span><span class="rv" id="roVerdict">—</span></div>
+    </div>
+    <div class="simverdict" id="simnote">Pick a mode and fire a burst. Watch the boundary.</div>
+  </div>
+  <p class="lede" style="margin-top:20px">That burst is exactly why the deepest level looks the way it does — a window counter over the trailing 60s. Here’s inside the limiter:</p>
+  ${c4Block()}
+  <div class="actions">
+    <button class="btn" onclick="advance(4)">Make it yours <span class="arr">→</span></button>
+    <span class="hint">${S.ranSim?'You’ve seen the failure mode. ✓':'Try firing in both modes first.'}</span>
+  </div>`;
+}
+
+function paneOwn(){
+  const chosen=S.keyChoice;
+  return `
+  <h1 class="title">One real call is yours.</h1>
+  <p class="lede">You’ve seen the shape, the trade-off, and the failure. Now decide something the textbook won’t decide for you, and say <i>why</i> — that reasoning becomes a record the next engineer inherits.</p>
+  <div class="card">
+    <div class="label">Identify each caller by…</div>
+    <button class="choice" aria-pressed="${chosen==='user ID'}" onclick="pickKey('user ID')"><span class="pick"></span><span class="ctxt"><b>User ID</b><span>fair per-person budget — but needs auth before the limiter runs.</span></span></button>
+    <button class="choice" aria-pressed="${chosen==='IP address'}" onclick="pickKey('IP address')"><span class="pick"></span><span class="ctxt"><b>IP address</b><span>works for anonymous traffic — but an office or NAT shares one budget.</span></span></button>
+    <div style="margin-top:16px">
+      <div class="label">Why? (one line — this is your ADR)</div>
+      <textarea id="reason" placeholder="e.g. our endpoints sit behind auth already, and per-user is the fairness model users expect…" oninput="syncReason()">${S._reason||''}</textarea>
+    </div>
+    <div class="actions" style="margin-top:18px">
+      <button class="btn" id="sealbtn" ${chosen?'':'disabled'} onclick="seal()">Record my decision <span class="arr">→</span></button>
+      <span class="hint">${chosen?'Adds ADR-0003 to your log.':'Pick a key to continue.'}</span>
+    </div>
+  </div>
+  <div id="reflectbox">${S.reflectionShown?reflectionHTML():''}</div>
+  `;
+}
+function reflectionHTML(){
+  const g=S.guess||'fixed';
+  const surprised = (g==='fixed');
+  return `<div class="card" style="margin-top:16px">
+    <div class="done-seal">✦ Lesson complete</div>
+    <div class="reflect" style="margin-top:14px">
+      <div class="r"><div class="rl">You guessed</div><div class="rt">${CHOICES[g].t} ${surprised?'— and met its boundary burst head-on.':'— a solid instinct.'}</div></div>
+      <div class="r"><div class="rl">What clicked</div><div class="rt">The minute boundary is a loophole; a sliding window closes it. Counters belong in Redis so every instance agrees.</div></div>
+      <div class="r"><div class="rl">You decided</div><div class="rt">Keyed the limit by <b>${S.keyChoice}</b> — recorded with your reasoning.</div></div>
+      <div class="r"><div class="rl">Next</div><div class="rt">Run <span style="font-family:var(--mono)">/learn token bucket</span> to learn the design that allows <i>intentional</i> bursts — then compare the two ADRs.</div></div>
+    </div>
+  </div>`;
+}
+
+/* ============================ INTERACTIONS ============================ */
+function go(i){ if(i>S.maxUnlocked) return; S.chapter=i; render(); document.getElementById('stage').scrollTo({top:0,behavior:'smooth'}); }
+function advance(to){ S.maxUnlocked=Math.max(S.maxUnlocked,to); go(to); }
+
+function pick(k){ if(S.committed) return; S.guess=k; commitGuess(); }
+function commitGuess(){
+  if(S.guess && !S.committed){
+    S.committed=true;
+    logPath(`First instinct: <b>${CHOICES[S.guess].t.toLowerCase()}</b>`);
+    render();
+  }
+}
+
+function setSim(m){ S.simMode=m; document.querySelectorAll('#simseg button').forEach(b=>b.classList.toggle('on',b.dataset.m===m)); positionWindow(); resetTrack(); updateReadout(null); }
+function positionWindow(){
+  const w=document.getElementById('simwin'); if(!w) return;
+  if(S.simMode==='fixed'){ w.style.left='0%'; w.style.width='50%'; }
+  else { w.style.left='25%'; w.style.width='50%'; }
+}
+function resetTrack(){ document.querySelectorAll('#track .req').forEach(r=>r.remove()); }
+function wireSim(){ positionWindow(); if(S.simResult) updateReadout(S.simResult); }
+function reduced(){ return window.matchMedia('(prefers-reduced-motion: reduce)').matches; }
+
+function fireBurst(){
+  const track=document.getElementById('track'); if(!track) return;
+  resetTrack();
+  S.ranSim=true; logPath('Stress-tested the minute boundary');
+  // 200 reqs: 100 just before :00 (left of center), 100 just after (right of center)
+  const fixed = S.simMode==='fixed';
+  // Fixed: counter resets at boundary -> both halves allowed -> 200. Sliding: one window -> 100 allowed, 100 blocked.
+  const allowed = fixed?200:100;
+  const dots = 22; // visual sample of the 200
+  for(let i=0;i<dots;i++){
+    const beforeBoundary = i < dots/2;
+    const left = beforeBoundary ? (40 + i* (8)) : (52 + (i-dots/2)*(8)); // cluster around center (%) -> convert
+    const xPct = beforeBoundary ? 44 + i*0.6 : 50 + (i-dots/2)*0.6;
+    const d=document.createElement('div'); d.className='req';
+    d.style.left = xPct+'%';
+    // decide ok/blocked
+    let ok;
+    if(fixed){ ok=true; }
+    else { ok = beforeBoundary; } // sliding counts them together; second half over the cap
+    d.classList.add(ok?'ok':'blocked');
+    track.appendChild(d);
+    const delay = reduced()?0: i*55;
+    setTimeout(()=>d.classList.add('in'), delay+20);
+  }
+  S.simResult = allowed;
+  setTimeout(()=>updateReadout(allowed), reduced()?0:dots*55+120);
+}
+function updateReadout(allowed){
+  const ra=document.getElementById('roAllow'), rv=document.getElementById('roVerdict'), note=document.getElementById('simnote');
+  if(!ra) return;
+  if(allowed===null){ ra.textContent='—'; ra.className='rv'; rv.textContent='—'; rv.className='rv'; note.className='simverdict'; note.innerHTML='Fire a burst and watch the boundary.'; return; }
+  const bad = allowed>100;
+  ra.textContent=allowed; ra.className='rv '+(bad?'bad':'good');
+  rv.textContent = bad?'breached':'held'; rv.className='rv '+(bad?'bad':'good');
+  note.className='simverdict '+(bad?'bad':'good');
+  note.innerHTML = bad
+    ? `<b>That’s the loophole.</b> The counter reset at <span style="font-family:var(--mono)">:00</span>, so 100 requests at <span style="font-family:var(--mono)">:59</span> + 100 at <span style="font-family:var(--mono)">:00</span> all passed — <b>double</b> your intended ceiling in ~1 second. Now flip to <b>sliding</b>.`
+    : `<b>Held at 100.</b> The sliding window counts the trailing 60s as one stretch, so the burst can’t hide across the boundary. <span style="color:var(--warn)">Red</span> requests are the ones correctly rejected.`;
+}
+
+function pickKey(k){ S.keyChoice=k; const b=document.getElementById('sealbtn'); if(b) b.disabled=false;
+  document.querySelectorAll('#stage .choice').forEach(c=>{}); render(); }
+function syncReason(){ S._reason=document.getElementById('reason').value; }
+function seal(){
+  if(!S.keyChoice) return;
+  const reason = document.getElementById('reason')?document.getElementById('reason').value:S._reason;
+  S._reason=reason;
+  addMyAdr(S.keyChoice, reason);
+  logPath(`Your call: key by <b>${S.keyChoice}</b>`);
+  S.reflectionShown=true;
+  document.getElementById('reflectbox').innerHTML=reflectionHTML();
+  document.getElementById('barfill').style.width='100%';
+  document.getElementById('reflectbox').scrollIntoView({behavior:'smooth',block:'center'});
+}
+
+/* margin drawer (mobile) */
+function openMargin(){ document.getElementById('margin').classList.add('open'); document.getElementById('scrim').classList.add('open'); }
+function closeMargin(){ document.getElementById('margin').classList.remove('open'); document.getElementById('scrim').classList.remove('open'); }
+
+/* auto-add system decisions as chapters advance */
+const _advance = advance;
+advance = function(to){ if(to>=2){ addAdr('a1'); } if(to>=3){ addAdr('a2'); } _advance(to); };
+
+render();
+</script>
+</body>
+</html>

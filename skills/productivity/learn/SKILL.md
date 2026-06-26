@@ -94,11 +94,33 @@ Write these into the repo as you go — they also fix the "no context" problem f
 
 - `docs/learning-log.md` — append a dated entry per session: topic, what was attempted, what was learned.
 
+## The interactive experience (rich HTML mode)
+
+When the user wants more than terminal output — "make it interactive", "give me a UI", "I want to click around" — emit a single self-contained HTML file built from the template at [`templates/experience.html`](./templates/experience.html). It is a working, gold-standard example (topic: rate limiting). Copy it, then swap the data for the real topic. Do not rebuild the shell from scratch.
+
+What the experience carries (all five phases live in one screen):
+
+- **Three columns:** left = chapter rail (the 5 phases), center = stage, right = margin holding the **path** (history of what was tried) and the **decision log** (ADRs).
+- **One C4 diagram that deepens by zoom**, not five separate diagrams. Click a highlighted box to fly one level in (Context → Container → Component); breadcrumbs + "zoom out" to go back. The horizontal axis is lesson progress; zoom is depth — exactly the two-axis model.
+- **The reveal is gated:** the user must commit a guess in CONFRONT before REVEAL unlocks (productive failure). Keep this — it is the heart of the method.
+- **A live simulator in PRACTICE** that lets them break it and watch the failure mode.
+- **Every decision becomes an ADR** in the margin as they go; the OWN-IT choice writes their own ADR with their reasoning.
+
+To retarget it to a new topic, edit only the data — the shell, CSS, zoom engine, and gating logic stay:
+
+1. `CHAPTERS` — usually leave as the five phases.
+2. `sceneContext()` / `sceneContainer()` / `sceneComponent()` — the three C4 levels. Use `node(x,y,w,h,title,sub,opts)` and `arrow(...)`; mark the box that zooms with `{zoom:'container'}` / `{zoom:'component'}`, and the decision box with `{adr:'aN'}`. Ground every box in the real code you read.
+3. `ANCHOR` — point each deeper level at the box it lives inside (so the zoom pivots on the right spot).
+4. `CHOICES` + `paneConfront`/`paneReveal` — the prediction options and the contrast against reality.
+5. The simulator (`fireBurst`, `updateReadout`, `panePractice`) — rebuild the "break it" interaction for this topic, or simplify to a stepped trace if a live sim doesn't fit.
+6. `ADR_LIB` + `paneOwn` — the decisions, including the one the user makes.
+
+Save the result somewhere the user can open it (e.g. `docs/diagrams/<topic>.html` or a temp path) and tell them the path. The HTML mode complements the artifacts above — it does not replace the `CONTEXT.md`/ADR/learning-log writing.
+
 ## Notes
 
 - Terminal UI is limited: diagrams render best opened in your IDE or on GitHub.
-  For a richer, clickable explainer, offer to emit a standalone HTML file the
-  user can open in a browser.
+  For a richer, clickable explainer, emit the interactive HTML experience above.
 - Keep this file lean — it reloads every turn. If it grows, move long rationale
   and extra templates into `./reference/` and `./templates/` beside this
   SKILL.md and link to them.
