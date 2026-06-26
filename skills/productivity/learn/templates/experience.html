@@ -148,9 +148,11 @@
   .c4node{box-sizing:border-box; width:100%; min-height:100%; border:2.5px solid var(--c4-in-stroke); background:var(--c4-in-fill);
     border-radius:18px; padding:18px 22px 16px; display:flex; flex-direction:column; gap:3px; position:relative; font-family:var(--sans); line-height:1.32}
   .c4node.ext{border-color:var(--c4-ext-stroke); background:var(--c4-ext-fill); border-style:solid}
-  .c4node.person{border-color:var(--c4-person-stroke); background:var(--c4-person-fill); padding-top:18px}
-  .c4node .c4head{position:absolute; top:-24px; left:50%; transform:translateX(-50%); width:42px; height:42px; border-radius:50%;
-    background:var(--c4-person-fill); border:2.5px solid var(--c4-person-stroke)}
+  .c4node.person{border-color:var(--c4-person-stroke); background:var(--c4-person-fill)}
+  /* person glyph is drawn as an SVG badge in frame coords (see personBadge);
+     give the person box a little top room so the name clears the badge */
+  .c4node.haspers{padding-left:64px}
+  .c4pbadge circle, .c4pbadge path{fill:var(--c4-person-fill); stroke:var(--c4-person-stroke); stroke-width:2.6}
   .c4node.store{border-bottom-width:7px}
   .c4name{font-weight:600; font-size:23px; color:var(--ink); letter-spacing:-.01em}
   .c4type{font-family:var(--mono); font-size:15px; color:var(--ink-faint); letter-spacing:.01em}
@@ -170,6 +172,38 @@
   .legend .lg-person{background:var(--c4-person-fill); border:1.5px solid var(--c4-person-stroke); border-radius:50%}
   .legend .lg-bound{background:transparent; border:1.4px dashed var(--ink-faint); border-radius:2px}
   .legend .lg-rel{width:15px; height:0; border-top:1.6px dashed var(--ink-faint); border-radius:0; margin-bottom:3px}
+
+  /* ---- view toggle (Static / Flow) ---- */
+  .viewtoggle{display:inline-flex; border:1px solid var(--line); border-radius:99px; padding:3px; background:var(--paper-2); margin-left:auto}
+  .viewtoggle button{border:none; background:none; padding:5px 14px; border-radius:99px; font-family:var(--mono); font-size:11px; letter-spacing:.04em; color:var(--ink-soft)}
+  .viewtoggle button.on{background:var(--ink); color:var(--paper)}
+  .c4topbar{display:flex; align-items:center; gap:10px; margin-bottom:7px}
+  .c4topbar .c4title{margin-bottom:0}
+
+  /* ---- flow (dynamic) mode ---- */
+  .flowedge{stroke:var(--ink-faint); stroke-width:2.4; stroke-dasharray:8 6; fill:none; opacity:.18; transition:opacity .3s, stroke .3s}
+  .flowedge.seen{opacity:.5}
+  .flowedge.active{opacity:1; stroke:var(--accent); stroke-width:3.4; stroke-dasharray:none}
+  .flownum{font-family:var(--mono); font-weight:600; font-size:17px; fill:#fff}
+  .flownum-bg{fill:var(--ink-faint); transition:fill .3s, r .2s}
+  .flownum-bg.seen{fill:var(--ink-soft)}
+  .flownum-bg.active{fill:var(--accent)}
+  .flowfo .c4node{opacity:.4; transition:opacity .3s, box-shadow .3s}
+  .flowfo.lit .c4node{opacity:1; box-shadow:0 0 0 4px var(--c4-ring)}
+  .flowctl{display:flex; align-items:center; gap:12px; margin-top:10px; flex-wrap:wrap}
+  .flowctl button{border:1px solid var(--line); background:var(--panel); border-radius:9px; padding:7px 13px; font-size:13px; font-weight:500; color:var(--ink)}
+  .flowctl button:disabled{opacity:.4; cursor:not-allowed}
+  .flowctl .step-of{font-family:var(--mono); font-size:12px; color:var(--ink-faint)}
+  .flowsteps{list-style:none; margin:12px 0 0; padding:0; display:grid; gap:6px}
+  .flowsteps li{display:flex; gap:11px; align-items:flex-start; padding:8px 11px; border:1px solid var(--line-soft); border-radius:9px; font-size:13.5px; color:var(--ink-soft); cursor:pointer; transition:.16s}
+  .flowsteps li:hover{border-color:var(--line)}
+  .flowsteps li.active{border-color:var(--accent); background:var(--accent-bg); color:var(--ink)}
+  .flowsteps li.seen{color:var(--ink)}
+  .flowsteps li .sn{flex:none; width:21px; height:21px; border-radius:50%; background:var(--ink-faint); color:#fff; font-family:var(--mono); font-size:11px; display:grid; place-items:center; margin-top:1px}
+  .flowsteps li.active .sn{background:var(--accent)}
+  .flowsteps li.seen .sn{background:var(--ink-soft)}
+  .flowsteps li b{color:var(--ink); font-weight:600}
+  .flowsteps li .tech{font-family:var(--mono); font-size:11px; color:var(--ink-faint)}
 
   /* ---------- confront choices ---------- */
   .choice{display:flex; gap:14px; align-items:flex-start; border:1.5px solid var(--line); background:var(--panel);
@@ -309,6 +343,7 @@
 const S = {
   chapter:0, maxUnlocked:0,
   zoom:'context', zoomReached:'context',
+  view:'static', flowStep:0, flowLevel:null,
   guess:null, committed:false,
   ranSim:false, simMode:'fixed', simResult:null,
   keyChoice:null, reflectionShown:false,
@@ -342,7 +377,7 @@ const MODEL = {
     level:'System Context', scope:'API Platform',
     boundary:null,
     nodes:[
-      {id:'eng', kind:'person', scope:'ext', name:'API Consumer', desc:'Calls your API over the internet.', x:60,y:240,w:210,h:112},
+      {id:'eng', kind:'person', scope:'ext', name:'API Consumer', desc:'Calls your API over the internet.', x:60,y:240,w:250,h:112},
       {id:'plat', kind:'system', scope:'in', name:'API Platform', desc:'Serves the API and protects it from overload.', x:560,y:228,w:250,h:142, into:'container', hint:'click to zoom in ↘'},
       {id:'down', kind:'system', scope:'ext', name:'Downstream Services', desc:'The expensive work the platform guards.', x:1180,y:80,w:230,h:116},
       {id:'store',kind:'system', scope:'ext', name:'Counter Store', desc:'Shared request tallies.', store:true, x:1180,y:404,w:230,h:116, adr:'a2'},
@@ -357,7 +392,7 @@ const MODEL = {
     level:'Container', scope:'API Platform',
     boundary:{name:'API Platform', type:'Software System'},
     nodes:[
-      {id:'eng', kind:'person', scope:'ext', name:'API Consumer', desc:'Calls the API.', x:60,y:250,w:200,h:108},
+      {id:'eng', kind:'person', scope:'ext', name:'API Consumer', desc:'Calls the API.', x:60,y:250,w:240,h:108},
       {id:'gw',  kind:'container', scope:'in', name:'API Gateway', tech:'Envoy', desc:'Edge routing & TLS.', x:560,y:150,w:230,h:116},
       {id:'back',kind:'container', scope:'in', name:'Backend', tech:'Java', desc:'Protected work.', x:1180,y:150,w:230,h:116},
       {id:'lim', kind:'container', scope:'in', name:'Limiter Service', tech:'Go', desc:'Decides allow / deny.', x:560,y:410,w:230,h:128, into:'component', hint:'click to zoom in ↘'},
@@ -389,11 +424,57 @@ const MODEL = {
   }
 };
 
+/* DYNAMIC (flow) view — the C4 way to show a runtime sequence WITHOUT faking
+   static relationships. One flow PER zoom level: each reuses that level's node
+   layout and lists ordered numbered interactions over those boxes. Switching
+   the breadcrumb reflows. `from`/`to` ids must exist in MODEL[level].nodes.
+   To retarget: rewrite the steps for each level (or drop a level's flow). */
+const FLOWS = {
+  context:{
+    title:'Dynamic · one request (context)',
+    steps:[
+      {from:'eng',  to:'plat', label:'Sends request',      tech:'HTTPS'},
+      {from:'plat', to:'store',label:'Checks the count'},
+      {from:'plat', to:'down', label:'Forwards if allowed'},
+    ]
+  },
+  container:{
+    title:'Dynamic · one request (containers)',
+    steps:[
+      {from:'eng', to:'gw',   label:'Sends request',     tech:'HTTPS'},
+      {from:'gw',  to:'lim',  label:'Asks: allow this?', tech:'gRPC'},
+      {from:'lim', to:'redis',label:'INCR + read count', tech:'RESP'},
+      {from:'lim', to:'gw',   label:'allow / deny'},
+      {from:'gw',  to:'back', label:'Forwards if allowed',tech:'HTTP'},
+    ]
+  },
+  component:{
+    title:'Dynamic · one allow check (components)',
+    steps:[
+      {from:'gw',  to:'key',    label:'Allow this call?'},
+      {from:'key', to:'win',    label:'Count for key'},
+      {from:'win', to:'redis',  label:'INCR / EXPIRE', tech:'RESP'},
+      {from:'win', to:'verdict',label:'Current count'},
+      {from:'verdict', to:'gw', label:'allow / 429'},
+    ]
+  }
+};
+
 const ZORDER = ['context','container','component'];
 const ZNAME  = {context:'System Context', container:'Container', component:'Component'};
 const CHAP_ZOOM={0:'context',2:'container',3:'component'};
 
 const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+// C4 "person" marker: a small head+shoulders badge in the node's top-left,
+// drawn in SVG frame coordinates so its size is predictable (no scaling blowup).
+function personBadge(n){
+  // top-left corner of the box; name gets pushed right via padding so no overlap
+  const cx=n.x+30, cy=n.y+26, hr=9;
+  return `<g class="c4pbadge">
+    <circle cx="${cx}" cy="${cy-5}" r="${hr}"/>
+    <path d="M ${cx-14} ${cy+18} a 14 14 0 0 1 28 0" stroke-linecap="round"/>
+  </g>`;
+}
 function typeLabel(n){
   if(n.kind==='person') return 'Person';
   if(n.kind==='system') return 'Software System';
@@ -405,10 +486,9 @@ function nodeSVG(n){
   const cls=['c4node', n.scope==='ext'?'ext':'', n.kind==='person'?'person':'',
              n.store?'store':'', (n.into||n.adr)?'hot':''].filter(Boolean).join(' ');
   const handler = n.into? `onclick="zoomTo('${n.into}')"` : (n.adr? `onclick="flashAdr('${n.adr}')"`:'');
-  const head = n.kind==='person'? `<div class="c4head"></div>`:'';
   const hint = n.into? `<div class="c4hint">${esc(n.hint||'click to zoom in ↘')}</div>`
              : (n.adr? `<div class="c4hint">why? ↘</div>`:'');
-  const inner = `<div class="${cls}" ${handler}>${head}
+  const inner = `<div class="${cls}${n.kind==='person'?' haspers':''}" ${handler}>
         <div class="c4name">${esc(n.name)}</div>
         <div class="c4type">[${esc(typeLabel(n))}]</div>
         ${n.desc?`<div class="c4desc">${esc(n.desc)}</div>`:''}
@@ -464,10 +544,11 @@ function sceneSVG(zid){
     ${bound}
     ${m.edges.map(e=>edgeLine(e,byId)).join('')}
     ${m.nodes.map(nodeSVG).join('')}
+    ${m.nodes.filter(n=>n.kind==='person').map(personBadge).join('')}
     ${m.edges.map(e=>edgeLabel(e,byId)).join('')}
   </svg>`;
 }
-const C4DEFS=`<defs><marker id="c4ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1.5L8 5L2 8.5" fill="none" stroke="var(--ink-faint)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>`;
+const C4DEFS=`<defs><marker id="c4ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1.5L8 5L2 8.5" fill="none" stroke="var(--ink-faint)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="fah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M2 1.5L8 5L2 8.5" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>`;
 
 function c4Title(zid){const m=MODEL[zid]; return `${ZNAME[zid]} diagram · ${esc(m.scope)}`;}
 function c4Legend(zid){
@@ -481,33 +562,127 @@ function c4Legend(zid){
   items.push(`<span><i class="lg-rel"></i>relationship →</span>`);
   return items.join('');
 }
+/* ---- Dynamic (flow) view ---- */
+// straight edge between two container nodes, clipped to their borders, with an
+// optional perpendicular offset so two steps on the same pair don't overlap.
+function flowEdgePath(a,b,off){
+  const ca=center(a), cb=center(b);
+  let p1=clipToBox(a,cb.x,cb.y), p2=clipToBox(b,ca.x,ca.y);
+  if(off){
+    // perpendicular from a CANONICAL direction (lower id -> higher id) so a
+    // request and its response fan to opposite lanes instead of cancelling.
+    const lo = a.id<b.id? ca:cb, hi = a.id<b.id? cb:ca;
+    const dx=hi.x-lo.x, dy=hi.y-lo.y, len=Math.hypot(dx,dy)||1;
+    const nx=-dy/len*off, ny=dx/len*off;
+    p1={x:p1.x+nx,y:p1.y+ny}; p2={x:p2.x+nx,y:p2.y+ny};
+  }
+  return {p1,p2,mx:(p1.x+p2.x)/2,my:(p1.y+p2.y)/2};
+}
+// for each step, decide a perpendicular offset: if another step links the same
+// pair of nodes, fan them into separate lanes (e.g. a request + its response).
+function flowOffsets(steps){
+  const key=s=>[s.from,s.to].sort().join('|');
+  const groups={}; steps.forEach((s,i)=>{ (groups[key(s)]=groups[key(s)]||[]).push(i); });
+  const off=new Array(steps.length).fill(0);
+  Object.values(groups).forEach(idxs=>{
+    if(idxs.length<2) return;
+    const spread=46;
+    idxs.forEach((idx,k)=>{ off[idx]=(k-(idxs.length-1)/2)*spread; });
+  });
+  return off;
+}
+function hasFlow(zid){ return !!(FLOWS[zid] && FLOWS[zid].steps.length); }
+// SVG for the flow at a given level (reuses that level's node layout)
+function flowSVG(zid){
+  const m=MODEL[zid], f=FLOWS[zid];
+  if(!f){ return `<svg viewBox="0 0 ${FRAME_W} ${FRAME_H}">${C4DEFS}</svg>`; }
+  const byId={}; m.nodes.forEach(n=>byId[n.id]=n);
+  const nodes=m.nodes.map(n=>{
+    const cls=['c4node', n.scope==='ext'?'ext':'', n.kind==='person'?'person':'', n.store?'store':''].filter(Boolean).join(' ');
+    return `<foreignObject class="flowfo" data-fnode="${n.id}" x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h+60}">
+      <div xmlns="http://www.w3.org/1999/xhtml" style="width:${n.w}px;min-height:${n.h}px">
+        <div class="${cls}${n.kind==='person'?' haspers':''}"><div class="c4name">${esc(n.name)}</div><div class="c4type">[${esc(typeLabel(n))}]</div>${n.desc?`<div class="c4desc">${esc(n.desc)}</div>`:''}</div>
+      </div></foreignObject>`;
+  }).join('');
+  const offs=flowOffsets(f.steps);
+  const arcs=f.steps.map((s,i)=>{
+    const a=byId[s.from], b=byId[s.to]; if(!a||!b) return '';
+    const {p1,p2,mx,my}=flowEdgePath(a,b,offs[i]);
+    return `<g data-fstep="${i}">
+      <path class="flowedge" d="M ${p1.x} ${p1.y} L ${p2.x} ${p2.y}" marker-end="url(#fah)"/>
+      <circle class="flownum-bg" cx="${mx}" cy="${my}" r="16"/>
+      <text class="flownum" x="${mx}" y="${my+6}" text-anchor="middle">${i+1}</text>
+    </g>`;
+  }).join('');
+  return `<svg viewBox="0 0 ${FRAME_W} ${FRAME_H}">${C4DEFS}
+    ${arcs}
+    ${nodes}
+    ${m.nodes.filter(n=>n.kind==='person').map(personBadge).join('')}
+  </svg>`;
+}
+function flowStepList(zid){
+  const m=MODEL[zid], f=FLOWS[zid]; if(!f) return '';
+  const byId={}; m.nodes.forEach(n=>byId[n.id]=n);
+  return `<ol class="flowsteps" id="flowsteps">${f.steps.map((s,i)=>`
+    <li data-step="${i}" onclick="flowGo(${i})">
+      <span class="sn">${i+1}</span>
+      <span><b>${esc(byId[s.from].name)} → ${esc(byId[s.to].name)}</b> · ${esc(s.label)}
+      ${s.tech?` <span class="tech">[${esc(s.tech)}]</span>`:''}</span>
+    </li>`).join('')}</ol>`;
+}
 function c4Block(){
   return `<div class="diagram">
-    <div class="c4title" id="c4title">${c4Title(S.zoom)}</div>
+    <div class="c4topbar">
+      <div class="c4title" id="c4title">${c4Title(S.zoom)}</div>
+      <div class="viewtoggle" id="viewtoggle">
+        <button class="${S.view==='static'?'on':''}" onclick="setView('static')">Static</button>
+        <button class="${S.view==='flow'?'on':''}" onclick="setView('flow')">Flow</button>
+      </div>
+    </div>
     <div class="crumbs" id="crumbs"></div>
     <div class="scene-wrap" id="scenewrap">
       <div class="scene" data-z="context">${sceneSVG('context')}</div>
       <div class="scene" data-z="container">${sceneSVG('container')}</div>
       <div class="scene" data-z="component">${sceneSVG('component')}</div>
+      <div class="scene" data-z="flow"></div>
     </div>
     <div class="legend" id="c4legend">${c4Legend(S.zoom)}</div>
+    <div id="flowpanel" style="display:none">
+      <div class="flowctl">
+        <button id="flowprev" onclick="flowStep(-1)">‹ Back</button>
+        <button id="flownext" onclick="flowStep(1)">Next ›</button>
+        <button id="flowplay" onclick="flowPlay()">▶ Play</button>
+        <span class="step-of" id="flowof"></span>
+      </div>
+      <div id="flowlistwrap"></div>
+    </div>
   </div>`;
 }
 
 function paintCrumbs(){
   const cr=document.getElementById('crumbs'); if(!cr) return;
+  const flow=S.view==='flow';
   const idx=ZORDER.indexOf(S.zoom);
   let html='';
   ZORDER.forEach((z,i)=>{
-    const reachable=i<=ZORDER.indexOf(S.zoomReached);
     if(i>0) html+=`<span class="sep">›</span>`;
-    html+=`<button class="${z===S.zoom?'on':''}" ${reachable&&!zooming?`onclick="zoomTo('${z}')"`:'disabled'}>${ZNAME[z]}</button>`;
+    if(flow){
+      // in flow mode the breadcrumb switches which level's sequence is shown;
+      // levels without a defined flow are disabled.
+      const ok=hasFlow(z);
+      html+=`<button class="${z===S.zoom?'on':''}" ${ok?`onclick="flowToLevel('${z}')"`:'disabled'}>${ZNAME[z]}</button>`;
+    }else{
+      const reachable=i<=ZORDER.indexOf(S.zoomReached);
+      html+=`<button class="${z===S.zoom?'on':''}" ${reachable&&!zooming?`onclick="zoomTo('${z}')"`:'disabled'}>${ZNAME[z]}</button>`;
+    }
   });
   html+=`<span class="spacer"></span>`;
-  if(idx>0) html+=`<button class="zoutbtn" ${zooming?'disabled':''} onclick="zoomTo('${ZORDER[idx-1]}')">↖ zoom out</button>`;
+  if(!flow && idx>0) html+=`<button class="zoutbtn" ${zooming?'disabled':''} onclick="zoomTo('${ZORDER[idx-1]}')">↖ zoom out</button>`;
   cr.innerHTML=html;
-  const t=document.getElementById('c4title'); if(t) t.textContent=c4Title(S.zoom);
-  const lg=document.getElementById('c4legend'); if(lg) lg.innerHTML=c4Legend(S.zoom);
+  if(!flow){
+    const t=document.getElementById('c4title'); if(t) t.textContent=c4Title(S.zoom);
+    const lg=document.getElementById('c4legend'); if(lg) lg.innerHTML=c4Legend(S.zoom);
+  }
 }
 
 /* A zoom anchor = the box (in the OUTER level) that the INNER level lives inside.
@@ -573,7 +748,87 @@ function fitBoundaries(){
     if(typ){ typ.setAttribute('x',bx+26); typ.setAttribute('y',by+62); }
   });
 }
-function initC4(){ if(!document.getElementById('scenewrap')) return; settleActive(S.zoom); fitBoundaries(); paintCrumbs(); }
+function initC4(){
+  if(!document.getElementById('scenewrap')) return;
+  fitBoundaries();
+  if(S.view==='flow'){ applyView(); } else { settleActive(S.zoom); paintCrumbs(); }
+}
+
+/* ---- view toggle: Static (zoomable C4) vs Flow (dynamic numbered sequence) ----
+   Flow follows the breadcrumb: there is one flow PER level. `flowLevel` is the
+   level currently shown in flow mode (defaults to the static zoom level, or the
+   nearest level that defines a flow). */
+let flowTimer=null;
+function nearestFlowLevel(zid){
+  if(hasFlow(zid)) return zid;
+  return ZORDER.find(hasFlow) || 'container';
+}
+function setView(v){
+  if(S.view===v) return;
+  S.view=v;
+  stopFlowPlay();
+  if(v==='flow'){ S.flowStep=0; S.flowLevel=nearestFlowLevel(S.zoom); }
+  applyView();
+}
+function flowToLevel(zid){
+  if(!hasFlow(zid) || S.flowLevel===zid) return;
+  stopFlowPlay(); S.flowLevel=zid; S.flowStep=0; S.zoom=zid;
+  if(ZORDER.indexOf(zid)>ZORDER.indexOf(S.zoomReached)) S.zoomReached=zid;
+  mountFlow(); paintCrumbs();
+  const t=document.getElementById('c4title'); if(t) t.textContent=FLOWS[zid].title;
+}
+// (re)build the flow scene + step list for the current flowLevel
+function mountFlow(){
+  const lvl=S.flowLevel||'container';
+  const scene=sceneEl('flow'); if(scene) scene.innerHTML=flowSVG(lvl);
+  const lw=document.getElementById('flowlistwrap'); if(lw) lw.innerHTML=flowStepList(lvl);
+  renderFlowStep();
+}
+function applyView(){
+  const flow=S.view==='flow';
+  document.querySelectorAll('#viewtoggle button').forEach(b=>b.classList.toggle('on', b.textContent.toLowerCase().startsWith(flow?'flow':'static')));
+  if(flow){ if(!S.flowLevel) S.flowLevel=nearestFlowLevel(S.zoom); S.zoom=S.flowLevel; mountFlow(); settleActive('flow'); }
+  else { settleActive(S.zoom); }
+  const lg=document.getElementById('c4legend'); if(lg) lg.style.display=flow?'none':'';
+  const fp=document.getElementById('flowpanel'); if(fp) fp.style.display=flow?'block':'none';
+  const t=document.getElementById('c4title'); if(t) t.textContent=flow?(FLOWS[S.flowLevel].title):c4Title(S.zoom);
+  paintCrumbs();
+}
+function curFlow(){ return FLOWS[S.flowLevel||'container']; }
+function renderFlowStep(){
+  const scene=sceneEl('flow'); if(!scene) return;
+  const f=curFlow(); if(!f) return;
+  scene.querySelectorAll('g[data-fstep]').forEach(g=>{
+    const i=+g.dataset.fstep;
+    const edge=g.querySelector('.flowedge'), bg=g.querySelector('.flownum-bg');
+    edge.classList.toggle('active', i===S.flowStep); edge.classList.toggle('seen', i<S.flowStep);
+    bg.classList.toggle('active', i===S.flowStep); bg.classList.toggle('seen', i<S.flowStep);
+  });
+  const cur=f.steps[S.flowStep];
+  scene.querySelectorAll('.flowfo').forEach(fo=>{
+    fo.classList.toggle('lit', fo.dataset.fnode===cur.from || fo.dataset.fnode===cur.to);
+  });
+  document.querySelectorAll('#flowsteps li').forEach(li=>{
+    const i=+li.dataset.step;
+    li.classList.toggle('active', i===S.flowStep); li.classList.toggle('seen', i<S.flowStep);
+  });
+  const of=document.getElementById('flowof'); if(of) of.textContent=`Step ${S.flowStep+1} of ${f.steps.length}`;
+  const pv=document.getElementById('flowprev'), nx=document.getElementById('flownext');
+  if(pv) pv.disabled=S.flowStep===0; if(nx) nx.disabled=S.flowStep===f.steps.length-1;
+}
+function flowStep(d){ const f=curFlow(); const n=S.flowStep+d; if(n<0||n>=f.steps.length) return; S.flowStep=n; renderFlowStep(); }
+function flowGo(i){ stopFlowPlay(); S.flowStep=i; renderFlowStep(); }
+function stopFlowPlay(){ if(flowTimer){ clearInterval(flowTimer); flowTimer=null; const b=document.getElementById('flowplay'); if(b) b.textContent='▶ Play'; } }
+function flowPlay(){
+  const f=curFlow(); const b=document.getElementById('flowplay');
+  if(flowTimer){ stopFlowPlay(); return; }
+  if(S.flowStep>=f.steps.length-1) S.flowStep=0;
+  renderFlowStep(); b.textContent='❚❚ Pause';
+  flowTimer=setInterval(()=>{
+    if(S.flowStep>=f.steps.length-1){ stopFlowPlay(); return; }
+    S.flowStep++; renderFlowStep();
+  }, 1100);
+}
 
 /* One adjacent hop. The clicked box grows to fill the frame (and the detail unfolds
    from inside it); zoom-out is the exact reverse, collapsing the detail back into its box.
@@ -701,9 +956,14 @@ function render(){
   // stage
   document.getElementById('panes').innerHTML = `<div class="pane" key="${S.chapter}">${PANE[S.chapter]()}</div>`;
   if(document.getElementById('scenewrap')){
-    if(S._lastChap!==S.chapter && CHAP_ZOOM[S.chapter]){
-      S.zoom=CHAP_ZOOM[S.chapter];
-      if(ZORDER.indexOf(S.zoom)>ZORDER.indexOf(S.zoomReached)) S.zoomReached=S.zoom;
+    if(S._lastChap!==S.chapter){
+      // each chapter opens in Static at its own C4 level
+      if(typeof stopFlowPlay==='function') stopFlowPlay();
+      S.view='static';
+      if(CHAP_ZOOM[S.chapter]){
+        S.zoom=CHAP_ZOOM[S.chapter];
+        if(ZORDER.indexOf(S.zoom)>ZORDER.indexOf(S.zoomReached)) S.zoomReached=S.zoom;
+      }
     }
     initC4();
   }
