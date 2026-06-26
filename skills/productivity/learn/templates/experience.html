@@ -127,7 +127,7 @@
   .crumbs .sep{color:var(--line); }
   .crumbs .spacer{flex:1}
   .zoutbtn{border:1px solid var(--line)!important; padding:3px 10px!important; color:var(--ink-soft)!important; background:var(--panel)!important}
-  .scene-wrap{position:relative; width:100%; aspect-ratio:16/9; min-height:230px; overflow:hidden; border-radius:10px; background:var(--paper-2)}
+  .scene-wrap{position:relative; width:100%; aspect-ratio:1220/580; min-height:340px; overflow:hidden; border-radius:10px; background:var(--paper-2)}
   .scene{position:absolute; inset:0; opacity:0; pointer-events:none; transform-origin:0 0; will-change:transform,opacity;
          transition:transform .58s cubic-bezier(.45,.02,.18,1), opacity .42s ease}
   .scene svg{width:100%; height:100%; display:block}
@@ -143,26 +143,28 @@
   /* ---- C4 grammar ---- */
   .c4title{font-family:var(--mono); font-size:11px; letter-spacing:.07em; text-transform:uppercase; color:var(--ink-soft); font-weight:500; margin-bottom:7px}
   .c4fo{overflow:visible}
-  .c4node{box-sizing:border-box; width:100%; height:100%; border:1.5px solid var(--c4-in-stroke); background:var(--c4-in-fill);
-    border-radius:11px; padding:9px 12px; display:flex; flex-direction:column; gap:1px; position:relative; font-family:var(--sans); line-height:1.32}
+  /* fonts/sizes are in the SVG's 1220-unit coordinate space, so they look ~0.6x
+     on screen once the diagram scales to the column — hence the larger numbers. */
+  .c4node{box-sizing:border-box; width:100%; min-height:100%; border:2.5px solid var(--c4-in-stroke); background:var(--c4-in-fill);
+    border-radius:18px; padding:18px 22px 16px; display:flex; flex-direction:column; gap:3px; position:relative; font-family:var(--sans); line-height:1.32}
   .c4node.ext{border-color:var(--c4-ext-stroke); background:var(--c4-ext-fill); border-style:solid}
-  .c4node.person{border-color:var(--c4-person-stroke); background:var(--c4-person-fill); padding-top:11px}
-  .c4node .c4head{position:absolute; top:-15px; left:50%; transform:translateX(-50%); width:26px; height:26px; border-radius:50%;
-    background:var(--c4-person-fill); border:1.5px solid var(--c4-person-stroke)}
-  .c4node.store{border-bottom-width:4px}
-  .c4name{font-weight:600; font-size:14px; color:var(--ink); letter-spacing:-.005em}
-  .c4type{font-family:var(--mono); font-size:9.5px; color:var(--ink-faint); letter-spacing:.01em}
-  .c4desc{font-size:11px; color:var(--ink-soft); margin-top:2px}
+  .c4node.person{border-color:var(--c4-person-stroke); background:var(--c4-person-fill); padding-top:18px}
+  .c4node .c4head{position:absolute; top:-24px; left:50%; transform:translateX(-50%); width:42px; height:42px; border-radius:50%;
+    background:var(--c4-person-fill); border:2.5px solid var(--c4-person-stroke)}
+  .c4node.store{border-bottom-width:7px}
+  .c4name{font-weight:600; font-size:23px; color:var(--ink); letter-spacing:-.01em}
+  .c4type{font-family:var(--mono); font-size:15px; color:var(--ink-faint); letter-spacing:.01em}
+  .c4desc{font-size:18px; color:var(--ink-soft); margin-top:3px; line-height:1.3}
   .c4node.hot{cursor:pointer; transition:box-shadow .16s, border-color .16s}
-  .c4node.hot:hover{box-shadow:0 0 0 4px var(--c4-ring); border-color:var(--accent)}
-  .c4hint{font-family:var(--mono); font-size:9px; color:var(--accent); margin-top:auto; padding-top:4px}
-  .c4bound{fill:none; stroke:var(--ink-faint); stroke-width:1.4; stroke-dasharray:7 5}
-  .c4boundlbl{font-family:var(--mono); font-size:11px; fill:var(--ink-soft); font-weight:500}
-  .c4boundtype{font-family:var(--mono); font-size:9px; fill:var(--ink-faint)}
-  .edge{stroke:var(--ink-faint); stroke-width:1.4; stroke-dasharray:5 4; fill:none}
+  .c4node.hot:hover{box-shadow:0 0 0 6px var(--c4-ring); border-color:var(--accent)}
+  .c4hint{font-family:var(--mono); font-size:14px; color:var(--accent); margin-top:auto; padding-top:7px}
+  .c4bound{fill:none; stroke:var(--ink-faint); stroke-width:2.2; stroke-dasharray:11 8}
+  .c4boundlbl{font-family:var(--mono); font-size:19px; fill:var(--ink-soft); font-weight:500}
+  .c4boundtype{font-family:var(--mono); font-size:15px; fill:var(--ink-faint)}
+  .edge{stroke:var(--ink-faint); stroke-width:2.2; stroke-dasharray:8 6; fill:none}
   .edgebg{fill:var(--paper-2)}
-  .edgelbl{font-family:var(--sans); font-size:10.5px; fill:var(--ink-soft)}
-  .edgetech{font-family:var(--mono); font-size:9px; fill:var(--ink-faint)}
+  .edgelbl{font-family:var(--sans); font-size:18px; fill:var(--ink-soft)}
+  .edgetech{font-family:var(--mono); font-size:15px; fill:var(--ink-faint)}
   .legend .lg-in{background:var(--c4-in-fill); border:1.5px solid var(--c4-in-stroke)}
   .legend .lg-ext{background:var(--c4-ext-fill); border:1.5px solid var(--c4-ext-stroke)}
   .legend .lg-person{background:var(--c4-person-fill); border:1.5px solid var(--c4-person-stroke); border-radius:50%}
@@ -330,34 +332,36 @@ const CHAPTERS = [
    - into:  level id this box zooms into (makes it a clickable boundary target)
    - adr:   decision key -> clicking the box flashes that ADR
    - store: true -> draw as a data store (thick bottom border)
-   Coordinates live in a 680x380 design space; x,y = top-left.            */
-const FRAME_W=680, FRAME_H=380;
+   Coordinates live in an 820x500 design space; x,y = top-left. Give boxes
+   room: ~108h when they carry a hint/why line, ~96h otherwise. Keep external
+   nodes OUTSIDE the boundary but fully INSIDE the frame.                   */
+const FRAME_W=1560, FRAME_H=600;
 
 const MODEL = {
   context:{
     level:'System Context', scope:'API Platform',
     boundary:null,
     nodes:[
-      {id:'eng', kind:'person', scope:'ext', name:'API Consumer', desc:'Calls your API over the internet.', x:36,y:150,w:150,h:84},
-      {id:'plat', kind:'system', scope:'in', name:'API Platform', desc:'Serves the API and protects it from overload.', x:268,y:150,w:172,h:92, into:'container', hint:'click to zoom in ↘'},
-      {id:'down', kind:'system', scope:'ext', name:'Downstream Services', desc:'The expensive work the platform guards.', x:520,y:60,w:148,h:90},
-      {id:'store',kind:'system', scope:'ext', name:'Counter Store', desc:'Shared request tallies.', store:true, x:520,y:236,w:148,h:88, adr:'a2'},
+      {id:'eng', kind:'person', scope:'ext', name:'API Consumer', desc:'Calls your API over the internet.', x:60,y:240,w:210,h:112},
+      {id:'plat', kind:'system', scope:'in', name:'API Platform', desc:'Serves the API and protects it from overload.', x:560,y:228,w:250,h:142, into:'container', hint:'click to zoom in ↘'},
+      {id:'down', kind:'system', scope:'ext', name:'Downstream Services', desc:'The expensive work the platform guards.', x:1180,y:80,w:230,h:116},
+      {id:'store',kind:'system', scope:'ext', name:'Counter Store', desc:'Shared request tallies.', store:true, x:1180,y:404,w:230,h:116, adr:'a2'},
     ],
     edges:[
-      {from:'eng', to:'plat', label:'Makes API requests to'},
-      {from:'plat',to:'down', label:'Forwards allowed traffic to'},
-      {from:'plat',to:'store',label:'Reads & writes counts'},
+      {from:'eng', to:'plat', label:'Makes requests to'},
+      {from:'plat',to:'down', label:'Forwards traffic to'},
+      {from:'plat',to:'store',label:'Reads/writes counts'},
     ]
   },
   container:{
     level:'Container', scope:'API Platform',
     boundary:{name:'API Platform', type:'Software System'},
     nodes:[
-      {id:'eng', kind:'person', scope:'ext', name:'API Consumer', desc:'Calls the API.', x:24,y:158,w:128,h:78},
-      {id:'gw',  kind:'container', scope:'in', name:'API Gateway', tech:'Envoy', desc:'Edge routing & TLS.', x:196,y:60,w:150,h:84},
-      {id:'lim', kind:'container', scope:'in', name:'Limiter Service', tech:'Go', desc:'Decides allow / deny.', x:196,y:236,w:150,h:88, into:'component', hint:'click to zoom in ↘'},
-      {id:'back',kind:'container', scope:'in', name:'Backend', tech:'Java', desc:'Protected work.', x:392,y:60,w:142,h:84},
-      {id:'redis',kind:'container',scope:'in', name:'Redis', tech:'Redis', desc:'Atomic shared counters.', store:true, x:392,y:236,w:142,h:88, adr:'a2'},
+      {id:'eng', kind:'person', scope:'ext', name:'API Consumer', desc:'Calls the API.', x:60,y:250,w:200,h:108},
+      {id:'gw',  kind:'container', scope:'in', name:'API Gateway', tech:'Envoy', desc:'Edge routing & TLS.', x:560,y:150,w:230,h:116},
+      {id:'back',kind:'container', scope:'in', name:'Backend', tech:'Java', desc:'Protected work.', x:1180,y:150,w:230,h:116},
+      {id:'lim', kind:'container', scope:'in', name:'Limiter Service', tech:'Go', desc:'Decides allow / deny.', x:560,y:410,w:230,h:128, into:'component', hint:'click to zoom in ↘'},
+      {id:'redis',kind:'container',scope:'in', name:'Redis', tech:'Redis', desc:'Atomic shared counters.', store:true, x:1180,y:410,w:230,h:120, adr:'a2'},
     ],
     edges:[
       {from:'eng', to:'gw',  label:'Requests', tech:'HTTPS'},
@@ -370,17 +374,17 @@ const MODEL = {
     level:'Component', scope:'Limiter Service',
     boundary:{name:'Limiter Service', type:'Container: Go'},
     nodes:[
-      {id:'gw',  kind:'container', scope:'ext', name:'API Gateway', tech:'Envoy', desc:'Asks: allow this call?', x:30,y:158,w:140,h:84},
-      {id:'key', kind:'component', scope:'in', name:'Key Resolver', tech:'Go pkg', desc:'user? IP? route?', x:214,y:58,w:158,h:84, adr:'a3'},
-      {id:'win', kind:'component', scope:'in', name:'Window Counter', tech:'Go pkg', desc:'Counts the trailing 60s.', x:214,y:236,w:158,h:88, adr:'a1'},
-      {id:'verdict',kind:'component',scope:'in',name:'Verdict', tech:'Go pkg', desc:'Under limit → allow · over → 429.', x:418,y:146,w:170,h:96},
-      {id:'redis',kind:'container',scope:'ext', name:'Redis', tech:'Redis', desc:'Atomic counters.', store:true, x:610,y:236,w:60,h:88, adr:'a2', clip:true},
+      {id:'gw',  kind:'container', scope:'ext', name:'API Gateway', tech:'Envoy', desc:'Asks: allow this call?', x:60,y:246,w:200,h:112},
+      {id:'key', kind:'component', scope:'in', name:'Key Resolver', tech:'Go pkg', desc:'user? IP? route?', x:560,y:130,w:230,h:118, adr:'a3'},
+      {id:'win', kind:'component', scope:'in', name:'Window Counter', tech:'Go pkg', desc:'Counts the trailing 60s.', x:560,y:410,w:230,h:118, adr:'a1'},
+      {id:'verdict',kind:'component',scope:'in',name:'Verdict', tech:'Go pkg', desc:'Under limit → allow · over → 429.', x:1000,y:270,w:220,h:118},
+      {id:'redis',kind:'container',scope:'ext', name:'Redis', tech:'Redis', desc:'Atomic counters.', store:true, x:1340,y:410,w:180,h:112, adr:'a2'},
     ],
     edges:[
       {from:'gw', to:'key',  label:'Allow this call?'},
       {from:'key',to:'win',  label:'Count for key'},
-      {from:'win',to:'redis',label:'INCR / EXPIRE', tech:'RESP'},
       {from:'win',to:'verdict',label:'Current count'},
+      {from:'win',to:'redis',label:'INCR / EXPIRE', tech:'RESP'},
     ]
   }
 };
@@ -404,17 +408,14 @@ function nodeSVG(n){
   const head = n.kind==='person'? `<div class="c4head"></div>`:'';
   const hint = n.into? `<div class="c4hint">${esc(n.hint||'click to zoom in ↘')}</div>`
              : (n.adr? `<div class="c4hint">why? ↘</div>`:'');
-  // clip: a sliver node sitting on the frame edge (a neighbour projected onto the boundary)
-  const inner = n.clip
-    ? `<div class="c4node ext store" style="width:${n.w*2.2}px"><div class="c4name">${esc(n.name)}</div><div class="c4type">[${esc(typeLabel(n))}]</div></div>`
-    : `<div class="${cls}" ${handler}>${head}
+  const inner = `<div class="${cls}" ${handler}>${head}
         <div class="c4name">${esc(n.name)}</div>
         <div class="c4type">[${esc(typeLabel(n))}]</div>
         ${n.desc?`<div class="c4desc">${esc(n.desc)}</div>`:''}
         ${hint}
       </div>`;
-  return `<foreignObject class="c4fo" x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}">
-    <div xmlns="http://www.w3.org/1999/xhtml" style="width:${n.w}px;height:${n.h}px">${inner}</div>
+  return `<foreignObject class="c4fo" x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h+30}">
+    <div xmlns="http://www.w3.org/1999/xhtml" style="width:${n.w}px;min-height:${n.h}px">${inner}</div>
   </foreignObject>`;
 }
 function center(n){return {x:n.x+n.w/2, y:n.y+n.h/2};}
@@ -426,36 +427,44 @@ function clipToBox(n,tx,ty){
   const t=Math.min(sx,sy);
   return {x:c.x+dx*t, y:c.y+dy*t};
 }
-function edgeSVG(e,byId){
+// the dashed line only (drawn UNDER the nodes)
+function edgeLine(e,byId){
   const a=byId[e.from], b=byId[e.to]; if(!a||!b) return '';
+  const ca=center(a), cb=center(b);
+  const p1=clipToBox(a,cb.x,cb.y), p2=clipToBox(b,ca.x,ca.y);
+  return `<path class="edge" d="M ${p1.x} ${p1.y} L ${p2.x} ${p2.y}" marker-end="url(#c4ah)"/>`;
+}
+// the label chip only (drawn OVER the nodes, so it is never hidden behind a box)
+function edgeLabel(e,byId){
+  const a=byId[e.from], b=byId[e.to]; if(!a||!b||!(e.label||e.tech)) return '';
   const ca=center(a), cb=center(b);
   const p1=clipToBox(a,cb.x,cb.y), p2=clipToBox(b,ca.x,ca.y);
   const mx=(p1.x+p2.x)/2, my=(p1.y+p2.y)/2;
   const lbl=esc(e.label||''), tech=e.tech?`[${esc(e.tech)}]`:'';
-  const wlbl=lbl.length*5.6, wtech=tech.length*5.4;
-  const w=Math.max(wlbl,wtech)+10, h=tech?28:17;
-  return `<path class="edge" d="M ${p1.x} ${p1.y} L ${p2.x} ${p2.y}" marker-end="url(#c4ah)"/>
-    ${lbl||tech?`<rect class="edgebg" x="${mx-w/2}" y="${my-h/2}" width="${w}" height="${h}" rx="4"/>`:''}
-    ${lbl?`<text class="edgelbl" x="${mx}" y="${my+(tech?-2:4)}" text-anchor="middle">${lbl}</text>`:''}
-    ${tech?`<text class="edgetech" x="${mx}" y="${my+11}" text-anchor="middle">${tech}</text>`:''}`;
+  const w=Math.max(lbl.length*10.0, tech.length*9.2)+22, h=tech?52:32;
+  return `<rect class="edgebg" x="${mx-w/2}" y="${my-h/2}" width="${w}" height="${h}" rx="8"/>
+    ${lbl?`<text class="edgelbl" x="${mx}" y="${my+(tech?-3:6)}" text-anchor="middle">${lbl}</text>`:''}
+    ${tech?`<text class="edgetech" x="${mx}" y="${my+19}" text-anchor="middle">${tech}</text>`:''}`;
 }
 function sceneSVG(zid){
   const m=MODEL[zid];
   const byId={}; m.nodes.forEach(n=>byId[n.id]=n);
-  // boundary box wraps the in-scope nodes
+  // boundary box wraps the in-scope nodes (extra top room for its [type] line)
   let bound='';
   if(m.boundary){
     const ins=m.nodes.filter(n=>n.scope==='in');
-    const minX=Math.min(...ins.map(n=>n.x))-22, minY=Math.min(...ins.map(n=>n.y))-30;
-    const maxX=Math.max(...ins.map(n=>n.x+n.w))+22, maxY=Math.max(...ins.map(n=>n.y+n.h))+18;
-    bound=`<rect class="c4bound" x="${minX}" y="${minY}" width="${maxX-minX}" height="${maxY-minY}" rx="16"/>
-      <text class="c4boundlbl" x="${minX+14}" y="${minY+20}">${esc(m.boundary.name)}</text>
-      <text class="c4boundtype" x="${minX+14}" y="${minY+33}">[${esc(m.boundary.type)}]</text>`;
+    const minX=Math.min(...ins.map(n=>n.x))-34, minY=Math.min(...ins.map(n=>n.y))-86;
+    const maxX=Math.max(...ins.map(n=>n.x+n.w))+34, maxY=Math.max(...ins.map(n=>n.y+n.h))+32;
+    bound=`<rect class="c4bound" x="${minX}" y="${minY}" width="${maxX-minX}" height="${maxY-minY}" rx="24"/>
+      <text class="c4boundlbl" x="${minX+26}" y="${minY+40}">${esc(m.boundary.name)}</text>
+      <text class="c4boundtype" x="${minX+26}" y="${minY+62}">[${esc(m.boundary.type)}]</text>`;
   }
+  // paint order: boundary -> edge lines -> nodes -> edge labels (labels always on top)
   return `<svg viewBox="0 0 ${FRAME_W} ${FRAME_H}">${C4DEFS}
     ${bound}
-    ${m.edges.map(e=>edgeSVG(e,byId)).join('')}
+    ${m.edges.map(e=>edgeLine(e,byId)).join('')}
     ${m.nodes.map(nodeSVG).join('')}
+    ${m.edges.map(e=>edgeLabel(e,byId)).join('')}
   </svg>`;
 }
 const C4DEFS=`<defs><marker id="c4ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1.5L8 5L2 8.5" fill="none" stroke="var(--ink-faint)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>`;
