@@ -96,6 +96,18 @@
       padding:7px 13px; border-radius:99px; font-size:12.5px; font-weight:500}
     .dec-toggle b{font-family:var(--mono); background:var(--accent); color:#fff; border-radius:99px; padding:0 7px; font-size:11px}
   }
+  /* TEMP dev module switcher + mandatory reset (Step 2) */
+  .devmod-wrap{display:inline-flex; align-items:center; gap:7px; font-family:var(--mono); font-size:10.5px; letter-spacing:.08em;
+    text-transform:uppercase; color:var(--ink-faint); border:1px dashed var(--line); border-radius:99px; padding:5px 6px 5px 12px; background:var(--paper-2)}
+  .devmod-wrap select{font-family:var(--sans); font-size:12.5px; color:var(--ink); background:var(--panel); border:1px solid var(--line);
+    border-radius:99px; padding:5px 10px; cursor:pointer}
+  .devmod-wrap select:focus{outline:none; border-color:var(--accent)}
+  .resetbtn{border:1px solid var(--line); background:var(--panel); color:var(--ink-soft); border-radius:99px;
+    padding:6px 13px; font-size:12.5px; font-weight:500; transition:.16s}
+  .resetbtn:hover{border-color:var(--warn); color:var(--warn)}
+  /* fixit code block */
+  .codebox{font-family:var(--mono); font-size:13px; line-height:1.55; color:var(--ink); background:var(--paper-2);
+    border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin:0; white-space:pre-wrap; overflow:auto}
   h1.title{font-family:var(--display); font-weight:600; font-size:clamp(28px,4vw,42px); line-height:1.05; letter-spacing:-.02em; margin:.1em 0 .35em}
   .lede{font-size:17px; color:var(--ink-soft); max-width:60ch; margin:0 0 22px}
   .panes{position:relative}
@@ -128,9 +140,15 @@
   .crumbs .spacer{flex:1}
   .zoutbtn{border:1px solid var(--line)!important; padding:3px 10px!important; color:var(--ink-soft)!important; background:var(--panel)!important}
   .scene-wrap{position:relative; width:100%; aspect-ratio:1220/580; min-height:340px; overflow:hidden; border-radius:10px; background:var(--paper-2)}
-  .scene{position:absolute; inset:0; opacity:0; pointer-events:none; transform-origin:0 0; will-change:transform,opacity;
+  .scene{position:absolute; inset:0; opacity:0; pointer-events:none; transform-origin:0 0;
          transition:transform .58s cubic-bezier(.45,.02,.18,1), opacity .42s ease}
+  /* will-change:transform is added ONLY during an active zoom (see zoomStep) and
+     removed when it settles. Leaving it on permanently promotes each .scene to a
+     GPU layer that rasters once at pre-web-font height, so text painted taller
+     after fonts load stays visually clipped. */
+  .scene.zooming{will-change:transform,opacity}
   .scene svg{width:100%; height:100%; display:block}
+  #tracewrap > svg{position:absolute; inset:0; width:100%; height:100%; display:block}
   .nz{cursor:pointer}
   .nz .nbx{transition:.18s}
   .nz:hover .nbx{filter:brightness(.97)}
@@ -159,6 +177,12 @@
   .c4desc{font-size:18px; color:var(--ink-soft); margin-top:3px; line-height:1.3}
   .c4node.hot{cursor:pointer; transition:box-shadow .16s, border-color .16s}
   .c4node.hot:hover{box-shadow:0 0 0 6px var(--c4-ring); border-color:var(--accent)}
+  /* focus-dimming (Q10): the scene's focus boxes get a highlight ring; the rest
+     of the in-scope boxes fade into fog so the eye lands on the module's subject. */
+  .c4node{transition:box-shadow .35s, border-color .35s, opacity .4s, filter .4s}
+  .c4node.dim{opacity:.34; filter:grayscale(.55)}
+  .c4node.focus{box-shadow:0 0 0 6px var(--accent-bg); border-color:var(--accent)}
+  .c4node.focus.hot:hover{box-shadow:0 0 0 6px var(--c4-ring)}
   .c4hint{font-family:var(--mono); font-size:14px; color:var(--accent); margin-top:auto; padding-top:7px}
   .c4bound{fill:none; stroke:var(--ink-faint); stroke-width:2.2; stroke-dasharray:11 8}
   .c4boundlbl{font-family:var(--mono); font-size:19px; fill:var(--ink-soft); font-weight:500}
@@ -173,10 +197,6 @@
   .legend .lg-bound{background:transparent; border:1.4px dashed var(--ink-faint); border-radius:2px}
   .legend .lg-rel{width:15px; height:0; border-top:1.6px dashed var(--ink-faint); border-radius:0; margin-bottom:3px}
 
-  /* ---- view toggle (Static / Flow) ---- */
-  .viewtoggle{display:inline-flex; border:1px solid var(--line); border-radius:99px; padding:3px; background:var(--paper-2); margin-left:auto}
-  .viewtoggle button{border:none; background:none; padding:5px 14px; border-radius:99px; font-family:var(--mono); font-size:11px; letter-spacing:.04em; color:var(--ink-soft)}
-  .viewtoggle button.on{background:var(--ink); color:var(--paper)}
   .c4topbar{display:flex; align-items:center; gap:10px; margin-bottom:7px}
   .c4topbar .c4title{margin-bottom:0}
 
@@ -310,17 +330,24 @@
   <!-- LEFT: chapters -->
   <nav id="rail">
     <div class="brand">/learn · interactive</div>
-    <div class="lesson">Rate&nbsp;limiting</div>
-    <div class="sub">Learn it by trying, failing, and deciding — not by reading.</div>
+    <div class="lesson" id="railLesson">Rate&nbsp;limiting</div>
+    <div class="sub" id="railSub">Learn it by trying, failing, and deciding — not by reading.</div>
     <div class="rail-chaps" id="chaplist"></div>
-    <div class="foot">5 chapters · built around<br>productive failure + C4 zoom<br>every choice → a decision record</div>
+    <div class="foot" id="railFoot"></div>
   </nav>
 
   <!-- CENTER: stage -->
   <main id="stage">
     <div class="stage-head">
-      <div class="kicker" id="kicker">Chapter 01 · Orient</div>
-      <button class="dec-toggle" onclick="openMargin()">Decisions <b id="decCountM">0</b></button>
+      <div class="kicker" id="kicker">Orient</div>
+      <div style="display:flex; align-items:center; gap:10px">
+        <label class="devmod-wrap" title="Step 2 dev affordance — switch module (skill map lands in Step 3)">
+          <span>module</span>
+          <select id="devmod"></select>
+        </label>
+        <button class="resetbtn" onclick="resetAll()" title="Reset all progress, mastery and decisions">↺ Reset</button>
+        <button class="dec-toggle" onclick="openMargin()">Decisions <b id="decCountM">0</b></button>
+      </div>
     </div>
     <div class="panes" id="panes"></div>
   </main>
@@ -339,24 +366,28 @@
 <div id="scrim" onclick="closeMargin()"></div>
 
 <script>
-/* ============================ STATE ============================ */
+/* ============================ STATE ============================
+   Progress/interaction state lives here. Fields under PER-MODULE reset (see
+   resetModuleState) are wiped when the active module changes; cross-module
+   state (path, adrs, decisions) persists so decisions carry across the map.   */
 const S = {
   chapter:0, maxUnlocked:0,
   zoom:'context', zoomReached:'context',
-  view:'static', flowStep:0, flowLevel:null,
+  flowStep:0,                                  // trace beat step pointer
   guess:null, committed:false,
   ranSim:false, simMode:'fixed', simResult:null,
-  keyChoice:null, reflectionShown:false,
-  path:[], adrs:[]
+  ownChoice:null, _reason:'', reflectionShown:false,
+  path:[], adrs:[], decisions:{}
 };
-
-const CHAPTERS = [
-  {k:'Orient',       sub:'Map the territory'},
-  {k:'Confront',     sub:'Try it before you’re told'},
-  {k:'Reveal',       sub:'See the why'},
-  {k:'Practice',     sub:'Break it on purpose'},
-  {k:'Own it',       sub:'Make the call'}
-];
+/* Wipe the interaction state that is scoped to one module (called on switch). */
+function resetModuleState(){
+  S.chapter=0; S.maxUnlocked=0; S.zoomReached='context';
+  S.flowStep=0; S.guess=null; S.committed=false;
+  S.ranSim=false; S.simMode='fixed'; S.simResult=null;
+  S.ownChoice=null; S._reason=''; S.reflectionShown=false;
+  S.fixPick=null; S._traceBeat=null;
+  S._lastChap=undefined;
+}
 
 /* ============================ C4 MODEL ============================
    ONE static model rendered at three zoom levels (System Context ->
@@ -424,132 +455,510 @@ const MODEL = {
   }
 };
 
-/* DYNAMIC (flow) view — the C4 way to show a runtime sequence WITHOUT faking
-   static relationships. One flow PER zoom level: each reuses that level's node
-   layout and lists ordered numbered interactions over those boxes. Switching
-   the breadcrumb reflows. `from`/`to` ids must exist in MODEL[level].nodes.
-   To retarget: rewrite the steps for each level (or drop a level's flow). */
-const FLOWS = {
-  context:{
-    title:'Dynamic · one request (context)',
-    steps:[
-      {from:'eng',  to:'plat', label:'Sends request',      tech:'HTTPS'},
-      {from:'plat', to:'store',label:'Checks the count'},
-      {from:'plat', to:'down', label:'Forwards if allowed'},
-    ]
-  },
-  container:{
-    title:'Dynamic · one request (containers)',
-    steps:[
-      {from:'eng', to:'gw',   label:'Sends request',     tech:'HTTPS'},
-      {from:'gw',  to:'lim',  label:'Asks: allow this?', tech:'gRPC'},
-      {from:'lim', to:'redis',label:'INCR + read count', tech:'RESP'},
-      {from:'lim', to:'gw',   label:'allow / deny'},
-      {from:'gw',  to:'back', label:'Forwards if allowed',tech:'HTTP'},
-    ]
-  },
-  component:{
-    title:'Dynamic · one allow check (components)',
-    steps:[
-      {from:'gw',  to:'key',    label:'Allow this call?'},
-      {from:'key', to:'win',    label:'Count for key'},
-      {from:'win', to:'redis',  label:'INCR / EXPIRE', tech:'RESP'},
-      {from:'win', to:'verdict',label:'Current count'},
-      {from:'verdict', to:'gw', label:'allow / 429'},
-    ]
-  }
-};
+/* The standalone Static/Flow scene toggle and the global FLOWS map are GONE
+   (Q11): the dynamic/flow view is now FOLDED INTO the 'trace' beat. A trace
+   beat carries its own `steps`, drawn as numbered hops over its module's scene
+   level. The flow RENDERING (numbered steps over boxes + lane separation) is
+   reused from the trace renderer below, sourced from the beat — not a global. */
 
 /* ============================ CURRICULUM (content) ============================
    THE ONE MOVE: lesson content is DATA, not welded into the render functions.
    A CURRICULUM bundles the shared C4 MODEL (the spatial backdrop, untouched in
-   shape) with a list of modules. Step 1 expresses today's whole rate-limiting
-   lesson as a SINGLE module whose FIXED SLOTS {orient, confront, reveal,
-   practice, own} each point at one beat. A beat = {type, id?, ...payload}; the
-   beat REGISTRY (below) maps a beat type to a renderer. The slots are rendered
-   in engine-enforced order, and the gate is SLOT-OWNED: a confront beat reports
-   "committed", and reveal stays locked until it does (productive-failure gate).
-   To retarget the lesson later: add modules + edit the per-beat payloads here;
-   the renderers stay generic.                                                */
+   shape) with a list of MODULES — each a CONCEPT of rate limiting (windowing,
+   storage, keying, failure, metrics, capstone), NOT a 1:1 C4 box. Every module
+   declares scene:{level, focus:[nodeId], zoomTo?} pointing INTO the one shared
+   MODEL: Orient renders that level with `focus` highlighted and the rest dimmed
+   (fog); Reveal zooms to `zoomTo`.
+
+   A module's FIXED SLOTS are {orient, confront, reveal, practice?, own?} in
+   engine-enforced order (orient/confront/reveal mandatory; practice/own optional
+   and may hold several beats). A beat = {type, id?, ...payload}; the beat REGISTRY
+   maps a type to a generic renderer that reads ONLY its beat object — so the same
+   PLAYER renders any module. The gate is SLOT-OWNED: a confront-legal beat reports
+   "committed", and Reveal stays locked until it does (productive-failure gate).
+
+   Beat -> slot legality (Q7): orient={orient}; confront={quiz,predict,sketch};
+   reveal={reveal}; practice={breakit,trace,fixit}; own={decide,callback}. The
+   'trace' beat folds the dynamic/flow view IN (Q11): its `steps` are drawn as
+   numbered hops over the module's scene — no global FLOWS, no Static/Flow toggle.
+
+   To retarget the lesson: add/edit modules + per-beat payloads here; renderers
+   stay generic.                                                                */
 const CURRICULUM = {
   system:'Rate limiting',
-  MODEL,            // the existing C4 backdrop, shared across modules
+  MODEL,            // the existing C4 backdrop, shared across all six modules
   modules:[
+    /* ---------- 01 · WINDOWING ---------- */
     {
-      id:'rate-limiting',
-      label:'Rate limiting',
-      kick:'Learn it by trying, failing, and deciding — not by reading.',
-      level:'container',
-      desc:'A gatekeeper that stands in front of expensive work and decides what gets through.',
+      id:'windowing',
+      label:'Windowing',
+      kick:'Aspect 01',
+      level:'component',
+      desc:'Fixed vs sliding — how you count time.',
       prereqs:[],
-      scene:{level:'context', focus:['plat'], zoomTo:'container'},
+      scene:{level:'component', focus:['win'], zoomTo:'component'},
       slots:{
-        orient:{ type:'orient', id:'rl-orient',
-          title:'Where does a limiter even sit?',
-          lede:'Before any code: get the shape of the thing. A rate limiter is a gatekeeper that stands in front of expensive work and decides what gets through. Here it is at a glance — <b>zoom in</b> when you’re ready for more detail.',
+        orient:{ type:'orient', id:'win-orient',
+          title:'How do you count a minute?',
+          lede:'Before any code: get the shape. The rule is <b>100 requests per minute, per user</b>. The one box that owns this question is the <b>Window Counter</b> — everything else is dimmed so you can see exactly where “counting time” lives.',
           scene:true,
-          note:'This same diagram deepens as you go: one level of detail at a time, so it never dumps the whole system on you at once.',
+          note:'A “minute” sounds obvious — but a calendar minute and a trailing 60 seconds behave very differently under a burst. That gap is this whole module.',
           cta:'I’ve got the shape', hint:'Next: you try the core problem yourself.' },
 
-        confront:{ type:'quiz', id:'rl-confront',
+        confront:{ type:'quiz', id:'win-confront',
           title:'Your turn first.',
-          lede:'The rule: <b>100 requests per minute, per user</b>. Don’t look for the “right” answer — reach for your <i>first instinct</i>. Picking, even wrongly, is what makes the next chapter land. (Research calls this productive failure; you’ll feel why in a second.)',
-          prompt:'How would you count & enforce it?',
+          lede:'Don’t look for the “right” answer — reach for your <i>first instinct</i>. Picking, even wrongly, is what makes the reveal land. (Research calls this productive failure; you’ll feel why in a second.)',
+          prompt:'How would you count 100/min?',
           choices:{
             fixed:{t:'A counter per user that resets every minute', d:'count++ on each request; wipe it at the top of the minute.'},
             log:{t:'Store a timestamp for every request', d:'keep the last 60s of timestamps and count them.'},
             bucket:{t:'Refill a bucket of tokens over time', d:'each request spends a token; tokens drip back at a steady rate.'}
           },
-          commitPath:k=>`First instinct: <b>${CURRICULUM.modules[0].slots.confront.choices[k].t.toLowerCase()}</b>`,
+          commitPath:k=>`Windowing instinct: <b>${activeModule().slots.confront.choices[k].t.toLowerCase()}</b>`,
           cta:'See how this plays out', committedHint:'Your instinct is logged — now let’s test it.',
           lockNote:'🔒 The reveal stays locked until you commit a guess. That’s the whole point.' },
 
-        reveal:{ type:'reveal', id:'rl-reveal',
+        reveal:{ type:'reveal', id:'win-reveal',
           title:'Your instinct, met with reality.',
           lede:'No answer here is “dumb” — each trades something. Here’s what you reached for, against what production systems converge on.',
           verdicts:{
-            fixed:{big:'The common first answer.', p:'A resetting counter is clean and fast — and it has one famous hole you’ll see in the next chapter.', good:false},
+            fixed:{big:'The common first answer.', p:'A resetting counter is clean and fast — and it has one famous hole you’ll break on purpose in a moment.', good:false},
             log:{big:'Exact, but heavy.', p:'Timestamps give a perfect count, but you store one entry per request. Accurate, memory-hungry at scale.', good:true},
             bucket:{big:'Smooth & burst-friendly.', p:'Token buckets shape traffic nicely and even allow controlled bursts — a great production choice.', good:true}
           },
           realTitle:'Sliding window',
           realBody:'Count the <b>trailing 60s</b> rather than a calendar minute. It keeps the simplicity of a counter while closing the boundary loophole.',
           scene:true,
-          afterScene:'You’re now one level deeper. The limiter has opened up into a gateway, a service, and a shared counter store — and the trail up top still shows exactly where you are. <b>Tap Redis</b> for why it’s Redis, or zoom back out to re-orient anytime.',
+          adr:'a1',
+          afterScene:'The Window Counter, now in full focus inside the limiter. The fog lifts on the one component this module owns.',
           cta:'Now break it', hint:'A decision was just written to your log. →' },
 
-        practice:[{ type:'breakit', id:'rl-practice',
+        practice:[{ type:'breakit', id:'win-practice',
           title:'Break it on purpose.',
           lede:'Theory is cheap; failure teaches. Below is a live minute. Fire a <b>burst of requests right across the minute boundary</b> and watch what the two designs do. The failure <i>is</i> the lesson.',
-          afterSim:'That burst is exactly why the deepest level looks the way it does — a window counter over the trailing 60s. Here’s inside the limiter:',
+          afterSim:'That burst is exactly why the deepest level counts the trailing 60s. The Window Counter is doing the work here:',
           scene:true,
           cta:'Make it yours' }],
 
-        own:[{ type:'decide', id:'rl-own',
+        own:[{ type:'decide', id:'win-own',
           title:'One real call is yours.',
           lede:'You’ve seen the shape, the trade-off, and the failure. Now decide something the textbook won’t decide for you, and say <i>why</i> — that reasoning becomes a record the next engineer inherits.',
-          prompt:'Identify each caller by…',
+          prompt:'Which window do you ship?',
           options:[
-            {v:'user ID', t:'User ID', d:'fair per-person budget — but needs auth before the limiter runs.'},
-            {v:'IP address', t:'IP address', d:'works for anonymous traffic — but an office or NAT shares one budget.'}
+            {v:'sliding window', t:'Sliding window', d:'trailing 60s — no boundary burst, a little more bookkeeping.'},
+            {v:'token bucket', t:'Token bucket', d:'smooth + intentional bursts; more moving parts to tune.'}
           ],
           reasonLabel:'Why? (one line — this is your ADR)',
-          reasonPlaceholder:'e.g. our endpoints sit behind auth already, and per-user is the fairness model users expect…',
+          reasonPlaceholder:'e.g. we want a hard ceiling with no surprise bursts, and the bookkeeping cost is acceptable…',
+          adr:'a1',
           cta:'Record my decision' }]
+      }
+    },
+
+    /* ---------- 02 · COUNTER STORAGE ---------- */
+    {
+      id:'storage',
+      label:'Counter storage',
+      kick:'Aspect 02',
+      level:'container',
+      desc:'Where the tallies live, and why they must be shared.',
+      prereqs:['windowing'],
+      scene:{level:'container', focus:['redis'], zoomTo:'container'},
+      slots:{
+        orient:{ type:'orient', id:'sto-orient',
+          title:'Where does the count live?',
+          lede:'You can count a minute — but <i>where</i> does the tally sit? At the container level the limiter talks to a store. The focus box here is <b>Redis</b>; the gateway and backend fade so you see the one relationship that matters: limiter ↔ store.',
+          scene:true,
+          note:'A counter in local memory is the fastest thing you can write — and the most wrong at scale. Hold that thought.',
+          cta:'I’ve got the shape', hint:'Next: pick where you’d keep the count.' },
+
+        confront:{ type:'quiz', id:'sto-confront',
+          title:'Your turn first.',
+          lede:'The limiter runs on <b>many gateway instances</b> behind a load balancer. Reach for your first instinct — where do the per-user counts live?',
+          prompt:'Where do you keep the counters?',
+          choices:{
+            mem:{t:'In memory, per instance', d:'fastest possible — each box keeps its own map of counts.'},
+            redis:{t:'In a shared store (Redis)', d:'one atomic INCR/EXPIRE every instance reads and writes.'},
+            db:{t:'In the primary database', d:'durable and already there — one more table.'}
+          },
+          commitPath:k=>`Storage instinct: <b>${activeModule().slots.confront.choices[k].t.toLowerCase()}</b>`,
+          cta:'See how this plays out', committedHint:'Logged — now let’s test it against real scale.',
+          lockNote:'🔒 The reveal stays locked until you commit a guess. That’s the whole point.' },
+
+        reveal:{ type:'reveal', id:'sto-reveal',
+          title:'Your instinct, met with reality.',
+          lede:'The trap is fairness across instances: a “100/min” limit must mean 100 total, not 100 per box.',
+          verdicts:{
+            mem:{big:'Fast, but the limit lies.', p:'With N instances the real ceiling becomes N×100 — load balancing silently multiplies the limit. Great latency, wrong number.', good:false},
+            redis:{big:'The production answer.', p:'A shared atomic counter means every instance agrees. One network hop on the hot path buys you a correct global limit.', good:true},
+            db:{big:'Correct, but heavy.', p:'A relational DB is durable but slow and contended for a hot per-request write. Right shape, wrong tool for the hot path.', good:false}
+          },
+          realTitle:'Counters in Redis',
+          realBody:'Keep counts in <b>Redis</b> with atomic INCR/EXPIRE. Shared, fast enough, and survives a restart — a correct <b>global</b> limit.',
+          scene:true,
+          zoomTo:'container',
+          adr:'a2',
+          afterScene:'Redis sits in focus as the shared counter store. <b>Tap it</b> for the full decision record, or zoom out to re-orient.',
+          cta:'Now break it', hint:'A decision was just written to your log. →' },
+
+        practice:[{ type:'trace', id:'sto-trace',
+          title:'Trace one allow-check, step by step.',
+          lede:'The static view shows what connects to what; it can’t show <i>order</i>. Walk a single request through the containers and watch where the count is read and written.',
+          steps:[
+            {from:'eng', to:'gw',   label:'Sends request',      tech:'HTTPS'},
+            {from:'gw',  to:'lim',  label:'Asks: allow this?',  tech:'gRPC'},
+            {from:'lim', to:'redis',label:'INCR + read count',  tech:'RESP'},
+            {from:'lim', to:'gw',   label:'allow / deny'},
+            {from:'gw',  to:'back', label:'Forwards if allowed',tech:'HTTP'}
+          ],
+          cta:'Make it yours' }],
+
+        own:[{ type:'decide', id:'sto-own',
+          title:'One real call is yours.',
+          lede:'The shared store is the correct ceiling — but the hot-path hop costs you. Decide how you soften it, and say why.',
+          prompt:'How do you cut the per-request cost?',
+          options:[
+            {v:'pipeline INCR+EXPIRE', t:'Pipeline INCR + EXPIRE', d:'one round trip instead of two; keeps it exact.'},
+            {v:'local pre-check cache', t:'Local pre-check cache', d:'short-TTL local guess to skip Redis for obvious passes — risks a little slack.'}
+          ],
+          reasonLabel:'Why? (one line — this is your ADR)',
+          reasonPlaceholder:'e.g. correctness over raw latency here, so we pipeline and keep every decision exact…',
+          adr:'a2',
+          cta:'Record my decision' }]
+      }
+    },
+
+    /* ---------- 03 · KEYING STRATEGY ---------- */
+    {
+      id:'keying',
+      label:'Keying strategy',
+      kick:'Aspect 03',
+      level:'component',
+      desc:'By user? IP? route? The blast radius of the choice.',
+      prereqs:['windowing'],
+      scene:{level:'component', focus:['key'], zoomTo:'component'},
+      slots:{
+        orient:{ type:'orient', id:'key-orient',
+          title:'Whose budget does a request spend?',
+          lede:'A count is meaningless until you decide <i>per what</i>. The <b>Key Resolver</b> turns a raw request into the bucket its count belongs to. It’s the only box in focus here — that one decision sets the blast radius of everything downstream.',
+          scene:true,
+          note:'Pick the key wrong and you either punish innocents together or let abusers slip the net. There’s no neutral default.',
+          cta:'I’ve got the shape', hint:'Next: predict what your instinct breaks.' },
+
+        confront:{ type:'quiz', id:'key-confront',
+          title:'You key by IP address. What breaks?',
+          lede:'Don’t look for the answer — commit to one. Generating a wrong guess is what makes the reveal stick. Reveal stays locked until you pick.',
+          prompt:'Pick the failure you’d expect first',
+          choices:{
+            power:{t:'Power users never get limited', d:'a few heavy callers each look like a fresh IP and slip through.'},
+            nat:{t:'A whole office behind one NAT gets throttled', d:'thousands of users collapse to one address — one budget.'},
+            reset:{t:'Counts reset too often to bite', d:'the key churns so fast the limit never accumulates.'}
+          },
+          commitPath:k=>`Keying instinct: <b>${activeModule().slots.confront.choices[k].t.toLowerCase()}</b>`,
+          cta:'See how this plays out', committedHint:'Logged — now let’s see who shares a budget.',
+          lockNote:'🔒 The reveal stays locked until you commit a guess. That’s the whole point.' },
+
+        reveal:{ type:'reveal', id:'key-reveal',
+          title:'Shared NAT puts thousands behind one key.',
+          lede:'Your instinct isn’t wrong about abuse — but it misses who else pays for it.',
+          verdicts:{
+            power:{big:'Real, but secondary.', p:'Per-IP does help with crude abuse — but the bigger surprise is who gets caught in the blast radius.', good:false},
+            nat:{big:'The expensive one.', p:'An office or mobile carrier NATs thousands of users to one address, so one key throttles them all — collective punishment.', good:true},
+            reset:{big:'Not the keying failure.', p:'Reset cadence is a windowing concern, not a keying one — different module, different fix.', good:false}
+          },
+          realTitle:'Key by identity, IP fallback',
+          realBody:'Key the window by <b>resolved user ID</b> where authenticated, falling back to client IP only for anonymous routes. Fair per-user budgets without collective punishment.',
+          scene:true,
+          adr:'a3',
+          afterScene:'The Key Resolver in full focus — the component that decides whose budget a request spends.',
+          cta:'Now break it', hint:'A decision was just written to your log. →' },
+
+        practice:[{ type:'fixit', id:'key-fixit',
+          title:'Fix the broken key.',
+          lede:'Here’s a resolver that keys purely by IP. Read what it does, then pick the change that fixes the NAT blast radius without breaking anonymous traffic.',
+          codeLabel:'key_resolver.go (broken)',
+          code:'func keyFor(r *Request) string {\n  // every caller keyed by source IP\n  return "rl:" + r.SourceIP\n}',
+          prompt:'Pick the fix',
+          options:[
+            {v:'a', t:'Prefer user ID, fall back to IP', d:'use the authenticated identity when present; IP only for anonymous.', correct:true},
+            {v:'b', t:'Hash the IP', d:'privacy-friendly, but a NAT still collapses to one hash — same blast radius.', correct:false},
+            {v:'c', t:'Add the route to the key', d:'finer buckets, but an office still shares each route’s budget.', correct:false}
+          ],
+          okNote:'Right. Identity-first keying gives each real user their own budget; IP only catches the anonymous tail.',
+          badNote:'Close, but that keeps everyone behind a NAT in one bucket. The blast radius is identity, not the address.',
+          cta:'Make it yours' }],
+
+        own:[{ type:'decide', id:'key-own',
+          title:'Anonymous traffic — what do you key by?',
+          lede:'Authenticated routes key by user ID. But anonymous endpoints have no identity. Pick one and own the trade-off — and this is the call a later module (Failure mode) will ask you to defend.',
+          prompt:'Key anonymous traffic by…',
+          options:[
+            {v:'IP + coarse route', t:'IP + coarse route', d:'so one endpoint can’t starve others; accept the NAT cost.'},
+            {v:'IP only', t:'IP only', d:'simplest; one shared budget per address across all routes.'}
+          ],
+          reasonLabel:'Why? (one line — this is your ADR)',
+          reasonPlaceholder:'e.g. anonymous traffic is low-trust, so we scope by route to contain one abusive endpoint…',
+          adr:'a3',
+          cta:'Record my decision' }]
+      }
+    },
+
+    /* ---------- 04 · FAILURE MODE ---------- */
+    {
+      id:'failure',
+      label:'Failure mode',
+      kick:'Aspect 04',
+      level:'container',
+      desc:'What happens when the counter store is down.',
+      prereqs:['storage','keying'],
+      scene:{level:'container', focus:['lim','redis'], zoomTo:'container'},
+      slots:{
+        orient:{ type:'orient', id:'fail-orient',
+          title:'What happens when Redis is gone?',
+          lede:'You put the counters in a shared store. Now that store is a dependency — and dependencies fail. Two boxes are in focus: the <b>Limiter Service</b> and <b>Redis</b>. When the line between them breaks, the limiter must still answer every request.',
+          scene:true,
+          note:'A rate limiter that crashes when its store is down has turned a safety feature into an outage. The failure path is the design.',
+          cta:'I’ve got the shape', hint:'Next: decide what the limiter does blind.' },
+
+        confront:{ type:'quiz', id:'fail-confront',
+          title:'Redis just went dark. Now what?',
+          lede:'The limiter can’t reach the counter store. Commit to your first instinct — what should it do for the next request?',
+          prompt:'On store failure, the limiter should…',
+          choices:{
+            open:{t:'Fail open — allow everything', d:'let traffic through; protect availability over the limit.'},
+            closed:{t:'Fail closed — block everything', d:'deny all; protect the backend at the cost of an outage.'},
+            local:{t:'Fail to local counting', d:'fall back to per-instance memory counts until the store returns.'}
+          },
+          commitPath:k=>`Failure instinct: <b>${activeModule().slots.confront.choices[k].t.toLowerCase()}</b>`,
+          cta:'See how this plays out', committedHint:'Logged — now let’s weigh the blast radius.',
+          lockNote:'🔒 The reveal stays locked until you commit a guess. That’s the whole point.' },
+
+        reveal:{ type:'reveal', id:'fail-reveal',
+          title:'There’s no free answer — only a chosen risk.',
+          lede:'Each branch trades a different outage. The right call depends on what you’re protecting.',
+          verdicts:{
+            open:{big:'Available, but exposed.', p:'Fail open keeps the API up — but a store outage becomes an open door to overload the very backend you were guarding.', good:false},
+            closed:{big:'Safe backend, dead API.', p:'Fail closed protects downstream, but turns a counter blip into a full outage. Rarely what users want.', good:false},
+            local:{big:'The pragmatic middle.', p:'Degrade to local per-instance counts: looser than global (up to N×limit) but never unbounded, and self-heals when Redis returns.', good:true}
+          },
+          realTitle:'Degrade to local counting',
+          realBody:'On store failure, fall back to <b>per-instance local counts</b> with a tighter local cap. You lose the exact global limit but keep a bounded, self-healing safety net — no outage, no open door.',
+          scene:true,
+          adr:'a4',
+          afterScene:'Limiter and Redis both in focus: the relationship between them is the failure surface this module owns.',
+          cta:'Now break it', hint:'A decision was just written to your log. →' },
+
+        practice:[{ type:'breakit', id:'fail-practice',
+          title:'Pull the plug on the store.',
+          lede:'Same live minute — but now imagine the shared counter is unreachable. Fire a burst and reason about which fallback keeps you bounded. The failure <i>is</i> the lesson.',
+          afterSim:'Local fallback keeps you bounded at N×cap instead of unbounded — looser, but never an open door. That’s the limiter↔store relationship under stress:',
+          scene:true,
+          cta:'Make it yours' }],
+
+        own:[{ type:'decide', id:'fail-own',
+          title:'Pick the failure you can live with.',
+          lede:'Your keying choice from earlier still stands — now defend it under partition. Decide the fallback and say why; this becomes the record an on-call engineer reads at 3am.',
+          prompt:'When the store is unreachable, you…',
+          options:[
+            {v:'fail to local counting', t:'Fail to local counting', d:'bounded N×cap, self-heals — looser limit, no outage.'},
+            {v:'fail open with alarms', t:'Fail open + page on-call', d:'keep the API up, accept the exposure, get humans on it fast.'}
+          ],
+          reasonLabel:'Why? (one line — this is your ADR)',
+          reasonPlaceholder:'e.g. our backend can absorb a brief N×cap, so we degrade locally rather than risk an outage…',
+          adr:'a4',
+          cta:'Record my decision' }]
+      }
+    },
+
+    /* ---------- 05 · OBSERVABILITY ---------- */
+    {
+      id:'metrics',
+      label:'Observability',
+      kick:'Aspect 05',
+      level:'component',
+      desc:'Knowing you are limiting, and to whom.',
+      prereqs:['keying'],
+      scene:{level:'component', focus:['verdict'], zoomTo:'component'},
+      slots:{
+        orient:{ type:'orient', id:'met-orient',
+          title:'A 429 is a decision. Can you see it?',
+          lede:'Every allow/deny is a verdict — and a silent limiter is indistinguishable from a broken one. The <b>Verdict</b> component is in focus: it’s where each decision is made, and where it should be <i>counted</i>.',
+          scene:true,
+          note:'If you can’t see who’s being limited and why, your first signal is an angry customer — not a dashboard.',
+          cta:'I’ve got the shape', hint:'Next: pick what you’d emit.' },
+
+        confront:{ type:'quiz', id:'met-confront',
+          title:'What do you emit on every verdict?',
+          lede:'You need to answer “are we limiting, and to whom?” without logging every request. Commit to your first instinct.',
+          prompt:'Pick the signal you’d add first',
+          choices:{
+            logall:{t:'Log every request + verdict', d:'full fidelity — one log line per call.'},
+            counter:{t:'A counter of allow vs 429, by route', d:'cheap aggregate metric, scraped over time.'},
+            none:{t:'Nothing extra — 429s are enough', d:'clients see the status code; let them complain.'}
+          },
+          commitPath:k=>`Observability instinct: <b>${activeModule().slots.confront.choices[k].t.toLowerCase()}</b>`,
+          cta:'See how this plays out', committedHint:'Logged — now let’s see what scales.',
+          lockNote:'🔒 The reveal stays locked until you commit a guess. That’s the whole point.' },
+
+        reveal:{ type:'reveal', id:'met-reveal',
+          title:'Counters first, logs for the tail.',
+          lede:'The question is signal-per-cost: you want to spot a limiting spike instantly, then drill in only when needed.',
+          verdicts:{
+            logall:{big:'Total recall, total cost.', p:'Per-request logs answer everything — and overwhelm storage and the hot path at scale. Reserve them for sampled drill-down.', good:false},
+            counter:{big:'The right default.', p:'A labeled allow/deny counter per route is cheap, scrape-friendly, and alertable. You see the spike in seconds, not after the complaint.', good:true},
+            none:{big:'Flying blind.', p:'Returning a 429 without emitting it means you only learn you’re limiting when someone yells. Unacceptable for a safety control.', good:false}
+          },
+          realTitle:'Emit a labeled verdict counter',
+          realBody:'Increment an <b>allow/deny counter labeled by route and reason</b> on every verdict. Add <i>sampled</i> structured logs for the denied tail — cheap visibility, drill-down when you need it.',
+          scene:true,
+          adr:'a5',
+          afterScene:'The Verdict component in focus — the natural seam to instrument, since every decision passes through it.',
+          cta:'Now break it', hint:'A decision was just written to your log. →' },
+
+        practice:[{ type:'trace', id:'met-trace',
+          title:'Trace where the metric is emitted.',
+          lede:'Walk one allow-check and watch where the verdict — and its counter increment — happens. Instrument at the seam every request crosses.',
+          steps:[
+            {from:'gw',  to:'key',    label:'Allow this call?'},
+            {from:'key', to:'win',    label:'Count for key'},
+            {from:'win', to:'redis',  label:'INCR / EXPIRE', tech:'RESP'},
+            {from:'win', to:'verdict',label:'Current count'},
+            {from:'verdict', to:'gw', label:'allow / 429 (+metric)'}
+          ],
+          cta:'Make it yours' }],
+
+        own:[{ type:'decide', id:'met-own',
+          title:'One real call is yours.',
+          lede:'Counters are the default — but the denied tail is where the interesting questions live. Decide how much of it you keep, and say why.',
+          prompt:'For denied requests, you…',
+          options:[
+            {v:'sample structured logs', t:'Sample structured logs', d:'keep a fraction of 429s with key + route for drill-down.'},
+            {v:'counters only', t:'Counters only', d:'no per-request detail; cheapest, but blind on the “who”.'}
+          ],
+          reasonLabel:'Why? (one line — this is your ADR)',
+          reasonPlaceholder:'e.g. we sample 1% of denials so we can answer “who got limited” without log bloat…',
+          adr:'a5',
+          cta:'Record my decision' }]
+      }
+    },
+
+    /* ---------- 06 · CAPSTONE ---------- */
+    {
+      id:'capstone',
+      label:'Design the limiter',
+      kick:'Capstone',
+      level:'container',
+      capstone:true,
+      desc:'Put it together — make every call yourself.',
+      prereqs:['failure','metrics'],
+      scene:{level:'container', focus:['lim','redis','gw'], zoomTo:'container'},
+      slots:{
+        orient:{ type:'orient', id:'cap-orient',
+          title:'Now design the whole limiter.',
+          lede:'You’ve mastered each aspect in isolation. The capstone asks you to hold them all at once: windowing, storage, keying, failure, and observability — for one real service. The full container view is in focus; this is the system you now own.',
+          scene:true,
+          note:'No single right answer here. The capstone is about <i>coherence</i> — do your five choices hang together as one design?',
+          cta:'I’m ready to commit', hint:'Next: state the headline design call.' },
+
+        confront:{ type:'quiz', id:'cap-confront',
+          title:'One sentence: what kind of limiter?',
+          lede:'Before the details — commit to the shape of your design. This frames every later choice.',
+          prompt:'Your limiter is, at its core…',
+          choices:{
+            global:{t:'Globally-correct, store-backed', d:'shared Redis counters; exact limit, accept the hop.'},
+            local:{t:'Latency-first, locally-counted', d:'per-instance counts; fast, looser ceiling.'},
+            hybrid:{t:'Global with local fallback', d:'store-backed normally, degrade to local on failure.'}
+          },
+          commitPath:k=>`Capstone shape: <b>${activeModule().slots.confront.choices[k].t.toLowerCase()}</b>`,
+          cta:'See how this plays out', committedHint:'Logged — now let’s assemble the parts.',
+          lockNote:'🔒 The reveal stays locked until you commit a guess. That’s the whole point.' },
+
+        reveal:{ type:'reveal', id:'cap-reveal',
+          title:'A coherent limiter, end to end.',
+          lede:'Your five modules compose into one design. Here’s how the choices fit — and where the tension is.',
+          verdicts:{
+            global:{big:'Exact, hop-bound.', p:'Globally-correct is the cleanest story — until the store blinks. You’ll want a failure plan, which is exactly the hybrid below.', good:true},
+            local:{big:'Fast, but loose.', p:'Latency-first is tempting, but a per-instance ceiling means your “100/min” is really N×100. Fine only if that’s genuinely OK.', good:false},
+            hybrid:{big:'The production shape.', p:'Global normally, local fallback under partition. Exact when healthy, bounded when not — the design your Failure module already argued for.', good:true}
+          },
+          realTitle:'Sliding window · Redis · identity-keyed · local fallback · counter metrics',
+          realBody:'The coherent default: a <b>sliding window</b> over <b>shared Redis counters</b>, keyed by <b>identity</b>, degrading to <b>local counting</b> on failure, with <b>labeled verdict counters</b> for visibility. Five decisions, one limiter.',
+          scene:true,
+          afterScene:'The full container — gateway, limiter, store — back in focus. Every box here is now a decision you’ve made.',
+          cta:'Now make every call', hint:'This is where your five ADRs come home. →' },
+
+        own:[
+          { type:'decide', id:'cap-own-window',
+            title:'Call 1 — the window.',
+            lede:'Capstone is all Own: each call is yours, and together they must cohere. State the window and why.',
+            prompt:'Window strategy',
+            options:[
+              {v:'sliding window', t:'Sliding window', d:'hard ceiling, no boundary burst.'},
+              {v:'token bucket', t:'Token bucket', d:'smooth with intentional bursts.'}
+            ],
+            reasonLabel:'Why? (one line)',
+            reasonPlaceholder:'e.g. predictable hard ceiling matters more than burst-friendliness here…',
+            adr:'a1',
+            cta:'Record this call' },
+          { type:'decide', id:'cap-own-failure',
+            title:'Call 2 — the failure mode.',
+            lede:'The store will fail eventually. What does your limiter do blind — and does it match the window you just chose?',
+            prompt:'On store failure',
+            options:[
+              {v:'fail to local counting', t:'Fail to local counting', d:'bounded N×cap, self-heals.'},
+              {v:'fail open with alarms', t:'Fail open + page', d:'stay up, accept exposure, get humans on it.'}
+            ],
+            reasonLabel:'Why? (one line)',
+            reasonPlaceholder:'e.g. a brief N×cap is survivable for our backend, so we never risk a full outage…',
+            adr:'a4',
+            cta:'Seal the design' }
+        ]
       }
     }
   ]
 };
 
-/* The active module for Step 1 (single-screen player; map comes later). */
-const MODULE = CURRICULUM.modules[0];
-/* Engine-enforced slot order. Each chapter index maps to one slot/beat. */
+/* ============================ PLAYER ENGINE ============================
+   A single CURRICULUM is played by ONE generic player. The active module is an
+   INDEX into CURRICULUM.modules; a temporary dev <select> (Step 2) lets the
+   verifier switch modules until the real map ships in Step 3. */
+let activeIndex = 0;
+function activeModule(){ return CURRICULUM.modules[activeIndex]; }
+
+/* A module's slot order is engine-enforced, but practice/own are optional and
+   may be absent — so the player derives the present slots PER MODULE. Each
+   chapter index maps to one present slot; beats inside a slot array (practice/
+   own) are flattened so multi-beat slots render as consecutive chapters that
+   stay grouped under the slot label. */
 const SLOT_ORDER = ['orient','confront','reveal','practice','own'];
-function beatAt(i){ const k=SLOT_ORDER[i]; const b=MODULE.slots[k]; return Array.isArray(b)?b[0]:b; }
+const SLOT_META = {
+  orient:{k:'Orient',   sub:'Map the territory'},
+  confront:{k:'Confront', sub:'Try it before you’re told'},
+  reveal:{k:'Reveal',   sub:'See the why'},
+  practice:{k:'Practice', sub:'Break it on purpose'},
+  own:{k:'Own it',     sub:'Make the call'}
+};
+/* Flat list of {slot, beat} for the active module, in enforced order. */
+function moduleBeats(){
+  const m=activeModule(), out=[];
+  SLOT_ORDER.forEach(slot=>{
+    const v=m.slots[slot]; if(!v) return;
+    (Array.isArray(v)?v:[v]).forEach(beat=>out.push({slot, beat}));
+  });
+  return out;
+}
+function beatAt(i){ const b=moduleBeats()[i]; return b?b.beat:null; }
+function slotAt(i){ const b=moduleBeats()[i]; return b?b.slot:null; }
 
 const ZORDER = ['context','container','component'];
 const ZNAME  = {context:'System Context', container:'Container', component:'Component'};
-const CHAP_ZOOM={0:'context',2:'container',3:'component'};
+/* Per-chapter zoom is derived from the module's scene (not a hardcoded map):
+   orient + confront sit at scene.level; reveal and everything after sit at
+   scene.zoomTo (defaults to scene.level). */
+function chapZoom(i){
+  const m=activeModule(), sc=m.scene;
+  return i>=2 ? (sc.zoomTo||sc.level) : sc.level;
+}
 
 const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 // C4 "person" marker: a small head+shoulders badge in the node's top-left,
@@ -569,9 +978,16 @@ function typeLabel(n){
   if(n.kind==='component') return n.tech?`Component: ${n.tech}`:'Component';
   return '';
 }
-function nodeSVG(n){
+/* FOCUS-DIMMING (Q10): when the active module's scene declares focus ids, the
+   in-scope boxes that AREN'T focus render dimmed/greyed (fog) and focus boxes
+   get a highlight ring. External actors are never dimmed (they're context, not
+   the subject). focus is a Set; empty/absent = everything reads normally. */
+function nodeSVG(n, focus){
+  const isFocus = focus && focus.size && focus.has(n.id);
+  const isDim   = focus && focus.size && !focus.has(n.id) && n.scope!=='ext';
   const cls=['c4node', n.scope==='ext'?'ext':'', n.kind==='person'?'person':'',
-             n.store?'store':'', (n.into||n.adr)?'hot':''].filter(Boolean).join(' ');
+             n.store?'store':'', (n.into||n.adr)?'hot':'',
+             isFocus?'focus':'', isDim?'dim':''].filter(Boolean).join(' ');
   const handler = n.into? `onclick="zoomTo('${n.into}')"` : (n.adr? `onclick="flashAdr('${n.adr}')"`:'');
   const hint = n.into? `<div class="c4hint">${esc(n.hint||'click to zoom in ↘')}</div>`
              : (n.adr? `<div class="c4hint">why? ↘</div>`:'');
@@ -640,8 +1056,9 @@ function edgeLabel(e,byId){
     ${lbl?`<text class="edgelbl" x="${mx}" y="${my+(tech?-2:5)}" text-anchor="middle">${lbl}</text>`:''}
     ${tech?`<text class="edgetech" x="${mx}" y="${my+15}" text-anchor="middle">${tech}</text>`:''}`;
 }
-function sceneSVG(zid){
+function sceneSVG(zid, focusIds){
   const m=MODEL[zid];
+  const focus=new Set(focusIds||[]);
   const byId={}; m.nodes.forEach(n=>byId[n.id]=n);
   // boundary box wraps the in-scope nodes (extra top room for its [type] line)
   let bound='';
@@ -657,10 +1074,16 @@ function sceneSVG(zid){
   return `<svg viewBox="0 0 ${FRAME_W} ${FRAME_H}">${C4DEFS}
     ${bound}
     ${m.edges.map(e=>edgeLine(e,byId)).join('')}
-    ${m.nodes.map(nodeSVG).join('')}
+    ${m.nodes.map(n=>nodeSVG(n,focus)).join('')}
     ${m.nodes.filter(n=>n.kind==='person').map(personBadge).join('')}
     ${m.edges.map(e=>edgeLabel(e,byId)).join('')}
   </svg>`;
+}
+/* The active module's focus set FOR a given level — only applies focus when that
+   level matches the module's scene level (focus ids are level-specific). */
+function focusFor(zid){
+  const sc=activeModule().scene;
+  return (sc && (zid===sc.level || zid===(sc.zoomTo||sc.level))) ? (sc.focus||[]) : [];
 }
 const C4DEFS=`<defs><marker id="c4ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1.5L8 5L2 8.5" fill="none" stroke="var(--ink-faint)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="fah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M2 1.5L8 5L2 8.5" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>`;
 
@@ -705,11 +1128,14 @@ function flowOffsets(steps){
   });
   return off;
 }
-function hasFlow(zid){ return !!(FLOWS[zid] && FLOWS[zid].steps.length); }
-// SVG for the flow at a given level (reuses that level's node layout)
-function flowSVG(zid){
-  const m=MODEL[zid], f=FLOWS[zid];
-  if(!f){ return `<svg viewBox="0 0 ${FRAME_W} ${FRAME_H}">${C4DEFS}</svg>`; }
+/* ---- TRACE beat (folds the dynamic/flow view in, Q11) ----
+   The trace beat carries its own `steps` and renders them as numbered hops over
+   ITS module's scene level (a self-contained flow block; no Static/Flow toggle).
+   flowSVG/flowStepList take an explicit (level, steps) pair sourced from the
+   beat, reusing the numbered-steps-over-boxes + lane-separation rendering. */
+function flowSVG(zid, steps){
+  const m=MODEL[zid];
+  if(!steps||!steps.length){ return `<svg viewBox="0 0 ${FRAME_W} ${FRAME_H}">${C4DEFS}</svg>`; }
   const byId={}; m.nodes.forEach(n=>byId[n.id]=n);
   const nodes=m.nodes.map(n=>{
     const cls=['c4node', n.scope==='ext'?'ext':'', n.kind==='person'?'person':'', n.store?'store':''].filter(Boolean).join(' ');
@@ -718,8 +1144,8 @@ function flowSVG(zid){
         <div class="${cls}${n.kind==='person'?' haspers':''}"><div class="c4name">${esc(n.name)}</div><div class="c4type">[${esc(typeLabel(n))}]</div>${n.desc?`<div class="c4desc">${esc(n.desc)}</div>`:''}</div>
       </div></foreignObject>`;
   }).join('');
-  const offs=flowOffsets(f.steps);
-  const arcs=f.steps.map((s,i)=>{
+  const offs=flowOffsets(steps);
+  const arcs=steps.map((s,i)=>{
     const a=byId[s.from], b=byId[s.to]; if(!a||!b) return '';
     const {p1,p2,mx,my}=flowEdgePath(a,b,offs[i]);
     return `<g data-fstep="${i}">
@@ -734,69 +1160,47 @@ function flowSVG(zid){
     ${m.nodes.filter(n=>n.kind==='person').map(personBadge).join('')}
   </svg>`;
 }
-function flowStepList(zid){
-  const m=MODEL[zid], f=FLOWS[zid]; if(!f) return '';
+function flowStepList(zid, steps){
+  const m=MODEL[zid]; if(!steps||!steps.length) return '';
   const byId={}; m.nodes.forEach(n=>byId[n.id]=n);
-  return `<ol class="flowsteps" id="flowsteps">${f.steps.map((s,i)=>`
+  return `<ol class="flowsteps" id="flowsteps">${steps.map((s,i)=>`
     <li data-step="${i}" onclick="flowGo(${i})">
       <span class="sn">${i+1}</span>
       <span><b>${esc(byId[s.from].name)} → ${esc(byId[s.to].name)}</b> · ${esc(s.label)}
       ${s.tech?` <span class="tech">[${esc(s.tech)}]</span>`:''}</span>
     </li>`).join('')}</ol>`;
 }
+/* Static, zoomable C4 block. Focus ids dim the fog and ring the subject (Q10).
+   The Static/Flow toggle is gone; the dynamic view lives in the trace beat. */
 function c4Block(){
   return `<div class="diagram">
     <div class="c4topbar">
       <div class="c4title" id="c4title">${c4Title(S.zoom)}</div>
-      <div class="viewtoggle" id="viewtoggle">
-        <button class="${S.view==='static'?'on':''}" onclick="setView('static')">Static</button>
-        <button class="${S.view==='flow'?'on':''}" onclick="setView('flow')">Flow</button>
-      </div>
     </div>
     <div class="crumbs" id="crumbs"></div>
     <div class="scene-wrap" id="scenewrap">
-      <div class="scene" data-z="context">${sceneSVG('context')}</div>
-      <div class="scene" data-z="container">${sceneSVG('container')}</div>
-      <div class="scene" data-z="component">${sceneSVG('component')}</div>
-      <div class="scene" data-z="flow"></div>
+      <div class="scene" data-z="context">${sceneSVG('context', focusFor('context'))}</div>
+      <div class="scene" data-z="container">${sceneSVG('container', focusFor('container'))}</div>
+      <div class="scene" data-z="component">${sceneSVG('component', focusFor('component'))}</div>
     </div>
     <div class="legend" id="c4legend">${c4Legend(S.zoom)}</div>
-    <div id="flowpanel" style="display:none">
-      <div class="flowctl">
-        <button id="flowprev" onclick="flowStep(-1)">‹ Back</button>
-        <button id="flownext" onclick="flowStep(1)">Next ›</button>
-        <button id="flowplay" onclick="flowPlay()">▶ Play</button>
-        <span class="step-of" id="flowof"></span>
-      </div>
-      <div id="flowlistwrap"></div>
-    </div>
   </div>`;
 }
 
 function paintCrumbs(){
   const cr=document.getElementById('crumbs'); if(!cr) return;
-  const flow=S.view==='flow';
   const idx=ZORDER.indexOf(S.zoom);
   let html='';
   ZORDER.forEach((z,i)=>{
     if(i>0) html+=`<span class="sep">›</span>`;
-    if(flow){
-      // in flow mode the breadcrumb switches which level's sequence is shown;
-      // levels without a defined flow are disabled.
-      const ok=hasFlow(z);
-      html+=`<button class="${z===S.zoom?'on':''}" ${ok?`onclick="flowToLevel('${z}')"`:'disabled'}>${ZNAME[z]}</button>`;
-    }else{
-      const reachable=i<=ZORDER.indexOf(S.zoomReached);
-      html+=`<button class="${z===S.zoom?'on':''}" ${reachable&&!zooming?`onclick="zoomTo('${z}')"`:'disabled'}>${ZNAME[z]}</button>`;
-    }
+    const reachable=i<=ZORDER.indexOf(S.zoomReached);
+    html+=`<button class="${z===S.zoom?'on':''}" ${reachable&&!zooming?`onclick="zoomTo('${z}')"`:'disabled'}>${ZNAME[z]}</button>`;
   });
   html+=`<span class="spacer"></span>`;
-  if(!flow && idx>0) html+=`<button class="zoutbtn" ${zooming?'disabled':''} onclick="zoomTo('${ZORDER[idx-1]}')">↖ zoom out</button>`;
+  if(idx>0) html+=`<button class="zoutbtn" ${zooming?'disabled':''} onclick="zoomTo('${ZORDER[idx-1]}')">↖ zoom out</button>`;
   cr.innerHTML=html;
-  if(!flow){
-    const t=document.getElementById('c4title'); if(t) t.textContent=c4Title(S.zoom);
-    const lg=document.getElementById('c4legend'); if(lg) lg.innerHTML=c4Legend(S.zoom);
-  }
+  const t=document.getElementById('c4title'); if(t) t.textContent=c4Title(S.zoom);
+  const lg=document.getElementById('c4legend'); if(lg) lg.innerHTML=c4Legend(S.zoom);
 }
 
 /* A zoom anchor = the box (in the OUTER level) that the INNER level lives inside.
@@ -887,7 +1291,7 @@ function fitBoundaries(){
 function initC4(){
   if(!document.getElementById('scenewrap')) return;
   fitNodes(); fitBoundaries();
-  if(S.view==='flow'){ applyView(); } else { settleActive(S.zoom); paintCrumbs(); }
+  settleActive(S.zoom); paintCrumbs();
   // Web fonts load async; the first fit measures with the fallback font (shorter),
   // so text re-wraps taller once the real font arrives and clips again. Re-fit then.
   if(document.fonts && document.fonts.ready){
@@ -895,51 +1299,31 @@ function initC4(){
   }
 }
 
-/* ---- view toggle: Static (zoomable C4) vs Flow (dynamic numbered sequence) ----
-   Flow follows the breadcrumb: there is one flow PER level. `flowLevel` is the
-   level currently shown in flow mode (defaults to the static zoom level, or the
-   nearest level that defines a flow). */
+/* ---- TRACE beat playback (Q11): the dynamic/flow view, now sourced from the
+   active trace beat's `steps` over its module scene level, rendered inline in
+   the trace pane (#tracewrap). No global flow level, no Static/Flow toggle. */
 let flowTimer=null;
-function nearestFlowLevel(zid){
-  if(hasFlow(zid)) return zid;
-  return ZORDER.find(hasFlow) || 'container';
-}
-function setView(v){
-  if(S.view===v) return;
-  S.view=v;
-  stopFlowPlay();
-  if(v==='flow'){ S.flowStep=0; S.flowLevel=nearestFlowLevel(S.zoom); }
-  applyView();
-}
-function flowToLevel(zid){
-  if(!hasFlow(zid) || S.flowLevel===zid) return;
-  stopFlowPlay(); S.flowLevel=zid; S.flowStep=0; S.zoom=zid;
-  if(ZORDER.indexOf(zid)>ZORDER.indexOf(S.zoomReached)) S.zoomReached=zid;
-  mountFlow(); paintCrumbs();
-  const t=document.getElementById('c4title'); if(t) t.textContent=FLOWS[zid].title;
-}
-// (re)build the flow scene + step list for the current flowLevel
-function mountFlow(){
-  const lvl=S.flowLevel||'container';
-  const scene=sceneEl('flow'); if(scene) scene.innerHTML=flowSVG(lvl);
-  const lw=document.getElementById('flowlistwrap'); if(lw) lw.innerHTML=flowStepList(lvl);
-  fitNodes();
+function curTrace(){ return S._traceBeat||null; }
+function traceLevel(){ const sc=activeModule().scene; return sc.zoomTo||sc.level; }
+function mountTrace(beat){
+  S._traceBeat=beat; S.flowStep=0;
+  const lvl=traceLevel();
+  const wrap=document.getElementById('tracewrap'); if(wrap) wrap.innerHTML=flowSVG(lvl, beat.steps);
+  const lw=document.getElementById('flowlistwrap'); if(lw) lw.innerHTML=flowStepList(lvl, beat.steps);
+  fitTraceNodes();
   renderFlowStep();
+  if(document.fonts && document.fonts.ready){ document.fonts.ready.then(()=>fitTraceNodes()); }
 }
-function applyView(){
-  const flow=S.view==='flow';
-  document.querySelectorAll('#viewtoggle button').forEach(b=>b.classList.toggle('on', b.textContent.toLowerCase().startsWith(flow?'flow':'static')));
-  if(flow){ if(!S.flowLevel) S.flowLevel=nearestFlowLevel(S.zoom); S.zoom=S.flowLevel; mountFlow(); settleActive('flow'); }
-  else { settleActive(S.zoom); }
-  const lg=document.getElementById('c4legend'); if(lg) lg.style.display=flow?'none':'';
-  const fp=document.getElementById('flowpanel'); if(fp) fp.style.display=flow?'block':'none';
-  const t=document.getElementById('c4title'); if(t) t.textContent=flow?(FLOWS[S.flowLevel].title):c4Title(S.zoom);
-  paintCrumbs();
+function fitTraceNodes(){
+  document.querySelectorAll('#tracewrap foreignObject.flowfo').forEach(fo=>{
+    const inner=fo.firstElementChild; if(!inner) return;
+    const h=inner.offsetHeight;
+    if(h>parseFloat(fo.getAttribute('height'))) fo.setAttribute('height', h+4);
+  });
 }
-function curFlow(){ return FLOWS[S.flowLevel||'container']; }
 function renderFlowStep(){
-  const scene=sceneEl('flow'); if(!scene) return;
-  const f=curFlow(); if(!f) return;
+  const scene=document.querySelector('#tracewrap svg'); if(!scene) return;
+  const f=curTrace(); if(!f) return;
   scene.querySelectorAll('g[data-fstep]').forEach(g=>{
     const i=+g.dataset.fstep;
     const edge=g.querySelector('.flowedge'), bg=g.querySelector('.flownum-bg');
@@ -958,11 +1342,11 @@ function renderFlowStep(){
   const pv=document.getElementById('flowprev'), nx=document.getElementById('flownext');
   if(pv) pv.disabled=S.flowStep===0; if(nx) nx.disabled=S.flowStep===f.steps.length-1;
 }
-function flowStep(d){ const f=curFlow(); const n=S.flowStep+d; if(n<0||n>=f.steps.length) return; S.flowStep=n; renderFlowStep(); }
+function flowStep(d){ const f=curTrace(); if(!f) return; const n=S.flowStep+d; if(n<0||n>=f.steps.length) return; S.flowStep=n; renderFlowStep(); }
 function flowGo(i){ stopFlowPlay(); S.flowStep=i; renderFlowStep(); }
 function stopFlowPlay(){ if(flowTimer){ clearInterval(flowTimer); flowTimer=null; const b=document.getElementById('flowplay'); if(b) b.textContent='▶ Play'; } }
 function flowPlay(){
-  const f=curFlow(); const b=document.getElementById('flowplay');
+  const f=curTrace(); if(!f) return; const b=document.getElementById('flowplay');
   if(flowTimer){ stopFlowPlay(); return; }
   if(S.flowStep>=f.steps.length-1) S.flowStep=0;
   renderFlowStep(); b.textContent='❚❚ Pause';
@@ -1002,13 +1386,14 @@ function zoomStep(fromZ,toZ,done){
   setTimeout(()=>{ settleActive(toZ); done&&done(); }, 640);
 }
 
-function zoomADR(z){ if(z==='container') addAdr('a2'); if(z==='component'){ addAdr('a2'); addAdr('a1'); } }
+/* ADRs are no longer minted by zooming — they come from the active module's
+   reveal/decide beats (each carries an authored `adr` key). Zoom is pure
+   navigation now; the box's own `adr` (clicked) still flashes its record. */
 
 /* Walks one hop at a time, so even a 2-level jump reads as a continuous flight. */
 function zoomTo(z){
   if(zooming || !document.getElementById('scenewrap')) return;
   if(ZORDER.indexOf(z)>ZORDER.indexOf(S.zoomReached)) S.zoomReached=z;
-  zoomADR(z);
   let i=ZORDER.indexOf(S.zoom); const j=ZORDER.indexOf(z);
   if(i===j){ paintCrumbs(); return; }
   const dir=j>i?1:-1, hops=[];
@@ -1034,21 +1419,36 @@ const ADR_LIB = {
     rows:[['Context','The Key Resolver must decide whose budget a request spends — per user, per IP, or per route.'],
           ['Decision','Key the window by <b>resolved user ID</b> where authenticated, falling back to client IP for anonymous routes.'],
           ['Alternatives','IP only — simple but unfair behind NAT/office gateways. Route only — coarse, lets one user starve others.'],
-          ['Consequence','Fair per-user budgets; needs identity resolved before the limiter runs on authed routes.']]}
+          ['Consequence','Fair per-user budgets; needs identity resolved before the limiter runs on authed routes.']]},
+  a4:{id:'ADR-0004', title:'Degrade to local counting on store failure', pill:'accepted',
+    rows:[['Context','The shared counter store is a dependency on the hot path. When it is unreachable, the limiter must still answer every request.'],
+          ['Decision','Fail to <b>per-instance local counts</b> with a tighter local cap until the store returns.'],
+          ['Alternatives','Fail open — keeps the API up but exposes the backend. Fail closed — protects downstream but turns a blip into an outage.'],
+          ['Consequence','Bounded at N×cap (not unbounded), self-heals when the store recovers; loses the exact global limit while degraded.']]},
+  a5:{id:'ADR-0005', title:'Emit a labeled verdict counter', pill:'accepted',
+    rows:[['Context','A silent limiter is indistinguishable from a broken one; you need to see who is being limited without logging every request.'],
+          ['Decision','Increment an <b>allow/deny counter labeled by route and reason</b> on every verdict; sample structured logs for the denied tail.'],
+          ['Alternatives','Log every request — total recall, overwhelming at scale. Nothing — you learn you are limiting only when a customer complains.'],
+          ['Consequence','Cheap, alertable visibility in seconds; drill-down detail only where it pays.']]}
 };
 function addAdr(key){
-  if(S.adrs.find(a=>a.key===key)) return;
+  if(!ADR_LIB[key] || S.adrs.find(a=>a.key===key)) return;
   S.adrs.push({key, ...ADR_LIB[key]});
   renderMargin();
 }
-function addMyAdr(choice, reason){
-  const k='mine';
-  const obj={key:k, id:'ADR-0003', title:`Key the limit by ${choice}`, pill:'your call', mine:true,
-    rows:[['Context','Same user behind one IP, or many users behind a shared IP (office, NAT) — the key decides who shares a budget.'],
-          ['Decision',`Identify each caller by <b>${choice}</b>.`],
-          ['Your reason', reason && reason.trim() ? reason.trim() : '—']]};
-  const ex=S.adrs.find(a=>a.key===k);
+/* Record the learner's own decision, keyed by the decide beat's STABLE authored
+   id (Q6) so it persists and can be referenced later. base = the ADR_LIB entry
+   this call refines (for the headline + framing). */
+function addMyAdr(beatId, base, choice, reason){
+  const ref=ADR_LIB[base]||{};
+  const obj={key:'mine:'+beatId, id:(ref.id||'ADR-XXXX')+' ·  you', title:`Your call: ${choice}`, pill:'your call', mine:true,
+    rows:[['Context', (ref.rows&&ref.rows[0]&&ref.rows[0][1]) || 'A real decision the textbook leaves to you.'],
+          ['Decision',`You chose <b>${esc(choice)}</b>.`],
+          ['Your reason', reason && reason.trim() ? esc(reason.trim()) : '—']]};
+  S.decisions[beatId]={choice, reason:reason||'', adr:base};
+  const ex=S.adrs.find(a=>a.key===obj.key);
   if(ex) Object.assign(ex,obj); else S.adrs.push(obj);
+  persist();
   renderMargin();
 }
 function flashAdr(key){
@@ -1077,60 +1477,84 @@ function renderMargin(){
   const dm=document.getElementById('decCountM'); if(dm) dm.textContent=n;
 }
 
-/* ============================ CHAPTER CONTENT ============================ */
+/* ============================ CHAPTER CONTENT ============================
+   "Chapters" are now the active module's flattened beats (one per chapter). The
+   rail labels group by slot; consecutive beats in the same slot share a label.  */
 function render(){
+  const beats=moduleBeats();
+  const cur=beats[S.chapter]||beats[0];
   // rail
   const cl=document.getElementById('chaplist');
-  cl.innerHTML = CHAPTERS.map((c,i)=>{
-    let st = i===S.chapter?'active' : i<=S.maxUnlocked? (i<S.chapter?'done':'idle') : 'locked';
-    if(i<S.maxUnlocked && i!==S.chapter) st='done';
-    if(i<=S.maxUnlocked && i>S.chapter) st='idle';
-    if(i===S.chapter) st='active';
+  cl.innerHTML = beats.map((b,i)=>{
+    const meta=SLOT_META[b.slot];
+    const st = i===S.chapter?'active' : (i<=S.maxUnlocked? (i<S.chapter?'done':'idle') : 'locked');
     const on = (i<=S.maxUnlocked && i!==S.chapter)?1:0;
+    const done = i<S.chapter || (i<S.maxUnlocked&&i!==S.chapter);
     return `<div class="chap" data-state="${st}" data-on="${on}" ${on?`onclick="go(${i})"`:''}>
-      <div class="dot">${i<S.chapter || (i<S.maxUnlocked&&i!==S.chapter)?'✓':String(i+1).padStart(2,'0')}</div>
-      <div class="ct"><div class="ck">${c.sub}</div><div class="cn">${c.k}</div></div>
+      <div class="dot">${done?'✓':String(i+1).padStart(2,'0')}</div>
+      <div class="ct"><div class="ck">${meta.sub}</div><div class="cn">${meta.k}</div></div>
     </div>`;
   }).join('');
-  // header
-  document.getElementById('kicker').textContent = `Chapter ${String(S.chapter+1).padStart(2,'0')} · ${CHAPTERS[S.chapter].k}`;
-  document.getElementById('barfill').style.width = ((S.chapter)/(CHAPTERS.length-1)*100)+'%';
-  // stage — render the current slot's beat through the type REGISTRY
-  const beat=beatAt(S.chapter);
-  const renderer=BEAT_REGISTRY[beat.type] || (()=>`<p class="lede">Unknown beat: ${esc(beat.type)}</p>`);
-  document.getElementById('panes').innerHTML = `<div class="pane" key="${S.chapter}">${renderer(beat)}</div>`;
+  // header + rail framing (all module-driven, no hardcoded copy)
+  const m=activeModule();
+  const curMeta=SLOT_META[cur.slot];
+  document.getElementById('kicker').textContent = `${m.label} · ${String(S.chapter+1).padStart(2,'0')} · ${curMeta.k}`;
+  const rl=document.getElementById('railLesson'); if(rl) rl.textContent=m.label;
+  const rs=document.getElementById('railSub'); if(rs) rs.textContent=m.kick+' — '+m.desc;
+  const rf=document.getElementById('railFoot'); if(rf) rf.innerHTML=`${beats.length} chapters · ${m.capstone?'capstone — all your calls':'productive failure + C4 zoom'}<br>focus: ${(m.scene.focus||[]).join(', ')||'—'} @ ${ZNAME[m.scene.level]}<br>every choice → a decision record`;
+  document.getElementById('barfill').style.width = (beats.length>1?(S.chapter)/(beats.length-1)*100:100)+'%';
+  // stage — render the current beat through the type REGISTRY
+  const renderer=BEAT_REGISTRY[cur.beat.type] || (()=>`<p class="lede">Unknown beat: ${esc(cur.beat.type)}</p>`);
+  document.getElementById('panes').innerHTML = `<div class="pane" key="${activeIndex}-${S.chapter}">${renderer(cur.beat)}</div>`;
+  // per-chapter C4 zoom is derived from the module scene (not a hardcoded map)
   if(document.getElementById('scenewrap')){
     if(S._lastChap!==S.chapter){
-      // each chapter opens in Static at its own C4 level
       if(typeof stopFlowPlay==='function') stopFlowPlay();
-      S.view='static';
-      if(CHAP_ZOOM[S.chapter]){
-        S.zoom=CHAP_ZOOM[S.chapter];
-        if(ZORDER.indexOf(S.zoom)>ZORDER.indexOf(S.zoomReached)) S.zoomReached=S.zoom;
-      }
+      const z=chapZoom(S.chapter);
+      S.zoom=z;
+      if(ZORDER.indexOf(z)>ZORDER.indexOf(S.zoomReached)) S.zoomReached=z;
     }
     initC4();
   }
-  if(S.chapter===3) wireSim();
+  if(cur.beat.type==='trace'){ stopFlowPlay(); mountTrace(cur.beat); }
+  if(cur.beat.type==='breakit') wireSim();
   S._lastChap=S.chapter;
   renderMargin();
 }
 
 /* ============================ BEAT REGISTRY ============================
-   type -> renderer(beat). Each renderer reads its beat object (content data)
-   instead of module-level globals, so the same engine plays any module. Step 1
-   ships the five beat types today's lesson needs; legality per slot (Q7) and
-   the slot-owned gate are enforced by the engine, not these renderers.        */
+   type -> renderer(beat). Each renderer reads ONLY its beat object (content
+   data), so the same engine plays any module. Slot legality (Q7) and the
+   slot-owned gate are enforced by the engine, not these renderers. The seven
+   beat types Step 2 implements:
+     orient   (orient slot)
+     quiz     (confront-legal: reports a commit)
+     reveal   (consumes the committed guess)
+     breakit  (practice: the windowing burst simulator)
+     trace    (practice: the folded-in dynamic/flow view, Q11)
+     fixit    (practice: read broken code, pick the fix)
+     decide   (own: write your own ADR)                                         */
 const BEAT_REGISTRY = {
   orient:   paneOrient,
-  quiz:     paneConfront,   // confront-legal: must report a commit
-  reveal:   paneReveal,     // consumes the committed guess
-  breakit:  panePractice,   // practice slot
-  decide:   paneOwn         // own slot
+  quiz:     paneConfront,
+  reveal:   paneReveal,
+  breakit:  panePractice,
+  trace:    paneTrace,
+  fixit:    paneFixit,
+  decide:   paneOwn
 };
-/* CHOICES kept as a live alias of the confront beat's choices so existing
-   reveal/path helpers that reference CHOICES[g] keep working unchanged. */
-const CHOICES = MODULE.slots.confront.choices;
+/* The active module's confront choices — re-read live so reveal/path helpers
+   resolve against whatever module is playing. */
+function curChoices(){ return activeModule().slots.confront.choices; }
+
+/* Engine navigation is generic now: a beat's "continue" button just calls
+   advance() to the NEXT chapter, so panes never hardcode a chapter index.     */
+function continueBtn(b, hint){
+  return `<div class="actions">
+    <button class="btn" onclick="advance()">${esc(b.cta||'Continue')} <span class="arr">→</span></button>
+    ${hint?`<span class="hint">${hint}</span>`:''}
+  </div>`;
+}
 
 function paneOrient(b){
   return `
@@ -1138,10 +1562,7 @@ function paneOrient(b){
   <p class="lede">${b.lede}</p>
   ${b.scene?c4Block():''}
   ${b.note?`<p class="hint" style="margin-top:14px">${b.note}</p>`:''}
-  <div class="actions">
-    <button class="btn" onclick="advance(1)">${esc(b.cta)} <span class="arr">→</span></button>
-    <span class="hint">${b.hint}</span>
-  </div>`;
+  ${continueBtn(b, b.hint)}`;
 }
 
 function paneConfront(b){
@@ -1157,16 +1578,14 @@ function paneConfront(b){
         <span class="ctxt"><b>${c.t}</b><span>${c.d}</span></span>
       </button>`).join('')}
   </div>
-  ${committed? `<div class="actions">
-      <button class="btn" onclick="advance(2)">${esc(b.cta)} <span class="arr">→</span></button>
-      <span class="hint">${b.committedHint}</span>
-    </div>`
+  ${committed? continueBtn(b, b.committedHint)
    : `<div class="locknote">${b.lockNote}</div>`}
   `;
 }
 
 function paneReveal(b){
-  const g=S.guess||Object.keys(CHOICES)[0];
+  const choices=curChoices();
+  const g=(S.guess && choices[S.guess])?S.guess:Object.keys(choices)[0];
   const v=b.verdicts[g];
   return `
   <h1 class="title">${b.title}</h1>
@@ -1174,7 +1593,7 @@ function paneReveal(b){
   <div class="verdict">
     <div class="vcell you">
       <div class="vh">You reached for</div>
-      <p class="big">${CHOICES[g].t}</p>
+      <p class="big">${choices[g].t}</p>
       <p>${v.big} ${v.p}</p>
     </div>
     <div class="vcell real">
@@ -1185,12 +1604,10 @@ function paneReveal(b){
   </div>
   ${b.afterScene?`<p class="lede" style="margin-top:18px">${b.afterScene}</p>`:''}
   ${b.scene?c4Block():''}
-  <div class="actions">
-    <button class="btn" onclick="advance(3)">${esc(b.cta)} <span class="arr">→</span></button>
-    <span class="hint">${b.hint}</span>
-  </div>`;
+  ${continueBtn(b, b.hint)}`;
 }
 
+/* PRACTICE · breakit — the windowing burst simulator (unchanged behaviour). */
 function panePractice(b){
   return `
   <h1 class="title">${b.title}</h1>
@@ -1218,59 +1635,123 @@ function panePractice(b){
   </div>
   ${b.afterSim?`<p class="lede" style="margin-top:20px">${b.afterSim}</p>`:''}
   ${b.scene?c4Block():''}
-  <div class="actions">
-    <button class="btn" onclick="advance(4)">${esc(b.cta)} <span class="arr">→</span></button>
-    <span class="hint">${S.ranSim?'You’ve seen the failure mode. ✓':'Try firing in both modes first.'}</span>
-  </div>`;
+  ${continueBtn(b, S.ranSim?'You’ve seen the failure mode. ✓':'Try firing in both modes first.')}`;
 }
 
+/* PRACTICE · trace — the folded-in dynamic/flow view (Q11). Numbered steps over
+   the module scene level, driven by the beat's own `steps`. mountTrace() (called
+   from render) injects the SVG + step list into #tracewrap / #flowlistwrap. */
+function paneTrace(b){
+  return `
+  <h1 class="title">${b.title}</h1>
+  <p class="lede">${b.lede}</p>
+  <div class="diagram">
+    <div class="c4topbar"><div class="c4title">Trace · ${esc(ZNAME[traceLevel()])} · one request</div></div>
+    <div class="scene-wrap" id="tracewrap"></div>
+    <div class="flowctl">
+      <button id="flowprev" onclick="flowStep(-1)">‹ Back</button>
+      <button id="flownext" onclick="flowStep(1)">Next ›</button>
+      <button id="flowplay" onclick="flowPlay()">▶ Play</button>
+      <span class="step-of" id="flowof"></span>
+    </div>
+    <div id="flowlistwrap"></div>
+  </div>
+  ${continueBtn(b, 'Step through the sequence, then continue.')}`;
+}
+
+/* PRACTICE · fixit — read broken code, pick the change that fixes it. */
+function paneFixit(b){
+  const picked=S.fixPick;
+  const opt=b.options.find(o=>o.v===picked);
+  return `
+  <h1 class="title">${b.title}</h1>
+  <p class="lede">${b.lede}</p>
+  <div class="card">
+    ${b.codeLabel?`<div class="label">${b.codeLabel}</div>`:''}
+    <pre class="codebox">${esc(b.code)}</pre>
+  </div>
+  <div class="card">
+    <div class="label">${b.prompt}</div>
+    ${b.options.map(o=>`<button class="choice" aria-pressed="${picked===o.v}" onclick="pickFix('${o.v}')"><span class="pick"></span><span class="ctxt"><b>${o.t}</b><span>${o.d}</span></span></button>`).join('')}
+    ${opt?`<div class="simverdict ${opt.correct?'good':'bad'}" style="margin-top:16px">${opt.correct?b.okNote:b.badNote}</div>`:''}
+  </div>
+  ${continueBtn(b, opt? (opt.correct?'Fixed. ✓':'You can re-pick, or carry the lesson forward.') : 'Pick a fix to continue.')}`;
+}
+
+/* OWN · decide — the learner writes their own ADR, keyed by the beat's stable
+   id so the decision persists across modules (Q6). */
 function paneOwn(b){
-  const chosen=S.keyChoice;
+  const chosen=S.ownChoice;
   return `
   <h1 class="title">${b.title}</h1>
   <p class="lede">${b.lede}</p>
   <div class="card">
     <div class="label">${b.prompt}</div>
-    ${b.options.map(o=>`<button class="choice" aria-pressed="${chosen===o.v}" onclick="pickKey('${o.v}')"><span class="pick"></span><span class="ctxt"><b>${o.t}</b><span>${o.d}</span></span></button>`).join('\n    ')}
+    ${b.options.map(o=>`<button class="choice" aria-pressed="${chosen===o.v}" onclick="pickOwn('${o.v}')"><span class="pick"></span><span class="ctxt"><b>${o.t}</b><span>${o.d}</span></span></button>`).join('\n    ')}
     <div style="margin-top:16px">
       <div class="label">${b.reasonLabel}</div>
-      <textarea id="reason" placeholder="${b.reasonPlaceholder}" oninput="syncReason()">${S._reason||''}</textarea>
+      <textarea id="reason" placeholder="${esc(b.reasonPlaceholder||'')}" oninput="syncReason()">${esc(S._reason||'')}</textarea>
     </div>
     <div class="actions" style="margin-top:18px">
       <button class="btn" id="sealbtn" ${chosen?'':'disabled'} onclick="seal()">${esc(b.cta)} <span class="arr">→</span></button>
-      <span class="hint">${chosen?'Adds ADR-0003 to your log.':'Pick a key to continue.'}</span>
+      <span class="hint">${chosen?'Writes your decision to the log.':'Pick an option to continue.'}</span>
     </div>
   </div>
   <div id="reflectbox">${S.reflectionShown?reflectionHTML():''}</div>
   `;
 }
 function reflectionHTML(){
-  const g=S.guess||'fixed';
-  const surprised = (g==='fixed');
+  const m=activeModule();
+  const choices=curChoices();
+  const g=(S.guess && choices[S.guess])?S.guess:Object.keys(choices)[0];
+  const decided = S.ownChoice || (m.slots.own && '—');
   return `<div class="card" style="margin-top:16px">
-    <div class="done-seal">✦ Lesson complete</div>
+    <div class="done-seal">✦ ${esc(m.label)} ${m.capstone?'— design sealed':'mastered'}</div>
     <div class="reflect" style="margin-top:14px">
-      <div class="r"><div class="rl">You guessed</div><div class="rt">${CHOICES[g].t} ${surprised?'— and met its boundary burst head-on.':'— a solid instinct.'}</div></div>
-      <div class="r"><div class="rl">What clicked</div><div class="rt">The minute boundary is a loophole; a sliding window closes it. Counters belong in Redis so every instance agrees.</div></div>
-      <div class="r"><div class="rl">You decided</div><div class="rt">Keyed the limit by <b>${S.keyChoice}</b> — recorded with your reasoning.</div></div>
-      <div class="r"><div class="rl">Next</div><div class="rt">Run <span style="font-family:var(--mono)">/learn token bucket</span> to learn the design that allows <i>intentional</i> bursts — then compare the two ADRs.</div></div>
+      <div class="r"><div class="rl">You guessed</div><div class="rt">${choices[g]?choices[g].t:'—'}</div></div>
+      <div class="r"><div class="rl">You decided</div><div class="rt">${decided?`<b>${esc(decided)}</b> — recorded with your reasoning.`:'—'}</div></div>
+      <div class="r"><div class="rl">Next</div><div class="rt">Use the <span style="font-family:var(--mono)">module ▾</span> switcher (top-right) to play another aspect. The skill-map navigation lands in Step 3.</div></div>
     </div>
   </div>`;
 }
 
 /* ============================ INTERACTIONS ============================ */
-function go(i){ if(i>S.maxUnlocked) return; S.chapter=i; render(); document.getElementById('stage').scrollTo({top:0,behavior:'smooth'}); }
-function advance(to){ S.maxUnlocked=Math.max(S.maxUnlocked,to); go(to); }
+/* GATE (Q7, slot-owned): the engine knows Reveal must not be reachable until
+   Confront has yielded a commit. The reveal beat is always the chapter right
+   after the (single) confront beat, so the gate is: you cannot pass the confront
+   chapter until S.committed is true. */
+function revealLocked(targetChapter){
+  const beats=moduleBeats();
+  const revealIdx=beats.findIndex(x=>x.slot==='reveal');
+  return revealIdx>=0 && targetChapter>=revealIdx && !S.committed;
+}
+function go(i){
+  if(i>S.maxUnlocked) return;
+  if(revealLocked(i)) return;                  // productive-failure gate
+  S.chapter=i; render();
+  const st=document.getElementById('stage'); if(st) st.scrollTo({top:0,behavior:'smooth'});
+}
+/* Advance to the NEXT chapter (no hardcoded index). Side effect: when we cross
+   INTO a reveal beat, mint that module's authored reveal ADR (the "system"
+   decision the lesson teaches). */
+function advance(){
+  const next=S.chapter+1;
+  const beats=moduleBeats();
+  if(next>=beats.length){ return; }            // already at the end
+  S.maxUnlocked=Math.max(S.maxUnlocked,next);
+  const nb=beats[next];
+  if(nb && nb.slot==='reveal' && nb.beat.adr) addAdr(nb.beat.adr);
+  go(next);
+}
 
 function pick(k){ if(S.committed) return; S.guess=k; commitGuess(); }
-/* SLOT-OWNED GATE: a confront-legal beat reports "committed". Reveal stays
-   locked until S.committed flips true (the productive-failure gate). The path
-   text comes from the beat (commitPath), not a hardcoded string. */
+/* A confront-legal beat reports "committed"; reveal stays locked until then. */
 function commitGuess(){
   if(S.guess && !S.committed){
     S.committed=true;
-    const cb=MODULE.slots.confront;
-    logPath(cb.commitPath ? cb.commitPath(S.guess) : `First instinct: <b>${CHOICES[S.guess].t.toLowerCase()}</b>`);
+    const cb=activeModule().slots.confront;
+    const choices=curChoices();
+    logPath(cb.commitPath ? cb.commitPath(S.guess) : `First instinct: <b>${choices[S.guess].t.toLowerCase()}</b>`);
     render();
   }
 }
@@ -1325,29 +1806,84 @@ function updateReadout(allowed){
     : `<b>Held at 100.</b> The sliding window counts the trailing 60s as one stretch, so the burst can’t hide across the boundary. <span style="color:var(--warn)">Red</span> requests are the ones correctly rejected.`;
 }
 
-function pickKey(k){ S.keyChoice=k; const b=document.getElementById('sealbtn'); if(b) b.disabled=false;
-  document.querySelectorAll('#stage .choice').forEach(c=>{}); render(); }
-function syncReason(){ S._reason=document.getElementById('reason').value; }
+function pickFix(v){ S.fixPick=v; const beats=moduleBeats(); const b=beats[S.chapter].beat;
+  const opt=b.options.find(o=>o.v===v);
+  if(opt && opt.correct) logPath(`Fixed the key: <b>${esc(opt.t.toLowerCase())}</b>`);
+  render(); }
+function pickOwn(v){ S.ownChoice=v; const sb=document.getElementById('sealbtn'); if(sb) sb.disabled=false; render(); }
+function syncReason(){ const t=document.getElementById('reason'); if(t) S._reason=t.value; }
 function seal(){
-  if(!S.keyChoice) return;
+  if(!S.ownChoice) return;
   const reason = document.getElementById('reason')?document.getElementById('reason').value:S._reason;
   S._reason=reason;
-  addMyAdr(S.keyChoice, reason);
-  logPath(`Your call: key by <b>${S.keyChoice}</b>`);
-  S.reflectionShown=true;
-  document.getElementById('reflectbox').innerHTML=reflectionHTML();
-  document.getElementById('barfill').style.width='100%';
-  document.getElementById('reflectbox').scrollIntoView({behavior:'smooth',block:'center'});
+  const beats=moduleBeats();
+  const b=beats[S.chapter].beat;                 // the active decide beat
+  addMyAdr(b.id, b.adr, S.ownChoice, reason);
+  logPath(`Your call: <b>${esc(S.ownChoice)}</b>`);
+  // last chapter of the module? seal it with a reflection; else just advance.
+  const last = S.chapter===beats.length-1;
+  if(last){
+    S.reflectionShown=true;
+    document.getElementById('reflectbox').innerHTML=reflectionHTML();
+    document.getElementById('barfill').style.width='100%';
+    document.getElementById('reflectbox').scrollIntoView({behavior:'smooth',block:'center'});
+  } else {
+    advance();
+  }
 }
 
 /* margin drawer (mobile) */
 function openMargin(){ document.getElementById('margin').classList.add('open'); document.getElementById('scrim').classList.add('open'); }
 function closeMargin(){ document.getElementById('margin').classList.remove('open'); document.getElementById('scrim').classList.remove('open'); }
 
-/* auto-add system decisions as chapters advance */
-const _advance = advance;
-advance = function(to){ if(to>=2){ addAdr('a1'); } if(to>=3){ addAdr('a2'); } _advance(to); };
+/* ---- TEMP dev affordance (Step 2): a module <select> so the verifier can
+   exercise all six. Replaced by the skill-map navigation in Step 3. ---- */
+function switchModule(idx){
+  idx=+idx; if(idx===activeIndex) return;
+  stopFlowPlay();
+  activeIndex=idx;
+  resetModuleState();
+  const sel=document.getElementById('devmod'); if(sel) sel.value=String(idx);
+  render();
+  const st=document.getElementById('stage'); if(st) st.scrollTo({top:0,behavior:'auto'});
+}
+function buildModuleSwitcher(){
+  const sel=document.getElementById('devmod'); if(!sel) return;
+  sel.innerHTML=CURRICULUM.modules.map((m,i)=>`<option value="${i}" ${i===activeIndex?'selected':''}>${esc(m.kick)} · ${esc(m.label)}</option>`).join('');
+  sel.onchange=e=>switchModule(e.target.value);
+}
 
+/* ---- PERSISTENCE (Q8): cross-module decisions persist in localStorage, wrapped
+   in try/catch with a silent in-memory fallback (sandboxed file:// may block it).
+   We persist only the durable record — the learner's decisions — not transient
+   per-chapter UI state. RESET wipes both stored + in-memory state. ---- */
+const STORE_KEY='learn.ratelimiting.v2';
+let _mem=null;                                  // in-memory fallback bucket
+function persist(){
+  const data={decisions:S.decisions};
+  try{ localStorage.setItem(STORE_KEY, JSON.stringify(data)); }
+  catch(e){ _mem=data; }
+}
+function loadPersisted(){
+  let data=null;
+  try{ const raw=localStorage.getItem(STORE_KEY); if(raw) data=JSON.parse(raw); }
+  catch(e){ data=_mem; }
+  if(data && data.decisions){ S.decisions=data.decisions; }
+}
+/* MANDATORY reset button. Clears progress, mastery and decisions everywhere. */
+function resetAll(){
+  stopFlowPlay();
+  try{ localStorage.removeItem(STORE_KEY); }catch(e){}
+  _mem=null;
+  S.path=[]; S.adrs=[]; S.decisions={};
+  activeIndex=0; resetModuleState();
+  buildModuleSwitcher();
+  render();
+  const st=document.getElementById('stage'); if(st) st.scrollTo({top:0,behavior:'auto'});
+}
+
+loadPersisted();
+buildModuleSwitcher();
 render();
 </script>
 </body>
