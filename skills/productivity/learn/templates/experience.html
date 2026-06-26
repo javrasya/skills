@@ -165,8 +165,8 @@
   .c4boundtype{font-family:var(--mono); font-size:15px; fill:var(--ink-faint)}
   .edge{stroke:var(--ink-faint); stroke-width:2.2; stroke-dasharray:8 6; fill:none}
   .edgebg{fill:var(--paper-2)}
-  .edgelbl{font-family:var(--sans); font-size:18px; fill:var(--ink-soft)}
-  .edgetech{font-family:var(--mono); font-size:15px; fill:var(--ink-faint)}
+  .edgelbl{font-family:var(--sans); font-size:14px; fill:var(--ink-soft)}
+  .edgetech{font-family:var(--mono); font-size:12px; fill:var(--ink-faint)}
   .legend .lg-in{background:var(--c4-in-fill); border:1.5px solid var(--c4-in-stroke)}
   .legend .lg-ext{background:var(--c4-ext-fill); border:1.5px solid var(--c4-ext-stroke)}
   .legend .lg-person{background:var(--c4-person-fill); border:1.5px solid var(--c4-person-stroke); border-radius:50%}
@@ -460,6 +460,93 @@ const FLOWS = {
   }
 };
 
+/* ============================ CURRICULUM (content) ============================
+   THE ONE MOVE: lesson content is DATA, not welded into the render functions.
+   A CURRICULUM bundles the shared C4 MODEL (the spatial backdrop, untouched in
+   shape) with a list of modules. Step 1 expresses today's whole rate-limiting
+   lesson as a SINGLE module whose FIXED SLOTS {orient, confront, reveal,
+   practice, own} each point at one beat. A beat = {type, id?, ...payload}; the
+   beat REGISTRY (below) maps a beat type to a renderer. The slots are rendered
+   in engine-enforced order, and the gate is SLOT-OWNED: a confront beat reports
+   "committed", and reveal stays locked until it does (productive-failure gate).
+   To retarget the lesson later: add modules + edit the per-beat payloads here;
+   the renderers stay generic.                                                */
+const CURRICULUM = {
+  system:'Rate limiting',
+  MODEL,            // the existing C4 backdrop, shared across modules
+  modules:[
+    {
+      id:'rate-limiting',
+      label:'Rate limiting',
+      kick:'Learn it by trying, failing, and deciding — not by reading.',
+      level:'container',
+      desc:'A gatekeeper that stands in front of expensive work and decides what gets through.',
+      prereqs:[],
+      scene:{level:'context', focus:['plat'], zoomTo:'container'},
+      slots:{
+        orient:{ type:'orient', id:'rl-orient',
+          title:'Where does a limiter even sit?',
+          lede:'Before any code: get the shape of the thing. A rate limiter is a gatekeeper that stands in front of expensive work and decides what gets through. Here it is at a glance — <b>zoom in</b> when you’re ready for more detail.',
+          scene:true,
+          note:'This same diagram deepens as you go: one level of detail at a time, so it never dumps the whole system on you at once.',
+          cta:'I’ve got the shape', hint:'Next: you try the core problem yourself.' },
+
+        confront:{ type:'quiz', id:'rl-confront',
+          title:'Your turn first.',
+          lede:'The rule: <b>100 requests per minute, per user</b>. Don’t look for the “right” answer — reach for your <i>first instinct</i>. Picking, even wrongly, is what makes the next chapter land. (Research calls this productive failure; you’ll feel why in a second.)',
+          prompt:'How would you count & enforce it?',
+          choices:{
+            fixed:{t:'A counter per user that resets every minute', d:'count++ on each request; wipe it at the top of the minute.'},
+            log:{t:'Store a timestamp for every request', d:'keep the last 60s of timestamps and count them.'},
+            bucket:{t:'Refill a bucket of tokens over time', d:'each request spends a token; tokens drip back at a steady rate.'}
+          },
+          commitPath:k=>`First instinct: <b>${CURRICULUM.modules[0].slots.confront.choices[k].t.toLowerCase()}</b>`,
+          cta:'See how this plays out', committedHint:'Your instinct is logged — now let’s test it.',
+          lockNote:'🔒 The reveal stays locked until you commit a guess. That’s the whole point.' },
+
+        reveal:{ type:'reveal', id:'rl-reveal',
+          title:'Your instinct, met with reality.',
+          lede:'No answer here is “dumb” — each trades something. Here’s what you reached for, against what production systems converge on.',
+          verdicts:{
+            fixed:{big:'The common first answer.', p:'A resetting counter is clean and fast — and it has one famous hole you’ll see in the next chapter.', good:false},
+            log:{big:'Exact, but heavy.', p:'Timestamps give a perfect count, but you store one entry per request. Accurate, memory-hungry at scale.', good:true},
+            bucket:{big:'Smooth & burst-friendly.', p:'Token buckets shape traffic nicely and even allow controlled bursts — a great production choice.', good:true}
+          },
+          realTitle:'Sliding window',
+          realBody:'Count the <b>trailing 60s</b> rather than a calendar minute. It keeps the simplicity of a counter while closing the boundary loophole.',
+          scene:true,
+          afterScene:'You’re now one level deeper. The limiter has opened up into a gateway, a service, and a shared counter store — and the trail up top still shows exactly where you are. <b>Tap Redis</b> for why it’s Redis, or zoom back out to re-orient anytime.',
+          cta:'Now break it', hint:'A decision was just written to your log. →' },
+
+        practice:[{ type:'breakit', id:'rl-practice',
+          title:'Break it on purpose.',
+          lede:'Theory is cheap; failure teaches. Below is a live minute. Fire a <b>burst of requests right across the minute boundary</b> and watch what the two designs do. The failure <i>is</i> the lesson.',
+          afterSim:'That burst is exactly why the deepest level looks the way it does — a window counter over the trailing 60s. Here’s inside the limiter:',
+          scene:true,
+          cta:'Make it yours' }],
+
+        own:[{ type:'decide', id:'rl-own',
+          title:'One real call is yours.',
+          lede:'You’ve seen the shape, the trade-off, and the failure. Now decide something the textbook won’t decide for you, and say <i>why</i> — that reasoning becomes a record the next engineer inherits.',
+          prompt:'Identify each caller by…',
+          options:[
+            {v:'user ID', t:'User ID', d:'fair per-person budget — but needs auth before the limiter runs.'},
+            {v:'IP address', t:'IP address', d:'works for anonymous traffic — but an office or NAT shares one budget.'}
+          ],
+          reasonLabel:'Why? (one line — this is your ADR)',
+          reasonPlaceholder:'e.g. our endpoints sit behind auth already, and per-user is the fairness model users expect…',
+          cta:'Record my decision' }]
+      }
+    }
+  ]
+};
+
+/* The active module for Step 1 (single-screen player; map comes later). */
+const MODULE = CURRICULUM.modules[0];
+/* Engine-enforced slot order. Each chapter index maps to one slot/beat. */
+const SLOT_ORDER = ['orient','confront','reveal','practice','own'];
+function beatAt(i){ const k=SLOT_ORDER[i]; const b=MODULE.slots[k]; return Array.isArray(b)?b[0]:b; }
+
 const ZORDER = ['context','container','component'];
 const ZNAME  = {context:'System Context', container:'Container', component:'Component'};
 const CHAP_ZOOM={0:'context',2:'container',3:'component'};
@@ -514,17 +601,44 @@ function edgeLine(e,byId){
   const p1=clipToBox(a,cb.x,cb.y), p2=clipToBox(b,ca.x,ca.y);
   return `<path class="edge" d="M ${p1.x} ${p1.y} L ${p2.x} ${p2.y}" marker-end="url(#c4ah)"/>`;
 }
-// the label chip only (drawn OVER the nodes, so it is never hidden behind a box)
+// rect (cx,cy centre + w,h) vs box overlap area — 0 means clear
+function rectBoxOverlap(cx,cy,w,h,n){
+  const ox=Math.max(0, Math.min(cx+w/2,n.x+n.w)-Math.max(cx-w/2,n.x));
+  const oy=Math.max(0, Math.min(cy+h/2,n.y+n.h)-Math.max(cy-h/2,n.y));
+  return ox*oy;
+}
+// the label chip only (drawn OVER the nodes, so it is never hidden behind a box).
+// A chip dropped at the geometric midpoint can land on a box border when nodes
+// sit close together. So we search positions ALONG the edge (t) and PERPENDICULAR
+// to it (off) and keep the one that overlaps the fewest boxes, nearest the middle.
 function edgeLabel(e,byId){
   const a=byId[e.from], b=byId[e.to]; if(!a||!b||!(e.label||e.tech)) return '';
   const ca=center(a), cb=center(b);
   const p1=clipToBox(a,cb.x,cb.y), p2=clipToBox(b,ca.x,ca.y);
-  const mx=(p1.x+p2.x)/2, my=(p1.y+p2.y)/2;
   const lbl=esc(e.label||''), tech=e.tech?`[${esc(e.tech)}]`:'';
-  const w=Math.max(lbl.length*10.0, tech.length*9.2)+22, h=tech?52:32;
-  return `<rect class="edgebg" x="${mx-w/2}" y="${my-h/2}" width="${w}" height="${h}" rx="8"/>
-    ${lbl?`<text class="edgelbl" x="${mx}" y="${my+(tech?-3:6)}" text-anchor="middle">${lbl}</text>`:''}
-    ${tech?`<text class="edgetech" x="${mx}" y="${my+19}" text-anchor="middle">${tech}</text>`:''}`;
+  const w=Math.max(lbl.length*7.8, tech.length*7.4)+16, h=tech?40:24;
+  const dx=p2.x-p1.x, dy=p2.y-p1.y, len=Math.hypot(dx,dy)||1;
+  const px=-dy/len, py=dx/len;             // unit perpendicular
+  // ALL boxes count — on short edges the chip is wider than the gap and bleeds
+  // into the connected boxes too, so we still need to lift it off the edge line.
+  const all=Object.values(byId);
+  let best=null;
+  // bias HARD toward t=.5 / off=0 so the chip hugs its arrow; only push it off
+  // the line when it genuinely can't sit on the arrow without covering a box.
+  for(const t of [.5,.42,.58,.34,.66,.27,.73,.2,.8]){
+    for(const off of [0, h, -h, h*2, -h*2, h*3, -h*3, h*4, -h*4, h*5, -h*5]){
+      const cx=p1.x+dx*t+px*off, cy=p1.y+dy*t+py*off;
+      let area=0; for(const n of all) area+=rectBoxOverlap(cx,cy,w,h,n);
+      const cost=area + Math.abs(t-.5)*240 + Math.abs(off)*1.6;
+      if(!best||cost<best.cost) best={cx,cy,cost,area};
+      if(area===0) break;                  // clear hit — take the most central one
+    }
+    if(best&&best.area===0) break;
+  }
+  const mx=best.cx, my=best.cy;
+  return `<rect class="edgebg" x="${mx-w/2}" y="${my-h/2}" width="${w}" height="${h}" rx="7"/>
+    ${lbl?`<text class="edgelbl" x="${mx}" y="${my+(tech?-2:5)}" text-anchor="middle">${lbl}</text>`:''}
+    ${tech?`<text class="edgetech" x="${mx}" y="${my+15}" text-anchor="middle">${tech}</text>`:''}`;
 }
 function sceneSVG(zid){
   const m=MODEL[zid];
@@ -722,6 +836,28 @@ function settleActive(z){
     void e.offsetWidth; e.style.transition='';
   });
 }
+/* A foreignObject CLIPS anything past its height. Boxes use min-height and grow
+   when text wraps, so the declared n.h+60 can be too short -> the hint/desc gets
+   cut off (e.g. "why?" sliced in half). Measure each box's real content height
+   after mount and grow its foreignObject to match, so nothing is ever clipped. */
+function fitNodes(){
+  document.querySelectorAll('#scenewrap foreignObject.c4fo, #scenewrap foreignObject.flowfo').forEach(fo=>{
+    const inner=fo.firstElementChild; if(!inner) return;
+    const h=inner.offsetHeight;
+    if(h>parseFloat(fo.getAttribute('height'))) fo.setAttribute('height', h+4);
+  });
+}
+/* `.scene` carries will-change:transform, so Chrome promotes it to a GPU layer
+   and rasters it ONCE — at fallback-font sizes, before web fonts load. Growing a
+   <foreignObject> afterwards updates layout but NOT that cached bitmap, so text
+   still paints clipped at the old height. Toggling will-change off/on drops and
+   re-creates the layer, forcing a fresh raster at the corrected geometry. */
+function repaintScenes(){
+  document.querySelectorAll('#scenewrap .scene').forEach(s=>{
+    const wc=s.style.willChange;
+    s.style.willChange='auto'; void s.offsetWidth; s.style.willChange=wc||'';
+  });
+}
 /* Boxes use min-height and grow when text wraps, so their RENDERED height can
    exceed the declared n.h. Recompute each boundary from the actual mounted box
    geometry so a component can never leak outside its container boundary. */
@@ -750,8 +886,13 @@ function fitBoundaries(){
 }
 function initC4(){
   if(!document.getElementById('scenewrap')) return;
-  fitBoundaries();
+  fitNodes(); fitBoundaries();
   if(S.view==='flow'){ applyView(); } else { settleActive(S.zoom); paintCrumbs(); }
+  // Web fonts load async; the first fit measures with the fallback font (shorter),
+  // so text re-wraps taller once the real font arrives and clips again. Re-fit then.
+  if(document.fonts && document.fonts.ready){
+    document.fonts.ready.then(()=>{ fitNodes(); fitBoundaries(); repaintScenes(); });
+  }
 }
 
 /* ---- view toggle: Static (zoomable C4) vs Flow (dynamic numbered sequence) ----
@@ -782,6 +923,7 @@ function mountFlow(){
   const lvl=S.flowLevel||'container';
   const scene=sceneEl('flow'); if(scene) scene.innerHTML=flowSVG(lvl);
   const lw=document.getElementById('flowlistwrap'); if(lw) lw.innerHTML=flowStepList(lvl);
+  fitNodes();
   renderFlowStep();
 }
 function applyView(){
@@ -953,8 +1095,10 @@ function render(){
   // header
   document.getElementById('kicker').textContent = `Chapter ${String(S.chapter+1).padStart(2,'0')} · ${CHAPTERS[S.chapter].k}`;
   document.getElementById('barfill').style.width = ((S.chapter)/(CHAPTERS.length-1)*100)+'%';
-  // stage
-  document.getElementById('panes').innerHTML = `<div class="pane" key="${S.chapter}">${PANE[S.chapter]()}</div>`;
+  // stage — render the current slot's beat through the type REGISTRY
+  const beat=beatAt(S.chapter);
+  const renderer=BEAT_REGISTRY[beat.type] || (()=>`<p class="lede">Unknown beat: ${esc(beat.type)}</p>`);
+  document.getElementById('panes').innerHTML = `<div class="pane" key="${S.chapter}">${renderer(beat)}</div>`;
   if(document.getElementById('scenewrap')){
     if(S._lastChap!==S.chapter){
       // each chapter opens in Static at its own C4 level
@@ -972,57 +1116,61 @@ function render(){
   renderMargin();
 }
 
-const PANE = [paneOrient, paneConfront, paneReveal, panePractice, paneOwn];
+/* ============================ BEAT REGISTRY ============================
+   type -> renderer(beat). Each renderer reads its beat object (content data)
+   instead of module-level globals, so the same engine plays any module. Step 1
+   ships the five beat types today's lesson needs; legality per slot (Q7) and
+   the slot-owned gate are enforced by the engine, not these renderers.        */
+const BEAT_REGISTRY = {
+  orient:   paneOrient,
+  quiz:     paneConfront,   // confront-legal: must report a commit
+  reveal:   paneReveal,     // consumes the committed guess
+  breakit:  panePractice,   // practice slot
+  decide:   paneOwn         // own slot
+};
+/* CHOICES kept as a live alias of the confront beat's choices so existing
+   reveal/path helpers that reference CHOICES[g] keep working unchanged. */
+const CHOICES = MODULE.slots.confront.choices;
 
-function paneOrient(){
+function paneOrient(b){
   return `
-  <h1 class="title">Where does a limiter even sit?</h1>
-  <p class="lede">Before any code: get the shape of the thing. A rate limiter is a gatekeeper that stands in front of expensive work and decides what gets through. Here it is at a glance — <b>zoom in</b> when you’re ready for more detail.</p>
-  ${c4Block()}
-  <p class="hint" style="margin-top:14px">This same diagram deepens as you go: one level of detail at a time, so it never dumps the whole system on you at once.</p>
+  <h1 class="title">${b.title}</h1>
+  <p class="lede">${b.lede}</p>
+  ${b.scene?c4Block():''}
+  ${b.note?`<p class="hint" style="margin-top:14px">${b.note}</p>`:''}
   <div class="actions">
-    <button class="btn" onclick="advance(1)">I’ve got the shape <span class="arr">→</span></button>
-    <span class="hint">Next: you try the core problem yourself.</span>
+    <button class="btn" onclick="advance(1)">${esc(b.cta)} <span class="arr">→</span></button>
+    <span class="hint">${b.hint}</span>
   </div>`;
 }
 
-const CHOICES = {
-  fixed:{t:'A counter per user that resets every minute', d:'count++ on each request; wipe it at the top of the minute.'},
-  log:{t:'Store a timestamp for every request', d:'keep the last 60s of timestamps and count them.'},
-  bucket:{t:'Refill a bucket of tokens over time', d:'each request spends a token; tokens drip back at a steady rate.'}
-};
-function paneConfront(){
+function paneConfront(b){
   const committed=S.committed;
   return `
-  <h1 class="title">Your turn first.</h1>
-  <p class="lede">The rule: <b>100 requests per minute, per user</b>. Don’t look for the “right” answer — reach for your <i>first instinct</i>. Picking, even wrongly, is what makes the next chapter land. (Research calls this productive failure; you’ll feel why in a second.)</p>
+  <h1 class="title">${b.title}</h1>
+  <p class="lede">${b.lede}</p>
   <div class="card">
-    <div class="label">How would you count & enforce it?</div>
-    ${Object.entries(CHOICES).map(([k,c])=>`
+    <div class="label">${b.prompt}</div>
+    ${Object.entries(b.choices).map(([k,c])=>`
       <button class="choice" aria-pressed="${S.guess===k}" ${committed?'disabled':''} onclick="pick('${k}')">
         <span class="pick"></span>
         <span class="ctxt"><b>${c.t}</b><span>${c.d}</span></span>
       </button>`).join('')}
   </div>
   ${committed? `<div class="actions">
-      <button class="btn" onclick="advance(2)">See how this plays out <span class="arr">→</span></button>
-      <span class="hint">Your instinct is logged — now let’s test it.</span>
+      <button class="btn" onclick="advance(2)">${esc(b.cta)} <span class="arr">→</span></button>
+      <span class="hint">${b.committedHint}</span>
     </div>`
-   : `<div class="locknote">🔒 The reveal stays locked until you commit a guess. That’s the whole point.</div>`}
+   : `<div class="locknote">${b.lockNote}</div>`}
   `;
 }
 
-function paneReveal(){
-  const g=S.guess||'fixed';
-  const map={
-    fixed:{big:'The common first answer.', p:'A resetting counter is clean and fast — and it has one famous hole you’ll see in the next chapter.', good:false},
-    log:{big:'Exact, but heavy.', p:'Timestamps give a perfect count, but you store one entry per request. Accurate, memory-hungry at scale.', good:true},
-    bucket:{big:'Smooth & burst-friendly.', p:'Token buckets shape traffic nicely and even allow controlled bursts — a great production choice.', good:true}
-  };
-  const v=map[g];
+function paneReveal(b){
+  const g=S.guess||Object.keys(CHOICES)[0];
+  const v=b.verdicts[g];
   return `
-  <h1 class="title">Your instinct, met with reality.</h1>
-  <p class="lede">No answer here is “dumb” — each trades something. Here’s what you reached for, against what production systems converge on.</p>
+  <h1 class="title">${b.title}</h1>
+  <p class="lede">${b.lede}</p>
   <div class="verdict">
     <div class="vcell you">
       <div class="vh">You reached for</div>
@@ -1031,22 +1179,22 @@ function paneReveal(){
     </div>
     <div class="vcell real">
       <div class="vh">Where it lands</div>
-      <p class="big">Sliding window</p>
-      <p>Count the <b>trailing 60s</b> rather than a calendar minute. It keeps the simplicity of a counter while closing the boundary loophole.</p>
+      <p class="big">${b.realTitle}</p>
+      <p>${b.realBody}</p>
     </div>
   </div>
-  <p class="lede" style="margin-top:18px">You’re now one level deeper. The limiter has opened up into a gateway, a service, and a shared counter store — and the trail up top still shows exactly where you are. <b>Tap Redis</b> for why it’s Redis, or zoom back out to re-orient anytime.</p>
-  ${c4Block()}
+  ${b.afterScene?`<p class="lede" style="margin-top:18px">${b.afterScene}</p>`:''}
+  ${b.scene?c4Block():''}
   <div class="actions">
-    <button class="btn" onclick="advance(3)">Now break it <span class="arr">→</span></button>
-    <span class="hint">A decision was just written to your log. →</span>
+    <button class="btn" onclick="advance(3)">${esc(b.cta)} <span class="arr">→</span></button>
+    <span class="hint">${b.hint}</span>
   </div>`;
 }
 
-function panePractice(){
+function panePractice(b){
   return `
-  <h1 class="title">Break it on purpose.</h1>
-  <p class="lede">Theory is cheap; failure teaches. Below is a live minute. Fire a <b>burst of requests right across the minute boundary</b> and watch what the two designs do. The failure <i>is</i> the lesson.</p>
+  <h1 class="title">${b.title}</h1>
+  <p class="lede">${b.lede}</p>
   <div class="card sim">
     <div class="simbar">
       <span class="label" style="margin:0">Windowing</span>
@@ -1068,29 +1216,28 @@ function panePractice(){
     </div>
     <div class="simverdict" id="simnote">Pick a mode and fire a burst. Watch the boundary.</div>
   </div>
-  <p class="lede" style="margin-top:20px">That burst is exactly why the deepest level looks the way it does — a window counter over the trailing 60s. Here’s inside the limiter:</p>
-  ${c4Block()}
+  ${b.afterSim?`<p class="lede" style="margin-top:20px">${b.afterSim}</p>`:''}
+  ${b.scene?c4Block():''}
   <div class="actions">
-    <button class="btn" onclick="advance(4)">Make it yours <span class="arr">→</span></button>
+    <button class="btn" onclick="advance(4)">${esc(b.cta)} <span class="arr">→</span></button>
     <span class="hint">${S.ranSim?'You’ve seen the failure mode. ✓':'Try firing in both modes first.'}</span>
   </div>`;
 }
 
-function paneOwn(){
+function paneOwn(b){
   const chosen=S.keyChoice;
   return `
-  <h1 class="title">One real call is yours.</h1>
-  <p class="lede">You’ve seen the shape, the trade-off, and the failure. Now decide something the textbook won’t decide for you, and say <i>why</i> — that reasoning becomes a record the next engineer inherits.</p>
+  <h1 class="title">${b.title}</h1>
+  <p class="lede">${b.lede}</p>
   <div class="card">
-    <div class="label">Identify each caller by…</div>
-    <button class="choice" aria-pressed="${chosen==='user ID'}" onclick="pickKey('user ID')"><span class="pick"></span><span class="ctxt"><b>User ID</b><span>fair per-person budget — but needs auth before the limiter runs.</span></span></button>
-    <button class="choice" aria-pressed="${chosen==='IP address'}" onclick="pickKey('IP address')"><span class="pick"></span><span class="ctxt"><b>IP address</b><span>works for anonymous traffic — but an office or NAT shares one budget.</span></span></button>
+    <div class="label">${b.prompt}</div>
+    ${b.options.map(o=>`<button class="choice" aria-pressed="${chosen===o.v}" onclick="pickKey('${o.v}')"><span class="pick"></span><span class="ctxt"><b>${o.t}</b><span>${o.d}</span></span></button>`).join('\n    ')}
     <div style="margin-top:16px">
-      <div class="label">Why? (one line — this is your ADR)</div>
-      <textarea id="reason" placeholder="e.g. our endpoints sit behind auth already, and per-user is the fairness model users expect…" oninput="syncReason()">${S._reason||''}</textarea>
+      <div class="label">${b.reasonLabel}</div>
+      <textarea id="reason" placeholder="${b.reasonPlaceholder}" oninput="syncReason()">${S._reason||''}</textarea>
     </div>
     <div class="actions" style="margin-top:18px">
-      <button class="btn" id="sealbtn" ${chosen?'':'disabled'} onclick="seal()">Record my decision <span class="arr">→</span></button>
+      <button class="btn" id="sealbtn" ${chosen?'':'disabled'} onclick="seal()">${esc(b.cta)} <span class="arr">→</span></button>
       <span class="hint">${chosen?'Adds ADR-0003 to your log.':'Pick a key to continue.'}</span>
     </div>
   </div>
@@ -1116,10 +1263,14 @@ function go(i){ if(i>S.maxUnlocked) return; S.chapter=i; render(); document.getE
 function advance(to){ S.maxUnlocked=Math.max(S.maxUnlocked,to); go(to); }
 
 function pick(k){ if(S.committed) return; S.guess=k; commitGuess(); }
+/* SLOT-OWNED GATE: a confront-legal beat reports "committed". Reveal stays
+   locked until S.committed flips true (the productive-failure gate). The path
+   text comes from the beat (commitPath), not a hardcoded string. */
 function commitGuess(){
   if(S.guess && !S.committed){
     S.committed=true;
-    logPath(`First instinct: <b>${CHOICES[S.guess].t.toLowerCase()}</b>`);
+    const cb=MODULE.slots.confront;
+    logPath(cb.commitPath ? cb.commitPath(S.guess) : `First instinct: <b>${CHOICES[S.guess].t.toLowerCase()}</b>`);
     render();
   }
 }
