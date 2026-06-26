@@ -124,6 +124,8 @@
   .resetbtn{border:1px solid var(--line); background:var(--panel); color:var(--ink-soft); border-radius:99px;
     padding:6px 13px; font-size:12.5px; font-weight:500; transition:.16s}
   .resetbtn:hover{border-color:var(--warn); color:var(--warn)}
+  .resetbtn.export{border-color:var(--accent); color:var(--accent)}
+  .resetbtn.export:hover{border-color:var(--accent); color:#fff; background:var(--accent)}
   /* fixit code block */
   .codebox{font-family:var(--mono); font-size:13px; line-height:1.55; color:var(--ink); background:var(--paper-2);
     border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin:0; white-space:pre-wrap; overflow:auto}
@@ -434,7 +436,8 @@
       <span><b id="mapMastered">0</b> <i>of <span id="mapTotal">6</span> mastered</i></span>
       <span><b id="mapDecisions">0</b> <i>decisions logged</i></span>
       <span><i>click an unlocked aspect to zoom in</i></span>
-      <button class="resetbtn" onclick="resetAll()" title="Reset all progress, mastery and decisions" style="margin-left:auto">↺ Reset</button>
+      <button class="resetbtn export" onclick="exportAdrs()" title="Export your decisions as ADR markdown" style="margin-left:auto">↧ Export ADRs</button>
+      <button class="resetbtn" onclick="resetAll()" title="Reset all progress, mastery and decisions">↺ Reset</button>
     </div>
   </div>
   <div class="canvas-wrap">
@@ -469,6 +472,7 @@
       <div class="kicker" id="kicker">Orient</div>
       <div style="display:flex; align-items:center; gap:10px">
         <button class="backmap-top" onclick="toMap()" title="Back to the skill map">⊞ skill map</button>
+        <button class="resetbtn export" onclick="exportAdrs()" title="Export your decisions as ADR markdown">↧ Export</button>
         <button class="resetbtn" onclick="resetAll()" title="Reset all progress, mastery and decisions">↺ Reset</button>
         <button class="dec-toggle" onclick="openMargin()">Decisions <b id="decCountM">0</b></button>
       </div>
@@ -1736,15 +1740,21 @@ function addAdr(key){
 /* Record the learner's own decision, keyed by the decide beat's STABLE authored
    id (Q6) so it persists and can be referenced later. base = the ADR_LIB entry
    this call refines (for the headline + framing). */
-function addMyAdr(beatId, base, choice, reason){
-  const ref=ADR_LIB[base]||{};
-  const obj={key:'mine:'+beatId, id:(ref.id||'ADR-XXXX')+' ·  you', title:`Your call: ${choice}`, pill:'your call', mine:true,
+/* Build the margin card for one of the learner's OWN decisions (keyed by stable
+   beat id). Shared by live recording (addMyAdr) and reload rehydration
+   (rebuildAdrsFromDecisions) so the two can never drift. */
+function myAdrCard(beatId, rec){
+  const ref=ADR_LIB[rec.adr]||{};
+  return {key:'mine:'+beatId, id:(ref.id||'ADR-XXXX')+' ·  you', title:`Your call: ${rec.choice}`, pill:'your call', mine:true,
     rows:[['Context', (ref.rows&&ref.rows[0]&&ref.rows[0][1]) || 'A real decision the textbook leaves to you.'],
-          ['Decision',`You chose <b>${esc(choice)}</b>.`],
-          ['Your reason', reason && reason.trim() ? esc(reason.trim()) : '—']]};
-  S.decisions[beatId]={choice, reason:reason||'', adr:base};
-  const ex=S.adrs.find(a=>a.key===obj.key);
-  if(ex) Object.assign(ex,obj); else S.adrs.push(obj);
+          ['Decision',`You chose <b>${esc(rec.choice)}</b>.`],
+          ['Your reason', rec.reason && rec.reason.trim() ? esc(rec.reason.trim()) : '—']]};
+}
+function upsertAdr(obj){ const ex=S.adrs.find(a=>a.key===obj.key); if(ex) Object.assign(ex,obj); else S.adrs.push(obj); }
+function addMyAdr(beatId, base, choice, reason){
+  const rec={choice, reason:reason||'', adr:base};
+  S.decisions[beatId]=rec;
+  upsertAdr(myAdrCard(beatId, rec));
   persist();
   renderMargin();
 }
@@ -2327,20 +2337,133 @@ function toast(msg){
 const STORE_KEY='learn.ratelimiting.v3';
 let _mem=null;                                  // in-memory fallback bucket
 function persist(){
-  // durable record: the learner's decisions + per-module mastery (Q8)
+  // durable record: the learner's decisions + per-module mastery (Q8). We persist
+  // ONLY the durable signal — decisions + mastery — never transient per-chapter UI.
   const mastered=CURRICULUM.modules.filter(m=>S.progress[m.id]==='mastered').map(m=>m.id);
-  const data={decisions:S.decisions, mastered};
+  const data={v:3, decisions:S.decisions, mastered};
+  _mem=data;                                     // always keep the in-memory mirror current
   try{ localStorage.setItem(STORE_KEY, JSON.stringify(data)); }
-  catch(e){ _mem=data; }
+  catch(e){ /* sandboxed file:// or quota — silent fall back to _mem */ }
+}
+/* VALIDATION (Q8): a corrupt or partial payload must NOT brick the app. We never
+   trust the stored shape — every field is checked, unknown module ids are dropped,
+   and a malformed decision entry is skipped rather than throwing. Anything that
+   doesn't validate falls through to the clean initial tree. */
+function sanitizePersisted(data){
+  if(!data || typeof data!=='object') return null;
+  const out={decisions:{}, mastered:[]};
+  // decisions: a map of stable beat id -> {choice, reason, adr}. Keep only entries
+  // whose key matches a real authored decide/callback beat and whose choice is a
+  // string; coerce reason/adr to strings. Drop anything else silently.
+  const decIds=new Set();
+  CURRICULUM.modules.forEach(m=>(m.slots.own||[]).forEach(b=>{ if(b&&b.id) decIds.add(b.id); }));
+  if(data.decisions && typeof data.decisions==='object' && !Array.isArray(data.decisions)){
+    Object.keys(data.decisions).forEach(k=>{
+      if(!decIds.has(k)) return;
+      const d=data.decisions[k];
+      if(!d || typeof d!=='object' || typeof d.choice!=='string') return;
+      out.decisions[k]={choice:d.choice, reason:typeof d.reason==='string'?d.reason:'', adr:typeof d.adr==='string'?d.adr:undefined};
+    });
+  }
+  // mastered: an array of real module ids; drop unknowns and dupes.
+  if(Array.isArray(data.mastered)){
+    const seen=new Set();
+    data.mastered.forEach(id=>{ if(typeof id==='string' && moduleById(id) && !seen.has(id)){ seen.add(id); out.mastered.push(id); } });
+  }
+  return out;
 }
 function loadPersisted(){
-  let data=null;
-  try{ const raw=localStorage.getItem(STORE_KEY); if(raw) data=JSON.parse(raw); }
-  catch(e){ data=_mem; }
-  if(data){
-    if(data.decisions){ S.decisions=data.decisions; }
-    if(Array.isArray(data.mastered)){ data.mastered.forEach(id=>{ if(moduleById(id)) S.progress[id]='mastered'; }); }
+  let raw=null;
+  try{ raw=localStorage.getItem(STORE_KEY); }
+  catch(e){ /* access blocked — fall back to in-memory mirror below */ }
+  let parsed=null;
+  if(raw!=null){
+    try{ parsed=JSON.parse(raw); }
+    catch(e){ parsed=null; }                     // corrupt JSON -> ignore, don't brick
   }
+  if(parsed==null) parsed=_mem;                  // no/blocked/corrupt storage -> in-memory mirror
+  const data=sanitizePersisted(parsed);
+  if(!data) return;                              // nothing valid -> clean initial tree
+  S.decisions=data.decisions;
+  data.mastered.forEach(id=>{ S.progress[id]='mastered'; });
+  // Rebuild the visible decision log (S.adrs) from the validated decisions so a
+  // reload restores the margin, not just the internal map.
+  rebuildAdrsFromDecisions();
+}
+/* Rehydrate the right-margin decision cards from persisted decisions (the durable
+   record is the decisions map; S.adrs is a derived view). System ADRs that a
+   restored decision refines are re-minted too, so the log reads coherently. */
+function rebuildAdrsFromDecisions(){
+  Object.keys(S.decisions).forEach(beatId=>{
+    const rec=S.decisions[beatId];
+    if(rec.adr) addAdr(rec.adr);                 // the system ADR this call refines
+    upsertAdr(myAdrCard(beatId, rec));
+  });
+}
+
+/* ---- EXPORT DECISIONS AS ADR MARKDOWN (Q8) ----
+   Offer a MADR-style markdown rendering of the learner's own recorded decisions.
+   This NEVER claims to write files — it copies to the clipboard where possible,
+   and ALWAYS shows the text in an overlay so the learner can read/copy it by hand.
+   Writing actual ADR files / the learning log stays the AGENT's job (SKILL.md). */
+function buildAdrMarkdown(){
+  const ids=Object.keys(S.decisions);
+  const date=new Date().toISOString().slice(0,10);
+  let md=`# ${CURRICULUM.system} — decision log\n\n`+
+    `_Exported from the /learn experience on ${date}. These are your own calls; `+
+    `the agent still owns writing real ADR files and the learning log._\n`;
+  if(!ids.length){
+    md+=`\n_No decisions recorded yet — work through an aspect's "Own it" slot to record one._\n`;
+    return md;
+  }
+  // order by curriculum/slot so the export reads in the lesson's order
+  const ordered=[];
+  CURRICULUM.modules.forEach(m=>(m.slots.own||[]).forEach(b=>{ if(b&&b.id&&S.decisions[b.id]) ordered.push({m,b,rec:S.decisions[b.id]}); }));
+  const stripTags=s=>String(s).replace(/<[^>]*>/g,'');
+  ordered.forEach(({m,b,rec},i)=>{
+    const ref=ADR_LIB[rec.adr]||{};
+    const num=String(i+1).padStart(4,'0');
+    md+=`\n## ADR-${num} · ${stripTags(b.title||m.label)}\n\n`+
+      `- **Aspect:** ${m.label}\n`+
+      `- **Status:** accepted (your call)\n`+
+      `- **Date:** ${date}\n\n`+
+      `### Context\n\n${stripTags((ref.rows&&ref.rows[0]&&ref.rows[0][1])||'A real decision the textbook leaves to you.')}\n\n`+
+      `### Decision\n\nChose **${stripTags(rec.choice)}**.\n\n`+
+      `### Rationale\n\n${rec.reason&&rec.reason.trim()?stripTags(rec.reason.trim()):'_(no rationale recorded)_'}\n`;
+  });
+  return md;
+}
+function exportAdrs(){
+  const md=buildAdrMarkdown();
+  // attempt clipboard, but never depend on it — always show the text too
+  let copied=false;
+  try{
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(md).then(()=>{},()=>{});
+      copied=true;                               // best-effort; the overlay is the source of truth
+    }
+  }catch(e){ /* clipboard blocked in sandbox — overlay still shows it */ }
+  const card=document.getElementById('calibcard');
+  card.innerHTML=`
+    <div class="ck">Export · ADR markdown</div>
+    <h2>Your decisions, as ADRs</h2>
+    <p>${copied?'Copied to your clipboard (if your browser allowed it). ':''}This is MADR-style text for you to paste into your own log — the experience does <b>not</b> write any files.</p>
+    <textarea id="adrExport" name="adrExport" readonly style="min-height:220px; font-family:var(--mono); font-size:12.5px" onclick="this.select()">${esc(md)}</textarea>
+    <div class="actions" style="margin-top:18px">
+      <button class="btn" onclick="copyExport()">Copy to clipboard</button>
+      <button class="btn ghost" onclick="closeCalib()">Done</button>
+    </div>`;
+  const overlay=document.getElementById('calib');
+  overlay.classList.add('open'); overlay.setAttribute('aria-hidden','false');
+}
+function copyExport(){
+  const ta=document.querySelector('#calibcard textarea'); if(!ta) return;
+  let ok=false;
+  try{
+    if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(ta.value); ok=true; }
+  }catch(e){}
+  if(!ok){ try{ ta.select(); document.execCommand('copy'); ok=true; }catch(e){} }
+  toast(ok?'Copied. Paste it into your own ADR log.':'Select the text and copy it manually.');
 }
 /* MANDATORY reset button (Q8). Clears progress, mastery and decisions everywhere. */
 function resetAll(){
