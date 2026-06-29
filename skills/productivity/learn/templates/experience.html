@@ -1379,7 +1379,8 @@ function sceneSVG(zid, focusIds){
       <text class="c4boundtype" data-boundtype x="${minX+26}" y="${minY+62}">[${esc(m.boundary.type)}]</text>`;
   }
   // paint order: boundary -> edge lines -> nodes -> edge labels (labels always on top)
-  return `<svg viewBox="0 0 ${FRAME_W} ${FRAME_H}">${C4DEFS}
+  const fr=frameOf(zid);
+  return `<svg viewBox="0 0 ${fr.w} ${fr.h}">${C4DEFS}
     ${bound}
     ${m.edges.map(e=>edgeLine(e,byId)).join('')}
     ${m.nodes.map(n=>nodeSVG(n,focus)).join('')}
@@ -1443,7 +1444,8 @@ function flowOffsets(steps){
    beat, reusing the numbered-steps-over-boxes + lane-separation rendering. */
 function flowSVG(zid, steps){
   const m=MODEL[zid];
-  if(!steps||!steps.length){ return `<svg viewBox="0 0 ${FRAME_W} ${FRAME_H}">${C4DEFS}</svg>`; }
+  const fr=frameOf(zid);
+  if(!steps||!steps.length){ return `<svg viewBox="0 0 ${fr.w} ${fr.h}">${C4DEFS}</svg>`; }
   const byId={}; m.nodes.forEach(n=>byId[n.id]=n);
   const nodes=m.nodes.map(n=>{
     const cls=['c4node', n.scope==='ext'?'ext':'', n.kind==='person'?'person':'', n.store?'store':''].filter(Boolean).join(' ');
@@ -1462,7 +1464,7 @@ function flowSVG(zid, steps){
       <text class="flownum" x="${mx}" y="${my+6}" text-anchor="middle">${i+1}</text>
     </g>`;
   }).join('');
-  return `<svg viewBox="0 0 ${FRAME_W} ${FRAME_H}">${C4DEFS}
+  return `<svg viewBox="0 0 ${fr.w} ${fr.h}">${C4DEFS}
     ${arcs}
     ${nodes}
     ${m.nodes.filter(n=>n.kind==='person').map(personBadge).join('')}
@@ -1511,6 +1513,58 @@ function paintCrumbs(){
   const lg=document.getElementById('c4legend'); if(lg) lg.innerHTML=c4Legend(S.zoom);
 }
 
+/* ============================ C4 SCENE SAFETY-NET ============================
+   C4 boxes carry AUTHORED x,y (Q4 — placement is deliberate: in-scope centred,
+   external on the edges, stores low). But a sloppy retarget (too many boxes, or
+   colliding coords) can ship OVERLAPPING boxes. This pass runs ONCE at boot and
+   guarantees no scene ever overlaps: it separates colliding boxes by the minimum
+   translation needed, shifts everything positive, then sizes a PER-LEVEL frame
+   that contains all nodes. A well-authored level that already fits and doesn't
+   overlap is left untouched (the separation finds nothing, the frame ≈ the
+   design frame), so good scenes look identical. */
+const SEP_MARGIN=44;                 // min gap kept between any two boxes
+function frameOf(zid){ const m=MODEL[zid]; return (m&&m._frame)||{w:FRAME_W,h:FRAME_H}; }
+function separateNodes(nodes){
+  for(let pass=0; pass<120; pass++){
+    let moved=false;
+    for(let i=0;i<nodes.length;i++) for(let j=i+1;j<nodes.length;j++){
+      const a=nodes[i], b=nodes[j];
+      // overlap of boxes inflated by half the margin on every side
+      const ox=Math.min(a.x+a.w, b.x+b.w) - Math.max(a.x, b.x) + SEP_MARGIN;
+      const oy=Math.min(a.y+a.h, b.y+b.h) - Math.max(a.y, b.y) + SEP_MARGIN;
+      if(ox<=0 || oy<=0) continue;                 // already clear
+      const acx=a.x+a.w/2, bcx=b.x+b.w/2, acy=a.y+a.h/2, bcy=b.y+b.h/2;
+      if(ox<oy){                                   // push apart on X (smaller overlap)
+        const d=ox/2, s=acx<=bcx?-1:1;
+        a.x+=s*d; b.x-=s*d;
+      }else{                                       // push apart on Y
+        const d=oy/2, s=acy<=bcy?-1:1;
+        a.y+=s*d; b.y-=s*d;
+      }
+      moved=true;
+    }
+    if(!moved) break;
+  }
+}
+function normalizeModel(){
+  ZORDER.forEach(zid=>{
+    const m=MODEL[zid]; if(!m||!m.nodes||!m.nodes.length) return;
+    const before=m.nodes.map(n=>({x:n.x,y:n.y}));
+    separateNodes(m.nodes);
+    const touched=m.nodes.some((n,i)=>n.x!==before[i].x||n.y!==before[i].y);
+    // boundary needs ~86px of head-room for its [type] label; keep that as top pad
+    const padL=40, padT=m.boundary?96:40, padR=40, padB=44;
+    if(touched){                                   // shift positive only if we moved things
+      const minX=Math.min(...m.nodes.map(n=>n.x)), minY=Math.min(...m.nodes.map(n=>n.y));
+      const dx=padL-minX, dy=padT-minY;
+      if(dx!==0||dy!==0) m.nodes.forEach(n=>{ n.x+=dx; n.y+=dy; });
+    }
+    const maxX=Math.max(...m.nodes.map(n=>n.x+n.w)), maxY=Math.max(...m.nodes.map(n=>n.y+n.h+60));
+    m._frame={ w:Math.max(FRAME_W, Math.round(maxX+padR)), h:Math.max(FRAME_H, Math.round(maxY+padB)) };
+  });
+}
+normalizeModel();
+
 /* A zoom anchor = the box (in the OUTER level) that the INNER level lives inside.
    Derived from MODEL: find, in the outer level, the node whose `into` is this
    inner level. cx/cy = that box's centre as a fraction of the frame. */
@@ -1518,8 +1572,9 @@ function anchorForInner(innerId){
   for(const zid of ZORDER){
     const host=MODEL[zid].nodes.find(n=>n.into===innerId);
     if(host){
-      const s=Math.min(3.2, Math.max(2.5, FRAME_W/host.w));
-      return {cx:(host.x+host.w/2)/FRAME_W, cy:(host.y+host.h/2)/FRAME_H, s};
+      const fr=frameOf(zid);
+      const s=Math.min(3.2, Math.max(2.5, fr.w/host.w));
+      return {cx:(host.x+host.w/2)/fr.w, cy:(host.y+host.h/2)/fr.h, s};
     }
   }
   return {cx:.5, cy:.5, s:2.8};
