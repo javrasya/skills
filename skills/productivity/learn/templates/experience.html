@@ -1565,9 +1565,49 @@ function separateNodes(nodes){
     if(!moved) break;
   }
 }
+/* LAYERED LAYOUT — when a level carries MANY boxes (>6) a hand-placed blob reads
+   as jammed. Rather than scroll (which breaks C4's see-it-all-at-once contract),
+   arrange the boxes into dependency COLUMNS: col(n) = longest chain of incoming
+   relationships, so sources sit left and the foundations they lean on sit right
+   (a clean left→right reading order). Persons are forced to the leftmost column.
+   Within a column, boxes stack vertically and the column is centred. Diagrams
+   with ≤6 boxes keep their authored placement untouched (good scenes unchanged). */
+const LAYER_THRESHOLD=6;
+function layerLayout(m, padL, padT){
+  const byId={}; m.nodes.forEach(n=>byId[n.id]=n);
+  const incoming={}; m.nodes.forEach(n=>incoming[n.id]=[]);
+  m.edges.forEach(e=>{ if(byId[e.from]&&byId[e.to]) incoming[e.to].push(e.from); });
+  const col={};
+  const depth=(id,seen)=>{
+    if(col[id]!=null) return col[id];
+    if(seen.has(id)) return 0;                       // cycle guard
+    seen.add(id);
+    const ins=incoming[id];
+    const d = ins.length? 1+Math.max(...ins.map(p=>depth(p,seen))) : 0;
+    seen.delete(id);
+    return col[id]=d;
+  };
+  m.nodes.forEach(n=>depth(n.id,new Set()));
+  m.nodes.forEach(n=>{ if(n.kind==='person') col[n.id]=0; });   // people lead, leftmost
+  // group by column, place
+  const cols={}; m.nodes.forEach(n=>{ (cols[col[n.id]]=cols[col[n.id]]||[]).push(n); });
+  const pitchX=Math.max(...m.nodes.map(n=>n.w))+96;
+  const keys=Object.keys(cols).map(Number).sort((a,b)=>a-b);
+  // tallest column drives the vertical centring band
+  const colH={}; keys.forEach(k=>{ colH[k]=cols[k].reduce((s,n)=>s+n.h,0)+ (cols[k].length-1)*48; });
+  const bandH=Math.max(...Object.values(colH));
+  keys.forEach((k,ci)=>{
+    const list=cols[k];
+    list.sort((a,b)=>a.y-b.y);                       // keep authored vertical hint as tiebreak
+    let y=padT + (bandH-colH[k])/2;
+    list.forEach(n=>{ n.x=padL + ci*pitchX; n.y=y; y+=n.h+48; });
+  });
+}
 function normalizeModel(){
   ZORDER.forEach(zid=>{
     const m=MODEL[zid]; if(!m||!m.nodes||!m.nodes.length) return;
+    const padL0=40, padT0=m.boundary?96:40;
+    if(m.nodes.length>LAYER_THRESHOLD) layerLayout(m, padL0, padT0);   // crowded → columns
     const before=m.nodes.map(n=>({x:n.x,y:n.y}));
     separateNodes(m.nodes);
     const touched=m.nodes.some((n,i)=>n.x!==before[i].x||n.y!==before[i].y);
