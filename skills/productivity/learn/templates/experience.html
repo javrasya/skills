@@ -1670,14 +1670,60 @@ function fitBoundaries(){
     if(typ){ typ.setAttribute('x',bx+26); typ.setAttribute('y',by+62); }
   });
 }
+/* The boot-time separateNodes() uses the DECLARED n.h, but boxes grow via
+   min-height when their text wraps, so a box can render much taller than declared
+   and still overlap its neighbour (e.g. semstrait-ir's long desc spilling into
+   semstrait-catalog). After mount we know the REAL heights: write them back into
+   the model, re-run separation + frame sizing on the true geometry, then re-emit
+   any scene whose nodes moved. Converges fast; guarded against re-entry. */
+let _reflowing=false;
+function reflowScenes(){
+  if(_reflowing) return; _reflowing=true;
+  let any=false;
+  ZORDER.forEach(zid=>{
+    const scene=sceneEl(zid); if(!scene) return;
+    const m=MODEL[zid]; if(!m) return;
+    // 1) measure real heights into the model
+    let changed=false;
+    m.nodes.forEach(n=>{
+      const fo=scene.querySelector(`foreignObject.c4fo[data-node="${n.id}"]`);
+      const inner=fo&&fo.firstElementChild; if(!inner) return;
+      const real=inner.offsetHeight;
+      if(real>n.h+0.5){ n.h=real; changed=true; }
+    });
+    if(!changed) return;
+    // 2) re-separate on the true geometry and re-size the frame
+    const before=m.nodes.map(n=>({x:n.x,y:n.y}));
+    separateNodes(m.nodes);
+    const padL=40, padT=m.boundary?96:40, padR=40, padB=44;
+    const moved=m.nodes.some((n,i)=>n.x!==before[i].x||n.y!==before[i].y);
+    if(moved){
+      const minX=Math.min(...m.nodes.map(n=>n.x)), minY=Math.min(...m.nodes.map(n=>n.y));
+      const dx=padL-minX, dy=padT-minY;
+      if(dx||dy) m.nodes.forEach(n=>{ n.x+=dx; n.y+=dy; });
+    }
+    const maxX=Math.max(...m.nodes.map(n=>n.x+n.w)), maxY=Math.max(...m.nodes.map(n=>n.y+n.h+60));
+    m._frame={ w:Math.max(FRAME_W, Math.round(maxX+padR)), h:Math.max(FRAME_H, Math.round(maxY+padB)) };
+    // 3) re-emit the scene with the corrected layout
+    scene.innerHTML = sceneSVG(zid, focusFor(zid));
+    any=true;
+  });
+  _reflowing=false;
+  return any;
+}
 function initC4(){
   if(!document.getElementById('scenewrap')) return;
   fitNodes(); fitBoundaries();
+  if(reflowScenes()){ fitNodes(); fitBoundaries(); }   // re-fit after any reflow
   settleActive(S.zoom); paintCrumbs();
   // Web fonts load async; the first fit measures with the fallback font (shorter),
   // so text re-wraps taller once the real font arrives and clips again. Re-fit then.
   if(document.fonts && document.fonts.ready){
-    document.fonts.ready.then(()=>{ fitNodes(); fitBoundaries(); repaintScenes(); });
+    document.fonts.ready.then(()=>{
+      fitNodes(); fitBoundaries();
+      if(reflowScenes()){ fitNodes(); fitBoundaries(); }
+      settleActive(S.zoom); repaintScenes();
+    });
   }
 }
 
