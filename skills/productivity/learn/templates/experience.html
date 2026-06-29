@@ -363,7 +363,7 @@
     transition:transform .22s cubic-bezier(.2,.7,.2,1), box-shadow .22s, border-color .22s;
     display:flex; flex-direction:column; gap:3px; overflow:hidden}
   .tnode:hover{transform:translateY(-3px); box-shadow:0 14px 30px -16px rgba(0,0,0,.4)}
-  .tnode .tk{font-family:var(--mono); font-size:9.5px; letter-spacing:.13em; text-transform:uppercase; color:var(--ink-faint)}
+  .tnode .tk{font-family:var(--mono); font-size:9.5px; letter-spacing:.13em; text-transform:uppercase; color:var(--ink-faint); padding-right:76px}
   .tnode .tn{font-family:var(--display); font-weight:600; font-size:18px; line-height:1.1; letter-spacing:-.01em}
   .tnode .td{font-size:12.5px; color:var(--ink-soft); line-height:1.4}
   .tnode .tbadge{position:absolute; top:12px; right:13px; font-family:var(--mono); font-size:9px; letter-spacing:.08em;
@@ -1127,6 +1127,7 @@ function setMastered(id){
    (in TREE_W×TREE_H space) overrides the auto position to nudge the layout.    */
 const NODE_W=250, NODE_H=164;
 const GAP_X=120, GAP_Y=46, PAD_X=48, PAD_Y=40;   // pitch is node+gap, so columns/rows never overlap
+let MAP_ROW_H=NODE_H;                            // grows to the tallest card (measured after mount)
 function computeTiers(){
   const tier={}, mods=CURRICULUM.modules;
   const depth=(id,seen)=>{
@@ -1149,11 +1150,11 @@ function layoutTree(){
   const maxTier=Math.max(0,...Object.values(tier));
   const byTier={};
   CURRICULUM.modules.forEach(m=>{ (byTier[tier[m.id]]=byTier[tier[m.id]]||[]).push(m); });
-  const pitchX=NODE_W+GAP_X, pitchY=NODE_H+GAP_Y;
+  const pitchX=NODE_W+GAP_X, pitchY=MAP_ROW_H+GAP_Y;   // row pitch tracks the tallest card
   // tallest tier drives canvas height; tier count drives width
   const maxRows=Math.max(1,...Object.values(byTier).map(c=>c.length));
   const W = PAD_X*2 + maxTier*pitchX + NODE_W;
-  const H = PAD_Y*2 + (maxRows-1)*pitchY + NODE_H;
+  const H = PAD_Y*2 + (maxRows-1)*pitchY + MAP_ROW_H;
   const pos={};
   Object.keys(byTier).forEach(t=>{
     const col=byTier[t], n=col.length;
@@ -1217,7 +1218,7 @@ function renderMap(){
     const cls=['tnode',st,m.capstone?'capstone':''].filter(Boolean).join(' ');
     const onclick = locked? '' : `onclick="enterModule('${m.id}')"`;
     const p=pos[m.id];
-    nodes += `<foreignObject x="${p.x}" y="${p.y}" width="${NODE_W}" height="${NODE_H}">
+    nodes += `<foreignObject class="tnodefo" x="${p.x}" y="${p.y}" width="${NODE_W}" height="${MAP_ROW_H}">
       <div xmlns="http://www.w3.org/1999/xhtml" class="${cls}" ${onclick}>
         <div class="tk">${esc(m.kick)} · ${esc(ZNAME[m.level]||m.level)}</div>
         <div class="tn">${esc(m.label)}</div>
@@ -1231,6 +1232,24 @@ function renderMap(){
   const mt=document.getElementById('mapTotal'); if(mt) mt.textContent=CURRICULUM.modules.length;
   const md=document.getElementById('mapDecisions'); if(md) md.textContent=Object.keys(S.decisions).length;
   const tt=document.getElementById('mapTitle'); if(tt) tt.textContent=CURRICULUM.system;
+  fitMapNodes();
+}
+/* Cards are min-height NODE_H but long titles/desc make them taller. Measure the
+   tallest rendered card; if it exceeds the current MAP_ROW_H, grow the row pitch
+   and re-render ONCE so the foreignObjects (which clip via overflow:hidden) are
+   tall enough and the rows stay spaced. Converges in one step; the guard stops
+   any loop. Short cards leave MAP_ROW_H at NODE_H — good maps are untouched. */
+let _mapFitting=false;
+function fitMapNodes(){
+  if(_mapFitting) return;
+  let tallest=NODE_H;
+  document.querySelectorAll('#tree foreignObject.tnodefo').forEach(fo=>{
+    const inner=fo.firstElementChild; if(inner) tallest=Math.max(tallest, inner.offsetHeight);
+  });
+  if(tallest>MAP_ROW_H+0.5){
+    MAP_ROW_H=Math.ceil(tallest)+6;
+    _mapFitting=true; renderMap(); _mapFitting=false;
+  }
 }
 
 /* A module's slot order is engine-enforced, but practice/own are optional and
@@ -2548,6 +2567,11 @@ loadPersisted();
 recomputeUnlocks();
 renderMargin();
 render();
+// Web fonts load async; cards measured with the fallback font can re-wrap taller
+// once the real font arrives. Re-fit the map then so nothing clips on first paint.
+if(document.fonts && document.fonts.ready){
+  document.fonts.ready.then(()=>{ if(S.screen==='map') fitMapNodes(); });
+}
 </script>
 </body>
 </html>
