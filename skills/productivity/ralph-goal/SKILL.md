@@ -1,6 +1,17 @@
 ---
 name: ralph-goal
-description: Author a Ralph Wiggum style goal prompt — a single fixed spec the user feeds to an agent CLI (Claude Code, Codex, aider, etc.) in a while-loop, where each iteration starts fresh, reads a progress file, does one verified slice of work, and writes a DONE sentinel when the whole goal passes its check. First runs a maturity gate; if the goal is not loopable yet (no checkable finish, fuzzy scope, no verify path), it grills the user on exactly the gaps before drafting. Produces three files: PROMPT.md (the looping goal, kept under 4K chars), PROGRESS.md (plan + cross-iteration memory), and ralph-loop.sh (the runner). Use when the user says "/ralph-goal <task>", wants a loopable goal prompt, asks about the Ralph Wiggum / Ralph technique, or wants a long task run unattended in a brute-force agent loop.
+description: >
+  Author a Ralph Wiggum style goal prompt — a single fixed spec the user feeds
+  to an agent CLI (Claude Code, Codex, aider, etc.) in a while-loop, where each
+  iteration starts fresh, reads a progress file, does one verified slice of work,
+  and writes a DONE sentinel when the whole goal passes its check. First runs a
+  maturity gate; if the goal is not loopable yet (no checkable finish, fuzzy
+  scope, no verify path), it grills the user on exactly the gaps before drafting.
+  Produces three files — PROMPT.md (the looping goal, kept under 4K chars),
+  PROGRESS.md (plan + cross-iteration memory), and ralph-loop.sh (the runner).
+  Use when the user says "/ralph-goal <task>", wants a loopable goal prompt, asks
+  about the Ralph Wiggum / Ralph technique, or wants a long task run unattended
+  in a brute-force agent loop.
 ---
 
 # Ralph Goal
