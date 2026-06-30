@@ -363,7 +363,7 @@
     transition:transform .22s cubic-bezier(.2,.7,.2,1), box-shadow .22s, border-color .22s;
     display:flex; flex-direction:column; gap:3px; overflow:hidden}
   .tnode:hover{transform:translateY(-3px); box-shadow:0 14px 30px -16px rgba(0,0,0,.4)}
-  .tnode .tk{font-family:var(--mono); font-size:9.5px; letter-spacing:.13em; text-transform:uppercase; color:var(--ink-faint)}
+  .tnode .tk{font-family:var(--mono); font-size:9.5px; letter-spacing:.13em; text-transform:uppercase; color:var(--ink-faint); padding-right:76px}
   .tnode .tn{font-family:var(--display); font-weight:600; font-size:18px; line-height:1.1; letter-spacing:-.01em}
   .tnode .td{font-size:12.5px; color:var(--ink-soft); line-height:1.4}
   .tnode .tbadge{position:absolute; top:12px; right:13px; font-family:var(--mono); font-size:9px; letter-spacing:.08em;
@@ -1125,7 +1125,9 @@ function setMastered(id){
    Roots sit at tier 0; each module is one past its deepest prereq. Within a tier
    the modules are spread evenly across the height. An optional per-module {x,y}
    (in TREE_W×TREE_H space) overrides the auto position to nudge the layout.    */
-const TREE_W=1320, TREE_H=560, NODE_W=250, NODE_H=164;
+const NODE_W=250, NODE_H=164;
+const GAP_X=120, GAP_Y=46, PAD_X=48, PAD_Y=40;   // pitch is node+gap, so columns/rows never overlap
+let MAP_ROW_H=NODE_H;                            // grows to the tallest card (measured after mount)
 function computeTiers(){
   const tier={}, mods=CURRICULUM.modules;
   const depth=(id,seen)=>{
@@ -1140,24 +1142,30 @@ function computeTiers(){
   mods.forEach(m=>depth(m.id,new Set()));
   return tier;
 }
-/* Auto position each node; respect per-module x,y override. */
+/* Auto position each node; respect per-module x,y override. Canvas size is
+   DERIVED from the tier counts so N nodes never overlap: column pitch and row
+   pitch are each (node + gap), and each tier's column is centred vertically. */
 function layoutTree(){
   const tier=computeTiers();
   const maxTier=Math.max(0,...Object.values(tier));
   const byTier={};
   CURRICULUM.modules.forEach(m=>{ (byTier[tier[m.id]]=byTier[tier[m.id]]||[]).push(m); });
-  const padX=40, padY=30;
-  const colSpan = maxTier>0 ? (TREE_W-NODE_W-2*padX)/maxTier : 0;
+  const pitchX=NODE_W+GAP_X, pitchY=MAP_ROW_H+GAP_Y;   // row pitch tracks the tallest card
+  // tallest tier drives canvas height; tier count drives width
+  const maxRows=Math.max(1,...Object.values(byTier).map(c=>c.length));
+  const W = PAD_X*2 + maxTier*pitchX + NODE_W;
+  const H = PAD_Y*2 + (maxRows-1)*pitchY + MAP_ROW_H;
   const pos={};
   Object.keys(byTier).forEach(t=>{
     const col=byTier[t], n=col.length;
-    const x = padX + (+t)*colSpan;
-    const usableH = TREE_H-NODE_H-2*padY;        // even spread within the tier
+    const x = PAD_X + (+t)*pitchX;
+    const colH = (n-1)*pitchY;                   // height this column actually spans
+    const top = (H-NODE_H-colH)/2;               // centre the column in the canvas
     col.forEach((m,i)=>{
-      const autoY = n<=1 ? (TREE_H-NODE_H)/2 : padY + i*(usableH/(n-1));
-      pos[m.id]={ x:(m.x!=null?m.x:x), y:(m.y!=null?m.y:autoY) };
+      pos[m.id]={ x:(m.x!=null?m.x:x), y:(m.y!=null?m.y:top + i*pitchY) };
     });
   });
+  pos._W=W; pos._H=H;                            // canvas dims travel with the result
   return pos;
 }
 
@@ -1177,8 +1185,8 @@ function treeEdgePath(pos,fromId,toId){
 function renderMap(){
   const svg=document.getElementById('tree'); if(!svg) return;
   recomputeUnlocks();
-  svg.setAttribute('viewBox',`0 0 ${TREE_W} ${TREE_H}`);
   const pos=layoutTree();
+  svg.setAttribute('viewBox',`0 0 ${pos._W} ${pos._H}`);
   let edges='', nodes='';
   CURRICULUM.modules.forEach(m=>{
     m.prereqs.forEach(p=>{
@@ -1210,7 +1218,7 @@ function renderMap(){
     const cls=['tnode',st,m.capstone?'capstone':''].filter(Boolean).join(' ');
     const onclick = locked? '' : `onclick="enterModule('${m.id}')"`;
     const p=pos[m.id];
-    nodes += `<foreignObject x="${p.x}" y="${p.y}" width="${NODE_W}" height="${NODE_H}">
+    nodes += `<foreignObject class="tnodefo" x="${p.x}" y="${p.y}" width="${NODE_W}" height="${MAP_ROW_H}">
       <div xmlns="http://www.w3.org/1999/xhtml" class="${cls}" ${onclick}>
         <div class="tk">${esc(m.kick)} · ${esc(ZNAME[m.level]||m.level)}</div>
         <div class="tn">${esc(m.label)}</div>
@@ -1224,6 +1232,24 @@ function renderMap(){
   const mt=document.getElementById('mapTotal'); if(mt) mt.textContent=CURRICULUM.modules.length;
   const md=document.getElementById('mapDecisions'); if(md) md.textContent=Object.keys(S.decisions).length;
   const tt=document.getElementById('mapTitle'); if(tt) tt.textContent=CURRICULUM.system;
+  fitMapNodes();
+}
+/* Cards are min-height NODE_H but long titles/desc make them taller. Measure the
+   tallest rendered card; if it exceeds the current MAP_ROW_H, grow the row pitch
+   and re-render ONCE so the foreignObjects (which clip via overflow:hidden) are
+   tall enough and the rows stay spaced. Converges in one step; the guard stops
+   any loop. Short cards leave MAP_ROW_H at NODE_H — good maps are untouched. */
+let _mapFitting=false;
+function fitMapNodes(){
+  if(_mapFitting) return;
+  let tallest=NODE_H;
+  document.querySelectorAll('#tree foreignObject.tnodefo').forEach(fo=>{
+    const inner=fo.firstElementChild; if(inner) tallest=Math.max(tallest, inner.offsetHeight);
+  });
+  if(tallest>MAP_ROW_H+0.5){
+    MAP_ROW_H=Math.ceil(tallest)+6;
+    _mapFitting=true; renderMap(); _mapFitting=false;
+  }
 }
 
 /* A module's slot order is engine-enforced, but practice/own are optional and
@@ -1372,7 +1398,8 @@ function sceneSVG(zid, focusIds){
       <text class="c4boundtype" data-boundtype x="${minX+26}" y="${minY+62}">[${esc(m.boundary.type)}]</text>`;
   }
   // paint order: boundary -> edge lines -> nodes -> edge labels (labels always on top)
-  return `<svg viewBox="0 0 ${FRAME_W} ${FRAME_H}">${C4DEFS}
+  const fr=frameOf(zid);
+  return `<svg viewBox="0 0 ${fr.w} ${fr.h}">${C4DEFS}
     ${bound}
     ${m.edges.map(e=>edgeLine(e,byId)).join('')}
     ${m.nodes.map(n=>nodeSVG(n,focus)).join('')}
@@ -1436,7 +1463,8 @@ function flowOffsets(steps){
    beat, reusing the numbered-steps-over-boxes + lane-separation rendering. */
 function flowSVG(zid, steps){
   const m=MODEL[zid];
-  if(!steps||!steps.length){ return `<svg viewBox="0 0 ${FRAME_W} ${FRAME_H}">${C4DEFS}</svg>`; }
+  const fr=frameOf(zid);
+  if(!steps||!steps.length){ return `<svg viewBox="0 0 ${fr.w} ${fr.h}">${C4DEFS}</svg>`; }
   const byId={}; m.nodes.forEach(n=>byId[n.id]=n);
   const nodes=m.nodes.map(n=>{
     const cls=['c4node', n.scope==='ext'?'ext':'', n.kind==='person'?'person':'', n.store?'store':''].filter(Boolean).join(' ');
@@ -1455,7 +1483,7 @@ function flowSVG(zid, steps){
       <text class="flownum" x="${mx}" y="${my+6}" text-anchor="middle">${i+1}</text>
     </g>`;
   }).join('');
-  return `<svg viewBox="0 0 ${FRAME_W} ${FRAME_H}">${C4DEFS}
+  return `<svg viewBox="0 0 ${fr.w} ${fr.h}">${C4DEFS}
     ${arcs}
     ${nodes}
     ${m.nodes.filter(n=>n.kind==='person').map(personBadge).join('')}
@@ -1504,6 +1532,98 @@ function paintCrumbs(){
   const lg=document.getElementById('c4legend'); if(lg) lg.innerHTML=c4Legend(S.zoom);
 }
 
+/* ============================ C4 SCENE SAFETY-NET ============================
+   C4 boxes carry AUTHORED x,y (Q4 — placement is deliberate: in-scope centred,
+   external on the edges, stores low). But a sloppy retarget (too many boxes, or
+   colliding coords) can ship OVERLAPPING boxes. This pass runs ONCE at boot and
+   guarantees no scene ever overlaps: it separates colliding boxes by the minimum
+   translation needed, shifts everything positive, then sizes a PER-LEVEL frame
+   that contains all nodes. A well-authored level that already fits and doesn't
+   overlap is left untouched (the separation finds nothing, the frame ≈ the
+   design frame), so good scenes look identical. */
+const SEP_MARGIN=44;                 // min gap kept between any two boxes
+function frameOf(zid){ const m=MODEL[zid]; return (m&&m._frame)||{w:FRAME_W,h:FRAME_H}; }
+function separateNodes(nodes){
+  for(let pass=0; pass<120; pass++){
+    let moved=false;
+    for(let i=0;i<nodes.length;i++) for(let j=i+1;j<nodes.length;j++){
+      const a=nodes[i], b=nodes[j];
+      // overlap of boxes inflated by half the margin on every side
+      const ox=Math.min(a.x+a.w, b.x+b.w) - Math.max(a.x, b.x) + SEP_MARGIN;
+      const oy=Math.min(a.y+a.h, b.y+b.h) - Math.max(a.y, b.y) + SEP_MARGIN;
+      if(ox<=0 || oy<=0) continue;                 // already clear
+      const acx=a.x+a.w/2, bcx=b.x+b.w/2, acy=a.y+a.h/2, bcy=b.y+b.h/2;
+      if(ox<oy){                                   // push apart on X (smaller overlap)
+        const d=ox/2, s=acx<=bcx?-1:1;
+        a.x+=s*d; b.x-=s*d;
+      }else{                                       // push apart on Y
+        const d=oy/2, s=acy<=bcy?-1:1;
+        a.y+=s*d; b.y-=s*d;
+      }
+      moved=true;
+    }
+    if(!moved) break;
+  }
+}
+/* LAYERED LAYOUT — when a level carries MANY boxes (>6) a hand-placed blob reads
+   as jammed. Rather than scroll (which breaks C4's see-it-all-at-once contract),
+   arrange the boxes into dependency COLUMNS: col(n) = longest chain of incoming
+   relationships, so sources sit left and the foundations they lean on sit right
+   (a clean left→right reading order). Persons are forced to the leftmost column.
+   Within a column, boxes stack vertically and the column is centred. Diagrams
+   with ≤6 boxes keep their authored placement untouched (good scenes unchanged). */
+const LAYER_THRESHOLD=6;
+function layerLayout(m, padL, padT){
+  const byId={}; m.nodes.forEach(n=>byId[n.id]=n);
+  const incoming={}; m.nodes.forEach(n=>incoming[n.id]=[]);
+  m.edges.forEach(e=>{ if(byId[e.from]&&byId[e.to]) incoming[e.to].push(e.from); });
+  const col={};
+  const depth=(id,seen)=>{
+    if(col[id]!=null) return col[id];
+    if(seen.has(id)) return 0;                       // cycle guard
+    seen.add(id);
+    const ins=incoming[id];
+    const d = ins.length? 1+Math.max(...ins.map(p=>depth(p,seen))) : 0;
+    seen.delete(id);
+    return col[id]=d;
+  };
+  m.nodes.forEach(n=>depth(n.id,new Set()));
+  m.nodes.forEach(n=>{ if(n.kind==='person') col[n.id]=0; });   // people lead, leftmost
+  // group by column, place
+  const cols={}; m.nodes.forEach(n=>{ (cols[col[n.id]]=cols[col[n.id]]||[]).push(n); });
+  const pitchX=Math.max(...m.nodes.map(n=>n.w))+96;
+  const keys=Object.keys(cols).map(Number).sort((a,b)=>a-b);
+  // tallest column drives the vertical centring band
+  const colH={}; keys.forEach(k=>{ colH[k]=cols[k].reduce((s,n)=>s+n.h,0)+ (cols[k].length-1)*48; });
+  const bandH=Math.max(...Object.values(colH));
+  keys.forEach((k,ci)=>{
+    const list=cols[k];
+    list.sort((a,b)=>a.y-b.y);                       // keep authored vertical hint as tiebreak
+    let y=padT + (bandH-colH[k])/2;
+    list.forEach(n=>{ n.x=padL + ci*pitchX; n.y=y; y+=n.h+48; });
+  });
+}
+function normalizeModel(){
+  ZORDER.forEach(zid=>{
+    const m=MODEL[zid]; if(!m||!m.nodes||!m.nodes.length) return;
+    const padL0=40, padT0=m.boundary?96:40;
+    if(m.nodes.length>LAYER_THRESHOLD) layerLayout(m, padL0, padT0);   // crowded → columns
+    const before=m.nodes.map(n=>({x:n.x,y:n.y}));
+    separateNodes(m.nodes);
+    const touched=m.nodes.some((n,i)=>n.x!==before[i].x||n.y!==before[i].y);
+    // boundary needs ~86px of head-room for its [type] label; keep that as top pad
+    const padL=40, padT=m.boundary?96:40, padR=40, padB=44;
+    if(touched){                                   // shift positive only if we moved things
+      const minX=Math.min(...m.nodes.map(n=>n.x)), minY=Math.min(...m.nodes.map(n=>n.y));
+      const dx=padL-minX, dy=padT-minY;
+      if(dx!==0||dy!==0) m.nodes.forEach(n=>{ n.x+=dx; n.y+=dy; });
+    }
+    const maxX=Math.max(...m.nodes.map(n=>n.x+n.w)), maxY=Math.max(...m.nodes.map(n=>n.y+n.h+60));
+    m._frame={ w:Math.max(FRAME_W, Math.round(maxX+padR)), h:Math.max(FRAME_H, Math.round(maxY+padB)) };
+  });
+}
+normalizeModel();
+
 /* A zoom anchor = the box (in the OUTER level) that the INNER level lives inside.
    Derived from MODEL: find, in the outer level, the node whose `into` is this
    inner level. cx/cy = that box's centre as a fraction of the frame. */
@@ -1511,8 +1631,9 @@ function anchorForInner(innerId){
   for(const zid of ZORDER){
     const host=MODEL[zid].nodes.find(n=>n.into===innerId);
     if(host){
-      const s=Math.min(3.2, Math.max(2.5, FRAME_W/host.w));
-      return {cx:(host.x+host.w/2)/FRAME_W, cy:(host.y+host.h/2)/FRAME_H, s};
+      const fr=frameOf(zid);
+      const s=Math.min(3.2, Math.max(2.5, fr.w/host.w));
+      return {cx:(host.x+host.w/2)/fr.w, cy:(host.y+host.h/2)/fr.h, s};
     }
   }
   return {cx:.5, cy:.5, s:2.8};
@@ -1589,14 +1710,60 @@ function fitBoundaries(){
     if(typ){ typ.setAttribute('x',bx+26); typ.setAttribute('y',by+62); }
   });
 }
+/* The boot-time separateNodes() uses the DECLARED n.h, but boxes grow via
+   min-height when their text wraps, so a box can render much taller than declared
+   and still overlap its neighbour (e.g. semstrait-ir's long desc spilling into
+   semstrait-catalog). After mount we know the REAL heights: write them back into
+   the model, re-run separation + frame sizing on the true geometry, then re-emit
+   any scene whose nodes moved. Converges fast; guarded against re-entry. */
+let _reflowing=false;
+function reflowScenes(){
+  if(_reflowing) return; _reflowing=true;
+  let any=false;
+  ZORDER.forEach(zid=>{
+    const scene=sceneEl(zid); if(!scene) return;
+    const m=MODEL[zid]; if(!m) return;
+    // 1) measure real heights into the model
+    let changed=false;
+    m.nodes.forEach(n=>{
+      const fo=scene.querySelector(`foreignObject.c4fo[data-node="${n.id}"]`);
+      const inner=fo&&fo.firstElementChild; if(!inner) return;
+      const real=inner.offsetHeight;
+      if(real>n.h+0.5){ n.h=real; changed=true; }
+    });
+    if(!changed) return;
+    // 2) re-separate on the true geometry and re-size the frame
+    const before=m.nodes.map(n=>({x:n.x,y:n.y}));
+    separateNodes(m.nodes);
+    const padL=40, padT=m.boundary?96:40, padR=40, padB=44;
+    const moved=m.nodes.some((n,i)=>n.x!==before[i].x||n.y!==before[i].y);
+    if(moved){
+      const minX=Math.min(...m.nodes.map(n=>n.x)), minY=Math.min(...m.nodes.map(n=>n.y));
+      const dx=padL-minX, dy=padT-minY;
+      if(dx||dy) m.nodes.forEach(n=>{ n.x+=dx; n.y+=dy; });
+    }
+    const maxX=Math.max(...m.nodes.map(n=>n.x+n.w)), maxY=Math.max(...m.nodes.map(n=>n.y+n.h+60));
+    m._frame={ w:Math.max(FRAME_W, Math.round(maxX+padR)), h:Math.max(FRAME_H, Math.round(maxY+padB)) };
+    // 3) re-emit the scene with the corrected layout
+    scene.innerHTML = sceneSVG(zid, focusFor(zid));
+    any=true;
+  });
+  _reflowing=false;
+  return any;
+}
 function initC4(){
   if(!document.getElementById('scenewrap')) return;
   fitNodes(); fitBoundaries();
+  if(reflowScenes()){ fitNodes(); fitBoundaries(); }   // re-fit after any reflow
   settleActive(S.zoom); paintCrumbs();
   // Web fonts load async; the first fit measures with the fallback font (shorter),
   // so text re-wraps taller once the real font arrives and clips again. Re-fit then.
   if(document.fonts && document.fonts.ready){
-    document.fonts.ready.then(()=>{ fitNodes(); fitBoundaries(); repaintScenes(); });
+    document.fonts.ready.then(()=>{
+      fitNodes(); fitBoundaries();
+      if(reflowScenes()){ fitNodes(); fitBoundaries(); }
+      settleActive(S.zoom); repaintScenes();
+    });
   }
 }
 
@@ -2223,8 +2390,8 @@ function closeMargin(){ document.getElementById('margin').classList.remove('open
    takes the full viewport. Closing zooms back OUT to the same node. */
 let _zoomOrigin='50% 50%';
 function nodeOriginPct(id){
-  const pos=layoutTree()[id]; if(!pos) return '50% 50%';
-  return `${((pos.x+NODE_W/2)/TREE_W*100).toFixed(2)}% ${((pos.y+NODE_H/2)/TREE_H*100).toFixed(2)}%`;
+  const all=layoutTree(); const pos=all[id]; if(!pos) return '50% 50%';
+  return `${((pos.x+NODE_W/2)/all._W*100).toFixed(2)}% ${((pos.y+NODE_H/2)/all._H*100).toFixed(2)}%`;
 }
 function enterModule(id, force){
   const idx=indexOfId(id); if(idx<0) return;
@@ -2486,6 +2653,11 @@ loadPersisted();
 recomputeUnlocks();
 renderMargin();
 render();
+// Web fonts load async; cards measured with the fallback font can re-wrap taller
+// once the real font arrives. Re-fit the map then so nothing clips on first paint.
+if(document.fonts && document.fonts.ready){
+  document.fonts.ready.then(()=>{ if(S.screen==='map') fitMapNodes(); });
+}
 </script>
 </body>
 </html>
