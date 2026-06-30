@@ -37,11 +37,22 @@ For each failed criterion, ask **one** question, **one at a time**, each seeded 
 
 When a criterion resolves, it's locked — don't relitigate. Once all six hold, draft.
 
+## Step 2.5 — Detect the iteration methodology
+
+A memoryless iteration does work *some way* — and it will invent one if the prompt is silent (the goal might come out TDD by luck, or not at all). Pin the **dev discipline** and the **CLI directives** so every iteration runs the same way, and bake them into PROMPT.md — never leave them to chance.
+
+- **Dev discipline** — how an iteration produces the slice. Read the repo first: a `CLAUDE.md`/`AGENTS.md`, a `tdd`/test-first norm, a `/tdd` skill, or a contributing guide. If the project is test-first, step 4 of the loop must say so — and if the agent CLI exposes it as a command (e.g. `/tdd`), name the command, don't paraphrase it. If nothing's documented and it's not obvious, ask the user one line: "what discipline does each iteration follow — TDD, spec-then-code, just-make-it-green?"
+- **CLI directives / reserved keywords** — control words the target CLI acts on, passed **verbatim** in the prompt. `ultracode` (Claude Code multi-agent orchestration) is one such reserved keyword; `/tdd` is a slash command the agent invokes. If the user runs with these, the prompt must contain the literal token — paraphrasing it ("use many agents", "test first") does NOT trigger the behaviour. Ask which the loop should carry if unstated.
+
+Both land in PROMPT.md: the discipline in loop step 4, the reserved keywords/commands inline where the agent will act on them.
+
 ## Step 3 — Draft the three files
 
 In a directory the user names (default `./ralph/`). Keep them CLI-agnostic.
 
 **PROMPT.md — the goal fed verbatim every iteration. Keep it UNDER 4K chars** (Claude Code's `-p` limit). It holds only the *unchanging machinery* — goal, loop steps, the two verify commands, rules. **The plan/checklist does NOT go here** — it lives in PROGRESS.md, which the agent reads as a file with no size limit. PROMPT.md stays small and constant regardless of task size. Char-count it before finishing; if over 4K, move detail into PROGRESS.md.
+
+Write the file content directly — no wrapping tags. Never emit a `</content>` (or similar) marker into the file; it gets fed to the agent every iteration as noise. After writing, confirm the last line is real content.
 
 ```md
 # Goal
@@ -57,7 +68,8 @@ Everything is in this file and PROGRESS.md. Do ONE slice, then exit.
    - Fails → continue.
 3. Pick the SINGLE next unchecked plan item. If its attempt count is already 2,
    write `RALPH_STUCK` with the blocker. STOP. Otherwise increment its count in PROGRESS.md.
-4. Do only that item.
+4. Do only that item, following <DISCIPLINE — e.g. TDD: invoke `/tdd`, write the failing
+   test first, then implement to green>. <RESERVED-KEYWORDS the CLI needs, verbatim — e.g. ultracode>.
 5. SLICE-VERIFY: run that item's "done when" check. Failed → log the failure, exit (don't tick it).
 6. Append a dated log entry: what you did, what you verified, what's next. Tick the item if it passed.
 7. Exit. Do not start another item.
@@ -98,6 +110,7 @@ Walk them through running it with their CLI. Confirm: DONE-CHECK really means do
 ## Checklist
 - [ ] Gate run: all six criteria checked against request + repo
 - [ ] Failed criteria grilled one-at-a-time, scoped, recommend-then-confirm; passed ones skipped
+- [ ] Methodology pinned: dev discipline in loop step 4; CLI reserved keywords (`ultracode`) / commands (`/tdd`) verbatim, not paraphrased
 - [ ] DONE-CHECK is an agent-run command, not a human judgement
 - [ ] Plan lives in PROGRESS.md with per-item "done when" + attempts; NOT in PROMPT.md
 - [ ] PROMPT.md self-contained, idempotent, char-counted under 4K
