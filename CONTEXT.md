@@ -18,7 +18,9 @@ A skill the agent may reach for **automatically** when the task fits, as well as
 
 ### Vendored skill
 
-A skill **copied into this repo** that originated elsewhere, kept here so the repo is self-contained rather than depending on a symlink to an out-of-repo location. Vendored skills keep upstream attribution. `handoff` (from Matt Pocock) and `caveman` are vendored. See ADR-0001.
+A skill **copied into this repo** that originated elsewhere, kept here so the repo is self-contained rather than depending on a symlink to an out-of-repo location. Vendored skills keep upstream attribution. `handoff` and `code-review` (from Matt Pocock) and `caveman` are vendored. See ADR-0001.
+
+A vendored copy **drifts** as upstream moves. `vendor.tsv` pins, per file, where it came from and the upstream sha last reviewed; `scripts/check-vendored.sh` reports, diffs or pulls when upstream moves past that pin. The pin tracks **upstream**, not our copy — a vendored file is expected to differ locally (attribution headers, [[genericization]]), so comparing the two would report drift forever.
 
 ### Handoff doc
 
@@ -55,3 +57,17 @@ The diagram system the [[learn]] skill's interactive experience renders. **Four 
 ### 4+1 (not C4)
 
 Kruchten's "4+1" architecture view model — Logical, Process, Development, Physical views + Scenarios. A **trap to avoid**: it is *not* C4. 4+1 is four orthogonal *views* of one system (different concerns); C4 is four *zoom levels* of one nested hierarchy. The [[learn]] experience uses C4 semantics only; do not let diagram code drift toward 4+1.
+
+### Task graph, and its frontier
+
+A spec's tickets are **not** a list of steps: they are a graph whose edges are blocking relationships, so at any moment some set of tickets has all its blockers satisfied — the **frontier**. [[implement-spec-in-workflow]] schedules against the frontier rather than in phases: each ticket is one memoised promise awaiting its dependencies' *merges*, so a ticket starts the instant its blockers land and a run costs the longest chain rather than the sum of the phases. Blocking edges usually live as **prose** ("Blocked by #12") rather than in GitHub's sub-issue or dependency APIs, which are frequently empty even when the tickets exist — so they are read by an agent, not queried. A ticket needing a human (hardware, a running game, credentials only a person holds) is excluded along with everything downstream of it, and what was dropped is named rather than silently skipped.
+
+### Serial merge lane
+
+The single-slot queue through which parallel work reaches one shared branch. Implementers run flat out and concurrently, each in its own worktree; their mergers are chained so **exactly one** agent touches the PR branch at a time. Two agents pushing one branch concurrently is the failure the arrangement exists to prevent — it is the one part of [[implement-spec-in-workflow]] that must not be parallelised for speed.
+
+### Gate loop, and the rejection ledger
+
+Reviewing a change **before** it merges, on its own branch, against its own ticket — while the diff is small and its author's reasoning is still recoverable. Review and fix alternate until a review returns nothing blocking, **a fresh reviewer each round**, so "clean" is a verdict rather than one reviewer running out of patience; a round cap merges what is unresolved and names it rather than stalling everything downstream.
+
+The loop's hazard is not slow convergence but **ping-pong**: a fixer judges a finding wrong and leaves the code, the next reviewer raises it again, and the pair trade it until the cap. The **rejection ledger** is the cure — the fixer returns one verdict per finding, `fixed` or `rejected` with a specific checkable reason; rejections accumulate across rounds, and a later reviewer may raise one again only by **falsifying its stated reason**. Without the ledger the loop cannot terminate on a disputed call. Distinct from the [[handover-loop]], which reviews *after* the work lands and re-delegates the whole task each round.

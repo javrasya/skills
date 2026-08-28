@@ -1,0 +1,10 @@
+# Provenance of vendored files (ADR-0001). One row per file, tab-separated:
+#   local path <TAB> upstream repo <TAB> upstream path <TAB> upstream blob sha we last reviewed
+# The sha tracks UPSTREAM, not our copy: a vendored file is expected to differ locally
+# (attribution headers, genericization). `./scripts/check-vendored.sh` reports when upstream
+# has moved past the reviewed sha; `--update` pulls the new content and re-pins.
+# `unreviewed` means upstream has never been diffed against our copy — always reported.
+# `caveman` is not listed: it has no discoverable upstream in mattpocock/skills.
+skills/engineering/code-review/SKILL.md	mattpocock/skills	skills/engineering/code-review/SKILL.md	e28d7acbf7b3bb4d7817b7eb5d9c105af03f6ec4
+skills/engineering/code-review/agents/openai.yaml	mattpocock/skills	skills/engineering/code-review/agents/openai.yaml	9076774ba327f49068db9273feceda03bfe940fa
+skills/productivity/handoff/SKILL.md	mattpocock/skills	skills/productivity/handoff/SKILL.md	unreviewed
