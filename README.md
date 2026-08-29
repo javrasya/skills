@@ -20,7 +20,7 @@ Skills that depend on other skills carry them in-repo, so the link script instal
 |---|---|
 | [pull-spiderman](./skills/engineering/pull-spiderman/SKILL.md) | the [`gh`](https://cli.github.com) CLI, authenticated against the repo |
 | [code-review](./skills/engineering/code-review/SKILL.md) | a `docs/agents/issue-tracker.md` in the target repo, so it can fetch the originating issue |
-| [implement-spec-in-workflow](./skills/engineering/implement-spec-in-workflow/SKILL.md) | `gh`; git **worktree** support; and a harness with a **workflow primitive** that runs a script of `agent()` calls — Claude Code's `Workflow` tool, or an equivalent |
+| [implement-spec-in-workflow](./skills/engineering/implement-spec-in-workflow/SKILL.md) | `gh`; git **worktree** support; a harness with a **workflow primitive** that runs a script of `agent()` calls — Claude Code's `Workflow` tool, or an equivalent; and the **`gh-stack` extension** for native stack registration — gated at arm time, never auto-installed; the run degrades to a plain `--base` chain (operator's choice) where the repo's stacks API is unavailable |
 | [implement-next](./skills/engineering/implement-next/SKILL.md) | `gh`, and a `docs/agents/frontier.md` in the target repo — the shared definition of *takeable* ([copy this one](./docs/agents/frontier.md)) |
 | [implement-all](./skills/engineering/implement-all/SKILL.md) | all of the above — `gh`, worktrees, a workflow primitive, `docs/agents/frontier.md` — plus a **CI pipeline** on the target repo (the gate is a green build) and a `Monitor`-style long-poll primitive |
 | [ralph-goal](./skills/productivity/ralph-goal/SKILL.md) | an agent CLI runnable headlessly in a shell loop |
@@ -34,7 +34,7 @@ These split on one axis — who can invoke them. **User-invoked** skills are rea
 **User-invoked**
 
 - **[pull-spiderman](./skills/engineering/pull-spiderman/SKILL.md)** — Triage and answer the review comments on a PR (left by any reviewer — agent or human). Double-challenges each comment adversarially, drafts a short reply, and gates every reply/resolve/fix behind per-comment human approval.
-- **[implement-spec-in-workflow](./skills/engineering/implement-spec-in-workflow/SKILL.md)** — Implement a whole spec issue and its tickets as one PR, driven by a dynamic workflow of subagents. Schedules against the ticket graph's frontier, gives each ticket its own worktree, reviews every ticket before it merges, and serialises the merges — while the orchestrating agent reads nothing but the summary.
+- **[implement-spec-in-workflow](./skills/engineering/implement-spec-in-workflow/SKILL.md)** — Implement a whole spec issue and its tickets as a **stack of PRs** — one per ticket, registered as a native GitHub stack the operator merges atomically from the top — driven by a dynamic workflow of subagents. Schedules against the ticket graph's frontier, gives each ticket its own worktree, reviews every ticket before it is published, and serialises the publishes — while the orchestrating agent reads nothing but the summary.
 - **[implement-next](./skills/engineering/implement-next/SKILL.md)** — Take the next pickable ticket under a spec and implement it, with a human present. Resolves the frontier, refuses to re-rank the operator's order, asks before running anything labelled `ready-for-human`, and names *which* of the five facts an empty frontier is.
 - **[implement-all](./skills/engineering/implement-all/SKILL.md)** — Chew through a spec's tickets one at a time, unattended, until the frontier stops it. Each ticket becomes one green, **stacked** PR through a five-stage workflow; the loop never merges and never touches `main` — the operator does that by hand. Dies on any of fourteen named pause conditions and is re-armed with the same one-line command.
 
@@ -60,15 +60,15 @@ These split on one axis — who can invoke them. **User-invoked** skills are rea
 
 `pull-spiderman` orchestrates the others: it delegates via `handover`, hardens fixes via `handover-loop`, runs its adversarial passes with `challenge`, and writes PR replies in the `caveman` voice. `handover-loop` builds on `handover`, which (like the subagents it spawns) uses `handoff` to pass context.
 
-`implement-spec-in-workflow` is the other orchestrator, and it delegates to a script rather than to itself: every subagent it spawns lives inside one workflow run, and `code-review` is what its reviewers invoke — once per ticket before that ticket merges, then once over the whole merged branch. Where `handover-loop` reviews **after** the work lands and re-delegates the whole task each round, its gate reviews **before** each merge and re-fixes only the finding.
+`implement-spec-in-workflow` is the other orchestrator, and it delegates to a script rather than to itself: every subagent it spawns lives inside one workflow run, and `code-review` is what its reviewers invoke — once per ticket before that ticket is published as a PR, then once over the whole stack. Where `handover-loop` reviews **after** the work lands and re-delegates the whole task each round, its gate reviews **before** each publish and re-fixes only the finding.
 
 `implement-next` and `implement-all` are the other two ways to work the same ticket graph, and the three differ in **what they hand back**:
 
-| | Attended? | Unit of output | Who merges |
+| | Attended? | How the stack is built | Who merges |
 |---|---|---|---|
-| `implement-next` | yes — asks on `ready-for-human` | one ticket | you, however you like |
-| `implement-all` | no — skips instead of asking | a **stack** of one PR per ticket | you, bottom-up, by hand |
-| `implement-spec-in-workflow` | no | **one** PR for the whole spec | you, once |
+| `implement-next` | yes — asks on `ready-for-human` | one ticket, no stack | you, however you like |
+| `implement-all` | no — skips instead of asking | serially, one green PR per tick, prose loop | you, bottom-up, by hand |
+| `implement-spec-in-workflow` | no | in parallel, one scripted run per spec, native GitHub stack | you, once, atomically from the top PR |
 
 All three read the definition of *takeable* from one place — `docs/agents/frontier.md` in the target repo — rather than each carrying a copy, because a second copy of the query is how two skills come to mean different things by the same word. `implement-all` does **not** call `implement-next`: it needs the frontier before claiming, skips where that one asks, and replaces the implement step with a five-stage `Workflow`. The shared definition is all they have in common, and that is deliberate.
 
