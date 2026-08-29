@@ -26,7 +26,7 @@ Your context is the scarce resource here. The spec body, the ticket bodies, the 
    | `__SPEC__` | the spec issue number, from the arguments |
    | `__REPO__` | `owner/name` of the repo the spec belongs to |
    | `__REPO_DIR__` | absolute path of that checkout |
-   | `__BASE_REF__` | the branch the stack merges into — the repo's default branch, unless the user named another. Prior work already sitting on a feature branch is **not** this value: the workflow's discovery agent finds that branch itself and it becomes the stack's bottom layer. |
+   | `__BASE_REF__` | the branch the stack merges into. The user naming one settles it. Otherwise check `git branch --show-current` against the repo's default branch: when they match, use the default branch silently; when the checkout sits on some other branch, **ask the user** which branch the stack merges into — the default branch, or the one they are on — and wait. A checkout parked on a long-lived branch often means the work targets that branch, and a wrong base miscuts every PR in the stack, so this is never guessed. Prior work already sitting on a feature branch is **not** this value: the workflow's discovery agent finds that branch itself and it becomes the stack's bottom layer. |
    | `__STACK_MODE__` | `native` when both probes in step 1 passed; `chain` when the user chose the fallback |
    | `__NOTES_DIR__` | `~/.claude/spec-notes/<repo-name>-<spec>`, absolute — durable, outside every checkout, readable by every agent |
 
