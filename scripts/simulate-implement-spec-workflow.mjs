@@ -17,6 +17,20 @@ function render() {
   return s
 }
 
+// A stubbed fixer answers from the findings its prompt actually names, so a
+// finding the script fails to route into a slice brief comes back with no
+// verdict — which is exactly what the reconciliation is there to catch.
+const ISSUES = new Map()
+function locationsIn(prompt) {
+  const out = []
+  for (const m of prompt.matchAll(/^- (?:\[\w+\] )?([\w./]+:\d+) \u2014 ([^\n\u2192]+?)(?: \u2192 |$)/gm)) {
+    out.push(m[1])
+    ISSUES.set(m[1], m[2].trim())
+  }
+  return out
+}
+const issueFor = (loc) => ISSUES.get(loc) || '?'
+
 async function run(overrides = {}) {
   const calls = []
   const defaults = {
@@ -32,10 +46,13 @@ async function run(overrides = {}) {
     dispatch: () => ({ ticket_brief: 'the ticket in brief', slices: [{ title: 'all of it', brief: 'do it', effort: 'medium' }] }),
     impl: (label) => ({ branch: 'ticket/' + label.match(/#(\d+)/)[1], summary: 's', tests_run: 'npm t', tests_green: true, unmet: [] }),
     gate: () => ({ findings: [] }),
-    gatefix: () => ({ verdicts: [], overflow: [] }),
+    // The fix dispatcher sees the findings in its prompt; by default it puts
+    // all of them in one slice, which is the verdict it is biased towards.
+    fixdispatch: (label, prompt) => ({ slices: [{ title: 'all the findings', brief: 'fix them', findings: locationsIn(prompt), effort: 'medium' }] }),
+    fixslice: (label, prompt) => ({ verdicts: locationsIn(prompt).map((l) => ({ location: l, issue: issueFor(l), action: 'fixed', reason: 'fixed it' })), unfinished: [] }),
     publish: (label) => { const n = label.match(/#(\d+)/)[1]; return { published: true, pr_url: 'https://pr/' + n, pr_number: 100 + Number(n), conflicts_resolved: [], note: '' } },
     review: () => ({ findings: [] }),
-    integration: () => ({ pr_url: 'https://pr/int', pr_number: 999, branch: 'spec/224-integration', verdicts: [] }),
+    integration: () => ({ pr_url: 'https://pr/int', pr_number: 999, branch: 'spec/224-integration' }),
     finalize: () => 'stack registered, 2 PRs ready, 0 worktrees',
   }
   const h = { ...defaults, ...overrides }
@@ -45,18 +62,19 @@ async function run(overrides = {}) {
     if (label.startsWith('explore')) return 'explore'
     if (label.startsWith('dispatch')) return 'dispatch'
     if (label.startsWith('impl')) return 'impl'
-    if (label.startsWith('gate-fix')) return label.includes(':d') ? 'impl' : 'gatefix'
+    if (label.endsWith(':dispatch')) return 'fixdispatch'
+    if (label.startsWith('gate-fix') || label.startsWith('integration')) return 'fixslice'
     if (label.startsWith('gate')) return 'gate'
+    if (label === 'publish:integration') return 'integration'
     if (label.startsWith('publish')) return 'publish'
     if (label.startsWith('review')) return 'review'
-    if (label === 'integration') return 'integration'
     if (label === 'finalize') return 'finalize'
     throw new Error('unrouted label: ' + label)
   }
 
   const agent = async (prompt, opts = {}) => {
     const label = opts.label || '?'
-    calls.push({ label, effort: opts.effort || '(inherit)', prompt })
+    calls.push({ label, effort: opts.effort || '(inherit)', prompt, opts })
     return h[route(label)](label, prompt, opts)
   }
   const parallel = (fns) => Promise.all(fns.map((f) => f()))
@@ -124,21 +142,77 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('C: finalize told what remains', calls.find((c) => c.label === 'finalize').prompt.includes('unmet criteria: criterion Z'), '')
 }
 
-// --- scenario D: gate fixer overflows to the dispatcher ---------------------
+// --- scenario D: every gate fix goes through the dispatcher -----------------
 {
   let gateRound = 0
   const { result, calls } = await run({
     graph: () => ({ tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }], start_ref: 'main', explorations: [] }),
     gate: () => (++gateRound === 1
-      ? { findings: [{ severity: 'blocker', location: 'a.js:1', issue: 'bug', fix: 'fix it' }] }
+      ? { findings: [{ severity: 'blocker', location: 'a.js:1', issue: 'bug', fix: 'fix it' }, { severity: 'major', location: 'b.js:2', issue: 'other bug', fix: 'fix that' }] }
       : { findings: [] }),
-    gatefix: () => ({ verdicts: [{ location: 'a.js:1', issue: 'bug', action: 'fixed', reason: 'small part fixed' }], overflow: ['a.js:1 — the large part'] }),
+    fixdispatch: (label, prompt) => ({ slices: [
+      { title: 'a', brief: 'fix a: a.js:1 — bug', findings: ['a.js:1'], effort: 'medium' },
+      { title: 'b', brief: 'fix b: b.js:2 — other bug', findings: ['b.js:2'], effort: 'high' },
+    ] }),
+    fixslice: (label) => label.endsWith(':s1')
+      ? { verdicts: [{ location: 'a.js:1', issue: 'bug', action: 'fixed', reason: 'done' }], unfinished: [] }
+      : { verdicts: [{ location: 'b.js:2', issue: 'other bug', action: 'rejected', reason: 'b.js:2 is generated code' }], unfinished: [] },
   })
   const seq = calls.map((c) => c.label)
-  check('D: overflow re-dispatches', seq.includes('dispatch:#10:re'), seq.join(' | '))
-  check('D: overflow slice agent runs under gate-fix tag', seq.some((l) => l.startsWith('gate-fix:#10:r1:d')), seq.join(' | '))
-  check('D: fixer got the ticket brief, not the issue', calls.find((c) => c.label === 'gate-fix:#10:r1').prompt.includes('the ticket in brief'), '')
-  check('D: gate converges next round', gateRound === 2 && result.gate_unfixed.length === 0, '')
+  check('D: no monolithic fixer — the batch is dispatched first', seq.includes('gate-fix:#10:r1:dispatch'), seq.join(' | '))
+  check('D: fix dispatcher runs at medium effort', calls.find((c) => c.label === 'gate-fix:#10:r1:dispatch').effort === 'medium', '')
+  check('D: dispatcher precedes every fix slice', seq.indexOf('gate-fix:#10:r1:dispatch') < seq.indexOf('gate-fix:#10:r1:s1'), seq.join(' | '))
+  check('D: one agent per slice, effort from the dispatcher', calls.find((c) => c.label === 'gate-fix:#10:r1:s1').effort === 'medium' && calls.find((c) => c.label === 'gate-fix:#10:r1:s2').effort === 'high', '')
+  check('D: fix agents run in the Gate phase, not Implement', calls.filter((c) => c.label.startsWith('gate-fix')).every((c) => c.opts.phase === 'Gate'), JSON.stringify(calls.filter((c) => c.label.startsWith('gate-fix')).map((c) => c.opts.phase)))
+  check('D: dispatcher got the ticket brief, not the issue', calls.find((c) => c.label === 'gate-fix:#10:r1:dispatch').prompt.includes('the ticket in brief'), '')
+  check('D: slice fixer reads only its brief', calls.find((c) => c.label === 'gate-fix:#10:r1:s1').prompt.includes('run no `gh issue view`'), '')
+  check('D: rejection reaches the next reviewer', calls.find((c) => c.label === 'gate:#10:r2').prompt.includes('b.js:2 is generated code'), '')
+  check('D: gate converges', gateRound === 2 && result.gate_unfixed.length === 0, '')
+}
+
+// --- scenario E: a dropped finding is reconciled, not assumed fixed ---------
+{
+  let gateRound = 0
+  const { result, calls, logs } = await run({
+    graph: () => ({ tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }], start_ref: 'main', explorations: [] }),
+    gate: () => (++gateRound === 1
+      ? { findings: [{ severity: 'blocker', location: 'a.js:1', issue: 'bug', fix: 'fix it' }, { severity: 'blocker', location: 'b.js:2', issue: 'dropped one', fix: 'fix that' }] }
+      : { findings: [] }),
+    // The dispatcher silently drops b.js:2 — the failure the script must catch.
+    fixdispatch: () => ({ slices: [{ title: 'a only', brief: 'fix a.js:1 — bug', findings: ['a.js:1'], effort: 'medium' }] }),
+    fixslice: () => ({ verdicts: [{ location: 'a.js:1', issue: 'bug', action: 'fixed', reason: 'done' }], unfinished: [] }),
+  })
+  check('E: the dropped finding is logged, not silently lost', logs.some((l) => l.includes('no verdict')), logs.join(' | '))
+  check('E: the next reviewer is told to check it explicitly', calls.find((c) => c.label === 'gate:#10:r2').prompt.includes('never reported back') && calls.find((c) => c.label === 'gate:#10:r2').prompt.includes('b.js:2'), '')
+  check('E: a fixed finding is NOT re-listed as unverified', !calls.find((c) => c.label === 'gate:#10:r2').prompt.includes('a.js:1'), '')
+  check('E: a clean re-review still closes the gate', gateRound === 2 && result.gate_unfixed.length === 0, '')
+}
+
+// --- scenario F: the whole-stack review routes through the dispatcher too ---
+{
+  const { result, calls } = await run({
+    review: () => ({ findings: [{ severity: 'major', location: 'c.js:3', issue: 'two helpers', fix: 'merge them' }] }),
+  })
+  const seq = calls.map((c) => c.label)
+  check('F: integration fixes are dispatched', seq.includes('integration:dispatch'), seq.join(' | '))
+  check('F: integration slices run in the Review phase', calls.filter((c) => c.label.startsWith('integration')).every((c) => c.opts.phase === 'Review'), '')
+  check('F: first integration slice cuts from the stack tip', calls.find((c) => c.label === 'integration').prompt.includes('origin/ticket/11'), calls.find((c) => c.label === 'integration').prompt)
+  check('F: a separate low-effort agent opens the PR', calls.find((c) => c.label === 'publish:integration') && calls.find((c) => c.label === 'publish:integration').effort === 'low', seq.join(' | '))
+  check('F: the publisher is told to change no code', calls.find((c) => c.label === 'publish:integration').prompt.includes('Change no code'), '')
+  check('F: the publisher runs after the fixes', seq.indexOf('integration') < seq.indexOf('publish:integration'), seq.join(' | '))
+  check('F: integration PR becomes the stack top', result.stack_bottom_to_top.some((l) => l.startsWith('integration')), JSON.stringify(result.stack_bottom_to_top))
+}
+
+// --- scenario G: no fix lands, so no integration PR is opened ---------------
+{
+  const { result, calls } = await run({
+    review: () => ({ findings: [{ severity: 'major', location: 'c.js:3', issue: 'two helpers', fix: 'merge them' }] }),
+    fixslice: () => null,
+  })
+  const seq = calls.map((c) => c.label)
+  check('G: nothing landed, so no PR is opened', !seq.includes('publish:integration'), seq.join(' | '))
+  check('G: the finding is reported unfixed', result.integration_unfixed.length > 0, JSON.stringify(result.integration_unfixed))
+  check('G: no integration PR in the stack', !result.stack_bottom_to_top.some((l) => l.startsWith('integration')), JSON.stringify(result.stack_bottom_to_top))
 }
 
 for (const c of checks) console.log((c.ok ? 'PASS' : 'FAIL') + '  ' + c.name + (c.ok ? '' : '   [' + c.detail + ']'))

@@ -150,38 +150,65 @@ const REVIEW_SCHEMA = {
   },
 }
 
-const FIX_SCHEMA = {
+const VERDICTS = {
+  type: 'array',
+  items: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['location', 'issue', 'action', 'reason'],
+    properties: {
+      location: { type: 'string', description: 'path:line, copied from the finding' },
+      issue: { type: 'string', description: 'the finding, copied verbatim' },
+      action: { type: 'string', enum: ['fixed', 'rejected'] },
+      reason: { type: 'string', description: 'what you changed, or \u2014 when rejected \u2014 the specific checkable reason the finding is wrong' },
+    },
+  },
+}
+
+// What the dispatcher returns when it sizes a batch of review findings. No
+// ticket_brief: a fix dispatch is handed the brief the ticket dispatcher
+// already wrote, and never re-derives it.
+const FIX_DISPATCH_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['verdicts', 'overflow'],
+  required: ['slices'],
   properties: {
-    overflow: { type: 'array', items: { type: 'string' }, description: '"location — issue" lines for findings too large to fix in this agent\'s remaining context — empty normally' },
-    verdicts: {
+    slices: {
       type: 'array',
+      minItems: 1,
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['location', 'issue', 'action', 'reason'],
+        required: ['title', 'brief', 'findings', 'effort'],
         properties: {
-          location: { type: 'string', description: 'path:line, copied from the finding' },
-          issue: { type: 'string', description: 'the finding, copied verbatim' },
-          action: { type: 'string', enum: ['fixed', 'rejected'] },
-          reason: { type: 'string', description: 'what you changed, or — when rejected — the specific checkable reason the finding is wrong' },
+          title: { type: 'string' },
+          brief: { type: 'string', description: 'self-contained: every finding this slice owns copied in full, the files they touch, and every constraint from the ticket brief that bears on them \u2014 its fixer reads no issue and no spec' },
+          findings: { type: 'array', minItems: 1, items: { type: 'string' }, description: 'the `location` of each finding this slice owns, copied verbatim \u2014 every finding in exactly one slice, none dropped, none in two' },
+          effort: { type: 'string', enum: ['medium', 'high'], description: 'reasoning effort for the slice fixer' },
         },
       },
     },
   },
 }
 
+const FIX_SLICE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['verdicts', 'unfinished'],
+  properties: {
+    verdicts: VERDICTS,
+    unfinished: { type: 'array', items: { type: 'string' }, description: '`location` of each finding in your brief you did not reach \u2014 empty normally' },
+  },
+}
+
 const INTEGRATION_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['pr_url', 'pr_number', 'branch', 'verdicts'],
+  required: ['pr_url', 'pr_number', 'branch'],
   properties: {
     pr_url: { type: 'string' },
     pr_number: { type: 'integer' },
     branch: { type: 'string' },
-    verdicts: FIX_SCHEMA.properties.verdicts,
   },
 }
 
@@ -283,9 +310,16 @@ const notesLine = notes.length ? `Research notes for this spec: ${notes.join(', 
 // the normal answer — and writes each a self-contained brief, so slice
 // implementers read no issue and no spec. Under-slicing self-corrects (an
 // overrun comes back here as a remainder to re-slice); over-slicing has no
-// corrective, so the dispatcher is biased against slicing. It is also the
-// universal overflow handler: a gate fixer that outgrows its context hands its
-// remainder here too.
+// corrective, so the dispatcher is biased against slicing.
+//
+// This is the dispatcher's implementation entry point. `dispatchFix` is the
+// other: the same role sizing a batch of review findings. Every piece of work
+// this run does goes through one of the two — nothing reaches a fixer or an
+// implementer unsized.
+//
+// MAX_DISPATCH_ROUNDS governs re-slicing HERE only. The gate has no equivalent
+// nesting: whatever a fix slice does not reach falls to the next reviewer,
+// which re-derives what is still broken from the branch itself.
 const MAX_DISPATCH_ROUNDS = 3
 
 function dispatch(t, remainder) {
@@ -389,6 +423,108 @@ Return whether it published, the PR url and number, what you resolved, and any n
   return run
 }
 
+// --- the fix path: findings reach a fixer only through the dispatcher -----
+// Every batch of blocking findings is sized and briefed exactly like a ticket:
+// the dispatcher is the only route into any work this run does, implementation
+// or fix. The earlier design let one fixer own a whole batch and hand back
+// only what it declared too large for its context — and an agent under context
+// pressure does not declare it: one measured run reached 344.8K tokens and
+// handed off nothing. Self-assessment is the first thing context pressure
+// destroys, so the routing is unconditional and the sizing happens before any
+// fixer starts. See docs/adr/0004.
+const fkey = (f) => `${f.location}||${f.issue}`
+
+function dispatchFix(findings, { subject, brief, branch, ref, started, phase: ph, tag }) {
+  return agent(
+    `Slice the review findings on ${subject} into the fewest fix slices that fresh-context agents can finish, and write each slice's brief.
+
+${POINTERS}
+What the work is, distilled — read this instead of the issue, and run no \`gh issue view\` and no spec: ${brief}
+The branch the fixes land on: \`${branch}\`${started ? ' — this run\'s own branch, already pushed, no PR' : `, which your first slice cuts fresh from \`${ref}\``}.
+
+Findings to fix:
+${findings.map((f) => `- [${f.severity}] ${f.location} — ${f.issue} → ${f.fix}`).join('\n')}
+
+Size this work, do not do it. \`git fetch origin\`, then skim at \`${ref}\`: \`git diff --stat\` against what it was cut from, and the STRUCTURE of the files the findings name — signatures, grep hits. Read no implementations; your slices read the code.
+
+Default to ONE slice. Slice only when one agent plausibly cannot finish in roughly 70 tool calls; when unsure, do not slice. A finding naming a rename and one naming an extraction read alike in a line and differ by two orders of magnitude in work — that difference, not the finding count, is what you are judging. Slices run sequentially on one branch, so each must leave the branch consistent — building, tests green.
+
+Every finding above belongs to exactly one slice: none dropped, none in two. Each brief must be self-contained — the findings it owns copied in full with their suggested fixes, the files they touch, and every constraint from the distilled work above that bears on them; its fixer reads no issue, no spec and no review.`,
+    { ...M, effort: 'medium', phase: ph, schema: FIX_DISPATCH_SCHEMA, label: `${tag}:dispatch` },
+  )
+}
+
+async function runFixSlices(slices, { subject, branch, cutFrom, started, phase: ph, tag }) {
+  const out = { verdicts: [], unfinished: [], landed: started, died: null }
+  for (let i = 0; i < slices.length; i++) {
+    const s = slices[i]
+    const r = await agent(
+      `Fix one slice of the review findings on ${subject}: ${s.title}${slices.length > 1 ? ` (slice ${i + 1} of ${slices.length})` : ''}.
+
+${POINTERS}
+
+Your brief — the work and its findings are already distilled into it, so run no \`gh issue view\`, read no spec, and re-read no review:
+${s.brief}
+
+First: \`git fetch origin && git checkout -B ${branch} ${out.landed ? `origin/${branch}\` — a branch THIS RUN created: this workflow made and pushed it minutes ago. It is unpublished, has no PR, and is not pre-existing work — continuing it is the assignment, not a modification of anyone else's branch` : `${q(cutFrom)}\``}.
+
+Fix what your brief owns and nothing else — the rest of the findings belong to other slices, and the branches below this one in the stack are published and must not be touched.
+
+A finding you believe is wrong: leave the code alone and return it as \`rejected\` with the reason it is wrong. That reason goes to the next reviewer, who may only raise it again by falsifying it — so make the reason specific and checkable, and reject only what you are confident about.
+
+${ECONOMY}
+
+Past roughly 70 tool calls this slice has outgrown one agent's context. Stop cleanly: commit and push what works, and name the findings you did not reach in \`unfinished\`. The next review round re-derives what is still broken from the branch itself, so a named remainder is cheap; a 300-turn agent is not.
+
+Run the repo's tests, get them green, commit, and push \`${branch}\` (plain push — this run's own branch, no PR yet).
+
+Return one verdict per finding in your brief you fixed or rejected, and the \`location\` of any you did not reach.`,
+      { ...M, effort: s.effort, phase: ph, schema: FIX_SLICE_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}` },
+    )
+    // A dead fixer is not fatal — it is the next reviewer's problem, and that
+    // reviewer reads the branch rather than anyone's account of it. But the
+    // branch may be mid-change, so the round stops rather than building on it.
+    if (!r) { out.died = s.title; break }
+    out.landed = true
+    out.verdicts.push(...r.verdicts)
+    out.unfinished.push(...r.unfinished)
+  }
+  return out
+}
+
+// Reconciliation happens HERE, in the script, never in a prompt: the reason
+// this path exists at all is that an agent's own account of what it did not do
+// is unreliable. A finding with no verdict is unfixed, named, and handed to the
+// next reviewer to check explicitly — not silently assumed done.
+async function fixFindings(findings, opts) {
+  const ref = opts.started ? `origin/${opts.branch}` : q(opts.cutFrom)
+  const plan = await dispatchFix(findings, { ...opts, ref })
+  if (!plan) {
+    log(`${opts.subject}: fix dispatcher died — ${findings.length} finding(s) unaccounted`)
+    return { verdicts: [], unaccounted: findings, landed: opts.started }
+  }
+  if (plan.slices.length > 1) log(`${opts.subject}: ${findings.length} finding(s) dispatched as ${plan.slices.length} fix slices`)
+  const out = await runFixSlices(plan.slices, opts)
+  if (out.died) log(`${opts.subject}: fix slice "${out.died}" died — the round stops there`)
+
+  const unfinished = new Set(out.unfinished)
+  const exact = new Map(out.verdicts.map((v) => [fkey(v), v]))
+  const byLoc = new Map()
+  for (const v of out.verdicts) byLoc.set(v.location, (byLoc.get(v.location) || []).concat(v))
+  const verdicts = []
+  const unaccounted = []
+  for (const f of findings) {
+    const at = byLoc.get(f.location) || []
+    // Agents copy imperfectly: an exact match first, then a location that only
+    // one verdict claims. Anything looser would credit the wrong finding.
+    const v = exact.get(fkey(f)) || (at.length === 1 ? at[0] : null)
+    if (v && !unfinished.has(f.location)) verdicts.push({ ...v, location: f.location, issue: f.issue })
+    else unaccounted.push(f)
+  }
+  if (unaccounted.length) log(`${opts.subject}: ${unaccounted.length} finding(s) came back with no verdict — carried to the next review`)
+  return { verdicts, unaccounted, landed: out.landed }
+}
+
 // A ticket is reviewed on its own still-unpublished branch, against the base it
 // was cut from, while its diff is small and its author's reasoning is still
 // recoverable. Review and fix alternate until a review comes back with nothing
@@ -401,9 +537,14 @@ Return whether it published, the PR url and number, what you resolved, and any n
 // again, forever. So a rejection is a first-class outcome — it is carried into
 // every later round with its reason, and a reviewer may only re-raise it by
 // falsifying that reason.
+//
+// A fix round is never re-dispatched in place: whatever a slice did not reach
+// falls to the next round's reviewer, which re-derives what is still broken
+// from the branch. One cap governs the gate, not two multiplying ones.
 const GATE_MAX_ROUNDS = 4
 async function reviewGate(t, impl, cutFrom, ticketBrief) {
   const rejected = []
+  let unverified = []
   for (let round = 1; round <= GATE_MAX_ROUNDS; round++) {
     const r = await agent(
       `Review ticket #${t.number}'s branch before it is published as a PR.
@@ -417,6 +558,10 @@ What the ticket asked for: \`gh issue view ${t.number}\`. What the implementer s
 Judge this ticket's diff. Work another ticket owns is out of scope; the whole stack gets its own review later. Change no code — report.
 ${impl.unmet.length ? `
 The implementer already declared these criteria unmet — they are carried to the operator, so report them without re-litigating: ${impl.unmet.join('; ')}` : ''}
+${unverified.length ? `
+The previous round handed these findings to a fixer that never reported back on them. Nobody knows whether they were addressed, so the branch is the only truth — check each one explicitly and raise it again if it is still real:
+
+${unverified.map((f) => `- ${f.location} — ${f.issue}`).join('\n')}` : ''}
 ${rejected.length
         ? `
 A previous round already raised the findings below, and the implementer judged each one wrong for the stated reason. Raise one again only if you can show its reason is false — say which part is false and why. Otherwise leave it out entirely.
@@ -435,38 +580,19 @@ ${rejected.map((v) => `- ${v.location} — ${v.issue}\n  judged wrong because: $
       return blocking
     }
     log(`#${t.number} gate round ${round}: ${blocking.length} blocking`)
-    const fix = await agent(
-      `Fix what the review raised on ticket #${t.number}'s branch.
-
-${POINTERS}
-The ticket, distilled (read this instead of the issue): ${ticketBrief}
-
-\`git fetch origin && git checkout ${impl.branch}\` — this run's own unpublished branch, created by this workflow's implementers; it has no PR and is not pre-existing work.
-
-${blocking.map((f) => `- [${f.severity}] ${f.location} — ${f.issue} → ${f.fix}`).join('\n')}
-
-Fix them. Stay inside ticket #${t.number}'s scope — unless a finding's real cause sits outside it, in which case fix it there and say so.
-
-A finding you believe is wrong: leave the code alone and return it as rejected with the reason it is wrong. That reason goes to the next reviewer, who may only raise it again by falsifying it — so make the reason specific and checkable, and reject only what you are confident about.
-
-${ECONOMY}
-
-A finding too large to fix in your remaining context (past roughly 70 tool calls): fix what you can, and return the rest as "location — issue" lines in \`overflow\` — the dispatcher hands them to fresh agents. Everything you neither reject nor overflow, you have fixed.
-
-Run the repo's tests, get them green, commit, and push \`${impl.branch}\` (plain push — this run's own branch, no PR yet).
-
-Return one verdict per finding above.`,
-      { ...M, phase: 'Gate', schema: FIX_SCHEMA, isolation: 'worktree', label: `gate-fix:#${t.number}:r${round}` },
-    )
-    if (!fix) throw new Error(`gate fixer for #${t.number} died at round ${round}`)
-    for (const v of fix.verdicts.filter((v) => v.action === 'rejected')) {
+    const out = await fixFindings(blocking, {
+      subject: `ticket #${t.number}`,
+      brief: ticketBrief,
+      branch: impl.branch,
+      cutFrom,
+      started: true,
+      phase: 'Gate',
+      tag: `gate-fix:#${t.number}:r${round}`,
+    })
+    for (const v of out.verdicts.filter((v) => v.action === 'rejected')) {
       if (!rejected.some((p) => p.location === v.location && p.issue === v.issue)) rejected.push(v)
     }
-    if (fix.overflow.length) {
-      log(`#${t.number} gate round ${round}: ${fix.overflow.length} finding(s) overflowed to the dispatcher`)
-      const replan = await dispatch(t, `gate findings too large for one fixer: ${fix.overflow.join('; ')}`)
-      if (replan) await runSlices(t, replan.slices, { cutFrom, started: true, tag: `gate-fix:#${t.number}:r${round}:d` })
-    }
+    unverified = out.unaccounted
   }
   return []
 }
@@ -554,32 +680,50 @@ log(`code review: ${findings.length} findings`)
 // become one integration PR on top — the seams between the tickets, as their
 // own small reviewable diff.
 let integration = null
+let integrationVerdicts = []
+let integrationUnaccounted = []
 if (findings.length) {
-  integration = await agent(
-    `Fix what the whole-stack review raised for spec #${SPEC}, as one integration PR on top of the stack.
+  const branch = `spec/${SPEC}-integration`
+  const stackLine = [...(hasLayer0 ? [`${graph.start_ref} (pre-existing work)`] : []), ...stacked.map((s) => `#${s.number} (${s.branch})`)].join(' → ')
+  const out = await fixFindings(findings, {
+    subject: `spec #${SPEC}`,
+    brief: `The whole stack for spec #${SPEC}, bottom to top: ${stackLine}. These findings come from the review of the stack as a whole, so they are the seams BETWEEN tickets — one helper implemented twice, abstractions that contradict each other, a contract one ticket relies on that another changed — not any single ticket's work. They land on \`${branch}\`, a new branch cut from the stack tip; every branch below it is published and must not be touched.`,
+    branch,
+    cutFrom: tip,
+    started: false,
+    phase: 'Review',
+    tag: 'integration',
+  })
+  integrationVerdicts = out.verdicts
+  integrationUnaccounted = out.unaccounted
+  if (out.landed) {
+    // Publishing is the one irreversible act of this phase, so it is its own
+    // small agent rather than the last and most context-exhausted fixer's job.
+    integration = await agent(
+      `Open the integration PR for spec #${SPEC} — the top layer of the stack.
 
 ${POINTERS}
-Current stack tip: \`${tip}\`.
+Branch \`${branch}\` carries the cross-ticket fixes from the whole-stack review; this run's fix slices already committed and pushed it. Current stack tip: \`${tip}\`.
 
-\`git fetch origin && git checkout -B spec/${SPEC}-integration ${q(tip)}\`.
+\`git fetch origin\` and confirm \`${branch}\` is on origin. Change no code and push nothing — if the branch is missing, say so in the branch field and open no PR.
 
-Findings:
-${findings.map((f) => `- [${f.severity}] ${f.location} — ${f.issue} → ${f.fix}`).join('\n')}
+Open a DRAFT PR: \`gh pr create --draft --head ${branch} --base ${tip}\`, title "spec #${SPEC}: integration fixes". The body lists the findings below and states that this PR carries the cross-ticket fixes from the whole-stack review of spec #${SPEC}.
 
-Fix them on this branch — touch no other branch of the stack; they are published. A finding you believe is wrong: leave the code alone and return it as rejected with a specific checkable reason.
+Findings it addresses:
+${findings.map((f) => `- [${f.severity}] ${f.location} — ${f.issue}`).join('\n')}
 
-${ECONOMY}
-
-Run the repo's tests, get them green, commit, push \`spec/${SPEC}-integration\`, and open a DRAFT PR: head \`spec/${SPEC}-integration\`, base \`${tip}\`, title "spec #${SPEC}: integration fixes". The body lists the findings it addresses and states that it carries the cross-ticket fixes from the whole-stack review.
-
-Return the PR url and number, the branch, and one verdict per finding.`,
-    { ...M, phase: 'Review', schema: INTEGRATION_SCHEMA, isolation: 'worktree', label: 'integration' },
-  )
-  if (integration) {
-    tip = integration.branch
-    log(`integration PR ${integration.pr_url} — new stack top`)
+Return the PR url and number, and the branch.`,
+      { ...M, effort: 'low', phase: 'Review', schema: INTEGRATION_SCHEMA, isolation: 'worktree', label: 'publish:integration' },
+    )
+    if (integration && integration.pr_number) {
+      tip = integration.branch
+      log(`integration PR ${integration.pr_url} — new stack top`)
+    } else {
+      integration = null
+      log(`integration PR never opened — the fixes sit on ${branch}, unpublished; the brief names them`)
+    }
   } else {
-    log('integration fixer died — findings land unfixed; the brief names them')
+    log('no integration fix landed — the review findings stay unfixed; the brief names them')
   }
 }
 
@@ -641,7 +785,11 @@ return {
   unmet: unmetTickets.map((o) => ({ ticket: o.number, criteria: o.unmet })),
   review_findings: findings.length,
   integration_pr: integration ? integration.pr_url : null,
-  integration_unfixed: findings.length && !integration ? findings.map((f) => `[${f.severity}] ${f.location} — ${f.issue}`) : [],
+  integration_unfixed: [
+    ...integrationUnaccounted.map((f) => `[${f.severity}] ${f.location} — ${f.issue} — no verdict came back`),
+    ...integrationVerdicts.filter((v) => v.action === 'rejected').map((v) => `${v.location} — ${v.issue} — rejected: ${v.reason}`),
+    ...(findings.length && !integration ? [`no integration PR was opened — any fix that landed sits unpublished on spec/${SPEC}-integration`] : []),
+  ],
   notes: NOTES_DIR,
   finalize,
 }
