@@ -60,7 +60,7 @@ Kruchten's "4+1" architecture view model — Logical, Process, Development, Phys
 
 ### Task graph, and its frontier
 
-A spec's tickets are **not** a list of steps: they are a graph whose edges are blocking relationships, so at any moment some set of tickets has all its blockers satisfied — the **frontier**. [[implement-spec-in-workflow]] schedules against the frontier rather than in phases: each ticket is one memoised promise awaiting its dependencies' *merges*, so a ticket starts the instant its blockers land and a run costs the longest chain rather than the sum of the phases. Blocking edges usually live as **prose** ("Blocked by #12") rather than in GitHub's sub-issue or dependency APIs, which are frequently empty even when the tickets exist — so they are read by an agent, not queried. A ticket needing a human (hardware, a running game, credentials only a person holds) is excluded along with everything downstream of it, and what was dropped is named rather than silently skipped.
+A spec's tickets are **not** a list of steps: they are a graph whose edges are blocking relationships, so at any moment some set of tickets has all its blockers satisfied — the **frontier**. **The definition of *takeable* lives in one place** — `docs/agents/frontier.md`, named from `CLAUDE.md` — and every skill that walks the graph reads it from there rather than restating it, because a second copy of the query is how two skills come to mean different things by the same word. That fragment also carries the fact that **an empty frontier is never "nothing to do"**: it is five distinct facts (finished / all blocked / gated by a human ticket / all assigned / a triage gap), and a skill halting on one says which. [[implement-spec-in-workflow]] schedules against the frontier rather than in phases: each ticket is one memoised promise awaiting its dependencies' *merges*, so a ticket starts the instant its blockers land and a run costs the longest chain rather than the sum of the phases. Blocking edges usually live as **prose** ("Blocked by #12") rather than in GitHub's sub-issue or dependency APIs, which are frequently empty even when the tickets exist — so they are read by an agent, not queried. A ticket needing a human (hardware, a running game, credentials only a person holds) is excluded along with everything downstream of it, and what was dropped is named rather than silently skipped.
 
 ### Serial merge lane
 
@@ -71,3 +71,29 @@ The single-slot queue through which parallel work reaches one shared branch. Imp
 Reviewing a change **before** it merges, on its own branch, against its own ticket — while the diff is small and its author's reasoning is still recoverable. Review and fix alternate until a review returns nothing blocking, **a fresh reviewer each round**, so "clean" is a verdict rather than one reviewer running out of patience; a round cap merges what is unresolved and names it rather than stalling everything downstream.
 
 The loop's hazard is not slow convergence but **ping-pong**: a fixer judges a finding wrong and leaves the code, the next reviewer raises it again, and the pair trade it until the cap. The **rejection ledger** is the cure — the fixer returns one verdict per finding, `fixed` or `rejected` with a specific checkable reason; rejections accumulate across rounds, and a later reviewer may raise one again only by **falsifying its stated reason**. Without the ledger the loop cannot terminate on a disputed call. Distinct from the [[handover-loop]], which reviews *after* the work lands and re-delegates the whole task each round.
+
+### Attended, unattended, and what comes back
+
+Three skills walk the same ticket graph and differ in **what they hand the operator**. [[implement-next]] is attended: it takes *one* ticket, and a `ready-for-human` pick is a question. [[implement-all]] is unattended: the same pick is a **skip**, because there is nobody to ask, and it walks the whole map. [[implement-spec-in-workflow]] is unattended too but collapses the spec into **one** PR. So the axis that actually separates them is the unit of output — one ticket, a stack, or a single PR — not how clever the scheduling is.
+
+### Stack, and the chain worktree
+
+PRs **stack**: each ticket branches from the previous ticket's branch, *unmerged*, so ticket N+1 sees N's work without waiting for a merge. The operator merges bottom-up by hand; the loop **never merges, never rebases, never force-pushes, and never touches `main`** — rewriting published history anywhere in a stack gives every child PR a phantom diff. One **chain worktree** serves the whole run (`.worktrees/chain`, cut off the stack tip at arm time), not one per ticket: a fresh worktree pays a cold dependency install and a cold build cache every time, and the tip only ever moves *forward*, so `switch -c` from where it stands is correct by construction.
+
+**Tip derivation is from GitHub, never remembered** — the open PR whose head branch is nobody else's base — and is re-derived every tick, because after a green tick the tip is that tick's own PR. A base frozen at arm time builds a flat fan of PRs all rooted at one commit, each carrying every earlier ticket's diff: silent corruption of the run's whole output, not a pause condition.
+
+### Arm and tick
+
+The two-part shape of an unattended loop. **Arming** happens once — fetch, sweep for a previous run's abandoned claim, derive the tip, check the tip's gate, prepare the worktree. A **tick** is one ticket becoming one green PR, and it re-derives everything it needs rather than inheriting shell state, because shell state does not survive between tool calls. The loop is continuous *through tickets*, not through the operator's interventions: **dying is cheap by design**, since a re-armed run derives everything from GitHub and holds no local state.
+
+### Pause condition
+
+A named fact that kills the loop, as opposed to a condition it works around. [[implement-all]] has **fourteen**, and the point of enumerating them is that they must never collapse into "nothing to do" — a brief that says *which* fact it is turns a halt into the operator's to-do list. Five of the fourteen are the empty-frontier facts, discriminated in `docs/agents/frontier.md` rather than locally.
+
+### The brief
+
+The single checkpoint of an unattended run, pushed **all the way out** — there is none inside the loop. Everything the loop did reaches the operator through it: why it stopped, the stack bottom-up in merge order, what needs a human, any flake re-run taken, and the re-arm command. Printed to the session **and** posted as a comment on the map issue, so it survives the dead session and is readable on a phone.
+
+### Flake registry
+
+A hand-seeded list of known-intermittent tests (`docs/known-flakes.md`), checked **before** any CI re-run. It exists because both defaults are wrong: a loop treating every red as a regression burns its repair rounds "fixing" timing tests, and a loop re-running every red hands a genuine regression a free second roll. The re-run licence needs *both* halves — the failing test is named in the registry **and** the branch touched nothing under that test's component. **The loop never writes to the registry**: a driver that appends an entry to make a red go away has granted itself its own licence, so a red that is not already named is real.
