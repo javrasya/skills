@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 A spec issue with tickets under it becomes a **stack of PRs — one PR per ticket** — implemented end to end by a **dynamic workflow** of subagents. The tickets are not a list of steps: they are a **task graph** with blocking relationships, so there is always a **frontier** of tickets ready to be grabbed, and the run schedules against that frontier rather than marching through phases. The stack exists so the operator reviews one small ticket-sized diff at a time, then merges the whole stack in one operation.
 
-Your context is the scarce resource here. The spec body, the ticket bodies, the research, the diffs and the review findings all stay inside the workflow; you hold the issue number, six interpolated values, and the summary that comes back. Read no ticket body, open no source file, and run no search — a discovery agent inside the workflow does that, and it does it better with a fresh window than you do with a full one.
+Your context is the scarce resource here. The spec body, the ticket bodies, the research, the diffs and the review findings all stay inside the workflow; you hold the issue number, six interpolated values, one verbatim pass of the script at launch, and the summary that comes back. Read no ticket body, open no source file, and run no search — a discovery agent inside the workflow does that, and it does it better with a fresh window than you do with a full one.
 
 `workflow.template.js`, beside this file, is the script. It carries every step; you render it and launch it.
 
@@ -32,11 +32,11 @@ Your context is the scarce resource here. The spec body, the ticket bodies, the 
 
 3. Render the script: copy `workflow.template.js` to `<notes-dir>/workflow.js` and substitute the six placeholders. Substitute, do not rewrite — the publish lane and the frontier scheduling are load-bearing.
 
-4. Launch it against the rendered path. It runs in the background and notifies you when it returns; do not poll it, and do not do any of its work yourself while it runs.
+4. Launch it by reading `<notes-dir>/workflow.js` and passing its content **inline** (the harness's `script` input), byte-for-byte — the harness accepts a path only from inside the working directory, and the notes dir is outside it on purpose; the checkout stays free of workflow files. It runs in the background and notifies you when it returns; do not poll it, and do not do any of its work yourself while it runs.
 
 5. Report what it returned: the stack bottom-to-top with each PR's url and state, the merge instructions for the mode the run ended in, tickets that failed, tickets deferred to a human and why, and the notes directory. The workflow's return value is already a summary — pass it on rather than re-deriving it from the PRs.
 
-To iterate after a failure, edit `<notes-dir>/workflow.js` and relaunch it with the harness's resume handle: the unchanged prefix of `agent()` calls returns from cache and only the edited call onward re-runs.
+To iterate after a failure, edit `<notes-dir>/workflow.js`, re-read it, and relaunch it the same way — inline, with the harness's resume handle: the unchanged prefix of `agent()` calls returns from cache and only the edited call onward re-runs.
 
 ## What the workflow does
 
