@@ -295,7 +295,7 @@ function dispatch(t, remainder) {
 ${POINTERS}
 ${notesLine}
 ${remainder ? `
-Earlier agents already did part of this work — branch \`ticket/${t.number}\` carries what they pushed. Slice ONLY what remains: ${remainder}` : ''}
+Earlier slices of this same run already did part of this work — \`ticket/${t.number}\` is this run's own unpublished branch (created by this workflow, no PR) carrying what they pushed. Slice ONLY what remains: ${remainder}` : ''}
 
 Read \`gh issue view ${t.number}\` and the spec's decisions that bear on it, and skim the code's STRUCTURE only — file lists, signatures, grep hits. Read no implementations: the slices read the code; you size and brief them.
 
@@ -320,7 +320,7 @@ ${POINTERS}
 Your brief — the ticket is already distilled into it, so run no \`gh issue view\` and read no spec:
 ${s.brief}
 
-First: \`git fetch origin && git checkout -B ticket/${t.number} ${out.started ? `origin/ticket/${t.number}\` — the branch already carries the earlier slices' pushed work` : `${q(cutFrom)}\` — your worktree starts on the wrong ref, and everything stacked before this ticket is reachable from there`}.
+First: \`git fetch origin && git checkout -B ticket/${t.number} ${out.started ? `origin/ticket/${t.number}\` — a branch THIS RUN created: earlier slices of this same workflow made and pushed it minutes ago. It is unpublished, has no PR, and is not pre-existing work — continuing it is the assignment, not a modification of anyone else's branch` : `${q(cutFrom)}\` — your worktree starts on the wrong ref, and everything stacked before this ticket is reachable from there`}.
 
 Follow the repo's own conventions and CLAUDE.md, and stay inside the brief — the rest of the ticket belongs to other slices. Comments only where load-bearing: why-not-what, landmines, pointers to external context; never narrate what code does.
 
@@ -328,7 +328,7 @@ ${ECONOMY}
 
 Past roughly 70 tool calls this slice has outgrown one agent's context. Stop cleanly: commit and push what works, and name what you did not reach in \`unmet\` — the dispatcher hands the remainder to a fresh agent. A named remainder is cheap; a 300-turn agent is not.
 
-Run the repo's tests for what you touched and get them green. Commit to \`ticket/${t.number}\` and push it to origin (plain push — the branch has no PR yet).
+Run the repo's tests for what you touched and get them green. Commit to \`ticket/${t.number}\` and push it to origin (plain push — this run's own branch, no PR yet).
 
 Return the branch, a one-line summary, the test command and its result, and anything from the brief you did not reach in \`unmet\`.`,
       { ...M, effort: s.effort, phase: 'Implement', schema: IMPL_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}` },
@@ -441,7 +441,7 @@ ${rejected.map((v) => `- ${v.location} — ${v.issue}\n  judged wrong because: $
 ${POINTERS}
 The ticket, distilled (read this instead of the issue): ${ticketBrief}
 
-\`git fetch origin && git checkout ${impl.branch}\`.
+\`git fetch origin && git checkout ${impl.branch}\` — this run's own unpublished branch, created by this workflow's implementers; it has no PR and is not pre-existing work.
 
 ${blocking.map((f) => `- [${f.severity}] ${f.location} — ${f.issue} → ${f.fix}`).join('\n')}
 
@@ -453,7 +453,7 @@ ${ECONOMY}
 
 A finding too large to fix in your remaining context (past roughly 70 tool calls): fix what you can, and return the rest as "location — issue" lines in \`overflow\` — the dispatcher hands them to fresh agents. Everything you neither reject nor overflow, you have fixed.
 
-Run the repo's tests, get them green, commit, and push \`${impl.branch}\` (plain push — the branch has no PR yet).
+Run the repo's tests, get them green, commit, and push \`${impl.branch}\` (plain push — this run's own branch, no PR yet).
 
 Return one verdict per finding above.`,
       { ...M, phase: 'Gate', schema: FIX_SCHEMA, isolation: 'worktree', label: `gate-fix:#${t.number}:r${round}` },
