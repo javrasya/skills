@@ -469,7 +469,7 @@ function dispatchFix(findings, { subject, brief, branch, skimRef, started, phase
 ${POINTERS}
 ${GIT}
 What the work is, distilled — read this instead of the issue, and run no \`gh issue view\` and no spec: ${brief}
-The branch the fixes land on: \`${branch}\`${started ? ' — this run\'s own branch, already pushed, no PR' : `, which your first slice cuts fresh from \`${ref}\``}.
+The branch the fixes land on: \`${branch}\`${started ? ' — this run\'s own branch, already pushed, no PR' : `, which your first slice cuts fresh from \`${skimRef}\``}.
 
 Findings to fix:
 ${findings.map((f) => `- [${f.severity}] ${f.location} — ${f.issue} → ${f.fix}`).join('\n')}
