@@ -24,9 +24,31 @@ const STACK_MODE = '__STACK_MODE__'                // 'native' (gh-stack + stack
 
 const M = { model: 'opus' }
 const POINTERS = `Repo ${REPO}, checkout ${REPO_DIR}. Spec: \`gh issue view ${SPEC}\`. Research notes: ${NOTES_DIR}.`
-// A ref as agents must address it: sha as-is, branch via origin — local branch
-// state in a throwaway worktree is meaningless.
-const q = (ref) => (/^[0-9a-f]{7,40}$/.test(ref) ? ref : `origin/${ref}`)
+// Every agent in this run works in a worktree LINKED to one clone — one object
+// store, one ref namespace — so a commit any agent makes is reachable by name
+// from every other the moment it lands. The shared clone, not origin, is how
+// work passes between slices. A ticket branch therefore reaches origin exactly
+// once, when the lane publishes it, and that push CREATES the ref rather than
+// rewriting one: there is no force-push anywhere in the run. See ADR-0005.
+//
+// Two kinds of ref follow. One this run CREATED is authoritative locally and
+// may not be on origin at all. One the run INHERITED — the base branch, prior
+// work on start_ref — is authoritative on origin, where the operator or
+// another machine may have moved it, so it is fetched and addressed there.
+const runRefs = new Set()
+const ref = (r) => (runRefs.has(r) ? r : /^[0-9a-f]{7,40}$/.test(r) ? r : `origin/${r}`)
+
+// Told to every agent that touches git. The first rule is why no push is
+// needed; the second is the one an agent cannot guess — git refuses to check
+// out a branch another worktree holds, and this run's worktrees outlive the
+// agents that made them. The last exists because an observed run answered that
+// refusal by inventing `slice1/227`, `ticket-227-slice2` and `fix/226-gate`,
+// and one agent's work was stranded on a ref nobody published.
+const GIT = `Git in this run — every agent shares ONE clone, and your worktree is linked to it:
+- A commit you make is reachable by every other agent, by ref name, the moment it lands. Nothing is pushed to hand work over: push only if this brief tells you to.
+- NEVER check a branch out — another worktree may hold it and git will refuse. Start from \`git switch --detach <ref>\`, and once your work is committed, move the branch with \`git update-ref refs/heads/<branch> HEAD\`. That succeeds exactly where \`git checkout\` and \`git branch -f\` are refused.
+- Never pass \`--force\` or \`--force-with-lease\` to any push, to any branch, for any reason.
+- If git refuses a command, STOP and report it. Never work around a refusal by inventing a branch name: a run scattered across improvised branches is worse than a run that stopped.`
 
 // Context economy, told to every agent that reads or edits code. A minor lever
 // by measurement (~5% of a heavy agent's context was repeat reads — the
@@ -285,6 +307,7 @@ if (hasLayer0) {
     `Open the layer-0 PR of the stack for spec #${SPEC}.
 
 ${POINTERS}
+${GIT}
 
 The branch \`${graph.start_ref}\` already carries work for this spec, done before this run. It becomes the bottom layer of the stack. \`git fetch origin\`, confirm the branch exists on origin (push it from the local checkout if it only exists locally — plain push, no force), then open a DRAFT PR: head \`${graph.start_ref}\`, base \`${BASE_REF}\`, title from the branch's work. The body must say plainly that this PR carries pre-existing work for spec #${SPEC} that this run did not implement or gate — the operator should review it with that in mind.
 
@@ -327,6 +350,7 @@ function dispatch(t, remainder) {
     `Slice ticket #${t.number} — ${t.title} — into the fewest implementation slices that fresh-context agents can finish, and write each slice's brief.
 
 ${POINTERS}
+${GIT}
 ${notesLine}
 ${remainder ? `
 Earlier slices of this same run already did part of this work — \`ticket/${t.number}\` is this run's own unpublished branch (created by this workflow, no PR) carrying what they pushed. Slice ONLY what remains: ${remainder}` : ''}
@@ -350,19 +374,20 @@ async function runSlices(t, slices, { cutFrom, started, tag }) {
       `Implement one slice of ticket #${t.number}: ${s.title}${slices.length > 1 ? ` (slice ${i + 1} of ${slices.length})` : ''}.
 
 ${POINTERS}
+${GIT}
 
 Your brief — the ticket is already distilled into it, so run no \`gh issue view\` and read no spec:
 ${s.brief}
 
-First: \`git fetch origin && git checkout -B ticket/${t.number} ${out.started ? `origin/ticket/${t.number}\` — a branch THIS RUN created: earlier slices of this same workflow made and pushed it minutes ago. It is unpublished, has no PR, and is not pre-existing work — continuing it is the assignment, not a modification of anyone else's branch` : `${q(cutFrom)}\` — your worktree starts on the wrong ref, and everything stacked before this ticket is reachable from there`}.
+First: \`git fetch origin && git switch --detach ${out.started ? `ticket/${t.number}\` — this run's own local branch, carrying what earlier slices of this same workflow committed minutes ago` : `${ref(cutFrom)}\` — your worktree starts on the wrong ref, and everything stacked before this ticket is reachable from there`}.
 
 Follow the repo's own conventions and CLAUDE.md, and stay inside the brief — the rest of the ticket belongs to other slices. Comments only where load-bearing: why-not-what, landmines, pointers to external context; never narrate what code does.
 
 ${ECONOMY}
 
-Past roughly 70 tool calls this slice has outgrown one agent's context. Stop cleanly: commit and push what works, and name what you did not reach in \`unmet\` — the dispatcher hands the remainder to a fresh agent. A named remainder is cheap; a 300-turn agent is not.
+Past roughly 70 tool calls this slice has outgrown one agent's context. Stop cleanly: commit what works, move the branch to it, and name what you did not reach in \`unmet\` — the dispatcher hands the remainder to a fresh agent. A named remainder is cheap; a 300-turn agent is not.
 
-Run the repo's tests for what you touched and get them green. Commit to \`ticket/${t.number}\` and push it to origin (plain push — this run's own branch, no PR yet).
+Run the repo's tests for what you touched and get them green. Commit, then move the ticket branch onto your work: \`git update-ref refs/heads/ticket/${t.number} HEAD\`. Push nothing — this branch reaches origin exactly once, when the stack lane publishes it.
 
 Return the branch, a one-line summary, the test command and its result, and anything from the brief you did not reach in \`unmet\`.`,
       { ...M, effort: s.effort, phase: 'Implement', schema: IMPL_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}` },
@@ -395,17 +420,20 @@ function enqueuePublish(t, impl, cutFrom) {
       `Publish ticket #${t.number}'s branch as the next PR of the stack for spec #${SPEC}.
 
 ${POINTERS}
-Ticket branch: \`${impl.branch}\`, cut from \`${q(cutFrom)}\` (\`gh issue view ${t.number}\` for what it was meant to do).
-Current stack tip: \`${base}\` — the branch your PR must be based on.
+${GIT}
+Ticket branch: \`${impl.branch}\` — a LOCAL ref this run created. It is not on origin, and putting it there is your job. Cut from \`${ref(cutFrom)}\` (\`gh issue view ${t.number}\` for what it was meant to do).
+Current stack tip: \`${ref(base)}\` — what your PR must be based on.
 Stack so far, bottom to top: ${stacked.length ? stacked.map((s) => `#${s.number} (${s.branch})`).join(' → ') : hasLayer0 ? `layer 0 (${graph.start_ref})` : 'empty'}.
 
-1. \`git fetch origin\`.
-${cutFrom !== base ? `2. The tip moved since this ticket was cut. Replay its commits onto the tip: \`git rebase --onto ${q(base)} ${q(cutFrom)} ${impl.branch}\` (check the branch out from origin first). Resolve any conflict in favour of keeping BOTH tickets' behaviour. This branch has NO pull request yet — this is the last moment its history may be rewritten.
-3. Run the tests the ticket branch ran (${impl.tests_run}); get them green.
-4. Push: \`git push --force-with-lease origin ${impl.branch}\` — force-with-lease because the pre-rebase branch is already on origin; it has no PR and nothing is based on it, so this rewrites nothing published.` : `2. The tip has not moved: the branch already sits on \`${q(base)}\`. No rebase. Confirm the branch is pushed to origin as-is.
-3. Run the tests the ticket branch ran (${impl.tests_run}); confirm green.
-4. Nothing to push beyond what is already on origin.`}
-5. Open a DRAFT PR: \`gh pr create --draft --head ${impl.branch} --base ${base}\` — \`--base\` takes the branch name. Title = the ticket's title. The body must contain the line \`Closes #${t.number}\` and state that it is part of the stack for spec #${SPEC}.
+1. \`git fetch origin\` — for the inherited refs; this run's own branches are already local.
+2. \`git switch --detach ${impl.branch}\`.
+${cutFrom !== base ? `3. The tip moved since this ticket was cut. Replay its commits onto the tip: \`git rebase --onto ${ref(base)} ${ref(cutFrom)}\`. This rewrites only local commits that have never left this clone, so it needs no force and destroys nothing. Resolve any conflict in favour of keeping BOTH tickets' behaviour.
+4. Run the tests the ticket branch ran (${impl.tests_run}); get them green, committing any fix.
+5. Move the branch onto the rebased work: \`git update-ref refs/heads/${impl.branch} HEAD\`.` : `3. The tip has not moved: the branch already sits on \`${ref(base)}\`. No rebase.
+4. Run the tests the ticket branch ran (${impl.tests_run}); confirm green.
+5. The branch already points at the work; nothing to move.`}
+6. Put it on origin for the first time: \`git push origin ${impl.branch}\`. This CREATES the branch there — it overwrites nothing and needs no force. A rejected push means something you do not know about is going on: stop and report it.
+7. Open a DRAFT PR: \`gh pr create --draft --head ${impl.branch} --base ${base}\` — \`--base\` takes the branch name. Title = the ticket's title. The body must contain the line \`Closes #${t.number}\` and state that it is part of the stack for spec #${SPEC}.
 
 You are the only agent publishing right now. After the PR exists, the branch is published: nothing may ever push to it again.
 
@@ -434,18 +462,19 @@ Return whether it published, the PR url and number, what you resolved, and any n
 // fixer starts. See docs/adr/0004.
 const fkey = (f) => `${f.location}||${f.issue}`
 
-function dispatchFix(findings, { subject, brief, branch, ref, started, phase: ph, tag }) {
+function dispatchFix(findings, { subject, brief, branch, skimRef, started, phase: ph, tag }) {
   return agent(
     `Slice the review findings on ${subject} into the fewest fix slices that fresh-context agents can finish, and write each slice's brief.
 
 ${POINTERS}
+${GIT}
 What the work is, distilled — read this instead of the issue, and run no \`gh issue view\` and no spec: ${brief}
 The branch the fixes land on: \`${branch}\`${started ? ' — this run\'s own branch, already pushed, no PR' : `, which your first slice cuts fresh from \`${ref}\``}.
 
 Findings to fix:
 ${findings.map((f) => `- [${f.severity}] ${f.location} — ${f.issue} → ${f.fix}`).join('\n')}
 
-Size this work, do not do it. \`git fetch origin\`, then skim at \`${ref}\`: \`git diff --stat\` against what it was cut from, and the STRUCTURE of the files the findings name — signatures, grep hits. Read no implementations; your slices read the code.
+Size this work, do not do it. \`git fetch origin\`, then skim at \`${skimRef}\`: \`git diff --stat\` against what it was cut from, and the STRUCTURE of the files the findings name — signatures, grep hits. Read no implementations; your slices read the code.
 
 Default to ONE slice. Slice only when one agent plausibly cannot finish in roughly 70 tool calls; when unsure, do not slice. A finding naming a rename and one naming an extraction read alike in a line and differ by two orders of magnitude in work — that difference, not the finding count, is what you are judging. Slices run sequentially on one branch, so each must leave the branch consistent — building, tests green.
 
@@ -462,11 +491,12 @@ async function runFixSlices(slices, { subject, branch, cutFrom, started, phase: 
       `Fix one slice of the review findings on ${subject}: ${s.title}${slices.length > 1 ? ` (slice ${i + 1} of ${slices.length})` : ''}.
 
 ${POINTERS}
+${GIT}
 
 Your brief — the work and its findings are already distilled into it, so run no \`gh issue view\`, read no spec, and re-read no review:
 ${s.brief}
 
-First: \`git fetch origin && git checkout -B ${branch} ${out.landed ? `origin/${branch}\` — a branch THIS RUN created: this workflow made and pushed it minutes ago. It is unpublished, has no PR, and is not pre-existing work — continuing it is the assignment, not a modification of anyone else's branch` : `${q(cutFrom)}\``}.
+First: \`git fetch origin && git switch --detach ${out.landed ? `${branch}\` — this run's own local branch, carrying what earlier fix slices of this same workflow committed minutes ago` : `${ref(cutFrom)}\``}.
 
 Fix what your brief owns and nothing else — the rest of the findings belong to other slices, and the branches below this one in the stack are published and must not be touched.
 
@@ -474,9 +504,9 @@ A finding you believe is wrong: leave the code alone and return it as \`rejected
 
 ${ECONOMY}
 
-Past roughly 70 tool calls this slice has outgrown one agent's context. Stop cleanly: commit and push what works, and name the findings you did not reach in \`unfinished\`. The next review round re-derives what is still broken from the branch itself, so a named remainder is cheap; a 300-turn agent is not.
+Past roughly 70 tool calls this slice has outgrown one agent's context. Stop cleanly: commit what works, move the branch to it, and name the findings you did not reach in \`unfinished\`. The next review round re-derives what is still broken from the branch itself, so a named remainder is cheap; a 300-turn agent is not.
 
-Run the repo's tests, get them green, commit, and push \`${branch}\` (plain push — this run's own branch, no PR yet).
+Run the repo's tests, get them green, commit, then move the branch onto your work: \`git update-ref refs/heads/${branch} HEAD\`. Push nothing.
 
 Return one verdict per finding in your brief you fixed or rejected, and the \`location\` of any you did not reach.`,
       { ...M, effort: s.effort, phase: ph, schema: FIX_SLICE_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}` },
@@ -497,8 +527,8 @@ Return one verdict per finding in your brief you fixed or rejected, and the \`lo
 // is unreliable. A finding with no verdict is unfixed, named, and handed to the
 // next reviewer to check explicitly — not silently assumed done.
 async function fixFindings(findings, opts) {
-  const ref = opts.started ? `origin/${opts.branch}` : q(opts.cutFrom)
-  const plan = await dispatchFix(findings, { ...opts, ref })
+  const skimRef = opts.started ? opts.branch : ref(opts.cutFrom)
+  const plan = await dispatchFix(findings, { ...opts, skimRef })
   if (!plan) {
     log(`${opts.subject}: fix dispatcher died — ${findings.length} finding(s) unaccounted`)
     return { verdicts: [], unaccounted: findings, landed: opts.started }
@@ -550,10 +580,11 @@ async function reviewGate(t, impl, cutFrom, ticketBrief) {
       `Review ticket #${t.number}'s branch before it is published as a PR.
 
 ${POINTERS}
-Branch \`${impl.branch}\`, reviewed against \`${q(cutFrom)}\` — that diff is the whole of this ticket's work.
+${GIT}
+Branch \`${impl.branch}\`, reviewed against \`${ref(cutFrom)}\` — that diff is the whole of this ticket's work.
 What the ticket asked for: \`gh issue view ${t.number}\`. What the implementer says it did: ${impl.summary}
 
-\`git fetch origin\`, then invoke the \`code-review\` skill with \`${q(cutFrom)}\` as the fixed point and ticket #${t.number} as the spec — both its axes: does it follow this repo's documented standards, and does it do what the ticket asked for, acceptance criterion by acceptance criterion.
+\`git fetch origin && git switch --detach ${impl.branch}\`, then invoke the \`code-review\` skill with \`${ref(cutFrom)}\` as the fixed point and ticket #${t.number} as the spec — both its axes: does it follow this repo's documented standards, and does it do what the ticket asked for, acceptance criterion by acceptance criterion.
 
 Judge this ticket's diff. Work another ticket owns is out of scope; the whole stack gets its own review later. Change no code — report.
 ${impl.unmet.length ? `
@@ -608,6 +639,9 @@ function ticketDone(n) {
         // The tip as this ticket starts: its dependencies are already stacked
         // (awaited above), so cutting from the tip sees all of their work.
         const cutFrom = tip
+        // This run owns `ticket/N` from here on: every agent addresses it as a
+        // local ref, and it stays off origin until the lane publishes it.
+        runRefs.add(`ticket/${t.number}`)
         const plan = await dispatch(t, null)
         if (!plan) throw new Error(`dispatcher for #${t.number} died`)
         if (plan.slices.length > 1) log(`#${t.number} dispatched as ${plan.slices.length} slices`)
@@ -664,10 +698,11 @@ const review = await agent(
   `Review the whole stack for spec #${SPEC}.
 
 ${POINTERS}
+${GIT}
 The stack, bottom to top: ${[...(hasLayer0 ? [`${graph.start_ref} (pre-existing work)`] : []), ...stacked.map((s) => `#${s.number} (${s.branch})`)].join(' → ')}.
-Review \`${q(BASE_REF)}...${q(tip)}\` — everything the stack adds.
+Review \`${ref(BASE_REF)}...${ref(tip)}\` — everything the stack adds.
 
-Invoke the \`code-review\` skill with \`${q(BASE_REF)}\` as the fixed point and spec #${SPEC} as the spec — both its axes: this repo's documented standards, and whether the stack matches what the spec and its tickets asked for.
+Invoke the \`code-review\` skill with \`${ref(BASE_REF)}\` as the fixed point and spec #${SPEC} as the spec — both its axes: this repo's documented standards, and whether the stack matches what the spec and its tickets asked for.
 
 Every ticket was already reviewed alone on its own branch, so look hardest at what that could not see: two implementations of one helper, abstractions that contradict each other, a contract one ticket relies on that another changed. Return every finding; change no code yourself.`,
   { ...M, phase: 'Review', schema: REVIEW_SCHEMA, isolation: 'worktree', label: `review:spec-${SPEC}` },
@@ -684,6 +719,7 @@ let integrationVerdicts = []
 let integrationUnaccounted = []
 if (findings.length) {
   const branch = `spec/${SPEC}-integration`
+  runRefs.add(branch)
   const stackLine = [...(hasLayer0 ? [`${graph.start_ref} (pre-existing work)`] : []), ...stacked.map((s) => `#${s.number} (${s.branch})`)].join(' → ')
   const out = await fixFindings(findings, {
     subject: `spec #${SPEC}`,
@@ -703,9 +739,10 @@ if (findings.length) {
       `Open the integration PR for spec #${SPEC} — the top layer of the stack.
 
 ${POINTERS}
-Branch \`${branch}\` carries the cross-ticket fixes from the whole-stack review; this run's fix slices already committed and pushed it. Current stack tip: \`${tip}\`.
+${GIT}
+Branch \`${branch}\` carries the cross-ticket fixes from the whole-stack review; this run's fix slices committed it locally. It is not on origin, and putting it there is your job. Current stack tip: \`${tip}\`.
 
-\`git fetch origin\` and confirm \`${branch}\` is on origin. Change no code and push nothing — if the branch is missing, say so in the branch field and open no PR.
+\`git fetch origin\` and confirm the local branch \`${branch}\` exists. Change no code. Then put it on origin for the first time: \`git push origin ${branch}\` — this CREATES the branch there, overwrites nothing, and needs no force. If the branch is missing locally or the push is rejected, say so in the branch field and open no PR.
 
 Open a DRAFT PR: \`gh pr create --draft --head ${branch} --base ${tip}\`, title "spec #${SPEC}: integration fixes". The body lists the findings below and states that this PR carries the cross-ticket fixes from the whole-stack review of spec #${SPEC}.
 
@@ -747,6 +784,7 @@ const finalize = await agent(
   `Finalize the stack for spec #${SPEC}.
 
 ${POINTERS}
+${GIT}
 The stack, bottom to top: ${bottomToTop.map((l) => `${l.label} → PR #${l.pr_number} (${l.branch})`).join(', ')}.
 Top PR: #${bottomToTop[bottomToTop.length - 1].pr_number}.
 
@@ -791,5 +829,12 @@ return {
     ...(findings.length && !integration ? [`no integration PR was opened — any fix that landed sits unpublished on spec/${SPEC}-integration`] : []),
   ],
   notes: NOTES_DIR,
+  local_only_branches: (() => {
+    const unpublished = auto.filter((t) => !stacked.some((x) => x.number === t.number)).map((t) => `ticket/${t.number}`)
+    if (integration === null && findings.length) unpublished.push(`spec/${SPEC}-integration`)
+    return unpublished.length
+      ? { note: `Never pushed. Any work these carry is in ${REPO_DIR}'s clone only — check them before deleting the run's worktrees.`, refs: unpublished }
+      : null
+  })(),
   finalize,
 }
