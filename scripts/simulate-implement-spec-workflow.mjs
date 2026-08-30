@@ -97,7 +97,13 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('A: dispatcher runs once per ticket', seq.filter((l) => l.startsWith('dispatch')).length === 2, seq.join(' | '))
   check('A: implementer is told NOT to read the issue', calls.find((c) => c.label === 'impl:#10').prompt.includes('run no `gh issue view`'), '')
   check('A: publish order respects the dependency', seq.indexOf('publish:#10') < seq.indexOf('publish:#11'), '')
-  check('A: #11 cut from #10 branch (tip moved)', calls.find((c) => c.label === 'impl:#11').prompt.includes('origin/ticket/10'), '')
+  check('A: #11 cut from #10 branch, addressed locally', calls.find((c) => c.label === 'impl:#11').prompt.includes('git switch --detach ticket/10') && !calls.find((c) => c.label === 'impl:#11').prompt.includes('origin/ticket/10'), '')
+  check('A: an inherited ref stays origin-addressed', calls.find((c) => c.label === 'impl:#10').prompt.includes('origin/main'), '')
+  check('A: no agent is ever told to force-push', calls.every((c) => !/--force/.test(c.prompt.replace(/Never pass[^\n]*/g, ''))), calls.filter((c) => /--force/.test(c.prompt.replace(/Never pass[^\n]*/g, ''))).map((c) => c.label).join(' | '))
+  check('A: no agent is told to check a branch out', calls.every((c) => !/git checkout -B|git checkout ticket\//.test(c.prompt)), calls.filter((c) => /git checkout -B/.test(c.prompt)).map((c) => c.label).join(' | '))
+  check('A: slices move the ref instead of pushing', calls.find((c) => c.label === 'impl:#10').prompt.includes('git update-ref refs/heads/ticket/10 HEAD') && calls.find((c) => c.label === 'impl:#10').prompt.includes('Push nothing'), '')
+  check('A: the lane pushes once, creating the ref', calls.find((c) => c.label === 'publish:#10').prompt.includes('git push origin ticket/10') && calls.find((c) => c.label === 'publish:#10').prompt.includes('CREATES the branch'), '')
+  check('A: publish #10 needs no rebase (tip unmoved)', !calls.find((c) => c.label === 'publish:#10').prompt.includes('git rebase --onto'), '')
   check('A: complete state', result.state.startsWith('complete'), result.state)
   check('A: no unmet', result.unmet.length === 0, JSON.stringify(result.unmet))
   check('A: explore effort low / dispatch high / publish low', calls.find((c) => c.label.startsWith('explore')).effort === 'low' && calls.find((c) => c.label === 'dispatch:#10').effort === 'high' && calls.find((c) => c.label === 'publish:#10').effort === 'low', '')
@@ -123,9 +129,32 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('B: bailed slice aborts the round (part 2 never runs pre-redispatch)', !seq.includes('impl:#10:s2'), seq.join(' | '))
   check('B: re-dispatch happens with remainder', seq.includes('dispatch:#10:re'), seq.join(' | '))
   check('B: re-dispatch prompt names the remainder and not-started slice', calls.find((c) => c.label === 'dispatch:#10:re').prompt.includes('criterion Z') && calls.find((c) => c.label === 'dispatch:#10:re').prompt.includes('not started: part 2'), '')
-  check('B: continuation slice starts from origin/ticket/10', calls.find((c) => c.label === 'impl:#10:r2').prompt.includes('origin/ticket/10'), '')
+  check('B: continuation slice detaches at the local ticket branch', calls.find((c) => c.label === 'impl:#10:r2').prompt.includes('git switch --detach ticket/10'), '')
   check('B: remainder slice gets dispatcher effort high', calls.find((c) => c.label === 'impl:#10:r2').effort === 'high', '')
   check('B: run completes with no unmet', result.unmet.length === 0 && result.state.startsWith('complete'), result.state)
+}
+
+// --- scenario B2: two independent tickets — the tip moves under the second --
+// The case that produced the force-push: both cut from main, one publishes
+// first, so the other must be replayed onto a tip that did not exist when it
+// started. Nothing on origin is rewritten, because it was never pushed.
+{
+  const { result, calls } = await run({
+    graph: () => ({
+      tickets: [
+        { number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' },
+        { number: 11, title: 'T11', blocked_by: [], needs_human: false, human_reason: '' },
+      ],
+      start_ref: 'main',
+      explorations: [],
+    }),
+  })
+  const second = calls.find((c) => c.label === 'publish:#11')
+  check('B2: both tickets cut from the same inherited base', calls.find((c) => c.label === 'impl:#11').prompt.includes('origin/main'), '')
+  check('B2: the second publish replays onto the moved tip', second.prompt.includes('git rebase --onto ticket/10'), second.prompt.slice(0, 400))
+  check('B2: the rebase is stated as local-only', second.prompt.includes('never left this clone'), '')
+  check('B2: still one plain push, no force', second.prompt.includes('git push origin ticket/11') && !second.prompt.includes('--force-with-lease origin'), '')
+  check('B2: both tickets stack', result.stack_bottom_to_top.length === 2, JSON.stringify(result.stack_bottom_to_top))
 }
 
 // --- scenario C: remainder survives every dispatch round --------------------
@@ -139,6 +168,7 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('C: unmet carried to the result', result.unmet.length === 1 && result.unmet[0].criteria.includes('criterion Z'), JSON.stringify(result.unmet))
   check('C: run is partial, spec stays open', result.state.startsWith('partial'), result.state)
   check('C: gate reviewer told not to re-litigate declared unmet', calls.find((c) => c.label === 'gate:#10:r1').prompt.includes('already declared these criteria unmet'), '')
+  check('C: local-only refs are named for recovery', result.local_only_branches === null || Array.isArray(result.local_only_branches.refs), JSON.stringify(result.local_only_branches))
   check('C: finalize told what remains', calls.find((c) => c.label === 'finalize').prompt.includes('unmet criteria: criterion Z'), '')
 }
 
@@ -196,7 +226,8 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   const seq = calls.map((c) => c.label)
   check('F: integration fixes are dispatched', seq.includes('integration:dispatch'), seq.join(' | '))
   check('F: integration slices run in the Review phase', calls.filter((c) => c.label.startsWith('integration')).every((c) => c.opts.phase === 'Review'), '')
-  check('F: first integration slice cuts from the stack tip', calls.find((c) => c.label === 'integration').prompt.includes('origin/ticket/11'), calls.find((c) => c.label === 'integration').prompt)
+  check('F: first integration slice cuts from the local stack tip', calls.find((c) => c.label === 'integration').prompt.includes('git switch --detach ticket/11'), calls.find((c) => c.label === 'integration').prompt)
+  check('F: the integration publisher performs the first push', calls.find((c) => c.label === 'publish:integration').prompt.includes('git push origin spec/224-integration'), '')
   check('F: a separate low-effort agent opens the PR', calls.find((c) => c.label === 'publish:integration') && calls.find((c) => c.label === 'publish:integration').effort === 'low', seq.join(' | '))
   check('F: the publisher is told to change no code', calls.find((c) => c.label === 'publish:integration').prompt.includes('Change no code'), '')
   check('F: the publisher runs after the fixes', seq.indexOf('integration') < seq.indexOf('publish:integration'), seq.join(' | '))

@@ -66,9 +66,19 @@ A spec's tickets are **not** a list of steps: they are a graph whose edges are b
 
 The single-slot queue through which parallel work reaches the run's shared line — whatever that line is. In [[implement-spec-in-workflow]] the lane **publishes**: it takes each finished ticket branch in turn, rebases it onto the current stack tip (legal, because the branch has no PR yet — see [[publish-once]]), pushes, and opens the next PR of the stack. Two agents publishing concurrently would base on the same tip, which is the failure the arrangement exists to prevent — it is the one part of the run that must not be parallelised for speed.
 
+### The shared clone, and run-created vs inherited refs
+
+Every agent of a run works in a worktree **linked to one clone** — one object store, one ref namespace — so a commit any agent makes is reachable by name from every other the moment it lands. **The shared clone, not origin, is how work passes between agents**, which is why a ticket branch stays local until it is published.
+
+That splits refs in two, and the split is what every agent's instructions turn on. A ref **this run created** is authoritative locally and may not exist on origin at all. A ref the run **inherited** — the base branch, prior work on a start ref — is authoritative on origin, where the operator or another machine may have moved it, so it is fetched and addressed there.
+
+Two consequences an agent cannot guess and is therefore told. Git **refuses to check out a branch another worktree holds**, and a run's worktrees outlive the agents that made them — so an agent starts from a detached HEAD and moves the branch with `update-ref`, which succeeds exactly where `checkout` and `branch -f` are refused. And a **refusal is a stop**, never something to route around by inventing a branch name: an observed run answered that refusal with `slice1/227` and `ticket-227-slice2`, stranding one agent's work on a ref nobody published and paying a second agent to redo it.
+
 ### Publish-once
 
-The invariant that keeps a stack safe to build in parallel: **all history rewriting happens before a branch becomes a PR, and nothing ever pushes to a published one.** Implementers and gate fixers work on branches with no PR; the serial lane's rebase-onto-the-tip is the last rewrite, and the PR it then opens seals the branch. Rewriting published history anywhere in a stack gives every child PR a phantom diff — so the line between "may rewrite" and "may not touch" is the moment of publication, not anyone's care. Cross-ticket fixes from the whole-stack review therefore land as a new **integration PR** on top, never as pushes into the layers below.
+The invariant that keeps a stack safe to build in parallel: **a branch reaches origin exactly once, and the push that puts it there creates it.** Every agent before the serial lane commits locally; the lane's rebase-onto-the-tip rewrites only commits that have never left the clone, and its single push creates a ref that did not exist. So **no ref on origin is ever rewritten by a run** — not narrowed to "only ones nothing depends on", but never — and there is no force-push anywhere to authorize. Rewriting published history in a stack gives every child PR a phantom diff, so the line between "may rewrite" and "may not touch" is the moment a commit leaves the clone, not anyone's care. Cross-ticket fixes from the whole-stack review land as a new **integration PR** on top, never as pushes into the layers below. See ADR-0005.
+
+The cost is that in-flight work is invisible until it publishes: a run that dies leaves its commits in the operator's clone under refs the run's summary names, not on origin where anyone could look.
 
 ### Gate loop, and the rejection ledger
 
