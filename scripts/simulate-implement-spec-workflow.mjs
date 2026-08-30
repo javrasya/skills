@@ -84,9 +84,15 @@ async function run(overrides = {}) {
 
   const fn = new Function('agent', 'parallel', 'phase', 'log', 'return (async () => {' + render() + '\n})()')
   const result = await fn(agent, parallel, phase, log)
+  EVERY_CALL.push(...calls)
   return { result, calls, logs }
 }
 
+// Assertions that must hold of EVERY prompt the workflow can emit are checked
+// against all scenarios at the bottom, not inside one — a prompt only rendered
+// on some path (the integration fix dispatcher, say) is exactly where a
+// template hole hides.
+const EVERY_CALL = []
 const checks = []
 function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); if (!cond) process.exitCode = 1 }
 
@@ -99,8 +105,6 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('A: publish order respects the dependency', seq.indexOf('publish:#10') < seq.indexOf('publish:#11'), '')
   check('A: #11 cut from #10 branch, addressed locally', calls.find((c) => c.label === 'impl:#11').prompt.includes('git switch --detach ticket/10') && !calls.find((c) => c.label === 'impl:#11').prompt.includes('origin/ticket/10'), '')
   check('A: an inherited ref stays origin-addressed', calls.find((c) => c.label === 'impl:#10').prompt.includes('origin/main'), '')
-  check('A: no agent is ever told to force-push', calls.every((c) => !/--force/.test(c.prompt.replace(/Never pass[^\n]*/g, ''))), calls.filter((c) => /--force/.test(c.prompt.replace(/Never pass[^\n]*/g, ''))).map((c) => c.label).join(' | '))
-  check('A: no agent is told to check a branch out', calls.every((c) => !/git checkout -B|git checkout ticket\//.test(c.prompt)), calls.filter((c) => /git checkout -B/.test(c.prompt)).map((c) => c.label).join(' | '))
   check('A: slices move the ref instead of pushing', calls.find((c) => c.label === 'impl:#10').prompt.includes('git update-ref refs/heads/ticket/10 HEAD') && calls.find((c) => c.label === 'impl:#10').prompt.includes('Push nothing'), '')
   check('A: the lane pushes once, creating the ref', calls.find((c) => c.label === 'publish:#10').prompt.includes('git push origin ticket/10') && calls.find((c) => c.label === 'publish:#10').prompt.includes('CREATES the branch'), '')
   check('A: publish #10 needs no rebase (tip unmoved)', !calls.find((c) => c.label === 'publish:#10').prompt.includes('git rebase --onto'), '')
@@ -227,6 +231,7 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('F: integration fixes are dispatched', seq.includes('integration:dispatch'), seq.join(' | '))
   check('F: integration slices run in the Review phase', calls.filter((c) => c.label.startsWith('integration')).every((c) => c.opts.phase === 'Review'), '')
   check('F: first integration slice cuts from the local stack tip', calls.find((c) => c.label === 'integration').prompt.includes('git switch --detach ticket/11'), calls.find((c) => c.label === 'integration').prompt)
+  check('F: the fix dispatcher names the ref the branch is cut from', calls.find((c) => c.label === 'integration:dispatch').prompt.includes('cuts fresh from `ticket/11`'), calls.find((c) => c.label === 'integration:dispatch').prompt.split('\n').find((l) => l.includes('cuts fresh from')))
   check('F: the integration publisher performs the first push', calls.find((c) => c.label === 'publish:integration').prompt.includes('git push origin spec/224-integration'), '')
   check('F: a separate low-effort agent opens the PR', calls.find((c) => c.label === 'publish:integration') && calls.find((c) => c.label === 'publish:integration').effort === 'low', seq.join(' | '))
   check('F: the publisher is told to change no code', calls.find((c) => c.label === 'publish:integration').prompt.includes('Change no code'), '')
@@ -244,6 +249,16 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('G: nothing landed, so no PR is opened', !seq.includes('publish:integration'), seq.join(' | '))
   check('G: the finding is reported unfixed', result.integration_unfixed.length > 0, JSON.stringify(result.integration_unfixed))
   check('G: no integration PR in the stack', !result.stack_bottom_to_top.some((l) => l.startsWith('integration')), JSON.stringify(result.stack_bottom_to_top))
+}
+
+// --- run-wide: every prompt of every scenario ------------------------------
+{
+  const offenders = (re) => [...new Set(EVERY_CALL.filter((c) => re.test(c.prompt)).map((c) => c.label))].join(' | ')
+  const noForce = /--force(?!` or `--force-with-lease` to any push)/
+  check('ALL: no prompt tells an agent to force-push', !EVERY_CALL.some((c) => noForce.test(c.prompt.replace(/^- Never pass.*$/gm, ''))), offenders(/--force-with-lease origin|--force origin/))
+  check('ALL: no prompt tells an agent to check a branch out', !EVERY_CALL.some((c) => /git checkout -B|git checkout ticket\//.test(c.prompt)), offenders(/git checkout -B/))
+  check('ALL: no prompt interpolates a helper instead of a value', !EVERY_CALL.some((c) => /runRefs\.has|\(r\) =>|=> \(\{/.test(c.prompt)), offenders(/runRefs\.has|\(r\) =>/))
+  check('ALL: every scenario contributed prompts', EVERY_CALL.length > 60, String(EVERY_CALL.length))
 }
 
 for (const c of checks) console.log((c.ok ? 'PASS' : 'FAIL') + '  ' + c.name + (c.ok ? '' : '   [' + c.detail + ']'))
