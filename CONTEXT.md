@@ -119,3 +119,32 @@ The single checkpoint of an unattended run, pushed **all the way out** — there
 ### Flake registry
 
 A hand-seeded list of known-intermittent tests (`docs/known-flakes.md`), checked **before** any CI re-run. It exists because both defaults are wrong: a loop treating every red as a regression burns its repair rounds "fixing" timing tests, and a loop re-running every red hands a genuine regression a free second roll. The re-run licence needs *both* halves — the failing test is named in the registry **and** the branch touched nothing under that test's component. **The loop never writes to the registry**: a driver that appends an entry to make a red go away has granted itself its own licence, so a red that is not already named is real.
+
+### Slice
+
+One PR of a [[stack]], and the unit [[code-review-in-stack]] reviews: the diff of a single
+ticket, judged against *that* ticket's acceptance criteria rather than against the spec as a
+whole. A slice is done when its criteria are met; work the criteria do not ask for is surplus,
+however obviously owed it looks from an ADR.
+
+### Verdict, evidence, and the escape hatch
+
+A review of a slice returns one **verdict** per acceptance criterion, and a tally over them
+("11 of 12"). **Evidence** is what makes a verdict *met*: the test that pins the rule, the
+symbol that implements it, the workaround a fixture no longer needs — never a doc comment
+claiming the behaviour, and never a plausibility argument. An **escape hatch** is a clause
+inside a criterion that hands part of its work forward ("assert at the primitive if compile
+cannot see the case, and say so in the test's own doc"); a criterion carrying one is met by
+taking it, which is why the ticket's own scope outranks any absolute claim inferred from an ADR.
+
+### Gap, its sweep, and its disposition
+
+A **gap** is a criterion the slice leaves unmet. Before a gap costs anyone work it gets a
+**sweep**: search the later layers and sibling branches for the *behaviour* the gap is made of
+(a `None` that should be a value, an absent call), counted per branch — because a refactor can
+move or reword every string you searched for and leave the behaviour untouched. A gap is then
+given exactly one **disposition**: *fix in this PR* (local, no decision owed), *fix in a child
+PR* (mechanical but wider than the slice), *hand forward as a ticket* (needs a decision, or
+widens the slice past its criteria), or *no work* (met, closed downstream, or out of scope by
+the ticket's own words). Reported with it: what the gap does **and does not** break — a
+diagnostic-only gap must not block a slice, and a byte-moving one must not be waved through.
