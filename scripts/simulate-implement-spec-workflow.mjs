@@ -43,6 +43,7 @@ async function run(overrides = {}) {
       explorations: [{ label: 'area-a', question: 'q?' }],
     }),
     explore: () => '/tmp/n/01-area-a.md',
+    layer0: () => ({ pr_url: 'https://pr/layer0', pr_number: 90 }),
     dispatch: () => ({ ticket_brief: 'the ticket in brief', slices: [{ title: 'all of it', brief: 'do it', effort: 'medium' }] }),
     impl: (label) => ({ branch: 'ticket/' + label.match(/#(\d+)/)[1], summary: 's', tests_run: 'npm t', tests_green: true, unmet: [] }),
     gate: () => ({ findings: [] }),
@@ -50,7 +51,14 @@ async function run(overrides = {}) {
     // all of them in one slice, which is the verdict it is biased towards.
     fixdispatch: (label, prompt) => ({ slices: [{ title: 'all the findings', brief: 'fix them', findings: locationsIn(prompt), effort: 'medium' }] }),
     fixslice: (label, prompt) => ({ verdicts: locationsIn(prompt).map((l) => ({ location: l, issue: issueFor(l), action: 'fixed', reason: 'fixed it' })), unfinished: [] }),
-    publish: (label) => { const n = label.match(/#(\d+)/)[1]; return { published: true, pr_url: 'https://pr/' + n, pr_number: 100 + Number(n), conflicts_resolved: [], note: '' } },
+    // Honest about the link: it reports what its own prompt told it to. A stub
+    // that always says "registered" would hide the script handing a one-layer
+    // stack a link command it cannot run.
+    publish: (label, prompt) => {
+      const n = label.match(/#(\d+)/)[1]
+      const stack_link = /gh stack link [a-z]/.test(prompt) ? 'registered' : /stack_link: "skipped"/.test(prompt) ? 'skipped' : 'disabled'
+      return { published: true, pr_url: 'https://pr/' + n, pr_number: 100 + Number(n), conflicts_resolved: [], stack_link, note: '' }
+    },
     review: () => ({ findings: [] }),
     integration: () => ({ pr_url: 'https://pr/int', pr_number: 999, branch: 'spec/224-integration' }),
     finalize: () => 'stack registered, 2 PRs ready, 0 worktrees',
@@ -60,6 +68,7 @@ async function run(overrides = {}) {
   function route(label) {
     if (label.startsWith('graph')) return 'graph'
     if (label.startsWith('explore')) return 'explore'
+    if (label.startsWith('layer0')) return 'layer0'
     if (label.startsWith('dispatch')) return 'dispatch'
     if (label.startsWith('impl')) return 'impl'
     if (label.endsWith(':dispatch')) return 'fixdispatch'
@@ -251,6 +260,83 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('G: no integration PR in the stack', !result.stack_bottom_to_top.some((l) => l.startsWith('integration')), JSON.stringify(result.stack_bottom_to_top))
 }
 
+// --- scenario H: the stack registers as it grows, not at finalize ----------
+// `gh stack link` takes a minimum of two arguments, so the first PR of a
+// layer-0-less run cannot register and the second must. Every call re-lists
+// the whole stack: no stack number is ever discovered or carried.
+{
+  const { result, calls, logs } = await run({
+    graph: () => ({
+      tickets: [
+        { number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' },
+        { number: 11, title: 'T11', blocked_by: [10], needs_human: false, human_reason: '' },
+      ],
+      start_ref: 'main',
+      explorations: [],
+    }),
+  })
+  const first = calls.find((c) => c.label === 'publish:#10')
+  const second = calls.find((c) => c.label === 'publish:#11')
+  const publishLogs = logs.filter((l) => l.startsWith('stacked #'))
+  check('H: the first PR cannot register — link needs two layers', /needs two layers/.test(first.prompt) && !/gh stack link [a-z]/.test(first.prompt), first.prompt.slice(-500))
+  check('H: the second PR registers the whole stack, bottom to top', second.prompt.includes('gh stack link ticket/10 ticket/11 --base main --remote origin'), second.prompt.slice(-700))
+  check('H: no publish uses the stack-number shortcut', !calls.some((c) => c.label.startsWith('publish:#') && /gh stack link \d+ /.test(c.prompt)), '')
+  check('H: each PR body states its actual layer position', first.prompt.includes('Layer 1 of 2 planned') && second.prompt.includes('Layer 2 of 2 planned'), '')
+  check('H: every layer stays draft until finalize', /Leave it a DRAFT/.test(second.prompt), '')
+  check('H: finalize reconciles rather than first-registers', calls.find((c) => c.label === 'finalize').prompt.includes('Reconcile the stack registration'), '')
+  check('H: the log line carries registration state', publishLogs[0].includes('needs 2 layers') && publishLogs[1].includes('stack registered'), publishLogs.join(' | '))
+  check('H: the brief says registration was incremental', /registered incrementally/.test(result.stack_registration), result.stack_registration)
+}
+
+// --- scenario H2: layer 0 means the FIRST ticket already has two layers -----
+{
+  const { calls } = await run({
+    graph: () => ({
+      tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }],
+      start_ref: 'feat/prior',
+      explorations: [],
+    }),
+  })
+  const layer0 = calls.find((c) => c.label.startsWith('layer0'))
+  const first = calls.find((c) => c.label === 'publish:#10')
+  check('H2: layer 0 cannot register alone', /needs two layers/.test(layer0.prompt), layer0.prompt.slice(-300))
+  check('H2: layer 0 is layer 1 of the planned count', layer0.prompt.includes('Layer 1 of 2 planned'), '')
+  check('H2: the first ticket registers layer 0 with itself', first.prompt.includes('gh stack link feat/prior ticket/10 --base main --remote origin'), first.prompt.slice(-700))
+  check('H2: the first ticket is layer 2, counting layer 0', first.prompt.includes('Layer 2 of 2 planned'), '')
+}
+
+// --- scenario H3: exit 9 mid-run latches, degrades, and says so loudly ------
+// The arm-time gate cannot cover the stacks API going away DURING a run, and
+// nobody is there to ask. Publishing continues; the brief must not pretend the
+// run is still native, because the operator's merge is a different operation.
+{
+  const { result, calls } = await run({
+    graph: () => ({
+      tickets: [
+        { number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' },
+        { number: 11, title: 'T11', blocked_by: [10], needs_human: false, human_reason: '' },
+        { number: 12, title: 'T12', blocked_by: [11], needs_human: false, human_reason: '' },
+      ],
+      start_ref: 'main',
+      explorations: [],
+    }),
+    publish: (label) => {
+      const n = label.match(/#(\d+)/)[1]
+      // #10 is the lone first layer, so it never gets a link command to run;
+      // #11 is the first that does, and that is where the API says exit 9.
+      const stack_link = n === '10' ? 'skipped' : n === '11' ? 'disabled' : 'registered'
+      return { published: true, pr_url: 'https://pr/' + n, pr_number: 100 + Number(n), conflicts_resolved: [], stack_link, note: '' }
+    },
+  })
+  const third = calls.find((c) => c.label === 'publish:#12')
+  check('H3: after exit 9 no later publish spends a call on link', !/gh stack link/.test(third.prompt) && /stacks API disabled/.test(third.prompt), third.prompt.slice(-500))
+  check('H3: the ticket still publishes — the PR outranks the stack map', result.stack_bottom_to_top.length === 3, JSON.stringify(result.stack_bottom_to_top))
+  check('H3: finalize does not retry the dead link', !/gh stack link/.test(calls.find((c) => c.label === 'finalize').prompt), '')
+  check('H3: the brief stops calling the run native', /degraded mid-run/.test(result.mode), result.mode)
+  check('H3: the brief states what was lost in its own field', /LOST MID-RUN/.test(result.stack_registration), result.stack_registration)
+  check('H3: the merge instructions switch to bottom-up by hand', /merge bottom-up by hand/.test(result.merge_how), result.merge_how.slice(0, 120))
+}
+
 // --- run-wide: every prompt of every scenario ------------------------------
 {
   const offenders = (re) => [...new Set(EVERY_CALL.filter((c) => re.test(c.prompt)).map((c) => c.label))].join(' | ')
@@ -258,6 +344,15 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('ALL: no prompt tells an agent to force-push', !EVERY_CALL.some((c) => noForce.test(c.prompt.replace(/^- Never pass.*$/gm, ''))), offenders(/--force-with-lease origin|--force origin/))
   check('ALL: no prompt tells an agent to check a branch out', !EVERY_CALL.some((c) => /git checkout -B|git checkout ticket\//.test(c.prompt)), offenders(/git checkout -B/))
   check('ALL: no prompt interpolates a helper instead of a value', !EVERY_CALL.some((c) => /runRefs\.has|\(r\) =>|=> \(\{/.test(c.prompt)), offenders(/runRefs\.has|\(r\) =>/))
+  // `--open` readies the PRs, and the drafts are half the "still adding
+  // layers" signal. Every `gh stack link` in the run must omit it.
+  check('ALL: no prompt passes --open to gh stack link', !EVERY_CALL.some((c) => /gh stack link[^\n]*--open/.test(c.prompt)), offenders(/gh stack link[^\n]*--open/))
+  // `link` opens a PR for any branch that lacks one, and that PR would be
+  // outside the run's control. Every prompt carrying a REAL link command (not
+  // just a mention of one) must say so. `[a-z]` after the command isolates an
+  // invocation with branch arguments from a backticked mention.
+  const realLink = /gh stack link [a-z]/
+  check('ALL: no prompt names a branch to link without its PR existing', !EVERY_CALL.some((c) => realLink.test(c.prompt) && !/already has its PR|PR you have not just confirmed exists/.test(c.prompt)), offenders(realLink))
   check('ALL: every scenario contributed prompts', EVERY_CALL.length > 60, String(EVERY_CALL.length))
 }
 
