@@ -140,12 +140,17 @@ const DISPATCH_SCHEMA = {
 const PUBLISH_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['published', 'pr_url', 'pr_number', 'conflicts_resolved', 'note'],
+  required: ['published', 'pr_url', 'pr_number', 'conflicts_resolved', 'stack_link', 'note'],
   properties: {
     published: { type: 'boolean' },
     pr_url: { type: 'string' },
     pr_number: { type: 'integer' },
     conflicts_resolved: { type: 'array', items: { type: 'string' } },
+    // `disabled` is the one value that latches: it means the stacks API said
+    // exit 9, so no later publish should spend a call on it. `failed` is a
+    // transient error and needs no handling — the next publish re-lists the
+    // whole stack and repairs it for free.
+    stack_link: { type: 'string', enum: ['registered', 'skipped', 'failed', 'disabled'] },
     note: { type: 'string' },
   },
 }
@@ -301,6 +306,14 @@ log(`${notes.length} research notes in ${NOTES_DIR}`)
 // as its own layer with its own PR, not be the branch the stack merges into.
 phase('Setup')
 const hasLayer0 = graph.start_ref !== BASE_REF
+// Every PR body says which layer it is out of how many are PLANNED — layer 0
+// plus the automatable tickets. Planned, not promised: a ticket can fail or be
+// deferred, so a stack that lands short must read as short rather than broken.
+// The integration PR is deliberately outside this count; whether it exists is
+// unknown until the whole-stack review returns.
+const PLANNED_LAYERS = auto.length + (hasLayer0 ? 1 : 0)
+const layerLine = (k) =>
+  `Layer ${k} of ${PLANNED_LAYERS} planned — spec #${SPEC} is still being implemented; more layers may follow.`
 let layer0 = null
 if (hasLayer0) {
   layer0 = await agent(
@@ -309,7 +322,13 @@ if (hasLayer0) {
 ${POINTERS}
 ${GIT}
 
-The branch \`${graph.start_ref}\` already carries work for this spec, done before this run. It becomes the bottom layer of the stack. \`git fetch origin\`, confirm the branch exists on origin (push it from the local checkout if it only exists locally — plain push, no force), then open a DRAFT PR: head \`${graph.start_ref}\`, base \`${BASE_REF}\`, title from the branch's work. The body must say plainly that this PR carries pre-existing work for spec #${SPEC} that this run did not implement or gate — the operator should review it with that in mind.
+The branch \`${graph.start_ref}\` already carries work for this spec, done before this run. It becomes the bottom layer of the stack. \`git fetch origin\`, confirm the branch exists on origin (push it from the local checkout if it only exists locally — plain push, no force), then open a DRAFT PR: head \`${graph.start_ref}\`, base \`${BASE_REF}\`, title from the branch's work. The body must open with exactly this line:
+
+${layerLine(1)}
+
+and then say plainly that this PR carries pre-existing work for spec #${SPEC} that this run did not implement or gate — the operator should review it with that in mind.
+
+Do not register a stack: \`gh stack link\` needs two layers and this is the only one so far. The next PR of the stack registers both.
 
 Do not disturb the user's working copy: leave ${REPO_DIR}'s checked-out branch and its uncommitted changes exactly as you found them.
 
@@ -412,10 +431,31 @@ Return the branch, a one-line summary, the test command and its result, and anyt
 const stacked = []
 let tip = hasLayer0 ? graph.start_ref : BASE_REF
 
+// The stack is registered as it grows, not at the end: the operator sees a
+// real stack map from the second PR onward instead of waiting for the run.
+// The lane is the only place this can happen — two concurrent `gh stack link`
+// calls against one stack is exactly the race the lane exists to prevent.
+//
+// `stackLayers()` is the full bottom-to-top list, re-listed on every publish.
+// `link` reconciles rather than replaces ("existing PRs are never removed"),
+// so re-listing needs no stack number to discover and no state to carry
+// between agents — the same reason the tip is derived and never remembered.
+const stackLayers = () => [...(hasLayer0 ? [graph.start_ref] : []), ...stacked.map((s) => s.branch)]
+let stackRegistered = false
+// Latches on exit 9 only: the stacks API went away mid-run, and no later call
+// will fix that. Chain mode starts here, so the lane never links at all.
+let stackDisabled = STACK_MODE !== 'native'
+
 let lane = Promise.resolve()
 function enqueuePublish(t, impl, cutFrom) {
   const run = lane.then(() => {
     const base = tip
+    // Layers as they will stand once this PR exists — k is the ACTUAL position
+    // in the stack, not the ticket's index in the plan, so the map's fourth box
+    // says "layer 4". A run that lost three tickets ends "4 of 7 planned",
+    // which announces its own shortfall before the brief does.
+    const layers = [...stackLayers(), impl.branch]
+    const canLink = !stackDisabled && layers.length >= 2
     return agent(
       `Publish ticket #${t.number}'s branch as the next PR of the stack for spec #${SPEC}.
 
@@ -433,17 +473,47 @@ ${cutFrom !== base ? `3. The tip moved since this ticket was cut. Replay its com
 4. Run the tests the ticket branch ran (${impl.tests_run}); confirm green.
 5. The branch already points at the work; nothing to move.`}
 6. Put it on origin for the first time: \`git push origin ${impl.branch}\`. This CREATES the branch there — it overwrites nothing and needs no force. A rejected push means something you do not know about is going on: stop and report it.
-7. Open a DRAFT PR: \`gh pr create --draft --head ${impl.branch} --base ${base}\` — \`--base\` takes the branch name. Title = the ticket's title. The body must contain the line \`Closes #${t.number}\` and state that it is part of the stack for spec #${SPEC}.
+7. Open a DRAFT PR: \`gh pr create --draft --head ${impl.branch} --base ${base}\` — \`--base\` takes the branch name. Title = the ticket's title. The body must open with exactly this line:
+
+   ${layerLine(layers.length)}
+
+   and must also contain the line \`Closes #${t.number}\` and state that it is part of the stack for spec #${SPEC}. Leave it a DRAFT — every layer stays draft until the run finalizes, which is how the operator can tell the stack is still being built.
+${canLink
+        ? `8. Register the stack as it now stands — this exact command, nothing else from the gh-stack extension (the others force-push or keep per-worktree state):
+
+   gh stack link ${layers.join(' ')} --base ${BASE_REF} --remote origin
+
+   It re-lists the whole stack on purpose: \`link\` reconciles rather than replaces, so this needs no stack number and repairs any earlier call that failed. Never pass \`--open\` — it would mark the PRs ready for review and destroy the in-progress signal. Never name a branch whose PR you have not just confirmed exists: \`link\` opens a PR for any branch that lacks one, and that PR would be outside this run's control.
+
+   This step must not fail the publish. The PR is the real output; registration is the stack map.
+   - Exit 9 → stacks are disabled for this repo. Report \`stack_link: "disabled"\` so no later publish spends a call on it.
+   - Any other error → report \`stack_link: "failed"\` and move on. The next publish re-lists everything and repairs it.
+   - Success → \`stack_link: "registered"\`.`
+        : stackDisabled
+          ? `8. Do not register a stack${STACK_MODE === 'native' ? ' — a previous publish found the stacks API disabled (exit 9)' : ' — this run is in chain mode'}. Report \`stack_link: "disabled"\`.`
+          : `8. Do not register a stack yet: \`gh stack link\` needs two layers and yours is the only one. Report \`stack_link: "skipped"\`. The next PR registers both.`}
 
 You are the only agent publishing right now. After the PR exists, the branch is published: nothing may ever push to it again.
 
-Return whether it published, the PR url and number, what you resolved, and any note.`,
+Return whether it published, the PR url and number, what you resolved, how the stack link went, and any note.`,
       { ...M, effort: 'low', phase: 'Stack', schema: PUBLISH_SCHEMA, isolation: 'worktree', label: `publish:#${t.number}` },
     ).then((r) => {
       if (!r || !r.published) throw new Error(`publish of #${t.number} failed: ${r ? r.note : 'agent died'}`)
       stacked.push({ number: t.number, branch: impl.branch, pr_url: r.pr_url, pr_number: r.pr_number })
       tip = impl.branch
-      log(`stacked #${t.number} → ${r.pr_url} — ${stacked.length}/${auto.length}`)
+      if (r.stack_link === 'registered') stackRegistered = true
+      // Only exit 9 latches. A transient failure is left alone deliberately —
+      // the next publish's full re-list is the repair, so retrying here would
+      // burn a call per layer for something one call already fixes.
+      if (r.stack_link === 'disabled' && STACK_MODE === 'native') stackDisabled = true
+      const linkState = stackDisabled
+        ? 'stack: unregistered — stacks API disabled mid-run'
+        : r.stack_link === 'registered'
+          ? 'stack registered'
+          : r.stack_link === 'skipped'
+            ? 'stack: not yet — needs 2 layers'
+            : 'stack: unregistered — link failed, next publish retries'
+      log(`stacked #${t.number} → ${r.pr_url} — ${stacked.length}/${auto.length} (${linkState})`)
       return r
     })
   })
@@ -744,7 +814,13 @@ Branch \`${branch}\` carries the cross-ticket fixes from the whole-stack review;
 
 \`git fetch origin\` and confirm the local branch \`${branch}\` exists. Change no code. Then put it on origin for the first time: \`git push origin ${branch}\` — this CREATES the branch there, overwrites nothing, and needs no force. If the branch is missing locally or the push is rejected, say so in the branch field and open no PR.
 
-Open a DRAFT PR: \`gh pr create --draft --head ${branch} --base ${tip}\`, title "spec #${SPEC}: integration fixes". The body lists the findings below and states that this PR carries the cross-ticket fixes from the whole-stack review of spec #${SPEC}.
+Open a DRAFT PR: \`gh pr create --draft --head ${branch} --base ${tip}\`, title "spec #${SPEC}: integration fixes". The body must open with exactly this line:
+
+Integration layer, on top of ${PLANNED_LAYERS} planned layers of spec #${SPEC}.
+
+It carries no layer index on purpose: whether this PR exists at all was unknown until the whole-stack review returned, so it is outside the planned count the other layers state. The rest of the body lists the findings below and states that this PR carries the cross-ticket fixes from the whole-stack review of spec #${SPEC}.
+
+Do not run \`gh stack link\` — finalize registers this layer.
 
 Findings it addresses:
 ${findings.map((f) => `- [${f.severity}] ${f.location} — ${f.issue}`).join('\n')}
@@ -764,7 +840,11 @@ Return the PR url and number, and the branch.`,
   }
 }
 
-// --- steps 8-9: register the stack, ready the PRs, clean up ---------------
+// --- steps 8-9: reconcile the stack, ready the PRs, clean up --------------
+// The lane already registered every ticket layer as it published, so this is a
+// reconciler, not the first registration: it picks up the integration PR (which
+// publishes outside the lane, so nothing there ever links it) and repairs any
+// in-lane call that failed. `link` is idempotent, so the cost is one call.
 phase('Finalize')
 // A ticket whose remainder survived every dispatch round is incomplete work,
 // exactly like a failed or deferred ticket: it keeps the spec open.
@@ -788,14 +868,22 @@ ${GIT}
 The stack, bottom to top: ${bottomToTop.map((l) => `${l.label} → PR #${l.pr_number} (${l.branch})`).join(', ')}.
 Top PR: #${bottomToTop[bottomToTop.length - 1].pr_number}.
 
-${STACK_MODE === 'native'
-    ? `1. Register it as a native GitHub stack — this exact command, nothing else from the gh-stack extension (the others force-push or keep per-worktree state):
+${stackDisabled
+    ? `1. No stack registration. ${STACK_MODE === 'native'
+      ? 'This run started in native mode and the stacks API went away mid-run (exit 9), so the PRs are a plain base-chain rather than a registered stack. Do not retry the link. Say so in your report — the operator has to merge bottom-up by hand instead of once from the top.'
+      : 'This run is in chain mode (native stacks unavailable at arm time). The PRs form a plain base-chain.'}`
+    : `1. Reconcile the stack registration — this exact command, nothing else from the gh-stack extension (the others force-push or keep per-worktree state):
 
    gh stack link ${bottomToTop.map((l) => l.branch).join(' ')} --base ${BASE_REF} --remote origin
 
-   It is append-only and pushes without force; the PRs already exist and are correctly based, so it only registers. If it exits 9, stacks are disabled for this repo — skip registration and say so in your report.`
-    : `1. No stack registration — this run is in chain mode (native stacks unavailable). The PRs form a plain base-chain.`}
-2. Mark every PR of the stack ready for review, bottom to top: \`gh pr ready <number>\`. Draft PRs block a stack merge, so none may stay draft.
+   ${stackRegistered
+      ? 'The stack is already registered: the publish lane linked each ticket layer as it landed. This call is the reconciler — it adds the integration PR, which publishes outside the lane, and repairs any in-lane link that failed. `link` reconciles rather than replaces, so re-listing every layer is correct and existing PRs are never removed.'
+      : 'No in-lane link ever succeeded — a single-layer stack cannot be registered, and two layers are needed. If the stack is still one layer, skip this and say so; that is correct, not a failure.'}
+
+   Every branch listed above already has its PR — this run opened each one — so \`link\` only registers; it never has to open one, which is the case that would put a PR outside this run's control.
+
+   Never pass \`--open\`: readying the PRs is step 2's job and belongs after this. If it exits 9, stacks are disabled for this repo — skip registration and say so in your report.`}
+2. Mark every PR of the stack ready for review, bottom to top: \`gh pr ready <number>\`. Draft PRs block a stack merge, so none may stay draft — and until this step the drafts are what tell the operator the run is still adding layers, so it must not happen earlier.
 ${complete
     ? `3. Append the line \`Closes #${SPEC}\` to the TOP PR's body (\`gh pr edit\` — keep the existing body, add the line). Merging the whole stack from the top then closes every ticket and the spec at once.`
     : `3. Add NO \`Closes #${SPEC}\` anywhere — the spec is not complete. Comment on the TOP PR and on issue #${SPEC}: the stack in merge order (the PR list above), and what remains for a human: ${remains.join('; ')}. A later run stacks the remainder on top.`}
@@ -809,10 +897,20 @@ Return one line: whether the stack registered, how many PRs went ready, and how 
 
 return {
   spec: SPEC,
-  mode: STACK_MODE,
+  // A run that started native and lost the stacks API mid-run is NOT a native
+  // run any more, and saying so is the whole point: the operator's merge is a
+  // different operation. This must never be a footnote.
+  mode: STACK_MODE === 'native' && stackDisabled ? 'chain (degraded mid-run from native)' : STACK_MODE,
+  stack_registration: STACK_MODE !== 'native'
+    ? 'none — chain mode was chosen at arm time'
+    : stackDisabled
+      ? 'LOST MID-RUN. The stack registered while publishing, then the stacks API returned exit 9 and later layers were never linked. The PRs and their base chain are correct and complete; only the Stack object is missing. Merge bottom-up by hand as described below, or re-register by hand once stacks are enabled again.'
+      : stackRegistered
+        ? 'registered incrementally as each layer published, reconciled at finalize'
+        : 'not registered — the stack never reached two layers, which is the minimum `gh stack link` accepts',
   stack_bottom_to_top: bottomToTop.map((l) => `${l.label}: ${l.pr_url}`),
   state: complete ? 'complete — ready for review' : 'partial — ready for review, spec stays open',
-  merge_how: STACK_MODE === 'native'
+  merge_how: STACK_MODE === 'native' && !stackDisabled
     ? `Review bottom-up, then merge ONCE from the top PR (the Merge button there, or PUT .../pulls/${bottomToTop[bottomToTop.length - 1].pr_number}/merge-async). Every layer needs green required checks and required approvals, evaluated against ${BASE_REF}. After a FAILED merge, re-read the actual state of ${BASE_REF} — do not assume rollback.`
     : `No stack object (chain mode): merge bottom-up by hand, one PR at a time, with MERGE COMMITS (--merge), deleting each head branch after its merge so GitHub retargets the next PR. Squash/rebase merges rewrite shas and give every child PR a phantom diff.`,
   gate_unfixed: outcomes
