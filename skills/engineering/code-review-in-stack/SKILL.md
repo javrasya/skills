@@ -31,6 +31,10 @@ Invoke with a PR id: `/code-review-in-stack 253`.
   as written out: met criteria collapse to one line, and only gaps get prose (step 7).
 - **The ticket's scope wins.** Where an ADR, a design doc, or a code comment implies work the
   ticket does not ask for, the ticket governs the verdict and the surplus becomes a suggestion.
+- **A gap is an unmet criterion. Anything else is a finding, and it says so.** "13 of 13 met"
+  followed by a gap block reads as a contradiction and costs the reader their trust in the tally.
+  A problem the ticket never asked about is labelled *outside the criteria* in its own first
+  words, so the score and the findings can never appear to disagree.
 
 ## Process
 
@@ -146,8 +150,42 @@ the verdict, the recommendation, and the risk.
 
 Then ask, per action, before posting the review, filing a ticket, or editing a criterion.
 
-The comment posted to the PR obeys the same budget. A reviewer reading it on a phone should
-reach the disposition without scrolling past prose that only proves you did the work.
+### 8. The comment posted to the PR is shorter than the report
+
+The report argues to a reader who asked for it. The PR comment is read by someone who did not,
+between two other tasks, often on a phone. So it carries **the score and the gaps, and nothing
+else** — no met-criteria list, no evidence spine, no freshness note, no self-claim paragraph.
+Everything you cut is still in your report and still available on challenge.
+
+The whole comment, exactly:
+
+1. **The score, one bold line.** `**12 of 14 criteria met. 2 gaps.**`
+2. **One block per gap**, three bold lead-ins and nothing more:
+   - `**Gap: <what is wrong, in plain English>.**` then one or two sentences of the concrete
+     detail — the symbol, the file:line, the behaviour. Say why it slipped when that is what
+     makes it understandable.
+   - `**Do this:** <the next action>.` A test to add, a body line to change, or the decision a
+     human owes. Never leave a gap without one.
+   - `**Impact:** <what breaks and what does not>.`
+3. Nothing after the last gap.
+
+A slice with no gaps gets one line: `**11 of 11 criteria met. No gaps.** Nothing to do.` Add at
+most one sentence when residue is visible in the diff but closes in a later layer, so a reader
+seeing it does not re-file it.
+
+Two failure modes to avoid, both of which read as vagueness:
+
+- **A gap with no next action.** "The error value is constructed by no test anywhere in the
+  stack" tells a reader something is wrong and leaves them to work out what to type. The
+  disposition from step 5 is the answer; put it in the comment as an imperative.
+- **Evidence in place of the finding.** Test names, grep counts and branch-by-branch tallies are
+  how *you* became sure. They are not what the reader needs to act. Keep the fact, drop the
+  proof.
+
+Rewriting a comment you already posted is normal and cheap: `gh api -X PATCH
+repos/<owner>/<repo>/issues/comments/<id> -F body=@file.md`. Give each comment a leading HTML
+comment marker (`<!-- code-review-in-stack -->`) when you post it, so you can find your own
+comment ids again later.
 
 ## The standards axis
 
