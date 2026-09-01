@@ -148,3 +148,13 @@ PR* (mechanical but wider than the slice), *hand forward as a ticket* (needs a d
 widens the slice past its criteria), or *no work* (met, closed downstream, or out of scope by
 the ticket's own words). Reported with it: what the gap does **and does not** break — a
 diagnostic-only gap must not block a slice, and a byte-moving one must not be waved through.
+
+### Reporting to a screen
+
+The output discipline of a review a human reads under time pressure: the verdict in the first
+sentence, met criteria collapsed to one line, a block *only* per [[gap]], drafts named and
+offered rather than pasted, and the blocking question last with nothing after it. The budget is
+a screen plus one block per gap. What does not fit is **named and offered, never silently
+dropped** — a warning, a number, a scoped condition and a conflict hazard survive every cut,
+because a reader who acts on a trimmed version acts wrong. Written for the skim: an exhaustive
+report nobody reaches the end of loses its findings exactly as surely as an incomplete one.

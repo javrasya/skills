@@ -27,7 +27,8 @@ Invoke with a PR id: `/code-review-in-stack 253`.
 - **Publish nothing without approval.** Posting the review to the PR, filing a ticket, and
   editing a ticket's criteria each wait for explicit approval of that specific action.
 - **Every criterion gets a verdict.** Report the tally ("11 of 12 met") and account for each one.
-  A criterion you could not check is its own verdict, named as such.
+  A criterion you could not check is its own verdict, named as such. Accounted for is not the same
+  as written out: met criteria collapse to one line, and only gaps get prose (step 7).
 - **The ticket's scope wins.** Where an ADR, a design doc, or a code comment implies work the
   ticket does not ask for, the ticket governs the verdict and the surplus becomes a suggestion.
 
@@ -118,13 +119,35 @@ For every **fix in this PR** disposition, write the change as instructions, not 
 Where a criterion needs amending — a half delivered, a half handed forward — propose the exact
 new wording and let the user rule.
 
-### 7. Report
+A draft is long by nature, so it does not go in the report. Keep it out of band: name it in one
+line ("ticket drafted for the nested half, want it?") and show it when asked, or write it to a
+file and give the path. The only exception is a one-line criterion rewording, which is shorter
+to show than to describe.
 
-One report, in this order: the gate result, the criteria tally, then one block per gap carrying
-its verdict, its evidence, its sweep result, its disposition, and its severity. Put the blocking
-question last if you have one.
+### 7. Report to a human with minutes, not hours
+
+The reader is a human deciding what to do next, and a report they skim is a report that loses
+its own findings. Write for the skim, in this order:
+
+1. **One sentence carrying the verdict**: the tally and the single thing that matters
+   ("11 of 12 criteria met, one gap, diagnostic-only, already open through the stack tip").
+2. **The gate result**, one line, with the numbers.
+3. **The met criteria as one line**, not one block each — a list of numbers, or "all but 4".
+   A met criterion's evidence is held in reserve for a challenge, not spent on the page.
+4. **One block per gap**, and nothing else gets a block. Five short labelled lines: the
+   criterion quoted, the evidence, the sweep result, the disposition with its next action, and
+   what it does *and does not* break.
+5. **The blocking question last**, when you have one, with nothing after it.
+
+Budget the whole thing at a screen plus one block per gap. What does not fit is named and
+offered, never silently dropped: a warning, a number, a scoped condition, and a conflict hazard
+stay in even when everything else goes. Bold the lead-in of each block so the bold alone carries
+the verdict, the recommendation, and the risk.
 
 Then ask, per action, before posting the review, filing a ticket, or editing a criterion.
+
+The comment posted to the PR obeys the same budget. A reviewer reading it on a phone should
+reach the disposition without scrolling past prose that only proves you did the work.
 
 ## The standards axis
 
