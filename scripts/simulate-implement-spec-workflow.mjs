@@ -1,8 +1,9 @@
 // Simulates the rendered workflow script with stubbed agent() calls, driving
 // it through the paths the dispatcher redesign added.
 import { readFileSync } from 'fs'
+import { fileURLToPath } from 'url'
 
-const TPL = new URL('../skills/engineering/implement-spec-in-workflow/workflow.template.js', import.meta.url).pathname
+const TPL = fileURLToPath(new URL('../skills/engineering/implement-spec-in-workflow/workflow.template.js', import.meta.url))
 
 function render() {
   let s = readFileSync(TPL, 'utf8')
@@ -43,7 +44,7 @@ async function run(overrides = {}) {
       explorations: [{ label: 'area-a', question: 'q?' }],
     }),
     explore: () => '/tmp/n/01-area-a.md',
-    layer0: () => ({ pr_url: 'https://pr/layer0', pr_number: 90 }),
+    layer0: () => ({ pr_url: 'https://pr/layer0', pr_number: 90, note: 'in sync', worktree: '/wt/layer0' }),
     dispatch: () => ({ ticket_brief: 'the ticket in brief', slices: [{ title: 'all of it', brief: 'do it', effort: 'medium' }] }),
     impl: (label) => ({ branch: 'ticket/' + label.match(/#(\d+)/)[1], summary: 's', tests_run: 'npm t', tests_green: true, unmet: [] }),
     gate: () => ({ findings: [] }),
@@ -57,10 +58,10 @@ async function run(overrides = {}) {
     publish: (label, prompt) => {
       const n = label.match(/#(\d+)/)[1]
       const stack_link = /gh stack link [a-z]/.test(prompt) ? 'registered' : /stack_link: "skipped"/.test(prompt) ? 'skipped' : 'disabled'
-      return { published: true, pr_url: 'https://pr/' + n, pr_number: 100 + Number(n), conflicts_resolved: [], stack_link, note: '' }
+      return { published: true, pr_url: 'https://pr/' + n, pr_number: 100 + Number(n), conflicts_resolved: [], stack_link, note: '', worktree: '/wt/publish-' + n, worktrees_removed: 0, worktrees_kept: [] }
     },
     review: () => ({ findings: [] }),
-    integration: () => ({ pr_url: 'https://pr/int', pr_number: 999, branch: 'spec/224-integration' }),
+    integration: () => ({ pr_url: 'https://pr/int', pr_number: 999, branch: 'spec/224-integration', worktree: '/wt/int', worktrees_removed: 0, worktrees_kept: [] }),
     finalize: () => 'stack registered, 2 PRs ready, 0 worktrees',
   }
   const h = { ...defaults, ...overrides }
@@ -325,7 +326,7 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
       // #10 is the lone first layer, so it never gets a link command to run;
       // #11 is the first that does, and that is where the API says exit 9.
       const stack_link = n === '10' ? 'skipped' : n === '11' ? 'disabled' : 'registered'
-      return { published: true, pr_url: 'https://pr/' + n, pr_number: 100 + Number(n), conflicts_resolved: [], stack_link, note: '' }
+      return { published: true, pr_url: 'https://pr/' + n, pr_number: 100 + Number(n), conflicts_resolved: [], stack_link, note: '', worktree: '/wt/publish-' + n, worktrees_removed: 0, worktrees_kept: [] }
     },
   })
   const third = calls.find((c) => c.label === 'publish:#12')
@@ -337,11 +338,75 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('H3: the merge instructions switch to bottom-up by hand', /merge bottom-up by hand/.test(result.merge_how), result.merge_how.slice(0, 120))
 }
 
+// --- scenario H4: a link push rejected non-fast-forward is not transient ----
+// `gh stack link` pushes every branch it names by LOCAL ref. A stale local ref
+// on any layer (an earlier run's leftover on layer 0, say) is rejected, and
+// every later re-list dies the same way — so every link call mirrors origin
+// into the lower layers first, and a rejection is named in the log and the
+// brief instead of being logged as transient and waited out.
+{
+  const { result, calls, logs } = await run({
+    graph: () => ({
+      tickets: [
+        { number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' },
+        { number: 11, title: 'T11', blocked_by: [10], needs_human: false, human_reason: '' },
+        { number: 12, title: 'T12', blocked_by: [11], needs_human: false, human_reason: '' },
+      ],
+      start_ref: 'feat/prior',
+      explorations: [],
+    }),
+    layer0: () => ({ pr_url: 'https://pr/layer0', pr_number: 90, note: 'moved feat/prior off stale 54a41bb0 to origin', worktree: '/wt/layer0' }),
+    publish: (label) => {
+      const n = label.match(/#(\d+)/)[1]
+      const stack_link = n === '12' ? 'registered' : 'rejected'
+      return { published: true, pr_url: 'https://pr/' + n, pr_number: 100 + Number(n), conflicts_resolved: [], stack_link, note: 'feat/prior local 54a41bb0 vs origin ac46c84a', worktree: '/wt/publish-' + n, worktrees_removed: 0, worktrees_kept: [] }
+    },
+  })
+  const layer0 = calls.find((c) => c.label.startsWith('layer0'))
+  const first = calls.find((c) => c.label === 'publish:#10')
+  const second = calls.find((c) => c.label === 'publish:#11')
+  const finalize = calls.find((c) => c.label === 'finalize')
+  const mirrorCmd = 'git update-ref refs/heads/<branch> origin/<branch>'
+  check('H4: layer 0 mirrors its own local ref from origin', layer0.prompt.includes(mirrorCmd) && layer0.prompt.includes('`feat/prior`'), layer0.prompt.slice(-600))
+  check('H4: the layer-0 log carries what the mirror found', logs.some((l) => /Layer 0:.*stale 54a41bb0/.test(l)), logs.join(' | '))
+  check('H4: every link mirrors the layers below before linking', first.prompt.includes(mirrorCmd) && first.prompt.includes('LOCAL ref of `feat/prior` before') && second.prompt.includes('LOCAL ref of `feat/prior`, `ticket/10` before'), second.prompt.slice(-900))
+  check('H4: the mirror never names the branch being published', !first.prompt.includes('`feat/prior`, `ticket/10` before'), '')
+  check('H4: the mirror spares a branch a worktree has checked out', /git worktree list/.test(first.prompt) && /let the link fail/.test(first.prompt), '')
+  check('H4: a rejected push is its own outcome, not "failed"', /stack_link: "rejected"/.test(first.prompt) && /not transient/.test(first.prompt), '')
+  check('H4: a rejection does not latch — the next publish still links', /gh stack link feat\/prior ticket\/10 ticket\/11 ticket\/12/.test(calls.find((c) => c.label === 'publish:#12').prompt), '')
+  check('H4: the log names the rejection loudly', logs.some((l) => /stacked #10.*NOT REGISTERED.*rejected non-fast-forward.*54a41bb0/.test(l)), logs.join(' | '))
+  check('H4: finalize mirrors every layer before reconciling', finalize.prompt.includes('LOCAL ref of `feat/prior`, `ticket/10`, `ticket/11`, `ticket/12`, `spec/224-integration` before') || finalize.prompt.includes('LOCAL ref of `feat/prior`, `ticket/10`, `ticket/11`, `ticket/12` before'), finalize.prompt.slice(0, 1200))
+  check('H4: the brief says registered once a later link succeeded', /registered incrementally/.test(result.stack_registration), result.stack_registration)
+}
+
+// --- scenario H5: every link rejected — the brief must not blame layer count -
+{
+  const { result, calls } = await run({
+    graph: () => ({
+      tickets: [
+        { number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' },
+        { number: 11, title: 'T11', blocked_by: [10], needs_human: false, human_reason: '' },
+      ],
+      start_ref: 'main',
+      explorations: [],
+    }),
+    publish: (label) => {
+      const n = label.match(/#(\d+)/)[1]
+      const stack_link = n === '10' ? 'skipped' : 'rejected'
+      return { published: true, pr_url: 'https://pr/' + n, pr_number: 100 + Number(n), conflicts_resolved: [], stack_link, note: 'ticket/10 local a vs origin b', worktree: '/wt/publish-' + n, worktrees_removed: 0, worktrees_kept: [] }
+    },
+  })
+  const finalize = calls.find((c) => c.label === 'finalize')
+  check('H5: the brief says the lane never registered, with the last rejection', /NOT REGISTERED IN THE LANE/.test(result.stack_registration) && /#11: link push rejected non-fast-forward — ticket\/10 local a vs origin b/.test(result.stack_registration), result.stack_registration)
+  check('H5: the brief does not blame the layer count', !/never reached two layers/.test(result.stack_registration), result.stack_registration)
+  check('H5: finalize is told it is the first registration, and why', /first registration/.test(finalize.prompt) && /the last failure: #11/.test(finalize.prompt), finalize.prompt.slice(0, 1500))
+}
+
 // --- run-wide: every prompt of every scenario ------------------------------
 {
   const offenders = (re) => [...new Set(EVERY_CALL.filter((c) => re.test(c.prompt)).map((c) => c.label))].join(' | ')
   const noForce = /--force(?!` or `--force-with-lease` to any push)/
-  check('ALL: no prompt tells an agent to force-push', !EVERY_CALL.some((c) => noForce.test(c.prompt.replace(/^- Never pass.*$/gm, ''))), offenders(/--force-with-lease origin|--force origin/))
+  check('ALL: no prompt tells an agent to force-push', !EVERY_CALL.some((c) => noForce.test(c.prompt.replace(/^- Never pass.*$/gm, '').replace(/git worktree remove --force/g, ''))), offenders(/--force-with-lease origin|--force origin/))
   check('ALL: no prompt tells an agent to check a branch out', !EVERY_CALL.some((c) => /git checkout -B|git checkout ticket\//.test(c.prompt)), offenders(/git checkout -B/))
   check('ALL: no prompt interpolates a helper instead of a value', !EVERY_CALL.some((c) => /runRefs\.has|\(r\) =>|=> \(\{/.test(c.prompt)), offenders(/runRefs\.has|\(r\) =>/))
   // `--open` readies the PRs, and the drafts are half the "still adding

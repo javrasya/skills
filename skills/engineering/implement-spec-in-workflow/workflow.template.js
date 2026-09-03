@@ -50,6 +50,18 @@ const GIT = `Git in this run — every agent shares ONE clone, and your worktree
 - Never pass \`--force\` or \`--force-with-lease\` to any push, to any branch, for any reason.
 - If git refuses a command, STOP and report it. Never work around a refusal by inventing a branch name: a run scattered across improvised branches is worse than a run that stopped.`
 
+// `gh stack link` pushes every branch it names BY LOCAL REF, atomically and
+// without force. So one stale local ref on any layer — left behind by an
+// earlier run on layer 0, or origin moved under an inherited branch mid-run —
+// is rejected non-fast-forward, and with it every registration for the rest
+// of the run, deterministically: no re-list repairs it (an observed run lost
+// its whole stack this way and logged each failure as transient). The lane's
+// own branches are local == origin by construction; every OTHER branch a link
+// call names is mirrored from origin first. A published layer is never
+// rewritten by a run (publish-once, ADR-0005), so origin is authoritative for
+// it and the mirror can only drop a stale shadow, never work. See ADR-0007.
+const mirror = (branches) => `\`git fetch origin\`, then mirror origin into the shared clone's LOCAL ref of ${branches.map((b) => `\`${b}\``).join(', ')} before linking — \`gh stack link\` pushes every branch it names by local ref, and one stale ref fails the whole atomic push, now and on every later re-list. For each: if \`git rev-parse <branch>\` differs from \`git rev-parse origin/<branch>\`, run \`git update-ref refs/heads/<branch> origin/<branch>\` — the branch is published and nothing in this run rewrites it, so origin is right and the local ref is a stale shadow; name the sha you moved off in your note (its commits stay in the object store). The one branch you may not move is one \`git worktree list\` shows checked out (\`[<branch>]\`): leave it, name it in your note, and let the link fail.`
+
 // Told to every agent that runs in its own worktree — and only those: the
 // dispatchers receive GIT too but run in the main checkout, so this cannot
 // live inside GIT. A worktree is per agent, not per ticket, and the harness
@@ -177,8 +189,13 @@ const RECLAIM_FIELDS = {
 const LAYER0_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['pr_url', 'pr_number', 'worktree'],
-  properties: { pr_url: { type: 'string' }, pr_number: { type: 'integer' }, ...WORKTREE_FIELD },
+  required: ['pr_url', 'pr_number', 'note', 'worktree'],
+  properties: {
+    pr_url: { type: 'string' },
+    pr_number: { type: 'integer' },
+    note: { type: 'string', description: 'what the local-ref mirror found: in sync, a stale sha it moved off, or a worktree holding the branch so it was left alone' },
+    ...WORKTREE_FIELD,
+  },
 }
 
 const IMPL_SCHEMA = {
@@ -230,8 +247,11 @@ const PUBLISH_SCHEMA = {
     // `disabled` is the one value that latches: it means the stacks API said
     // exit 9, so no later publish should spend a call on it. `failed` is a
     // transient error and needs no handling — the next publish re-lists the
-    // whole stack and repairs it for free.
-    stack_link: { type: 'string', enum: ['registered', 'skipped', 'failed', 'disabled'] },
+    // whole stack and repairs it for free. `rejected` is neither: the push
+    // was refused non-fast-forward on a named branch, which is deterministic
+    // and recurs on every re-list until that branch's local ref is mirrored;
+    // it is logged loudly and carried into the brief rather than waited out.
+    stack_link: { type: 'string', enum: ['registered', 'skipped', 'failed', 'rejected', 'disabled'] },
     note: { type: 'string' },
     ...WORKTREE_FIELD,
     ...RECLAIM_FIELDS,
@@ -433,18 +453,18 @@ ${layerLine(1)}
 
 and then say plainly that this PR carries pre-existing work for spec #${SPEC} that this run did not implement or gate — the operator should review it with that in mind.
 
-Do not register a stack: \`gh stack link\` needs two layers and this is the only one so far. The next PR of the stack registers both.
+Do not register a stack: \`gh stack link\` needs two layers and this is the only one so far. The next PR of the stack registers both — and every one of those calls names this branch, so: ${mirror([graph.start_ref])}
 
 Do not disturb the user's working copy: leave ${REPO_DIR}'s checked-out branch and its uncommitted changes exactly as you found them.
 
 ${WORKTREE}
 
-Return the PR url and number, and your worktree.`,
+Return the PR url and number, what the mirror found, and your worktree.`,
     { ...M, effort: 'low', phase: 'Setup', schema: LAYER0_SCHEMA, isolation: 'worktree', label: `layer0:${graph.start_ref}` },
   )
   if (!layer0) throw new Error('layer-0 PR failed — prior work would be orphaned')
   noteWorktree('layer0', graph.start_ref, layer0)
-  log(`Layer 0: ${layer0.pr_url} (pre-existing work on ${graph.start_ref})`)
+  log(`Layer 0: ${layer0.pr_url} (pre-existing work on ${graph.start_ref}) — ${layer0.note}`)
 }
 
 // --- steps 4-6: frontier scheduling, gate, then the serial publish lane ---
@@ -553,6 +573,9 @@ let tip = hasLayer0 ? graph.start_ref : BASE_REF
 // between agents — the same reason the tip is derived and never remembered.
 const stackLayers = () => [...(hasLayer0 ? [graph.start_ref] : []), ...stacked.map((s) => s.branch)]
 let stackRegistered = false
+// The last non-transient link failure, for the brief: a rejected push is a
+// fact about a branch, not the weather, and the operator has to hear it.
+let lastLinkFailure = null
 // Latches on exit 9 only: the stacks API went away mid-run, and no later call
 // will fix that. Chain mode starts here, so the lane never links at all.
 let stackDisabled = STACK_MODE !== 'native'
@@ -602,7 +625,9 @@ ${cutFrom !== base ? `4. The tip moved since this ticket was cut. Replay its com
 
    and must also contain the line \`Closes #${t.number}\` and state that it is part of the stack for spec #${SPEC}. Leave it a DRAFT — every layer stays draft until the run finalizes, which is how the operator can tell the stack is still being built.
 ${canLink
-        ? `9. Register the stack as it now stands — this exact command, nothing else from the gh-stack extension (the others force-push or keep per-worktree state):
+        ? `9. ${mirror(layers.slice(0, -1))}
+
+   Then register the stack as it now stands — this exact command, nothing else from the gh-stack extension (the others force-push or keep per-worktree state):
 
    gh stack link ${layers.join(' ')} --base ${BASE_REF} --remote origin
 
@@ -610,6 +635,7 @@ ${canLink
 
    This step must not fail the publish. The PR is the real output; registration is the stack map.
    - Exit 9 → stacks are disabled for this repo. Report \`stack_link: "disabled"\` so no later publish spends a call on it.
+   - A push refused non-fast-forward (\`! [rejected] <branch> -> <branch>\`) → report \`stack_link: "rejected"\`, with the branch and its local and origin shas in your note. This is not transient: it names a local ref that still disagrees with origin, and no re-list repairs it.
    - Any other error → report \`stack_link: "failed"\` and move on. The next publish re-lists everything and repairs it.
    - Success → \`stack_link: "registered"\`.`
         : stackDisabled
@@ -640,13 +666,19 @@ Return whether it published, the PR url and number, what you resolved, how the s
       // the next publish's full re-list is the repair, so retrying here would
       // burn a call per layer for something one call already fixes.
       if (r.stack_link === 'disabled' && STACK_MODE === 'native') stackDisabled = true
+      // A rejected push does not latch — the next publish mirrors the stale
+      // ref and its re-list repairs the stack — but it is never called
+      // transient: the log names it and the brief carries it.
+      if (r.stack_link === 'rejected') lastLinkFailure = `#${t.number}: link push rejected non-fast-forward — ${r.note}`
       const linkState = stackDisabled
         ? 'stack: unregistered — stacks API disabled mid-run'
         : r.stack_link === 'registered'
           ? 'stack registered'
           : r.stack_link === 'skipped'
             ? 'stack: not yet — needs 2 layers'
-            : 'stack: unregistered — link failed, next publish retries'
+            : r.stack_link === 'rejected'
+              ? `stack: NOT REGISTERED — link push rejected non-fast-forward, a local ref shadows origin (${r.note})`
+              : 'stack: unregistered — link failed, next publish retries'
       log(`stacked #${t.number} → ${r.pr_url} — ${stacked.length}/${auto.length} (${linkState}; reclaimed ${r.worktrees_removed} worktree(s)${r.worktrees_kept.length ? `, kept ${r.worktrees_kept.length}` : ''})`)
       return r
     })
@@ -1058,13 +1090,17 @@ ${stackDisabled
     ? `1. No stack registration. ${STACK_MODE === 'native'
       ? 'This run started in native mode and the stacks API went away mid-run (exit 9), so the PRs are a plain base-chain rather than a registered stack. Do not retry the link. Say so in your report — the operator has to merge bottom-up by hand instead of once from the top.'
       : 'This run is in chain mode (native stacks unavailable at arm time). The PRs form a plain base-chain.'}`
-    : `1. Reconcile the stack registration — this exact command, nothing else from the gh-stack extension (the others force-push or keep per-worktree state):
+    : `1. Reconcile the stack registration. ${mirror(bottomToTop.map((l) => l.branch))}
+
+   Then this exact command, nothing else from the gh-stack extension (the others force-push or keep per-worktree state):
 
    gh stack link ${bottomToTop.map((l) => l.branch).join(' ')} --base ${BASE_REF} --remote origin
 
    ${stackRegistered
       ? 'The stack is already registered: the publish lane linked each ticket layer as it landed. This call is the reconciler — it adds the integration PR, which publishes outside the lane, and repairs any in-lane link that failed. `link` reconciles rather than replaces, so re-listing every layer is correct and existing PRs are never removed.'
-      : 'No in-lane link ever succeeded — a single-layer stack cannot be registered, and two layers are needed. If the stack is still one layer, skip this and say so; that is correct, not a failure.'}
+      : bottomToTop.length >= 2
+        ? `No in-lane link ever succeeded${lastLinkFailure ? ` — the last failure: ${lastLinkFailure}` : ''}. This call is the stack's first registration; if it fails too, quote the error in your report.`
+        : 'No in-lane link ever succeeded — a single-layer stack cannot be registered, and two layers are needed. If the stack is still one layer, skip this and say so; that is correct, not a failure.'}
 
    Every branch listed above already has its PR — this run opened each one — so \`link\` only registers; it never has to open one, which is the case that would put a PR outside this run's control.
 
@@ -1096,7 +1132,9 @@ return {
       ? 'LOST MID-RUN. The stack registered while publishing, then the stacks API returned exit 9 and later layers were never linked. The PRs and their base chain are correct and complete; only the Stack object is missing. Merge bottom-up by hand as described below, or re-register by hand once stacks are enabled again.'
       : stackRegistered
         ? 'registered incrementally as each layer published, reconciled at finalize'
-        : 'not registered — the stack never reached two layers, which is the minimum `gh stack link` accepts',
+        : bottomToTop.length >= 2
+          ? `NOT REGISTERED IN THE LANE — every in-lane link failed${lastLinkFailure ? ` (last: ${lastLinkFailure})` : ''}; finalize's reconcile was the first real attempt, see its report below. Until a stack object exists, merge bottom-up by hand.`
+          : 'not registered — the stack never reached two layers, which is the minimum `gh stack link` accepts',
   stack_bottom_to_top: bottomToTop.map((l) => `${l.label}: ${l.pr_url}`),
   state: complete ? 'complete — ready for review' : 'partial — ready for review, spec stays open',
   merge_how: STACK_MODE === 'native' && !stackDisabled
