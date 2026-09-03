@@ -7,9 +7,9 @@ export const meta = {
     { title: 'Setup', detail: 'layer-0 PR when prior work already sits on a branch' },
     { title: 'Implement', detail: 'a dispatcher sizes each ticket; fresh slice agents implement it, frontier-scheduled' },
     { title: 'Gate', detail: 'code-review each ticket branch before it is published' },
-    { title: 'Stack', detail: 'serial publish lane: rebase onto the tip, one draft PR per ticket' },
+    { title: 'Stack', detail: 'serial publish lane: rebase onto the tip, one draft PR per ticket, reclaim the ticket\'s worktrees' },
     { title: 'Review', detail: 'code-review the whole stack; fixes land as the top PR' },
-    { title: 'Finalize', detail: 'register the stack, ready the PRs, prune worktrees' },
+    { title: 'Finalize', detail: 'reconcile the stack, ready the PRs, reclaim the worktrees the lane has not' },
   ],
 }
 
@@ -49,6 +49,70 @@ const GIT = `Git in this run — every agent shares ONE clone, and your worktree
 - NEVER check a branch out — another worktree may hold it and git will refuse. Start from \`git switch --detach <ref>\`, and once your work is committed, move the branch with \`git update-ref refs/heads/<branch> HEAD\`. That succeeds exactly where \`git checkout\` and \`git branch -f\` are refused.
 - Never pass \`--force\` or \`--force-with-lease\` to any push, to any branch, for any reason.
 - If git refuses a command, STOP and report it. Never work around a refusal by inventing a branch name: a run scattered across improvised branches is worse than a run that stopped.`
+
+// Told to every agent that runs in its own worktree — and only those: the
+// dispatchers receive GIT too but run in the main checkout, so this cannot
+// live inside GIT. A worktree is per agent, not per ticket, and the harness
+// keeps every one that changed. The lane reclaims a ticket's worktrees the
+// moment its PR exists, and the only safe way to know which those are is for
+// each agent to name its own — an agent for the next ticket sits clean at the
+// same commit and is indistinguishable by git state alone.
+const WORKTREE = `Your worktree is throwaway and per agent. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. This run reclaims it — uncommitted leftovers included — once the work it holds is published.`
+
+// --- the worktree ledger ---------------------------------------------------
+// Every path an isolated agent reports, keyed by what it worked on, beside the
+// branch that holds its work. A reclaim is handed EXACT paths from here and
+// never a pattern. The check before removal is that HEAD is on that branch;
+// the tree may be dirty, because an agent that returned committed what it
+// meant to keep and the rest is build output — in a repo whose build rewrites
+// tracked generated files every worktree is dirty, and a rule that spared
+// them would reclaim nothing. A dead agent never reports a path, so its
+// worktree is never in here and never removed: finalize names it instead.
+const worktreesOf = new Map() // key → { branch, paths: [] }
+function noteWorktree(key, branch, r) {
+  if (!r || !r.worktree) return
+  const e = worktreesOf.get(key) || { branch, paths: [] }
+  if (!e.paths.includes(r.worktree)) e.paths.push(r.worktree)
+  worktreesOf.set(key, e)
+}
+const reclaimed = new Set()
+const worktreesKept = []
+// The publisher cannot remove its own worktree (its cwd), so it is handed to
+// the next publisher down the lane, and the last one to finalize.
+let prevPublishWorktree = null // { path, branch }
+const prevPublisher = () => (prevPublishWorktree ? [prevPublishWorktree] : [])
+// Entries not yet handed to any reclaimer. Marked reclaimed only once the reclaimer
+// returned: a reclaimer that died leaves them for the next one, or finalize.
+function pendingWorktrees(keys) {
+  const out = []
+  for (const k of keys) {
+    const e = worktreesOf.get(k)
+    if (e) for (const path of e.paths) if (!reclaimed.has(path)) out.push({ path, branch: e.branch })
+  }
+  return out
+}
+function markReclaimed(entries, r) {
+  for (const e of entries) reclaimed.add(e.path)
+  if (r && r.worktrees_kept) worktreesKept.push(...r.worktrees_kept)
+}
+const reclaimStep = (entries) => entries.length
+  ? `Reclaim these worktrees — exact paths, nothing else. Each belonged to an agent of this run that has finished, and the branch beside it holds that agent's work:
+${entries.map((e) => `   - ${e.path} → ${ref(e.branch)}`).join('\n')}
+   For each path: if it no longer exists, count it removed — the harness already cleaned it. Otherwise \`git -C <path> merge-base --is-ancestor HEAD <branch>\` must succeed; if it fails the worktree holds a commit its branch does not, so keep it and report why. Then \`git worktree remove --force <path>\` — force on purpose: the agent that used it returned and committed what it meant to keep, so whatever is uncommitted there is build output, and the ancestor check above is the real guard. If git still refuses (a file lock, say), keep the worktree and report \`{path, reason}\`. Never remove your own worktree, ${REPO_DIR}, or any path not in this list. Finish with \`git worktree prune\`. Return how many you removed and every one you kept.`
+  : `No worktrees to reclaim this time: report 0 removed and none kept.`
+// A dead agent never reported a path, so its worktree is not in the ledger.
+// The harness names a run's worktrees `wf_<run>-<n>`; the prefix is read off
+// any reported path so a reclaimer can NAME the strays without touching them.
+const strayPrefix = () => {
+  for (const e of worktreesOf.values()) for (const p of e.paths) { const m = /^(.*[\\/]wf_[^\\/]+-)\d+$/.exec(p); if (m) return m[1] }
+  return null
+}
+const strayStep = () => {
+  const prefix = strayPrefix()
+  return prefix
+    ? `Then \`git worktree list --porcelain\`: any worktree whose path starts with \`${prefix}\` and is NOT in the list above belonged to an agent of this run that died before reporting. Do not remove it — it may hold the only copy of that agent's work — but add it to \`worktrees_kept\` with the reason "not in the ledger: its agent died before reporting".`
+    : ''
+}
 
 // Context economy, told to every agent that reads or edits code. A minor lever
 // by measurement (~5% of a heavy agent's context was repeat reads — the
@@ -94,23 +158,40 @@ const GRAPH_SCHEMA = {
   },
 }
 
+// Every agent that runs in its own worktree names it; see WORKTREE.
+const WORKTREE_FIELD = { worktree: { type: 'string', description: 'absolute path of the worktree you ran in — `git rev-parse --show-toplevel`' } }
+// What a reclaimer reports back; see reclaimStep.
+const RECLAIM_FIELDS = {
+  worktrees_removed: { type: 'integer' },
+  worktrees_kept: {
+    type: 'array',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['path', 'reason'],
+      properties: { path: { type: 'string' }, reason: { type: 'string', description: 'why it was kept: dirty, HEAD not on its branch, or the refusal git gave' } },
+    },
+  },
+}
+
 const LAYER0_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['pr_url', 'pr_number'],
-  properties: { pr_url: { type: 'string' }, pr_number: { type: 'integer' } },
+  required: ['pr_url', 'pr_number', 'worktree'],
+  properties: { pr_url: { type: 'string' }, pr_number: { type: 'integer' }, ...WORKTREE_FIELD },
 }
 
 const IMPL_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['branch', 'summary', 'tests_run', 'tests_green', 'unmet'],
+  required: ['branch', 'summary', 'tests_run', 'tests_green', 'unmet', 'worktree'],
   properties: {
     branch: { type: 'string' },
     summary: { type: 'string', description: 'one or two sentences' },
     tests_run: { type: 'string', description: 'the exact command(s) run' },
     tests_green: { type: 'boolean' },
     unmet: { type: 'array', items: { type: 'string' }, description: 'acceptance criteria from the ticket that were not satisfied — empty when all are met' },
+    ...WORKTREE_FIELD,
   },
 }
 
@@ -140,7 +221,7 @@ const DISPATCH_SCHEMA = {
 const PUBLISH_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['published', 'pr_url', 'pr_number', 'conflicts_resolved', 'stack_link', 'note'],
+  required: ['published', 'pr_url', 'pr_number', 'conflicts_resolved', 'stack_link', 'note', 'worktree', 'worktrees_removed', 'worktrees_kept'],
   properties: {
     published: { type: 'boolean' },
     pr_url: { type: 'string' },
@@ -152,14 +233,18 @@ const PUBLISH_SCHEMA = {
     // whole stack and repairs it for free.
     stack_link: { type: 'string', enum: ['registered', 'skipped', 'failed', 'disabled'] },
     note: { type: 'string' },
+    ...WORKTREE_FIELD,
+    ...RECLAIM_FIELDS,
   },
 }
 
+// Shared by the gate reviewers and the whole-stack review — both isolated.
 const REVIEW_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['findings'],
+  required: ['findings', 'worktree'],
   properties: {
+    ...WORKTREE_FIELD,
     findings: {
       type: 'array',
       items: {
@@ -221,21 +306,41 @@ const FIX_DISPATCH_SCHEMA = {
 const FIX_SLICE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['verdicts', 'unfinished'],
+  required: ['verdicts', 'unfinished', 'worktree'],
   properties: {
     verdicts: VERDICTS,
     unfinished: { type: 'array', items: { type: 'string' }, description: '`location` of each finding in your brief you did not reach \u2014 empty normally' },
+    ...WORKTREE_FIELD,
   },
 }
 
 const INTEGRATION_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['pr_url', 'pr_number', 'branch'],
+  required: ['pr_url', 'pr_number', 'branch', 'worktree', 'worktrees_removed', 'worktrees_kept'],
   properties: {
     pr_url: { type: 'string' },
     pr_number: { type: 'integer' },
     branch: { type: 'string' },
+    ...WORKTREE_FIELD,
+    ...RECLAIM_FIELDS,
+  },
+}
+
+const RECLAIM_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['worktrees_removed', 'worktrees_kept'],
+  properties: { ...RECLAIM_FIELDS },
+}
+
+const FINALIZE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['summary', 'worktrees_removed', 'worktrees_kept'],
+  properties: {
+    summary: { type: 'string', description: 'one line: whether the stack registered and how many PRs went ready' },
+    ...RECLAIM_FIELDS,
   },
 }
 
@@ -322,7 +427,7 @@ if (hasLayer0) {
 ${POINTERS}
 ${GIT}
 
-The branch \`${graph.start_ref}\` already carries work for this spec, done before this run. It becomes the bottom layer of the stack. \`git fetch origin\`, confirm the branch exists on origin (push it from the local checkout if it only exists locally — plain push, no force), then open a DRAFT PR: head \`${graph.start_ref}\`, base \`${BASE_REF}\`, title from the branch's work. The body must open with exactly this line:
+The branch \`${graph.start_ref}\` already carries work for this spec, done before this run. It becomes the bottom layer of the stack. \`git fetch origin\`, then \`git switch --detach ${ref(graph.start_ref)}\` so your worktree sits on the layer it publishes (the reclaim that later removes it checks exactly that), confirm the branch exists on origin (push it from the local checkout if it only exists locally — plain push, no force), then open a DRAFT PR: head \`${graph.start_ref}\`, base \`${BASE_REF}\`, title from the branch's work. The body must open with exactly this line:
 
 ${layerLine(1)}
 
@@ -332,10 +437,13 @@ Do not register a stack: \`gh stack link\` needs two layers and this is the only
 
 Do not disturb the user's working copy: leave ${REPO_DIR}'s checked-out branch and its uncommitted changes exactly as you found them.
 
-Return the PR url and number.`,
+${WORKTREE}
+
+Return the PR url and number, and your worktree.`,
     { ...M, effort: 'low', phase: 'Setup', schema: LAYER0_SCHEMA, isolation: 'worktree', label: `layer0:${graph.start_ref}` },
   )
   if (!layer0) throw new Error('layer-0 PR failed — prior work would be orphaned')
+  noteWorktree('layer0', graph.start_ref, layer0)
   log(`Layer 0: ${layer0.pr_url} (pre-existing work on ${graph.start_ref})`)
 }
 
@@ -408,10 +516,13 @@ Past roughly 70 tool calls this slice has outgrown one agent's context. Stop cle
 
 Run the repo's tests for what you touched and get them green. Commit, then move the ticket branch onto your work: \`git update-ref refs/heads/ticket/${t.number} HEAD\`. Push nothing — this branch reaches origin exactly once, when the stack lane publishes it.
 
-Return the branch, a one-line summary, the test command and its result, and anything from the brief you did not reach in \`unmet\`.`,
+${WORKTREE}
+
+Return the branch, a one-line summary, the test command and its result, anything from the brief you did not reach in \`unmet\`, and your worktree.`,
       { ...M, effort: s.effort, phase: 'Implement', schema: IMPL_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}` },
     )
     if (!r) throw new Error(`slice implementer for #${t.number} died (${s.title})`)
+    noteWorktree(t.number, `ticket/${t.number}`, r)
     out.started = true
     out.summaries.push(r.summary)
     out.last = r
@@ -456,6 +567,16 @@ function enqueuePublish(t, impl, cutFrom) {
     // which announces its own shortfall before the brief does.
     const layers = [...stackLayers(), impl.branch]
     const canLink = !stackDisabled && layers.length >= 2
+    // Everything this ticket's agents left behind, plus the previous
+    // publisher's own worktree (it could not remove its cwd) and, on the
+    // first publish, layer 0's. The reclaim runs BEFORE the rebase below: the
+    // check is "HEAD is on ticket/N", and a rebase makes every slice
+    // worktree's HEAD an orphan of the branch it built, so reclaiming after
+    // would keep them all for nothing.
+    const toReclaim = [
+      ...pendingWorktrees([t.number, ...(stacked.length ? [] : ['layer0'])]),
+      ...prevPublisher(),
+    ]
     return agent(
       `Publish ticket #${t.number}'s branch as the next PR of the stack for spec #${SPEC}.
 
@@ -466,20 +587,22 @@ Current stack tip: \`${ref(base)}\` — what your PR must be based on.
 Stack so far, bottom to top: ${stacked.length ? stacked.map((s) => `#${s.number} (${s.branch})`).join(' → ') : hasLayer0 ? `layer 0 (${graph.start_ref})` : 'empty'}.
 
 1. \`git fetch origin\` — for the inherited refs; this run's own branches are already local.
-2. \`git switch --detach ${impl.branch}\`.
-${cutFrom !== base ? `3. The tip moved since this ticket was cut. Replay its commits onto the tip: \`git rebase --onto ${ref(base)} ${ref(cutFrom)}\`. This rewrites only local commits that have never left this clone, so it needs no force and destroys nothing. Resolve any conflict in favour of keeping BOTH tickets' behaviour.
-4. Run the tests the ticket branch ran (${impl.tests_run}); get them green, committing any fix.
-5. Move the branch onto the rebased work: \`git update-ref refs/heads/${impl.branch} HEAD\`.` : `3. The tip has not moved: the branch already sits on \`${ref(base)}\`. No rebase.
-4. Run the tests the ticket branch ran (${impl.tests_run}); confirm green.
-5. The branch already points at the work; nothing to move.`}
-6. Put it on origin for the first time: \`git push origin ${impl.branch}\`. This CREATES the branch there — it overwrites nothing and needs no force. A rejected push means something you do not know about is going on: stop and report it.
-7. Open a DRAFT PR: \`gh pr create --draft --head ${impl.branch} --base ${base}\` — \`--base\` takes the branch name. Title = the ticket's title. The body must open with exactly this line:
+2. ${reclaimStep(toReclaim)}${toReclaim.length ? `
+   This comes before any rebase on purpose: the check is that a worktree's HEAD sits on its branch, and a rebase would orphan every one of them from the branch they built.` : ''}
+3. \`git switch --detach ${impl.branch}\`.
+${cutFrom !== base ? `4. The tip moved since this ticket was cut. Replay its commits onto the tip: \`git rebase --onto ${ref(base)} ${ref(cutFrom)}\`. This rewrites only local commits that have never left this clone, so it needs no force and destroys nothing. Resolve any conflict in favour of keeping BOTH tickets' behaviour.
+5. Run the tests the ticket branch ran (${impl.tests_run}); get them green, committing any fix.
+6. Move the branch onto the rebased work: \`git update-ref refs/heads/${impl.branch} HEAD\`.` : `4. The tip has not moved: the branch already sits on \`${ref(base)}\`. No rebase.
+5. Run the tests the ticket branch ran (${impl.tests_run}); confirm green.
+6. The branch already points at the work; nothing to move.`}
+7. Put it on origin for the first time: \`git push origin ${impl.branch}\`. This CREATES the branch there — it overwrites nothing and needs no force. A rejected push means something you do not know about is going on: stop and report it.
+8. Open a DRAFT PR: \`gh pr create --draft --head ${impl.branch} --base ${base}\` — \`--base\` takes the branch name. Title = the ticket's title. The body must open with exactly this line:
 
    ${layerLine(layers.length)}
 
    and must also contain the line \`Closes #${t.number}\` and state that it is part of the stack for spec #${SPEC}. Leave it a DRAFT — every layer stays draft until the run finalizes, which is how the operator can tell the stack is still being built.
 ${canLink
-        ? `8. Register the stack as it now stands — this exact command, nothing else from the gh-stack extension (the others force-push or keep per-worktree state):
+        ? `9. Register the stack as it now stands — this exact command, nothing else from the gh-stack extension (the others force-push or keep per-worktree state):
 
    gh stack link ${layers.join(' ')} --base ${BASE_REF} --remote origin
 
@@ -490,15 +613,26 @@ ${canLink
    - Any other error → report \`stack_link: "failed"\` and move on. The next publish re-lists everything and repairs it.
    - Success → \`stack_link: "registered"\`.`
         : stackDisabled
-          ? `8. Do not register a stack${STACK_MODE === 'native' ? ' — a previous publish found the stacks API disabled (exit 9)' : ' — this run is in chain mode'}. Report \`stack_link: "disabled"\`.`
-          : `8. Do not register a stack yet: \`gh stack link\` needs two layers and yours is the only one. Report \`stack_link: "skipped"\`. The next PR registers both.`}
+          ? `9. Do not register a stack${STACK_MODE === 'native' ? ' — a previous publish found the stacks API disabled (exit 9)' : ' — this run is in chain mode'}. Report \`stack_link: "disabled"\`.`
+          : `9. Do not register a stack yet: \`gh stack link\` needs two layers and yours is the only one. Report \`stack_link: "skipped"\`. The next PR registers both.`}
 
 You are the only agent publishing right now. After the PR exists, the branch is published: nothing may ever push to it again.
 
-Return whether it published, the PR url and number, what you resolved, how the stack link went, and any note.`,
+${WORKTREE}
+
+Return whether it published, the PR url and number, what you resolved, how the stack link went, any note, the reclaim count and kept list, and your worktree.`,
       { ...M, effort: 'low', phase: 'Stack', schema: PUBLISH_SCHEMA, isolation: 'worktree', label: `publish:#${t.number}` },
     ).then((r) => {
-      if (!r || !r.published) throw new Error(`publish of #${t.number} failed: ${r ? r.note : 'agent died'}`)
+      if (!r || !r.published) {
+        // A publisher that returned without publishing still used a
+        // worktree: file it under the ticket so finalize reclaims it. Its
+        // reclaim list is NOT marked — finalize re-hands it, and a path the
+        // failed publisher already removed simply counts as removed.
+        noteWorktree(t.number, impl.branch, r)
+        throw new Error(`publish of #${t.number} failed: ${r ? r.note : 'agent died'}`)
+      }
+      markReclaimed(toReclaim, r)
+      prevPublishWorktree = { path: r.worktree, branch: impl.branch }
       stacked.push({ number: t.number, branch: impl.branch, pr_url: r.pr_url, pr_number: r.pr_number })
       tip = impl.branch
       if (r.stack_link === 'registered') stackRegistered = true
@@ -513,7 +647,7 @@ Return whether it published, the PR url and number, what you resolved, how the s
           : r.stack_link === 'skipped'
             ? 'stack: not yet — needs 2 layers'
             : 'stack: unregistered — link failed, next publish retries'
-      log(`stacked #${t.number} → ${r.pr_url} — ${stacked.length}/${auto.length} (${linkState})`)
+      log(`stacked #${t.number} → ${r.pr_url} — ${stacked.length}/${auto.length} (${linkState}; reclaimed ${r.worktrees_removed} worktree(s)${r.worktrees_kept.length ? `, kept ${r.worktrees_kept.length}` : ''})`)
       return r
     })
   })
@@ -553,7 +687,7 @@ Every finding above belongs to exactly one slice: none dropped, none in two. Eac
   )
 }
 
-async function runFixSlices(slices, { subject, branch, cutFrom, started, phase: ph, tag }) {
+async function runFixSlices(slices, { subject, branch, cutFrom, started, phase: ph, tag, ledgerKey }) {
   const out = { verdicts: [], unfinished: [], landed: started, died: null }
   for (let i = 0; i < slices.length; i++) {
     const s = slices[i]
@@ -578,13 +712,16 @@ Past roughly 70 tool calls this slice has outgrown one agent's context. Stop cle
 
 Run the repo's tests, get them green, commit, then move the branch onto your work: \`git update-ref refs/heads/${branch} HEAD\`. Push nothing.
 
-Return one verdict per finding in your brief you fixed or rejected, and the \`location\` of any you did not reach.`,
+${WORKTREE}
+
+Return one verdict per finding in your brief you fixed or rejected, the \`location\` of any you did not reach, and your worktree.`,
       { ...M, effort: s.effort, phase: ph, schema: FIX_SLICE_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}` },
     )
     // A dead fixer is not fatal — it is the next reviewer's problem, and that
     // reviewer reads the branch rather than anyone's account of it. But the
     // branch may be mid-change, so the round stops rather than building on it.
     if (!r) { out.died = s.title; break }
+    noteWorktree(ledgerKey, branch, r)
     out.landed = true
     out.verdicts.push(...r.verdicts)
     out.unfinished.push(...r.unfinished)
@@ -668,9 +805,12 @@ ${rejected.length
 A previous round already raised the findings below, and the implementer judged each one wrong for the stated reason. Raise one again only if you can show its reason is false — say which part is false and why. Otherwise leave it out entirely.
 
 ${rejected.map((v) => `- ${v.location} — ${v.issue}\n  judged wrong because: ${v.reason}`).join('\n')}`
-        : ''}`,
+        : ''}
+
+${WORKTREE}`,
       { ...M, phase: 'Gate', schema: REVIEW_SCHEMA, isolation: 'worktree', label: `gate:#${t.number}:r${round}` },
     )
+    noteWorktree(t.number, impl.branch, r)
     const blocking = r ? r.findings.filter((f) => f.severity !== 'minor') : []
     if (!blocking.length) {
       log(`#${t.number} gate clean${round > 1 ? ` after ${round} rounds` : ''}${rejected.length ? `, ${rejected.length} finding(s) rejected` : ''}`)
@@ -689,6 +829,7 @@ ${rejected.map((v) => `- ${v.location} — ${v.issue}\n  judged wrong because: $
       started: true,
       phase: 'Gate',
       tag: `gate-fix:#${t.number}:r${round}`,
+      ledgerKey: t.number,
     })
     for (const v of out.verdicts.filter((v) => v.action === 'rejected')) {
       if (!rejected.some((p) => p.location === v.location && p.issue === v.issue)) rejected.push(v)
@@ -760,7 +901,30 @@ const outcomes = await Promise.all(
 )
 const failed = outcomes.filter((o) => o.failed)
 if (failed.length) log(`FAILED: ${failed.map((o) => '#' + o.number).join(', ')}`)
-if (!stacked.length && !hasLayer0) return { spec: SPEC, error: 'no ticket was published', failed: failed.map((o) => ({ ticket: o.number, error: o.failed })) }
+if (!stacked.length && !hasLayer0) {
+  // Nothing published, so no lane step ever reclaimed. The worktrees are the
+  // same dead weight as after a full run; the same rule applies, and a dirty
+  // one is a dead agent's only copy — kept and named.
+  const leftovers = pendingWorktrees([...worktreesOf.keys()])
+  const reclaim = leftovers.length
+    ? await agent(
+      `Nothing of spec #${SPEC} was published; the run is stopping. ${reclaimStep(leftovers)}
+${strayStep()}
+
+${POINTERS}
+Delete no branches: any work these worktrees carried is on its \`ticket/<n>\` branch in ${REPO_DIR}'s clone, and the operator may want it.`,
+      { ...M, effort: 'low', phase: 'Finalize', schema: RECLAIM_SCHEMA, label: 'reclaim' },
+    )
+    : null
+  if (reclaim) markReclaimed(leftovers, reclaim)
+  return {
+    spec: SPEC,
+    error: 'no ticket was published',
+    failed: failed.map((o) => ({ ticket: o.number, error: o.failed })),
+    worktrees_kept: worktreesKept,
+    local_only_branches: { note: `Never pushed. Any work these carry is in ${REPO_DIR}'s clone only.`, refs: auto.map((t) => `ticket/${t.number}`) },
+  }
+}
 
 // --- step 7: review the whole stack; fixes land as the top PR -------------
 phase('Review')
@@ -774,9 +938,12 @@ Review \`${ref(BASE_REF)}...${ref(tip)}\` — everything the stack adds.
 
 Invoke the \`code-review\` skill with \`${ref(BASE_REF)}\` as the fixed point and spec #${SPEC} as the spec — both its axes: this repo's documented standards, and whether the stack matches what the spec and its tickets asked for.
 
-Every ticket was already reviewed alone on its own branch, so look hardest at what that could not see: two implementations of one helper, abstractions that contradict each other, a contract one ticket relies on that another changed. Return every finding; change no code yourself.`,
+Every ticket was already reviewed alone on its own branch, so look hardest at what that could not see: two implementations of one helper, abstractions that contradict each other, a contract one ticket relies on that another changed. Return every finding; change no code yourself.
+
+${WORKTREE}`,
   { ...M, phase: 'Review', schema: REVIEW_SCHEMA, isolation: 'worktree', label: `review:spec-${SPEC}` },
 )
+noteWorktree('review', tip, review)
 const findings = review ? review.findings : []
 log(`code review: ${findings.length} findings`)
 
@@ -799,12 +966,17 @@ if (findings.length) {
     started: false,
     phase: 'Review',
     tag: 'integration',
+    ledgerKey: 'integration',
   })
   integrationVerdicts = out.verdicts
   integrationUnaccounted = out.unaccounted
   if (out.landed) {
     // Publishing is the one irreversible act of this phase, so it is its own
     // small agent rather than the last and most context-exhausted fixer's job.
+    // It also reclaims: the whole-stack review's worktree, the integration
+    // fixers', and the last ticket publisher's. No rebase here, so after the
+    // PR is fine.
+    const integrationReclaim = [...pendingWorktrees(['review', 'integration']), ...prevPublisher()]
     integration = await agent(
       `Open the integration PR for spec #${SPEC} — the top layer of the stack.
 
@@ -825,13 +997,23 @@ Do not run \`gh stack link\` — finalize registers this layer.
 Findings it addresses:
 ${findings.map((f) => `- [${f.severity}] ${f.location} — ${f.issue}`).join('\n')}
 
-Return the PR url and number, and the branch.`,
+After the PR exists:
+${reclaimStep(integrationReclaim)}
+
+${WORKTREE}
+
+Return the PR url and number, the branch, the reclaim count and kept list, and your worktree.`,
       { ...M, effort: 'low', phase: 'Review', schema: INTEGRATION_SCHEMA, isolation: 'worktree', label: 'publish:integration' },
     )
     if (integration && integration.pr_number) {
+      // The prompt reclaims only after the PR exists, so a returned-but-unopened
+      // result reclaimed nothing: leave its list pending for finalize.
+      markReclaimed(integrationReclaim, integration)
+      prevPublishWorktree = { path: integration.worktree, branch }
       tip = integration.branch
       log(`integration PR ${integration.pr_url} — new stack top`)
     } else {
+      noteWorktree('integration', branch, integration)
       integration = null
       log(`integration PR never opened — the fixes sit on ${branch}, unpublished; the brief names them`)
     }
@@ -860,6 +1042,10 @@ const remains = [
   ...failed.map((o) => `#${o.number} — failed: ${o.failed}`),
   ...unmetTickets.map((o) => `#${o.number} — published with unmet criteria: ${o.unmet.join('; ')}`),
 ]
+// Whatever no reclaimer was handed: failed tickets' worktrees, a reclaimer that
+// died, and the last publisher's own. Same rule as the lane — exact paths,
+// dirty kept and named — never "the ones for this spec".
+const finalReclaim = [...pendingWorktrees([...worktreesOf.keys()]), ...prevPublisher()]
 const finalize = await agent(
   `Finalize the stack for spec #${SPEC}.
 
@@ -887,13 +1073,16 @@ ${stackDisabled
 ${complete
     ? `3. Append the line \`Closes #${SPEC}\` to the TOP PR's body (\`gh pr edit\` — keep the existing body, add the line). Merging the whole stack from the top then closes every ticket and the spec at once.`
     : `3. Add NO \`Closes #${SPEC}\` anywhere — the spec is not complete. Comment on the TOP PR and on issue #${SPEC}: the stack in merge order (the PR list above), and what remains for a human: ${remains.join('; ')}. A later run stacks the remainder on top.`}
-4. Clean up every worktree this run created: \`git worktree list\`, remove the ones created for spec #${SPEC}, and \`git worktree prune\`. Leave the user's own checkout and any worktree you did not create alone. Delete no branches and close no PRs.
+4. ${reclaimStep(finalReclaim)}
+   The lane already reclaimed each published ticket's worktrees; these are the rest. ${strayStep()}
+   Touch no other worktree — the user's own checkout in particular — and delete no branches and close no PRs.
 
 Do not merge anything — merging is the operator's.
 
-Return one line: whether the stack registered, how many PRs went ready, and how many worktrees you removed.`,
-  { ...M, effort: 'low', phase: 'Finalize', label: 'finalize' },
+Return one line on the stack — whether it registered and how many PRs went ready — plus the reclaim count and kept list.`,
+  { ...M, effort: 'low', phase: 'Finalize', schema: FINALIZE_SCHEMA, label: 'finalize' },
 )
+if (finalize) markReclaimed(finalReclaim, finalize)
 
 return {
   spec: SPEC,
@@ -931,8 +1120,12 @@ return {
     const unpublished = auto.filter((t) => !stacked.some((x) => x.number === t.number)).map((t) => `ticket/${t.number}`)
     if (integration === null && findings.length) unpublished.push(`spec/${SPEC}-integration`)
     return unpublished.length
-      ? { note: `Never pushed. Any work these carry is in ${REPO_DIR}'s clone only — check them before deleting the run's worktrees.`, refs: unpublished }
+      ? { note: `Never pushed. Any work these carry is on the branch in ${REPO_DIR}'s clone only — the worktrees that built it were removed where clean and on the branch, kept otherwise; see worktrees_kept.`, refs: unpublished }
       : null
   })(),
+  // Every worktree a reclaim refused to remove, with git's reason. Each is a
+  // dead agent's uncommitted work or a file the OS still holds — both for the
+  // operator, neither for --force.
+  worktrees_kept: worktreesKept,
   finalize,
 }
