@@ -84,6 +84,8 @@ The cost is that in-flight work is invisible until it publishes: a run that dies
 
 Reviewing a change **before** it merges, on its own branch, against its own ticket — while the diff is small and its author's reasoning is still recoverable. Review and fix alternate until a review returns nothing blocking, **a fresh reviewer each round**, so "clean" is a verdict rather than one reviewer running out of patience; a round cap merges what is unresolved and names it rather than stalling everything downstream. The fixing half of the round goes through the [[dispatcher]] like any other work.
 
+What may **block** at the gate is deliberately narrow: an unmet ticket criterion, a red mechanical check (the project's format, lint and test commands), or a **correctness bug** (a panic, a crash, silent data loss in a release build). ADR fit, architectural drift and style are not gate blockers — they were settled when the spec was designed, re-proving them per ticket costs rounds without changing the PR's merge-worthiness, and they are the whole-stack review's or a later PR-level procedure's concern. Round 1 reviews the whole diff; later rounds **verify the claimed fixes and the lines the fixer touched**, so a round count measures repair, not fresh discovery.
+
 The loop's hazard is not slow convergence but **ping-pong**: a fixer judges a finding wrong and leaves the code, the next reviewer raises it again, and the pair trade it until the cap. The **rejection ledger** is the cure — a fix slice returns one verdict per finding it owns, `fixed` or `rejected` with a specific checkable reason; rejections accumulate across rounds, and a later reviewer may raise one again only by **falsifying its stated reason**. Without the ledger the loop cannot terminate on a disputed call.
 
 A finding that comes back with **no verdict** — dropped by the dispatcher, or owned by a slice that died — is reconciled **by the script, never by a prompt**: it is named in the log and handed to the next round's reviewer to check explicitly on the branch. Silently assuming it fixed is how a real finding leaves the run. The round is never re-dispatched in place; whatever a slice did not reach falls to the next reviewer, which re-derives what is still broken from the branch itself, so one cap governs the gate rather than two multiplying ones.
@@ -141,7 +143,10 @@ A hand-seeded list of known-intermittent tests (`docs/known-flakes.md`), checked
 One PR of a [[stack]], and the unit [[code-review-in-stack]] reviews: the diff of a single
 ticket, judged against *that* ticket's acceptance criteria rather than against the spec as a
 whole. A slice is done when its criteria are met; work the criteria do not ask for is surplus,
-however obviously owed it looks from an ADR.
+however obviously owed it looks from an ADR. The **acceptance contract** of a slice is the
+ticket's criteria, the spec, and any ADR the spec itself creates or amends, and nothing else:
+existing ADRs were checked when the spec was designed, and the run does not re-prove them
+ticket by ticket.
 
 ### Verdict, evidence, and the escape hatch
 
@@ -160,10 +165,26 @@ A **gap** is a criterion the slice leaves unmet. Before a gap costs anyone work 
 (a `None` that should be a value, an absent call), counted per branch — because a refactor can
 move or reword every string you searched for and leave the behaviour untouched. A gap is then
 given exactly one **disposition**: *fix in this PR* (local, no decision owed), *fix in a child
-PR* (mechanical but wider than the slice), *hand forward as a ticket* (needs a decision, or
-widens the slice past its criteria), or *no work* (met, closed downstream, or out of scope by
-the ticket's own words). Reported with it: what the gap does **and does not** break — a
+PR* (mechanical but wider than the slice), *hand forward as a ticket* (**only** when it names
+the decision a human must make), or *no work* (met, closed downstream, or out of scope by the
+ticket's own words). Reported with it: what the gap does **and does not** break — a
 diagnostic-only gap must not block a slice, and a byte-moving one must not be waved through.
+
+Work the brief asked for and the slice did not do is **never a gap**: it is a **remainder**,
+and it goes back to dispatch, not forward to the gate or to a human. A gap with no decision
+attached is a remainder wearing a costume; an observed run (#343) relabelled a required test
+this way and paid a gate round to rediscover it.
+
+### Validation list, and readiness
+
+The project's own mechanical checks — format, lint, test — as commands with exit codes, **confirmed by the
+user once before a run launches** (inferred from the tech stack and CI config when the project documents
+none; empty is honest and the [[brief]] says so) and reused by every later run. Every implementer and
+fixer carries the same list and returns **one result per command**, never one green boolean; a missing
+result is a schema failure, not a pass. **Readiness** is the list green on the exact commit under review:
+the reviewer's first act is to re-run it, and a red there is a **remainder** sent back to dispatch, not a
+finding sent to gate-fix. Running a command is not the self-assessment ADR-0004 forbids — the agent does
+not judge, the exit code does.
 
 ### Reporting to a screen
 

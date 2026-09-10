@@ -20,7 +20,12 @@ const REPO_DIR = String.raw`__REPO_DIR__`          // main checkout
 const NOTES_DIR = String.raw`__NOTES_DIR__`        // research notes, outside the repo
 const BASE_REF = '__BASE_REF__'                    // branch the stack merges into
 const STACK_MODE = '__STACK_MODE__'                // 'native' (gh-stack + stacks API) or 'chain' (plain --base chain)
+// The project's mechanical checks — format, lint, test — one command per line,
+// confirmed by the user before launch and saved in <notes-dir>/validation.md.
+// Empty is honest: readiness then reduces to "the tests you ran are green".
+const VALIDATION_RAW = String.raw`__VALIDATION__`
 // -------------------------------------------------------------------------
+const VALIDATION = VALIDATION_RAW.split('\n').map((s) => s.trim()).filter((s) => s && !s.startsWith('#'))
 
 const M = { model: 'opus' }
 const POINTERS = `Repo ${REPO}, checkout ${REPO_DIR}. Spec: \`gh issue view ${SPEC}\`. Research notes: ${NOTES_DIR}.`
@@ -136,6 +141,44 @@ const ECONOMY = `Context economy — your context is re-read every turn, so neve
 - Decide a file's whole change before touching it and land it in as few edits as you can.
 - Run tests in the repo's quietest failures-only form, and re-run only after you changed something.`
 
+// --- the acceptance contract and readiness ---------------------------------
+// What a ticket owes is the ticket's criteria, the spec, and any ADR the spec
+// itself creates or amends — nothing else. Existing ADRs were checked when the
+// spec was designed; re-proving them ticket by ticket cost an observed run
+// (spec #339) most of its gate rounds without changing whether a PR was
+// mergeable. Told to dispatchers, implementers and reviewers alike, so all
+// three hold the same definition of done.
+const CONTRACT = `The acceptance contract for this ticket is its own acceptance criteria, the spec's decisions that bear on it, and any ADR the spec itself creates or amends. Nothing else binds: existing ADRs and repo conventions are guidance, not criteria — follow them where cheap, never re-prove them.`
+
+// Readiness is the validation list green on the exact commit under review.
+// Running a command is not the self-assessment ADR-0004 forbids — the agent
+// does not judge, the exit code does — so the implementer runs it, and the
+// reviewer re-runs it first. The list comes from the project, never hardcoded.
+const validationLine = VALIDATION.length
+  ? `Validation list — run EVERY command below on your final commit and return one result per command, the command copied verbatim:\n${VALIDATION.map((c) => `- \`${c}\``).join('\n')}`
+  : `This project confirmed no validation list. Run the repo's tests for what you touched and return each command you ran with its result.`
+// The commands a result set leaves red or missing. Whitespace-insensitive,
+// because agents copy imperfectly; anything looser would credit the wrong run.
+const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim()
+const readinessRed = (checks) => VALIDATION.filter((c) => !(checks || []).some((k) => norm(k.command) === norm(c) && k.passed))
+// One result per command. A single green boolean is what let a fixer report
+// "tests, clippy, docs green" while fmt was never run (#344).
+const CHECKS_FIELD = {
+  checks: {
+    type: 'array',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['command', 'passed'],
+      properties: {
+        command: { type: 'string', description: 'the exact command, copied verbatim from the validation list' },
+        passed: { type: 'boolean' },
+      },
+    },
+    description: 'one entry per validation command run on the final commit',
+  },
+}
+
 const GRAPH_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -201,13 +244,13 @@ const LAYER0_SCHEMA = {
 const IMPL_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['branch', 'summary', 'tests_run', 'tests_green', 'unmet', 'worktree'],
+  required: ['branch', 'summary', 'checks', 'unmet', 'decisions_needed', 'worktree'],
   properties: {
     branch: { type: 'string' },
     summary: { type: 'string', description: 'one or two sentences' },
-    tests_run: { type: 'string', description: 'the exact command(s) run' },
-    tests_green: { type: 'boolean' },
-    unmet: { type: 'array', items: { type: 'string' }, description: 'acceptance criteria from the ticket that were not satisfied — empty when all are met' },
+    ...CHECKS_FIELD,
+    unmet: { type: 'array', items: { type: 'string' }, description: 'the REMAINDER: work the brief asked for that you did not do — a criterion, a test, a file. Empty when the brief is done. Never a question for a human; that goes in decisions_needed' },
+    decisions_needed: { type: 'array', items: { type: 'string' }, description: 'a question only a human can answer, which blocks a criterion: the ticket and spec are silent or contradict each other on it. Name the question and the criterion. Never work you did not do' },
     ...WORKTREE_FIELD,
   },
 }
@@ -215,9 +258,10 @@ const IMPL_SCHEMA = {
 const DISPATCH_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['ticket_brief', 'slices'],
+  required: ['ticket_brief', 'decisions_needed', 'slices'],
   properties: {
     ticket_brief: { type: 'string', description: 'one short paragraph on the whole ticket, for later fix agents — they read this instead of the issue' },
+    decisions_needed: { type: 'array', items: { type: 'string' }, description: 'questions the ticket and spec leave open that a human must answer — never pick a reading yourself; brief the slices around them' },
     slices: {
       type: 'array',
       minItems: 1,
@@ -227,7 +271,7 @@ const DISPATCH_SCHEMA = {
         required: ['title', 'brief', 'effort'],
         properties: {
           title: { type: 'string' },
-          brief: { type: 'string', description: 'self-contained: the goal, the acceptance criteria this slice covers, the files it touches, and every constraint from ticket/spec/notes that bears on it — its implementer reads no issue and no spec' },
+          brief: { type: 'string', description: 'self-contained: the goal, the acceptance criteria this slice covers, the files it touches, and every constraint from the ticket and spec that bears on it — its implementer reads no issue and no spec' },
           effort: { type: 'string', enum: ['medium', 'high'], description: 'reasoning effort for the slice implementer' },
         },
       },
@@ -259,27 +303,35 @@ const PUBLISH_SCHEMA = {
 }
 
 // Shared by the gate reviewers and the whole-stack review — both isolated.
+const FINDINGS_FIELD = {
+  findings: {
+    type: 'array',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['severity', 'location', 'issue', 'fix'],
+      properties: {
+        severity: { type: 'string', enum: ['blocker', 'major', 'minor'] },
+        location: { type: 'string', description: 'path:line' },
+        issue: { type: 'string' },
+        fix: { type: 'string' },
+      },
+    },
+  },
+}
 const REVIEW_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   required: ['findings', 'worktree'],
-  properties: {
-    ...WORKTREE_FIELD,
-    findings: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['severity', 'location', 'issue', 'fix'],
-        properties: {
-          severity: { type: 'string', enum: ['blocker', 'major', 'minor'] },
-          location: { type: 'string', description: 'path:line' },
-          issue: { type: 'string' },
-          fix: { type: 'string' },
-        },
-      },
-    },
-  },
+  properties: { ...WORKTREE_FIELD, ...FINDINGS_FIELD },
+}
+// The gate reviewer also re-runs the validation list before it reads a line:
+// a red there is a readiness failure, routed back to dispatch, not a finding.
+const GATE_REVIEW_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['checks', 'findings', 'worktree'],
+  properties: { ...WORKTREE_FIELD, ...CHECKS_FIELD, ...FINDINGS_FIELD },
 }
 
 const VERDICTS = {
@@ -326,9 +378,10 @@ const FIX_DISPATCH_SCHEMA = {
 const FIX_SLICE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['verdicts', 'unfinished', 'worktree'],
+  required: ['verdicts', 'unfinished', 'checks', 'worktree'],
   properties: {
     verdicts: VERDICTS,
+    ...CHECKS_FIELD,
     unfinished: { type: 'array', items: { type: 'string' }, description: '`location` of each finding in your brief you did not reach \u2014 empty normally' },
     ...WORKTREE_FIELD,
   },
@@ -489,8 +542,10 @@ const notesLine = notes.length ? `Research notes for this spec: ${notes.join(', 
 //
 // MAX_DISPATCH_ROUNDS governs re-slicing HERE only. The gate has no equivalent
 // nesting: whatever a fix slice does not reach falls to the next reviewer,
-// which re-derives what is still broken from the branch itself.
-const MAX_DISPATCH_ROUNDS = 3
+// which re-derives what is still broken from the branch itself. A readiness
+// red at the gate (the validation list failing on the branch) also comes back
+// here as a remainder and spends one of these rounds — one cap, not two.
+const MAX_DISPATCH_ROUNDS = 6
 
 function dispatch(t, remainder) {
   return agent(
@@ -500,13 +555,19 @@ ${POINTERS}
 ${GIT}
 ${notesLine}
 ${remainder ? `
-Earlier slices of this same run already did part of this work — \`ticket/${t.number}\` is this run's own unpublished branch (created by this workflow, no PR) carrying what they pushed. Slice ONLY what remains: ${remainder}` : ''}
+Earlier slices of this same run already did part of this work — \`ticket/${t.number}\` is this run's own unpublished branch (created by this workflow, no PR) carrying what they pushed. Slice ONLY what remains: ${remainder}
+
+This remainder is work the earlier brief asked for and nobody did. It is not a gap, not a question for the operator, and not something to "report": brief a slice that does it.` : ''}
 
 Read \`gh issue view ${t.number}\` and the spec's decisions that bear on it, and skim the code's STRUCTURE only — file lists, signatures, grep hits. Read no implementations: the slices read the code; you size and brief them.
 
+${CONTRACT} The research notes cite existing ADRs and conventions: pass those on as guidance where useful, never as criteria.
+
+Where the ticket and spec are silent or contradict each other on something a criterion turns on, do NOT pick a reading: put the question in \`decisions_needed\` and brief the slices around it. A provisional interpretation is work review cannot legitimately pass.
+
 Default to ONE slice. Slice only when one agent plausibly cannot finish in roughly 70 tool calls; when unsure, do not slice. Slices run sequentially on one branch, so each must leave the branch consistent — building, tests green.
 
-Each brief must be self-contained: its goal, the acceptance criteria it covers, the files it will touch, and every constraint from the ticket, the spec, and the notes that bears on it — its implementer reads none of those. Set each slice's effort: 'high' for the gnarly ones, 'medium' otherwise.
+Each brief must be self-contained: its goal, the acceptance criteria it covers, the files it will touch, and every constraint from the ticket and the spec that bears on it — its implementer reads none of those. Every criterion of the ticket must be owned by exactly one slice, including any test the ticket demands. Set each slice's effort: 'high' for the gnarly ones, 'medium' otherwise.
 
 Also return ticket_brief: one short paragraph on the whole ticket, for later fix agents.`,
     { ...M, effort: 'high', phase: 'Implement', schema: DISPATCH_SCHEMA, label: `dispatch:#${t.number}${remainder ? ':re' : ''}` },
@@ -514,7 +575,7 @@ Also return ticket_brief: one short paragraph on the whole ticket, for later fix
 }
 
 async function runSlices(t, slices, { cutFrom, started, tag }) {
-  const out = { started, summaries: [], last: null, unmet: [] }
+  const out = { started, summaries: [], last: null, unmet: [], decisions: [] }
   for (let i = 0; i < slices.length; i++) {
     const s = slices[i]
     const r = await agent(
@@ -526,6 +587,8 @@ ${GIT}
 Your brief — the ticket is already distilled into it, so run no \`gh issue view\` and read no spec:
 ${s.brief}
 
+${CONTRACT}
+
 First: \`git fetch origin && git switch --detach ${out.started ? `ticket/${t.number}\` — this run's own local branch, carrying what earlier slices of this same workflow committed minutes ago` : `${ref(cutFrom)}\` — your worktree starts on the wrong ref, and everything stacked before this ticket is reachable from there`}.
 
 Follow the repo's own conventions and CLAUDE.md, and stay inside the brief — the rest of the ticket belongs to other slices. Comments only where load-bearing: why-not-what, landmines, pointers to external context; never narrate what code does.
@@ -534,11 +597,14 @@ ${ECONOMY}
 
 Past roughly 70 tool calls this slice has outgrown one agent's context. Stop cleanly: commit what works, move the branch to it, and name what you did not reach in \`unmet\` — the dispatcher hands the remainder to a fresh agent. A named remainder is cheap; a 300-turn agent is not.
 
-Run the repo's tests for what you touched and get them green. Commit, then move the ticket branch onto your work: \`git update-ref refs/heads/ticket/${t.number} HEAD\`. Push nothing — this branch reaches origin exactly once, when the stack lane publishes it.
+\`unmet\` is the remainder: anything the brief asked for that you did not do, a test included. It is never a question — a criterion you cannot meet because the brief is silent or contradicts itself on it goes in \`decisions_needed\`, with the question spelled out. Do not pick a reading and implement it.
+
+${validationLine}
+Every command must pass on the commit you return. Commit, then move the ticket branch onto your work: \`git update-ref refs/heads/ticket/${t.number} HEAD\`. Push nothing — this branch reaches origin exactly once, when the stack lane publishes it.
 
 ${WORKTREE}
 
-Return the branch, a one-line summary, the test command and its result, anything from the brief you did not reach in \`unmet\`, and your worktree.`,
+Return the branch, a one-line summary, one result per validation command, anything from the brief you did not reach in \`unmet\`, any question in \`decisions_needed\`, and your worktree.`,
       { ...M, effort: s.effort, phase: 'Implement', schema: IMPL_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}` },
     )
     if (!r) throw new Error(`slice implementer for #${t.number} died (${s.title})`)
@@ -546,10 +612,15 @@ Return the branch, a one-line summary, the test command and its result, anything
     out.started = true
     out.summaries.push(r.summary)
     out.last = r
-    if (r.unmet.length) {
+    out.decisions.push(...r.decisions_needed)
+    // A red or missing validation result is a remainder like any other: the
+    // brief asked for a green list and did not get one.
+    const red = readinessRed(r.checks)
+    const unmet = [...r.unmet, ...red.map((c) => `validation red or not run: ${c}`)]
+    if (unmet.length) {
       // Later slices may depend on the unfinished part: stop the round and let
       // the dispatcher re-slice the whole remainder rather than build on sand.
-      out.unmet.push(...r.unmet, ...slices.slice(i + 1).map((x) => `not started: ${x.title}`))
+      out.unmet.push(...unmet, ...slices.slice(i + 1).map((x) => `not started: ${x.title}`))
       break
     }
   }
@@ -744,9 +815,12 @@ Past roughly 70 tool calls this slice has outgrown one agent's context. Stop cle
 
 Run the repo's tests, get them green, commit, then move the branch onto your work: \`git update-ref refs/heads/${branch} HEAD\`. Push nothing.
 
+${validationLine}
+Every command must pass on the commit you return — a fix that leaves one red is not fixed; it is the next round's first finding, and a round costs two agents.
+
 ${WORKTREE}
 
-Return one verdict per finding in your brief you fixed or rejected, the \`location\` of any you did not reach, and your worktree.`,
+Return one verdict per finding in your brief you fixed or rejected, the \`location\` of any you did not reach, one result per validation command, and your worktree.`,
       { ...M, effort: s.effort, phase: ph, schema: FIX_SLICE_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}` },
     )
     // A dead fixer is not fatal — it is the next reviewer's problem, and that
@@ -757,6 +831,11 @@ Return one verdict per finding in your brief you fixed or rejected, the \`locati
     out.landed = true
     out.verdicts.push(...r.verdicts)
     out.unfinished.push(...r.unfinished)
+    // A fixer that left the validation list red has not fixed anything it
+    // claims: the next reviewer's readiness check will catch it, but the log
+    // should say why before it does.
+    const red = readinessRed(r.checks)
+    if (red.length) log(`${subject}: fix slice "${s.title}" left validation red: ${red.join('; ')}`)
   }
   return out
 }
@@ -801,6 +880,16 @@ async function fixFindings(findings, opts) {
 // reviewer running out of patience. Fixes land before the branch becomes a PR,
 // so the gate never touches published history.
 //
+// What may BLOCK is deliberately narrow: an unmet criterion, a red validation
+// command, or a correctness bug (panic, crash, silent data loss in release).
+// ADR fit and style are minor here — see docs/adr/0008. Round 1 reads the
+// whole diff; later rounds verify the claimed fixes and the lines the fixer
+// touched, so the round count measures repair, not fresh discovery.
+//
+// Readiness comes before review: the reviewer re-runs the validation list on
+// the branch, and a red there is a remainder handed back to dispatch (the
+// gate returns `readiness`), not a finding handed to a fixer.
+//
 // The loop's real hazard is not slow convergence, it is ping-pong: a fixer
 // judges a finding wrong and leaves the code, the next reviewer raises it
 // again, forever. So a rejection is a first-class outcome — it is carried into
@@ -811,23 +900,38 @@ async function fixFindings(findings, opts) {
 // falls to the next round's reviewer, which re-derives what is still broken
 // from the branch. One cap governs the gate, not two multiplying ones.
 const GATE_MAX_ROUNDS = 4
+const BLOCKING = `What may block this ticket is exactly three things: an acceptance criterion of the ticket that the diff does not meet; a validation command that is red on the branch; and a correctness bug — a panic or crash reachable from input, an unhandled variant, silent data loss or a check that only runs in debug builds. Mark those \`blocker\` or \`major\`. Everything else — ADR fit, architecture, naming, style, a convention the repo documents — is \`minor\`, which passes the gate: it was settled when the spec was designed, or it is the whole-stack review's to judge across tickets.`
 async function reviewGate(t, impl, cutFrom, ticketBrief) {
   const rejected = []
   let unverified = []
+  let lastFixed = []
   for (let round = 1; round <= GATE_MAX_ROUNDS; round++) {
     const r = await agent(
-      `Review ticket #${t.number}'s branch before it is published as a PR.
+      `Review ticket #${t.number}'s branch before it is published as a PR${round > 1 ? ` — round ${round}, verifying the previous round's fixes` : ''}.
 
 ${POINTERS}
 ${GIT}
 Branch \`${impl.branch}\`, reviewed against \`${ref(cutFrom)}\` — that diff is the whole of this ticket's work.
 What the ticket asked for: \`gh issue view ${t.number}\`. What the implementer says it did: ${impl.summary}
 
-\`git fetch origin && git switch --detach ${impl.branch}\`, then invoke the \`code-review\` skill with \`${ref(cutFrom)}\` as the fixed point and ticket #${t.number} as the spec — both its axes: does it follow this repo's documented standards, and does it do what the ticket asked for, acceptance criterion by acceptance criterion.
+\`git fetch origin && git switch --detach ${impl.branch}\`. Before you read a line of the diff: ${validationLine}
+Return one result per command in \`checks\`. If any is red, stop there and return no findings — the branch is not ready for review and goes back to implementation, not to a fixer.
 
-Judge this ticket's diff. Work another ticket owns is out of scope; the whole stack gets its own review later. Change no code — report.
+${CONTRACT}
+${round === 1
+        ? `Then invoke the \`code-review\` skill with \`${ref(cutFrom)}\` as the fixed point and ticket #${t.number} as the spec — both its axes, with the severities below overriding whatever the skill would assign. Judge acceptance criterion by acceptance criterion.`
+        : `Then verify, do not rediscover: the previous round's fixer claims to have fixed the findings below. Check each on the branch, and read the lines the fixer touched since the last review (\`git log -p\` for the newest commit(s)) for anything that fix broke. Do not re-review the rest of the diff — round 1 did, and the whole stack gets its own review later.
+
+Claimed fixed:
+${lastFixed.map((v) => `- ${v.location} — ${v.issue}\n  fixer says: ${v.reason}`).join('\n')}`}
+
+${BLOCKING}
+
+Judge this ticket's diff. Work another ticket owns is out of scope. Change no code — report.
 ${impl.unmet.length ? `
-The implementer already declared these criteria unmet — they are carried to the operator, so report them without re-litigating: ${impl.unmet.join('; ')}` : ''}
+The implementer declared this remainder after every re-dispatch round the run allows — it is carried to the operator, so report it without re-litigating and do not block on it: ${impl.unmet.join('; ')}` : ''}
+${impl.decisions.length ? `
+These questions were left for a human and their criteria were not implemented — report them without re-litigating and do not block on them: ${impl.decisions.join('; ')}` : ''}
 ${unverified.length ? `
 The previous round handed these findings to a fixer that never reported back on them. Nobody knows whether they were addressed, so the branch is the only truth — check each one explicitly and raise it again if it is still real:
 
@@ -840,17 +944,29 @@ ${rejected.map((v) => `- ${v.location} — ${v.issue}\n  judged wrong because: $
         : ''}
 
 ${WORKTREE}`,
-      { ...M, phase: 'Gate', schema: REVIEW_SCHEMA, isolation: 'worktree', label: `gate:#${t.number}:r${round}` },
+      { ...M, phase: 'Gate', schema: GATE_REVIEW_SCHEMA, isolation: 'worktree', label: `gate:#${t.number}:r${round}` },
     )
     noteWorktree(t.number, impl.branch, r)
-    const blocking = r ? r.findings.filter((f) => f.severity !== 'minor') : []
+    // Fail closed: a reviewer that died is not a clean review. Its round is
+    // spent, and the next reviewer sees the same branch.
+    if (!r) {
+      log(`#${t.number} gate round ${round}: reviewer died — not counted as clean`)
+      if (round === GATE_MAX_ROUNDS) return { unfixed: [{ severity: 'blocker', location: 'gate', issue: 'no review completed', fix: 'review the PR by hand' }] }
+      continue
+    }
+    const red = readinessRed(r.checks)
+    if (red.length) {
+      log(`#${t.number} gate round ${round}: not ready — validation red: ${red.join('; ')}`)
+      return { readiness: red }
+    }
+    const blocking = r.findings.filter((f) => f.severity !== 'minor')
     if (!blocking.length) {
       log(`#${t.number} gate clean${round > 1 ? ` after ${round} rounds` : ''}${rejected.length ? `, ${rejected.length} finding(s) rejected` : ''}`)
-      return []
+      return { unfixed: [] }
     }
     if (round === GATE_MAX_ROUNDS) {
       log(`#${t.number} publishes with ${blocking.length} unresolved finding(s) — gate hit ${GATE_MAX_ROUNDS} rounds`)
-      return blocking
+      return { unfixed: blocking }
     }
     log(`#${t.number} gate round ${round}: ${blocking.length} blocking`)
     const out = await fixFindings(blocking, {
@@ -866,9 +982,10 @@ ${WORKTREE}`,
     for (const v of out.verdicts.filter((v) => v.action === 'rejected')) {
       if (!rejected.some((p) => p.location === v.location && p.issue === v.issue)) rejected.push(v)
     }
+    lastFixed = out.verdicts.filter((v) => v.action === 'fixed')
     unverified = out.unaccounted
   }
-  return []
+  return { unfixed: [] }
 }
 
 const memo = new Map()
@@ -888,39 +1005,54 @@ function ticketDone(n) {
         const plan = await dispatch(t, null)
         if (!plan) throw new Error(`dispatcher for #${t.number} died`)
         if (plan.slices.length > 1) log(`#${t.number} dispatched as ${plan.slices.length} slices`)
-        // Slice rounds: run the plan; a remainder (a slice bailed out, or was
-        // never started) goes back to the dispatcher for a re-slice with a
-        // fresh agent. On the round cap the remainder is carried as unmet —
-        // named for the operator — rather than ground out.
+        const decisions = [...plan.decisions_needed]
+        if (decisions.length) log(`#${t.number} needs a human decision: ${decisions.join('; ')}`)
+        // Slice rounds: run the plan; a remainder (a slice bailed out, was
+        // never started, or left the validation list red — including at the
+        // gate) goes back to the dispatcher for a re-slice with a fresh agent.
+        // On the round cap the remainder is carried as unmet — named for the
+        // operator — rather than ground out or ground into a gate-fix.
         let slices = plan.slices
         let started = false
         let last = null
         const summaries = []
         let unmet = []
+        let gate = null
         for (let round = 1; round <= MAX_DISPATCH_ROUNDS; round++) {
           const out = await runSlices(t, slices, { cutFrom, started, tag: `impl:#${t.number}${round > 1 ? `:r${round}` : ''}` })
           started = out.started
           if (out.last) last = out.last
           summaries.push(...out.summaries)
+          for (const d of out.decisions) if (!decisions.includes(d)) decisions.push(d)
           unmet = out.unmet
-          if (!unmet.length || round === MAX_DISPATCH_ROUNDS) break
+          if (!unmet.length) {
+            gate = await reviewGate(t, { branch: `ticket/${t.number}`, summary: summaries.join(' '), unmet: [], decisions }, cutFrom, plan.ticket_brief)
+            if (!gate.readiness) break
+            unmet = gate.readiness.map((c) => `validation red at the gate: ${c}`)
+            gate = null
+          }
+          if (round === MAX_DISPATCH_ROUNDS) break
           log(`#${t.number} remainder after round ${round}: ${unmet.join('; ')} — re-dispatching`)
           const replan = await dispatch(t, unmet.join('; '))
           if (!replan) { log(`#${t.number} re-dispatch died — carrying the remainder as unmet`); break }
+          for (const d of replan.decisions_needed) if (!decisions.includes(d)) decisions.push(d)
           slices = replan.slices
         }
         if (!started || !last) throw new Error(`no slice of #${t.number} landed`)
         const impl = {
           branch: `ticket/${t.number}`,
           summary: summaries.join(' '),
-          tests_run: last.tests_run,
-          tests_green: last.tests_green,
+          checks: last.checks,
           unmet,
+          decisions,
         }
-        if (impl.unmet.length) log(`#${t.number} unmet: ${impl.unmet.join('; ')}`)
-        const unfixed = await reviewGate(t, impl, cutFrom, plan.ticket_brief)
+        if (impl.unmet.length) log(`#${t.number} unmet after ${MAX_DISPATCH_ROUNDS} rounds: ${impl.unmet.join('; ')}`)
+        // A remainder that survived the cap still gets its gate — the reviewer
+        // is told about it and does not block on it (a readiness red here is
+        // already in `unmet`, so it is not re-routed).
+        if (!gate) gate = await reviewGate(t, impl, cutFrom, plan.ticket_brief)
         await enqueuePublish(t, impl, cutFrom)
-        return { number: t.number, ...impl, unfixed }
+        return { number: t.number, ...impl, unfixed: gate.unfixed || [] }
       })(),
     )
   }
@@ -976,8 +1108,10 @@ ${WORKTREE}`,
   { ...M, phase: 'Review', schema: REVIEW_SCHEMA, isolation: 'worktree', label: `review:spec-${SPEC}` },
 )
 noteWorktree('review', tip, review)
+// Fail closed: a review that never returned is not a review with zero findings.
+const reviewMissing = !review
 const findings = review ? review.findings : []
-log(`code review: ${findings.length} findings`)
+log(reviewMissing ? 'code review: the whole-stack reviewer died — the stack is UNREVIEWED as a whole' : `code review: ${findings.length} findings`)
 
 // The stack's PRs are published: pushing fixes into them would force-update
 // every PR above and hand the operator phantom diffs mid-review. So the fixes
@@ -1061,9 +1195,16 @@ Return the PR url and number, the branch, the reclaim count and kept list, and y
 // in-lane call that failed. `link` is idempotent, so the cost is one call.
 phase('Finalize')
 // A ticket whose remainder survived every dispatch round is incomplete work,
-// exactly like a failed or deferred ticket: it keeps the spec open.
+// exactly like a failed or deferred ticket: it keeps the spec open. So does a
+// question left for a human, a gate finding nobody fixed, an integration
+// finding with no verdict, and a whole-stack review that never ran: published
+// is not complete, and a run that cannot show its work was reviewed does not
+// get to say the spec is done.
 const unmetTickets = outcomes.filter((o) => o.unmet && o.unmet.length)
-const complete = !deferred.length && !failed.length && !unmetTickets.length
+const decisionTickets = outcomes.filter((o) => o.decisions && o.decisions.length)
+const gateUnfixedTickets = outcomes.filter((o) => o.unfixed && o.unfixed.length)
+const integrationOpen = findings.length && (!integration || integrationUnaccounted.length)
+const complete = !deferred.length && !failed.length && !unmetTickets.length && !decisionTickets.length && !gateUnfixedTickets.length && !integrationOpen && !reviewMissing
 const bottomToTop = [
   ...(hasLayer0 ? [{ label: `layer 0 (pre-existing)`, branch: graph.start_ref, pr_url: layer0.pr_url, pr_number: layer0.pr_number }] : []),
   ...stacked.map((s) => ({ label: `#${s.number}`, branch: s.branch, pr_url: s.pr_url, pr_number: s.pr_number })),
@@ -1073,6 +1214,10 @@ const remains = [
   ...deferred.map((t) => `#${t.number} — ${t.human_reason || 'downstream of a human ticket'}`),
   ...failed.map((o) => `#${o.number} — failed: ${o.failed}`),
   ...unmetTickets.map((o) => `#${o.number} — published with unmet criteria: ${o.unmet.join('; ')}`),
+  ...decisionTickets.map((o) => `#${o.number} — needs a human decision: ${o.decisions.join('; ')}`),
+  ...gateUnfixedTickets.map((o) => `#${o.number} — published with ${o.unfixed.length} unresolved gate finding(s)`),
+  ...(integrationOpen ? [`whole-stack review findings not fully fixed or not published`] : []),
+  ...(reviewMissing ? ['the whole-stack review never ran — review the stack as a whole by hand'] : []),
 ]
 // Whatever no reclaimer was handed: failed tickets' worktrees, a reclaimer that
 // died, and the last publisher's own. Same rule as the lane — exact paths,
@@ -1146,7 +1291,8 @@ return {
   failed: failed.map((o) => ({ ticket: o.number, error: o.failed })),
   deferred_to_human: deferred.map((t) => ({ ticket: t.number, reason: t.human_reason || 'downstream of a human ticket' })),
   unmet: unmetTickets.map((o) => ({ ticket: o.number, criteria: o.unmet })),
-  review_findings: findings.length,
+  decisions_needed: decisionTickets.map((o) => ({ ticket: o.number, questions: o.decisions })),
+  review_findings: reviewMissing ? 'UNREVIEWED — the whole-stack reviewer died' : findings.length,
   integration_pr: integration ? integration.pr_url : null,
   integration_unfixed: [
     ...integrationUnaccounted.map((f) => `[${f.severity}] ${f.location} — ${f.issue} — no verdict came back`),
