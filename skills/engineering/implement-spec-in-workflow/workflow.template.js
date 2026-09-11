@@ -258,10 +258,9 @@ const IMPL_SCHEMA = {
 const DISPATCH_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['ticket_brief', 'decisions_needed', 'slices'],
+  required: ['ticket_brief', 'slices'],
   properties: {
     ticket_brief: { type: 'string', description: 'one short paragraph on the whole ticket, for later fix agents — they read this instead of the issue' },
-    decisions_needed: { type: 'array', items: { type: 'string' }, description: 'questions the ticket and spec leave open that a human must answer — never pick a reading yourself; brief the slices around them' },
     slices: {
       type: 'array',
       minItems: 1,
@@ -271,7 +270,7 @@ const DISPATCH_SCHEMA = {
         required: ['title', 'brief', 'effort'],
         properties: {
           title: { type: 'string' },
-          brief: { type: 'string', description: 'self-contained: the goal, the acceptance criteria this slice covers, the files it touches, and every constraint from the ticket and spec that bears on it — its implementer reads no issue and no spec' },
+          brief: { type: 'string', maxLength: 3000, description: 'four sections and nothing else: the acceptance criteria this slice owns, verbatim; the files you expect it to touch; the research notes to read; what is out of scope. No design — no function to reuse, no test body, no doc paragraph to delete' },
           effort: { type: 'string', enum: ['medium', 'high'], description: 'reasoning effort for the slice implementer' },
         },
       },
@@ -521,19 +520,26 @@ Return the PR url and number, what the mirror found, and your worktree.`,
 }
 
 // --- steps 4-6: frontier scheduling, gate, then the serial publish lane ---
-// Not "read all of these first": the notes exist to save exploration, and a
-// ticket that needs one of the four should not pay for the other three.
-const notesLine = notes.length ? `Research notes for this spec: ${notes.join(', ')}. Their filenames name their subjects. Read the ones whose subject bears on this ticket — once each — instead of re-deriving that ground yourself, and skip the rest.` : ''
+// The notes are named in each slice's brief by the dispatcher, by filename,
+// so a ticket that needs one of the four does not pay for the other three.
 
-// --- the dispatcher: the agent expert at sizing a ticket's work -----------
+// --- the dispatcher: a router, not a planner -------------------------------
 // A single long-lived implementer accumulates every read and every thought for
 // its whole life and pays for them again on each turn (one measured run: 276
 // turns, 362K peak context). The dispatcher resets that: it reads the ticket
 // ONCE, decides how many fresh-context agents the work actually needs — one is
-// the normal answer — and writes each a self-contained brief, so slice
-// implementers read no issue and no spec. Under-slicing self-corrects (an
-// overrun comes back here as a remainder to re-slice); over-slicing has no
-// corrective, so the dispatcher is biased against slicing.
+// the normal answer — and tells each which criteria it owns. Under-slicing
+// self-corrects (an overrun comes back here as a remainder to re-slice);
+// over-slicing has no corrective, so the dispatcher is biased against slicing.
+//
+// It answers two questions — how many agents, which criteria each — and no
+// third. An observed dispatcher (#360) told to write "self-contained" briefs
+// carrying "every constraint" thought for 40 minutes before its first tool
+// call, wrote a 15K-char implementation plan plus five design essays, and
+// cost $17; the implementer then redid the design with the code open. So the
+// brief is capped, the dispatcher reads no spec and no note body, and it does
+// not hunt for gaps: the ticket was cut from the spec by a human and is trusted
+// as written. A gap is met by the implementer at the line where it lives.
 //
 // This is the dispatcher's implementation entry point. `dispatchFix` is the
 // other: the same role sizing a batch of review findings. Every piece of work
@@ -549,25 +555,22 @@ const MAX_DISPATCH_ROUNDS = 6
 
 function dispatch(t, remainder) {
   return agent(
-    `Slice ticket #${t.number} — ${t.title} — into the fewest implementation slices that fresh-context agents can finish, and write each slice's brief.
+    `Route ticket #${t.number} — ${t.title} — to the fewest implementation slices that fresh-context agents can finish, and say which acceptance criteria each owns.
 
 ${POINTERS}
 ${GIT}
-${notesLine}
 ${remainder ? `
-Earlier slices of this same run already did part of this work — \`ticket/${t.number}\` is this run's own unpublished branch (created by this workflow, no PR) carrying what they pushed. Slice ONLY what remains: ${remainder}
+Earlier slices of this same run already did part of this work — \`ticket/${t.number}\` is this run's own unpublished branch (created by this workflow, no PR) carrying what they pushed. Route ONLY what remains: ${remainder}
 
 This remainder is work the earlier brief asked for and nobody did. It is not a gap, not a question for the operator, and not something to "report": brief a slice that does it.` : ''}
 
-Read \`gh issue view ${t.number}\` and the spec's decisions that bear on it, and skim the code's STRUCTURE only — file lists, signatures, grep hits. Read no implementations: the slices read the code; you size and brief them.
+You are a router, not a planner. You answer two questions — how many agents, and which criteria each owns — and no third. Read \`gh issue view ${t.number}\` for the criteria. Skim the code's STRUCTURE only — \`git ls-files\`, grep hits — to name the files each criterion is likely to touch; about five tool calls is normal. Read no spec, no research note body and no implementation, and do not work out HOW anything will be done: the implementer designs with the code in front of it, and a design done here is done twice.
 
-${CONTRACT} The research notes cite existing ADRs and conventions: pass those on as guidance where useful, never as criteria.
-
-Where the ticket and spec are silent or contradict each other on something a criterion turns on, do NOT pick a reading: put the question in \`decisions_needed\` and brief the slices around it. A provisional interpretation is work review cannot legitimately pass.
+The ticket was cut from the spec by a human and is trusted as written. Do not look for gaps, silences or drift; if a criterion is unclear, hand it on verbatim — the implementer meets a real gap at the line where it lives and reports it from there.
 
 Default to ONE slice. Slice only when one agent plausibly cannot finish in roughly 70 tool calls; when unsure, do not slice. Slices run sequentially on one branch, so each must leave the branch consistent — building, tests green.
 
-Each brief must be self-contained: its goal, the acceptance criteria it covers, the files it will touch, and every constraint from the ticket and the spec that bears on it — its implementer reads none of those. Every criterion of the ticket must be owned by exactly one slice, including any test the ticket demands. Set each slice's effort: 'high' for the gnarly ones, 'medium' otherwise.
+Each brief is under 3,000 characters and has four sections, nothing else: (1) the acceptance criteria this slice owns, copied verbatim from the ticket; (2) the files you expect it to touch; (3) which of these research notes to read — ${notes.length ? notes.join(', ') : 'none exist'} — by filename, the ones whose subject bears on its criteria; (4) what is out of scope because another slice owns it. Every criterion of the ticket is owned by exactly one slice, including any test the ticket demands. Set each slice's effort: 'high' for the gnarly ones, 'medium' otherwise.
 
 Also return ticket_brief: one short paragraph on the whole ticket, for later fix agents.`,
     { ...M, effort: 'high', phase: 'Implement', schema: DISPATCH_SCHEMA, label: `dispatch:#${t.number}${remainder ? ':re' : ''}` },
@@ -584,10 +587,12 @@ async function runSlices(t, slices, { cutFrom, started, tag }) {
 ${POINTERS}
 ${GIT}
 
-Your brief — the ticket is already distilled into it, so run no \`gh issue view\` and read no spec:
+Your brief — which criteria you own, which files, which notes:
 ${s.brief}
 
-${CONTRACT}
+Read the ticket for the wording of your criteria: \`gh issue view ${t.number}\`. Read the research notes your brief names, once each. Read no spec: the ticket is the contract, and ${CONTRACT}
+
+You design the change: your brief names what to satisfy, not how. Read the code the criteria touch and decide the approach with it in front of you.
 
 First: \`git fetch origin && git switch --detach ${out.started ? `ticket/${t.number}\` — this run's own local branch, carrying what earlier slices of this same workflow committed minutes ago` : `${ref(cutFrom)}\` — your worktree starts on the wrong ref, and everything stacked before this ticket is reachable from there`}.
 
@@ -597,7 +602,7 @@ ${ECONOMY}
 
 Past roughly 70 tool calls this slice has outgrown one agent's context. Stop cleanly: commit what works, move the branch to it, and name what you did not reach in \`unmet\` — the dispatcher hands the remainder to a fresh agent. A named remainder is cheap; a 300-turn agent is not.
 
-\`unmet\` is the remainder: anything the brief asked for that you did not do, a test included. It is never a question — a criterion you cannot meet because the brief is silent or contradicts itself on it goes in \`decisions_needed\`, with the question spelled out. Do not pick a reading and implement it.
+\`unmet\` is the remainder: anything the brief asked for that you did not do, a test included. It is never a question — a criterion you cannot meet because the ticket is silent or contradicts itself on it goes in \`decisions_needed\`, with the question spelled out. When you hit one: stop that criterion, leave no code for it, and go on to the next criterion. Do not pick a reading and implement it — a provisional interpretation is work review cannot legitimately pass.
 
 ${validationLine}
 Every command must pass on the commit you return. Commit, then move the ticket branch onto your work: \`git update-ref refs/heads/ticket/${t.number} HEAD\`. Push nothing — this branch reaches origin exactly once, when the stack lane publishes it.
@@ -1005,8 +1010,7 @@ function ticketDone(n) {
         const plan = await dispatch(t, null)
         if (!plan) throw new Error(`dispatcher for #${t.number} died`)
         if (plan.slices.length > 1) log(`#${t.number} dispatched as ${plan.slices.length} slices`)
-        const decisions = [...plan.decisions_needed]
-        if (decisions.length) log(`#${t.number} needs a human decision: ${decisions.join('; ')}`)
+        const decisions = []
         // Slice rounds: run the plan; a remainder (a slice bailed out, was
         // never started, or left the validation list red — including at the
         // gate) goes back to the dispatcher for a re-slice with a fresh agent.
@@ -1035,7 +1039,6 @@ function ticketDone(n) {
           log(`#${t.number} remainder after round ${round}: ${unmet.join('; ')} — re-dispatching`)
           const replan = await dispatch(t, unmet.join('; '))
           if (!replan) { log(`#${t.number} re-dispatch died — carrying the remainder as unmet`); break }
-          for (const d of replan.decisions_needed) if (!decisions.includes(d)) decisions.push(d)
           slices = replan.slices
         }
         if (!started || !last) throw new Error(`no slice of #${t.number} landed`)
