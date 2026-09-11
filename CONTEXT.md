@@ -80,6 +80,20 @@ The invariant that keeps a stack safe to build in parallel: **a branch reaches o
 
 The cost is that in-flight work is invisible until it publishes: a run that dies leaves its commits in the operator's clone under refs the run's summary names, not on origin where anyone could look.
 
+### Dispatcher, and the brief
+
+The agent that turns a ticket into slices, and review findings into fix slices. It is a **router,
+not a planner**: it answers two questions, *how many agents* and *which acceptance criteria each
+owns*, and nothing else. It reads the ticket, the research notes' filenames and a structural skim
+of the code (file lists, grep hits); it reads no spec, no note body and no implementation, and it
+does not look for gaps or drift — the ticket was cut from the spec by a human and is trusted as
+written. A **brief** is what it hands a slice: the criteria owned, verbatim; the files expected;
+the notes to read; what is out of scope. Under 3K characters, never a design — no function to
+reuse, no test body, no doc paragraph to delete. Design is the implementer's, with the code in
+front of it. An observed dispatcher (#360) that was told to write "self-contained" briefs thought
+for 40 minutes before its first tool call, produced a 15K-character implementation plan and five
+design essays, and cost $17 — work the implementer then redid with the code open.
+
 ### Gate loop, and the rejection ledger
 
 Reviewing a change **before** it merges, on its own branch, against its own ticket — while the diff is small and its author's reasoning is still recoverable. Review and fix alternate until a review returns nothing blocking, **a fresh reviewer each round**, so "clean" is a verdict rather than one reviewer running out of patience; a round cap merges what is unresolved and names it rather than stalling everything downstream. The fixing half of the round goes through the [[dispatcher]] like any other work.
