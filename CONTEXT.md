@@ -60,7 +60,7 @@ Kruchten's "4+1" architecture view model — Logical, Process, Development, Phys
 
 ### Task graph, and its frontier
 
-A spec's tickets are **not** a list of steps: they are a graph whose edges are blocking relationships, so at any moment some set of tickets has all its blockers satisfied — the **frontier**. **The definition of *takeable* lives in one place** — `docs/agents/frontier.md`, named from `CLAUDE.md` — and every skill that walks the graph reads it from there rather than restating it, because a second copy of the query is how two skills come to mean different things by the same word. That fragment also carries the fact that **an empty frontier is never "nothing to do"**: it is five distinct facts (finished / all blocked / gated by a human ticket / all assigned / a triage gap), and a skill halting on one says which. [[implement-spec-in-workflow]] schedules against the frontier rather than in phases: each ticket is one memoised promise awaiting its dependencies' *publishes*, so a ticket starts the instant its blockers' PRs exist and a run costs the longest chain rather than the sum of the phases. Blocking edges usually live as **prose** ("Blocked by #12") rather than in GitHub's sub-issue or dependency APIs, which are frequently empty even when the tickets exist — so they are read by an agent, not queried. A ticket needing a human (hardware, a running game, credentials only a person holds) is excluded along with everything downstream of it, and what was dropped is named rather than silently skipped.
+A spec's tickets are **not** a list of steps: they are a graph whose edges are blocking relationships, so at any moment some set of tickets has all its blockers satisfied — the **frontier**. **The definition of *takeable* lives in one place** — `docs/agents/frontier.md`, named from `CLAUDE.md` — and every skill that walks the graph reads it from there rather than restating it, because a second copy of the query is how two skills come to mean different things by the same word. That fragment also carries the fact that **an empty frontier is never "nothing to do"**: it is five distinct facts (finished / all blocked / gated by a human ticket / all assigned / a triage gap), and a skill halting on one says which. [[implement-spec-in-workflow]] schedules against the frontier rather than in phases: each ticket is one memoised promise awaiting its dependencies' *publishes*, so a ticket starts the instant its blockers' PRs exist and a run costs the longest chain rather than the sum of the phases. Blocking edges are **queried first** — GitHub's native dependency API, one call per ticket — and read as **prose** ("Blocked by #12") only where the API returns nothing; a ticket whose dependencies were recorded natively has no prose to read. A ticket needing a human (hardware, a running game, credentials only a person holds) is excluded along with everything downstream of it, and what was dropped is named rather than silently skipped.
 
 ### Serial lane
 
@@ -196,9 +196,32 @@ user once before a run launches** (inferred from the tech stack and CI config wh
 none; empty is honest and the [[brief]] says so) and reused by every later run. Every implementer and
 fixer carries the same list and returns **one result per command**, never one green boolean; a missing
 result is a schema failure, not a pass. **Readiness** is the list green on the exact commit under review:
-the reviewer's first act is to re-run it, and a red there is a **remainder** sent back to dispatch, not a
-finding sent to gate-fix. Running a command is not the self-assessment ADR-0004 forbids — the agent does
-not judge, the exit code does.
+the reviewer's first act is to establish it — by [[inherited-result]] when the sha is unchanged, else by
+re-running — and a red there is a **remainder** sent back to dispatch, not a finding sent to gate-fix.
+Running a command is not the self-assessment ADR-0004 forbids — the agent does not judge, the exit code
+does. A check is run **in the foreground, as written, once after the last edit**; while iterating an
+agent runs the narrowest scope its build tool supports, and no agent ever cleans a build cache.
+
+### Validated sha, and the inherited result
+
+The **validated sha** is the commit the whole validation list last passed on, named by whoever ran it
+and carried downstream with the result: implementer to gate reviewer, fixer to the next reviewer, gate
+to publisher, publisher to the PR body (`Validated green at <sha> by <role>`). An **inherited result**
+is a downstream agent reporting that list green without re-running it, because `git rev-parse HEAD`
+equals the validated sha and it edited nothing — one `rev-parse` proves the tree is the one already
+proven. A rebase produces a tree nobody has validated, so the publisher always runs the list after one.
+The proof is the sha match, never the upstream agent's word: an agent that edited anything, or whose
+HEAD differs, runs the list. See ADR-0009.
+
+### Retrospective, and the validation report
+
+What a run's validation **cost**, summed by the script from every agent's own timings (seconds and run
+count per command, hangs, results inherited, checks re-run on an unchanged sha), and written by one
+agent as the **validation report** in the notes directory: the numbers, then **proposals** for the
+validation list with the number that motivates each, then the hangs and outliers. The report is for the
+operator, or for a separate session the operator points at it. **Nothing applies a proposal**: every
+run reads the validation list exactly as the operator left it, so the report can never change what the
+next run does behind the operator's back.
 
 ### Reporting to a screen
 
