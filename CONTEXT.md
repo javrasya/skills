@@ -38,6 +38,38 @@ A handover wrapped in an **adversarial review loop**: each round a fresh subagen
 
 The author of a PR review comment — **any** agent (Copilot, Claude, etc.) or human. The `pull-spiderman` skill is reviewer-agnostic; it is not specific to GitHub Copilot.
 
+### Stack sweep, and its three outcomes
+
+The read-only act of pinning one PR's place in its [[stack]] — parents, children, siblings, tip,
+registered GitHub Stack or plain chain, and whether the refs are fresh — and then, for each
+**construct** handed in, asking whether a later layer already makes the change the construct
+names. A construct is either the behaviour a [[gap]] is made of or a review comment's marked
+lines plus what the reviewer asks of them; a question and a disagreement are constructs too,
+because each names something the code should become. Exactly three outcomes, shared by every
+caller so two skills cannot mean different things by the same word: **addressed downstream** (a
+named later layer does it), **unchanged through the tip** (no layer on any branch of the stack
+touches it — stated with the per-layer count), and **changed but not addressed** (a later layer
+rewrote the same lines and did something else — a conflict hazard, since a fix written against
+the layer's tree will not apply at the tip). The sweep **counts behaviour, not prose**: a rename
+or a refactor changes every string you grepped for and none of what the code does. Held by the
+[[stack-sweep]] skill; consumed by [[code-review-in-stack]] for gaps and by [[pull-spiderman]]
+for comments.
+
+_Avoid_: covered downstream, closed downstream, open through the tip — "covered" suggests a
+later layer can answer a question, and a comment is not open or closed, it is addressed or not.
+
+### Review fix PR, and the review ticket
+
+Where an agreed review comment on a **layer** of a stack gets fixed: a **new PR based on the
+tip**, which then becomes the tip, never a commit into the layer — a published layer is
+immutable, the tip included (ADR-0010). One run of [[pull-spiderman]] over one PR produces at
+most **one** review fix PR and **one review ticket**, whatever the number of comments it agrees
+with: the ticket (a sub-issue of the spec the stack implements, when there is one) is filed
+first and lists every comment it carries, so the reply "tracked in #M, fix lands on the tip" is
+true whether the fix is made now (`agree-and-fix`) or deferred (`agree-and-ticket`). The fix PR
+closes the ticket and is linked into the registered Stack when there is one. A PR with no parent
+and no child has no review fix PR; the fix goes in the PR, as it always did.
+
 ### Genericization
 
 The norm that every skill in this repo must be free of personal info (individual traits, language background), company/proprietary identifiers (internal service names, domain identifiers), and over-narrow framing (one tool/language when the skill is broader). Skills here are for a broad audience.
@@ -175,14 +207,15 @@ taking it, which is why the ticket's own scope outranks any absolute claim infer
 ### Gap, its sweep, and its disposition
 
 A **gap** is a criterion the slice leaves unmet. Before a gap costs anyone work it gets a
-**sweep**: search the later layers and sibling branches for the *behaviour* the gap is made of
-(a `None` that should be a value, an absent call), counted per branch — because a refactor can
-move or reword every string you searched for and leave the behaviour untouched. A gap is then
-given exactly one **disposition**: *fix in this PR* (local, no decision owed), *fix in a child
-PR* (mechanical but wider than the slice), *hand forward as a ticket* (**only** when it names
-the decision a human must make), or *no work* (met, closed downstream, or out of scope by the
-ticket's own words). Reported with it: what the gap does **and does not** break — a
-diagnostic-only gap must not block a slice, and a byte-moving one must not be waved through.
+[[stack sweep]]: the behaviour the gap is made of is looked for in the later layers and sibling
+branches, counted per branch — because a refactor can move or reword every string you searched
+for and leave the behaviour untouched. A gap is then given exactly one **disposition**: *fix in
+this PR* (local, no decision owed, **and the PR is not in a stack**), *fix in a PR on the tip*
+(the same local fix when the PR is a layer — a published layer is never edited, ADR-0010),
+*hand forward as a ticket* (**only** when it names the decision a human must make), or *no
+work* (met, addressed downstream, or out of scope by the ticket's own words). Reported with it:
+what the gap does **and does not** break — a diagnostic-only gap must not block a slice, and a
+byte-moving one must not be waved through.
 
 Work the brief asked for and the slice did not do is **never a gap**: it is a **remainder**,
 and it goes back to dispatch, not forward to the gate or to a human. A gap with no decision

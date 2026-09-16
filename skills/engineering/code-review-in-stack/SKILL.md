@@ -16,7 +16,9 @@ slice is done when its criteria are met, and a criterion is met when an artifact
 Two things make this different from a plain diff review. A slice sits in a **stack**, so a gap
 may already be closed by a later layer, and recommending work without looking is how two agents
 do one job twice. And a slice has a **boundary**, so a gap that needs a decision or crosses
-layers is handed forward as a ticket rather than smuggled into the PR under review.
+layers is handed forward as a ticket rather than smuggled into the PR under review. A published
+layer is also **immutable** (ADR-0010): a fix for a stacked slice lands as a new PR on the tip,
+never as a commit into the slice.
 
 Invoke with a PR id: `/code-review-in-stack 253`.
 
@@ -44,10 +46,11 @@ Resolve the PR id to: head sha, base ref, the ticket it claims (`Closes #N`, or 
 named in the title/body), and the parent spec. Fetch the ticket and the spec through the repo's
 issue-tracker workflow (`docs/agents/issue-tracker.md`).
 
-Then pin the slice's **place in the stack**: which branch it is based on, which branches are
-based on it, and the sibling branches of the same spec. Remote-tracking refs are enough
-(`git branch -r`, `git merge-base --is-ancestor`); note it when `gh` or `fetch` fails so the
-report says how fresh its facts are.
+Then pin the slice's **place in the stack** with the `stack-sweep` skill's step 1
+(`stack-map.sh <pr>`): parents, children, siblings, tip, whether the stack is a registered
+GitHub Stack, and whether the fetch that produced those facts succeeded. Carry its freshness
+line into the report. `in_stack: false` means the dispositions in step 5 collapse to their
+single-PR forms.
 
 No ticket, no criteria, no review: ask the user for the ticket before going further.
 
@@ -74,36 +77,38 @@ close a ticket whose criteria are not all met is a finding of its own.
 
 ### 4. Sweep the stack before recommending anything
 
-For every gap, look for it in the rest of the stack **before** costing a fix. Search the later
-layers and the sibling branches for the construct the gap is made of — the `None` that should
-be a value, the missing call, the absent test — and count it per branch rather than reading the
-prose around it. A comment can move, be reworded, or be folded into a helper while the behaviour
-survives untouched; behaviour is what the sweep counts.
+For every gap, hand the behaviour it is made of to the `stack-sweep` skill as a construct, and
+let its step 2 look for it in the later layers and the sibling branches **before** costing a
+fix. That skill counts behaviour per branch rather than reading the prose around it, and it
+returns one of three outcomes; each changes the recommendation:
 
-Three outcomes, and each changes the recommendation:
-
-- **Closed downstream.** Name the branch or PR that closes it. Recommend nothing; the gap is a
-  note in the report so the next reviewer does not re-find it.
-- **Open through the tip.** Say so with the evidence ("all four sites unchanged from layer 1 to
-  layer 15"), which is what makes the disposition in step 5 defensible.
-- **Touched but not closed.** A side branch rewrites the same lines cosmetically. Report it as a
-  conflict hazard: whichever of the two lands second takes the conflict.
+- **Addressed downstream.** Name the branch or PR that closes it. Recommend nothing; the gap is
+  a note in the report so the next reviewer does not re-find it.
+- **Unchanged through the tip.** Say so with the evidence ("all four sites unchanged from
+  layer 1 to layer 15"), which is what makes the disposition in step 5 defensible.
+- **Changed but not addressed.** A later layer rewrites the same lines and does something
+  else. Report it as a conflict hazard: whichever of the two lands second takes the conflict.
 
 ### 5. Dispose of every gap
 
 Each gap gets exactly one disposition, and each carries what to do next:
 
-- **Fix in this PR** — the fix is local to files this slice already touches, needs no decision,
-  and adds no criterion. Say which symbol changes and which test pins it.
-- **Fix in a child PR** — the fix is mechanical but wider than the slice, or the stack makes an
-  edit at this head expensive. Name the base to branch from and the base to target.
+- **Fix in this PR** — only when the PR is **not** in a stack. The fix is local to files this
+  slice already touches, needs no decision, and adds no criterion. Say which symbol changes and
+  which test pins it.
+- **Fix in a PR on the tip** — the same local, decision-free fix when the PR **is** in a stack.
+  A published layer is never edited (ADR-0010), so the fix is a new PR branched from the tip and
+  based on it, which makes that PR the new tip. Name the tip to branch from, the symbol that
+  changes, the test that pins it, and whether the stack is registered — a registered stack needs
+  the new PR linked in (`gh stack link`, re-listed bottom-to-top) or it sits outside the atomic
+  merge.
 - **Hand forward as a ticket** — the fix needs a human decision, crosses layers, or widens the
   slice past its criteria. Draft the ticket in step 6.
-- **No work** — met, or closed downstream, or out of scope by the ticket's own words.
+- **No work** — met, or addressed downstream, or out of scope by the ticket's own words.
 
 Two questions size it. Does closing the gap require a decision nobody has made? Then it is a
-ticket, whatever its diff size. Does closing it here move a branch other layers are built on?
-Then the mechanics belong in the report, not in a footnote.
+ticket, whatever its diff size. Is the PR in a stack? Then no disposition may touch it, and the
+mechanics of the PR on the tip belong in the report, not in a footnote.
 
 **Say what the gap does and does not break.** A criterion can be unmet while the ticket's
 headline property holds — an id that stays `null` still serialises deterministically, so the
@@ -118,7 +123,8 @@ where, why it is still owed, what is already settled, the decisions a human stil
 acceptance criteria, and the coordination hazard from step 4. State plainly that it does not
 block the slice under review when it does not.
 
-For every **fix in this PR** disposition, write the change as instructions, not as a patch.
+For every **fix in this PR** or **fix in a PR on the tip** disposition, write the change as
+instructions, not as a patch.
 
 Where a criterion needs amending — a half delivered, a half handed forward — propose the exact
 new wording and let the user rule.
@@ -134,7 +140,7 @@ The reader is a human deciding what to do next, and a report they skim is a repo
 its own findings. Write for the skim, in this order:
 
 1. **One sentence carrying the verdict**: the tally and the single thing that matters
-   ("11 of 12 criteria met, one gap, diagnostic-only, already open through the stack tip").
+   ("11 of 12 criteria met, one gap, diagnostic-only, unchanged through the stack tip").
 2. **The gate result**, one line, with the numbers.
 3. **The met criteria as one line**, not one block each — a list of numbers, or "all but 4".
    A met criterion's evidence is held in reserve for a challenge, not spent on the page.
@@ -201,7 +207,8 @@ one axis masking the other is what keeping them apart prevents.
   actually contains the gap; when it does not, the mis-citation is itself a finding.
 - **An ADR's absolute claim.** "There is no site at which this cannot be derived" is a decision,
   not a scope. It tells you the gap is real; the ticket tells you whose slice owns it.
-- **Grepping prose instead of behaviour.** A refactor that folds four literals into one helper
-  changes every string you searched for and none of the behaviour. Count the behaviour.
-- **A stale account or ref.** A failing `gh` call and a stale remote-tracking ref both produce
-  confident wrong answers about the stack. Say which facts came from a fetch that worked.
+- **A fix recommended into a layer.** "Add the test in this PR" reads naturally and is wrong
+  whenever the PR has a child: the layer is published, and the fix belongs on the tip.
+- **A stale account or ref.** The sweep's freshness line is part of the report. A failing `gh`
+  call and a stale remote-tracking ref both produce confident wrong answers about the stack;
+  say which facts came from a fetch that worked.
