@@ -50,11 +50,42 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca' } = {}) {
 
     async workerShow({ dispatch }) {
       const r = await call(['orchestration', 'worker-show', '--dispatch', dispatch])
+      const handle = r.worker?.agentTerminalHandle ?? null
+      // agentWait: an object is a wait only a human can answer; null means
+      // Orca looked and found none; absent means it never looked.
+      const wait = r.observation?.agentWait ?? r.terminal?.agentWait ?? null
       return {
         settled: r.worker?.stage === 'settled' || SETTLED_DISPATCH.has(r.dispatch?.status),
         outcome: r.projection?.outcome ?? r.worker?.state ?? null,
-        terminal: r.worker?.agentTerminalHandle ?? null,
+        terminal: handle,
+        // A worker never given a terminal is not one whose terminal is gone.
+        gone: Boolean(handle) && (!r.terminal || r.terminal.orphaned === true),
+        exited: r.observation?.status === 'exited',
+        waiting: wait && typeof wait === 'object' ? JSON.stringify(wait).slice(0, 300) : null,
+        lastOutputAt: r.terminal?.lastOutputAt ?? null,
       }
+    },
+
+    // A short `terminal wait --for tui-idle` is a poll: satisfied means idle,
+    // Orca's `timeout` error means busy.
+    async terminalIdle({ terminal, timeoutMs }) {
+      try {
+        await call(['terminal', 'wait', '--terminal', terminal, '--for', 'tui-idle', '--timeout-ms', String(timeoutMs)])
+        return true
+      } catch (e) {
+        if (e.code === 'timeout') return false
+        throw e
+      }
+    },
+
+    // Typed into the worker's TUI as a prompt: a mailbox message would wait
+    // for a check the idle agent never makes.
+    async terminalSend({ terminal, text }) {
+      await call(['terminal', 'send', '--terminal', terminal, '--text', text, '--enter'])
+    },
+
+    async workerStop({ dispatch }) {
+      await call(['orchestration', 'worker-stop', '--dispatch', dispatch])
     },
 
     async workerRelease({ dispatch }) {

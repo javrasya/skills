@@ -17,17 +17,13 @@ import { basename, dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { checkSchema, validate } from './schema.mjs'
 import { orcaCli } from './orca-cli.mjs'
+import { RUNNER_SETTINGS } from './settings.mjs'
 
 export const SUBMIT = fileURLToPath(new URL('./submit.mjs', import.meta.url))
 
-// The runner settings table. Every limit the runner enforces lives here.
-export const SETTINGS = Object.freeze({
-  // Agents live at once — started and not yet released. Orca's own cap for
-  // this runner, not the Workflow runner's; further agent() calls queue.
-  MAX_LIVE: 10,
-  // How often a live worker is asked whether it has settled.
-  POLL_MS: 5000,
-})
+// The runner settings table (settings.mjs). Every limit the runner enforces
+// lives there.
+export const SETTINGS = RUNNER_SETTINGS
 
 // The same loading the workflow simulator does: the script's one ESM line
 // becomes a plain const, and the body runs as an async function body so its
@@ -106,10 +102,17 @@ export function readJournal(path) {
 }
 
 const slug = (s) => s.replace(/[^\w.-]+/g, '_').slice(0, 60)
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+const mins = (ms) => Math.round(ms / 60_000)
 
-export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) => console.log(s), settings = {}, fallbackObjective = 'workflow run', resume = false }) {
-  const { MAX_LIVE, POLL_MS } = { ...SETTINGS, ...settings }
+export const realClock = { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) }
+
+const NUDGE = 'The workflow has not received your result: your final message is not read. Finish the task, then run the submit command from your instructions until it exits 0.'
+
+// `settings` overrides entries of SETTINGS; `clock` is what the liveness
+// limits are measured against, so tests can drive time.
+export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) => console.log(s), settings = {}, clock = realClock, fallbackObjective = 'workflow run', resume = false }) {
+  const limits = { ...SETTINGS, ...settings }
+  const { MAX_LIVE } = limits
   const script = loadScript(text)
   const meta = {}
   const live = slots(MAX_LIVE)
@@ -133,7 +136,10 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) =>
     out(`== ${title}`)
   }
   const log = (msg) => out(`   ${msg}`)
-  const parallel = (fns) => Promise.all(fns.map((f) => f()))
+  const parallel = (fns) => Promise.all(fns.map((f, i) => Promise.resolve().then(f).catch((e) => {
+    out(`!! parallel: thunk ${i} threw (${e?.message ?? e}); it resolves to null`)
+    return null
+  })))
 
   // Re-reads what submit recorded: the script is handed a value only if it is
   // valid now, whatever the worker claimed when it settled.
@@ -147,6 +153,85 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) =>
     }
     const errors = schema ? validate(schema, value) : typeof value === 'string' ? [] : ['$: expected text']
     return errors.length ? { error: `recorded result fails its schema: ${errors.join('; ')}` } : { value }
+  }
+
+  // Watches one worker until it settles ({ outcome }) or crosses a limit in
+  // the settings table ({ dead: why }).
+  async function watch(w, title) {
+    const start = clock.now()
+    let errors = 0
+    let nudges = 0
+    let graceFrom = start
+    let quietFrom = start
+    let lastNudgeAt = null
+    let silenceNudged = false
+    let blockedAt = null
+
+    async function nudge(why) {
+      out(`>> ${title}: ${why}; nudging it`)
+      lastNudgeAt = graceFrom = clock.now()
+      try {
+        await orca.terminalSend({ terminal: w.terminal, text: NUDGE })
+      } catch (e) {
+        out(`!! ${title}: the nudge did not reach it: ${e.message}`)
+      }
+    }
+
+    for (;; await clock.sleep(limits.pollMs)) {
+      let s
+      let idle = false
+      const settling = clock.now() - graceFrom < limits.nudgeGraceMs
+      try {
+        s = await orca.workerShow({ dispatch: w.dispatchId })
+        if (!s.settled && !s.gone && !s.waiting && !s.exited && !settling && w.terminal) {
+          idle = await orca.terminalIdle({ terminal: w.terminal, timeoutMs: limits.idleProbeMs })
+        }
+        errors = 0
+      } catch (e) {
+        if (++errors >= limits.watchErrors) return { dead: `Orca failed ${errors} times in a row watching it (${e.message})` }
+        out(`!! ${title}: could not look at its worker: ${e.message}`)
+        continue
+      }
+      if (s.settled) return { outcome: s.outcome }
+      if (s.gone) return { dead: 'its terminal is gone' }
+
+      const now = clock.now()
+      if (s.waiting) {
+        if (blockedAt === null) {
+          blockedAt = now
+          out(`!!!!!!!! ${title} is BLOCKED ON A HUMAN. Answer it in terminal ${w.terminal}.`)
+          out(`!!!!!!!! waiting on: ${s.waiting}`)
+          out(`!!!!!!!! if nobody answers within ${mins(limits.blockedDeadMs)} minutes, it counts as dead and agent() returns null`)
+        }
+        if (now - blockedAt >= limits.blockedDeadMs) return { dead: `blocked on a human, unanswered for ${mins(now - blockedAt)} minutes` }
+        continue
+      }
+      if (blockedAt !== null) {
+        out(`>> ${title}: no longer blocked`)
+        blockedAt = null
+        quietFrom = graceFrom = now
+      }
+
+      const echo = lastNudgeAt !== null && s.lastOutputAt <= lastNudgeAt + limits.nudgeEchoMs
+      if (s.lastOutputAt != null && s.lastOutputAt > quietFrom && !echo) {
+        quietFrom = s.lastOutputAt
+        silenceNudged = false
+      }
+
+      if ((s.exited && !settling) || idle) {
+        const how = s.exited ? 'exited' : 'went idle'
+        if (nudges >= limits.idleNudges) return { dead: `it ${how} without submitting, after ${nudges} nudges` }
+        await nudge(`it ${how} without submitting (nudge ${++nudges} of ${limits.idleNudges})`)
+        continue
+      }
+
+      const quiet = now - quietFrom
+      if (quiet >= limits.silentDeadMs) return { dead: `silent for ${mins(quiet)} minutes` }
+      if (quiet >= limits.silentNudgeMs && !silenceNudged) {
+        silenceNudged = true
+        await nudge(`silent for ${mins(quiet)} minutes`)
+      }
+    }
   }
 
   async function agent(prompt, opts = {}) {
@@ -191,7 +276,14 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) =>
 
   async function supervise(runId, prompt, opts, { key, n, title, schemaPath, resultPath, payloadPath }) {
     journal({ type: 'started', key, n, title })
-    const w = await orca.workerStart({ run: runId, prompt: workerPrompt(prompt, { schemaPath, resultPath, payloadPath }), title })
+    let w
+    try {
+      w = await orca.workerStart({ run: runId, prompt: workerPrompt(prompt, { schemaPath, resultPath, payloadPath }), title })
+    } catch (e) {
+      out(`!! ${title}: its worker did not start: ${e.message}; agent() returns null`)
+      journal({ type: 'result', key, n, title, result: null })
+      return null
+    }
     out(`>> ${title}: started as dispatch ${w.dispatchId}${w.terminal ? ` in terminal ${w.terminal}` : ''}`)
     if (w.mode !== 'terminal' || !w.terminal) {
       out(`!! ${title} has no terminal tab to watch (mode: ${w.mode ?? 'unknown'}). Orca's setting for new agent tabs decides this; set it to terminal. ${w.modeDetail}`)
@@ -205,9 +297,17 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) =>
       }
     }
 
-    let s
-    while (!(s = await orca.workerShow({ dispatch: w.dispatchId })).settled) await sleep(POLL_MS)
+    const end = await watch(w, title)
+    // Read even for a dead worker: one that died after submit recorded its
+    // result still delivered it.
     const result = readResult(resultPath, opts.schema)
+    if (end.dead) {
+      try {
+        await orca.workerStop({ dispatch: w.dispatchId })
+      } catch (e) {
+        out(`!! ${title}: could not stop its worker: ${e.message}`)
+      }
+    }
     try {
       await orca.workerRelease({ dispatch: w.dispatchId })
     } catch (e) {
@@ -217,7 +317,7 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) =>
     // a resume replays it until the call is edited.
     const value = result.error ? null : result.value
     journal({ type: 'result', key, n, title, result: value })
-    if (result.error) out(`!! ${title}: ${result.error} (outcome ${s.outcome}); agent() returns null`)
+    if (result.error) out(`!! ${title}: ${end.dead ? `${end.dead}, with no result` : `${result.error} (outcome ${end.outcome})`}; agent() returns null`)
     else out(`<< ${title}: result received`)
     return value
   }

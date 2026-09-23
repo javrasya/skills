@@ -1,6 +1,7 @@
 // Offline tests for the Orca runner: submit, the agent() round trip, the live
-// cap, how a run is laid out in Orca, and resume from the journal, with the
-// fake Orca standing in for the CLI adapter.
+// cap, how a run is laid out in Orca, resume from the journal, and every way a
+// worker dies becoming null, with the fake Orca standing in for the CLI
+// adapter and a fake clock standing in for time.
 //   node scripts/test-orca-runner.mjs
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -11,6 +12,7 @@ import { spawnSync } from 'child_process'
 import { submit } from '../skills/engineering/implement-spec-in-workflow/orca/submit.mjs'
 import { runScript, journalKey, SUBMIT, SETTINGS } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
 import { fakeOrca } from '../skills/engineering/implement-spec-in-workflow/orca/fake-orca.mjs'
+import { RUNNER_SETTINGS } from '../skills/engineering/implement-spec-in-workflow/orca/settings.mjs'
 
 const SCHEMA = {
   type: 'object',
@@ -34,7 +36,7 @@ const BAD_ERRORS = [
 ]
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'orca-runner-test-'))
-const FAST = { POLL_MS: 1 }
+const FAST = { pollMs: 1 }
 const TEMPLATE = new URL('../skills/engineering/implement-spec-in-workflow/workflow.template.js', import.meta.url)
 
 // A dispatched worker as submit sees it: its preamble IDs and its files.
@@ -249,6 +251,48 @@ const submitting = (hold = 0) => async ({ prompt, preamble, orca }) => {
   assert.equal((await runSubmit(argv, orca)).code, 0)
 }
 
+// Liveness. Time only moves when the runner sleeps between looks, and `at`
+// runs a callback once the clock passes a given time.
+const MIN = 60_000
+const POLL = RUNNER_SETTINGS.pollMs
+
+function fakeClock() {
+  const timers = []
+  const c = {
+    t: 0,
+    now: () => c.t,
+    at: (t, fn) => timers.push({ t, fn }),
+    async sleep(ms) {
+      c.t += ms
+      for (const due of timers.filter((x) => x.t <= c.t)) {
+        timers.splice(timers.indexOf(due), 1)
+        await due.fn()
+      }
+      await new Promise((r) => setImmediate(r))
+    },
+  }
+  return c
+}
+
+const ONE = `return await agent('Do a thing.', { label: 'one', phase: 'P', schema: ${JSON.stringify(SCHEMA)} })`
+
+// Runs a script (one agent() by default) on the default settings table, each
+// worker played by `worker`.
+async function runOne(worker, { script = ONE, orcaPatch = {} } = {}) {
+  const clock = fakeClock()
+  const lines = []
+  const orca = Object.assign(fakeOrca({ worker: (w) => worker({ ...w, clock }), clock }), orcaPatch)
+  const result = await runScript(script, { orca, stateDir: tmp(), out: (s) => lines.push(s), clock })
+  const of = (verb) => orca.calls.filter((c) => c.verb === verb)
+  return { result, lines, nudges: of('terminalSend'), stop: of('workerStop')[0], released: of('workerRelease').length }
+}
+
+async function submitGood({ prompt, preamble, orca }) {
+  const argv = submitArgvIn(prompt, preamble)
+  writeFileSync(argv[argv.indexOf('--payload') + 1], JSON.stringify(GOOD))
+  assert.equal((await runSubmit(argv, orca)).code, 0)
+}
+
 // Most workers live at once over the run: started and not yet released.
 function liveHighWater(calls) {
   let live = 0
@@ -332,4 +376,125 @@ test('titles: a tab that cannot be renamed is reported, and the agent still runs
   const result = await runScript(SCRIPT, { orca, stateDir: tmp(), out: (s) => lines.push(s), settings: FAST })
   assert.deepEqual(result, { r: GOOD })
   assert.ok(lines.some((l) => l.startsWith('!! [Tracer] tracer:thing: could not title its tab')), lines.join('\n'))
+})
+
+const within = (at, from, what) => assert.ok(at >= from && at < from + POLL, `${what} at ${at / MIN} min, expected ${from / MIN} min`)
+
+test('settings: the liveness limits are the ticket\'s, in one table', () => {
+  assert.equal(RUNNER_SETTINGS.idleNudges, 2)
+  assert.equal(RUNNER_SETTINGS.silentNudgeMs, 20 * MIN)
+  assert.equal(RUNNER_SETTINGS.silentDeadMs, 40 * MIN)
+  assert.equal(RUNNER_SETTINGS.blockedDeadMs, 30 * MIN)
+  assert.ok(Object.isFrozen(RUNNER_SETTINGS))
+})
+
+test('liveness: a worker whose terminal is gone with no result is null at the next look, never nudged', async () => {
+  const r = await runOne(async ({ state }) => { state.gone = true })
+  assert.equal(r.result, null)
+  assert.equal(r.nudges.length, 0)
+  assert.ok(r.stop && r.stop.at <= POLL, `stopped at ${r.stop?.at}`)
+  assert.equal(r.released, 1)
+  assert.ok(r.lines.some((l) => l.includes('its terminal is gone, with no result; agent() returns null')), r.lines.join('\n'))
+})
+
+test('liveness: a worker whose terminal is gone after submit recorded its result still delivers it', async () => {
+  const r = await runOne(async ({ prompt, state }) => {
+    const argv = submitArgvIn(prompt, { handle: 'h', capability: 'c', taskId: 't', dispatchId: 'd' })
+    writeFileSync(argv[argv.indexOf('--result') + 1], JSON.stringify(GOOD))
+    state.gone = true
+  })
+  assert.deepEqual(r.result, GOOD)
+})
+
+for (const how of ['idle', 'exited']) {
+  test(`liveness: a worker that ${how === 'idle' ? 'goes idle' : 'exits'} without submitting is nudged twice, then null`, async () => {
+    const r = await runOne(async ({ state }) => { state[how] = true })
+    assert.equal(r.result, null)
+    assert.equal(r.nudges.length, 2)
+    for (const n of r.nudges) assert.match(n.text, /submit command/)
+    within(r.nudges[0].at, RUNNER_SETTINGS.nudgeGraceMs, 'first nudge')
+    within(r.nudges[1].at, 2 * RUNNER_SETTINGS.nudgeGraceMs, 'second nudge')
+    within(r.stop.at, 3 * RUNNER_SETTINGS.nudgeGraceMs, 'death')
+    assert.ok(r.lines.some((l) => l.includes('without submitting, after 2 nudges, with no result')), r.lines.join('\n'))
+  })
+}
+
+test('liveness: an idle worker that answers its nudge by submitting returns its result', async () => {
+  const r = await runOne(async (w) => {
+    w.state.idle = true
+    w.state.onNudge = async () => {
+      w.state.idle = false
+      await submitGood(w)
+    }
+  })
+  assert.deepEqual(r.result, GOOD)
+  assert.equal(r.nudges.length, 1)
+  assert.equal(r.stop, undefined)
+})
+
+test('liveness: a silent worker is nudged at 20 minutes and is null at 40', async () => {
+  const r = await runOne(async ({ state, clock }) => {
+    // The nudge's own echo is not the worker coming back.
+    state.onNudge = () => { state.lastOutputAt = clock.now() + 1000 }
+  })
+  assert.equal(r.result, null)
+  assert.equal(r.nudges.length, 1)
+  within(r.nudges[0].at, 20 * MIN, 'silence nudge')
+  within(r.stop.at, 40 * MIN, 'death')
+  assert.ok(r.lines.some((l) => l.includes('silent for 40 minutes, with no result')), r.lines.join('\n'))
+})
+
+test('liveness: output from the worker restarts the silence clock', async () => {
+  const r = await runOne(async ({ state, clock }) => {
+    clock.at(30 * MIN, () => { state.lastOutputAt = 30 * MIN })
+  })
+  assert.equal(r.result, null)
+  assert.equal(r.nudges.length, 2)
+  within(r.nudges[1].at, 50 * MIN, 'second silence nudge')
+  within(r.stop.at, 70 * MIN, 'death')
+})
+
+test('liveness: a worker blocked on a human is logged loudly once, never nudged, and is null after 30 minutes', async () => {
+  const r = await runOne(async ({ state }) => { state.waiting = '{"evidence":"prompt-text","text":"Allow this command?"}' })
+  assert.equal(r.result, null)
+  assert.equal(r.nudges.length, 0)
+  within(r.stop.at, 30 * MIN, 'death')
+  const loud = r.lines.filter((l) => l.includes('BLOCKED ON A HUMAN'))
+  assert.equal(loud.length, 1, r.lines.join('\n'))
+  assert.ok(loud[0].includes('[P] one') && loud[0].includes('term_fake1'), loud[0])
+  assert.ok(r.lines.some((l) => l.includes('Allow this command?')), r.lines.join('\n'))
+})
+
+test('liveness: a blocked worker the operator answers in time returns its result', async () => {
+  const r = await runOne(async (w) => {
+    w.state.waiting = '{"evidence":"hook"}'
+    w.clock.at(29 * MIN, async () => {
+      w.state.waiting = null
+      await submitGood(w)
+    })
+  })
+  assert.deepEqual(r.result, GOOD)
+  assert.equal(r.nudges.length, 0)
+})
+
+test('liveness: a worker Orca cannot start, or cannot be watched, is null', async () => {
+  const start = await runOne(async () => {}, { orcaPatch: { workerStart: async () => { throw new Error('orca orchestration worker-start: outcome_unknown') } } })
+  assert.equal(start.result, null)
+  assert.ok(start.lines.some((l) => l.includes('its worker did not start')), start.lines.join('\n'))
+
+  const watch = await runOne(async () => {}, { orcaPatch: { workerShow: async () => { throw new Error('orca orchestration worker-show: 1') } } })
+  assert.equal(watch.result, null)
+  within(watch.stop.at, (RUNNER_SETTINGS.watchErrors - 1) * POLL, 'death')
+})
+
+test('parallel(): a throwing thunk resolves to null and the call never rejects', async () => {
+  const script = `return await parallel([
+    () => { throw new Error('sync boom') },
+    async () => { throw new Error('async boom') },
+    () => 7,
+    () => agent('Do a thing.', { label: 'dies' }),
+  ])`
+  const r = await runOne(async ({ state }) => { state.gone = true }, { script })
+  assert.deepEqual(r.result, [null, null, 7, null])
+  assert.ok(r.lines.some((l) => l.includes('thunk 0 threw (sync boom)')), r.lines.join('\n'))
 })
