@@ -2,6 +2,7 @@
 // it through the paths the dispatcher redesign added.
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
+import { loadScript } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
 
 const TPL = fileURLToPath(new URL('../skills/engineering/implement-spec-in-workflow/workflow.template.js', import.meta.url))
 
@@ -18,7 +19,6 @@ function render(runner) {
     .replace(/__STACK_MODE__/g, 'native')
     .replace(/__RUNNER__/g, runner)
     .replace(/__VALIDATION__/g, SIM_CHECK)
-    .replace(/^export const meta/m, 'const meta')
   return s
 }
 
@@ -121,8 +121,8 @@ async function run(overrides = {}, { runner = 'workflow' } = {}) {
   const log = (m) => logs.push(m)
   const phase = () => {}
 
-  const fn = new Function('agent', 'parallel', 'phase', 'log', 'return (async () => {' + render(runner) + '\n})()')
-  const result = await fn(agent, parallel, phase, log)
+  // The Orca runner's own loader, so the script is loaded one way everywhere.
+  const result = await loadScript(render(runner))(agent, parallel, phase, log, {})
   EVERY_CALL.push(...calls)
   return { result, calls, logs }
 }

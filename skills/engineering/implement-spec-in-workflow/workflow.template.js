@@ -16,11 +16,13 @@ export const meta = {
 // ---- harness and model per role -----------------------------------------
 // The one table an operator edits to move a role between harnesses — cheap
 // roles on pi, hard ones on Claude. Every agent() call spreads its role's row.
-// harness: 'claude' (Claude Code) or 'pi'. model: a Claude model name for
-// claude, a pi model pattern ('provider/id') for pi.
-// Only the Orca runner reads `harness`. The Workflow runner ignores it and runs
-// every role on Claude, still passing `model` — so a pi row's model must be
-// one Claude also accepts if the run may land on the Workflow runner.
+// harness: 'claude' (Claude Code) or 'pi'. model: always a Claude model name.
+// piModel: a pi model pattern ('provider/id'), read only for a pi row.
+// Only the Orca runner reads `harness` and `piModel`. The Workflow runner
+// ignores both and runs every role on Claude with `model`, so a pi row keeps a
+// Claude `model` beside its `piModel` — e.g.
+// { harness: 'pi', piModel: 'openai/gpt-5', model: 'opus' } — and the same
+// rendered script runs on either runner.
 const CLAUDE = { harness: 'claude', model: 'opus' }
 const ROLES = {
   graph: CLAUDE,         // Graph: read the spec, return the ticket graph

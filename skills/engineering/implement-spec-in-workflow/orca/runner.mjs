@@ -281,7 +281,10 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) =>
     if (opts.schema) checkSchema(opts.schema)
     const harness = opts.harness ?? 'claude'
     if (!HARNESSES.includes(harness)) throw new Error(`agent(): unknown harness "${harness}": expected one of ${HARNESSES.join(', ')}`)
-    const launch = { harness, model: opts.model, effort: opts.effort, permissionMode: harness === 'claude' ? permissionMode : null }
+    // A pi worker's model is `piModel`, never `model`: `model` stays a Claude
+    // model the Workflow runner can take, since it ignores the harness and runs
+    // every role on Claude. Both are in the call's journal key, as every option is.
+    const launch = { harness, model: harness === 'pi' ? opts.piModel : opts.model, effort: opts.effort, permissionMode: harness === 'claude' ? permissionMode : null }
     // Refused here, before any worker, like an unsatisfiable schema.
     launchCommand(launch)
     const n = ++count

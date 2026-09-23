@@ -64,7 +64,15 @@ export async function submit(argv, { orca, stdout = (s) => process.stdout.write(
 
   let value = text
   if (a.schema) {
-    const schema = JSON.parse(readText(a.schema))
+    // The runner wrote this file: one it cannot read is the run's fault, not
+    // the payload's, so it is a usage error (2), never a rejection (1).
+    let schema
+    try {
+      schema = JSON.parse(readText(a.schema))
+    } catch (e) {
+      stderr(`submit: cannot read schema ${a.schema}: ${e.message}`)
+      return 2
+    }
     try {
       value = JSON.parse(text)
     } catch (e) {

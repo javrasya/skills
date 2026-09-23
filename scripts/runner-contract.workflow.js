@@ -12,6 +12,8 @@ export const meta = { name: 'runner-contract', description: 'the guarantees the 
 const EXPECTED = {
   valid: { word: 'hello', count: 3 },
   repaired: { count: 3, first_attempt_rejected: true },
+  options: { word: 'hello', count: 3 },
+  isolated: { own_worktree: true },
   thrown: [null, null],
   killed: null,
 }
@@ -28,10 +30,22 @@ const REPAIR = {
   required: ['count', 'first_attempt_rejected'],
   properties: { count: { type: 'integer' }, first_attempt_rejected: { type: 'boolean' } },
 }
+const TOPLEVEL = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['toplevel'],
+  properties: { toplevel: { type: 'string' } },
+}
 const DONE = { type: 'object', required: ['done'], properties: { done: { type: 'boolean' } } }
 
 const C = { phase: 'Contract', effort: 'low' }
 const NOT_A_TASK = 'This is a check of the workflow runner, not a task: read no files and run nothing except what returning your result needs.'
+// The options the template spreads onto every call from its role table: a
+// runner must take harness, model and piModel without refusing the call (the
+// Workflow runner ignores harness and piModel; the Orca runner reads piModel
+// only for a pi worker).
+const ROLE = { harness: 'claude', model: 'sonnet', piModel: 'openai/gpt-5' }
+const TOP = `${NOT_A_TASK} Run the shell command git rev-parse --show-toplevel once; your result is toplevel set to its output, exactly.`
 
 // Key order is whatever the agent wrote; the comparison and the returned
 // object must not depend on it.
@@ -56,6 +70,9 @@ try {
       `${NOT_A_TASK} It checks that a rejected result is repaired inside your turn. Your FIRST attempt to return your result must deliberately leave out a required field: return exactly {"count": 3}. It will be rejected with a validation error. Then return it again, correctly: {"count": 3, "first_attempt_rejected": true}.`,
       { ...C, label: 'contract:repair', schema: REPAIR },
     ),
+    () => agent(`${NOT_A_TASK} Your result is word "hello" and count 3.`, { ...C, ...ROLE, label: 'contract:options', schema: HELLO }),
+    () => agent(TOP, { ...C, label: 'contract:here', schema: TOPLEVEL }),
+    () => agent(TOP, { ...C, label: 'contract:isolated', schema: TOPLEVEL, isolation: 'worktree' }),
     () => {
       throw new Error('contract: this thunk throws before returning a promise')
     },
@@ -65,11 +82,19 @@ try {
   ])
 } catch (e) {
   failures.push(`parallel: rejected (${e?.message ?? e}); it must resolve with null in the throwing thunks' places`)
-  par = [null, null, null, null]
+  par = [null, null, null, null, null, null, null]
 }
 log('parallel returned ' + JSON.stringify(par))
 
-// Last, so a resume's unchanged prefix is the two calls above. Outside
+// An isolated agent works in a worktree of its own, never the run's, where a
+// non-isolated agent works. Paths differ by runner and machine, so only the
+// comparison reaches the result.
+const top = (v) => (v && typeof v.toplevel === 'string' && v.toplevel.trim() ? v.toplevel.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() : null)
+const here = top(par[3])
+const isolatedTop = top(par[4])
+log(`contract:here in ${here}, contract:isolated in ${isolatedTop}`)
+
+// Last, so a resume's unchanged prefix is the five calls above. Outside
 // parallel(), which turns a throw into null and would hide an agent() that
 // throws on a dead agent. The wait is bounded and the prompt asks for nothing
 // an agent refuses: told to never return, a Workflow runner agent returns at
@@ -91,7 +116,9 @@ log('contract:kill returned ' + JSON.stringify(killed))
 const result = {
   valid: expect('valid', par[0]),
   repaired: expect('repaired', par[1]),
-  thrown: expect('thrown', [par[2], par[3]]),
+  options: expect('options', par[2]),
+  isolated: expect('isolated', { own_worktree: !!here && !!isolatedTop && here !== isolatedTop }),
+  thrown: expect('thrown', [par[5], par[6]]),
   killed: expect('killed', killed.threw ? '<threw>' : killed.value),
 }
 for (const f of failures) log('FAIL ' + f)

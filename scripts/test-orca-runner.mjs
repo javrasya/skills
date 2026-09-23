@@ -7,7 +7,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, existsSync, readFileSync } from 'fs'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { join, dirname } from 'path'
 import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { submit } from '../skills/engineering/implement-spec-in-workflow/orca/submit.mjs'
@@ -103,6 +103,20 @@ test('submit: a repaired result is accepted after the rejected one, and signals 
   assert.deepEqual(JSON.parse(readFileSync(paths.result, 'utf8')), GOOD)
   assert.equal(doneCalls(orca).length, 1)
   assert.equal(d.outcome, 'succeeded')
+})
+
+test('submit: a schema file it cannot read or parse is a usage error (exit 2), not a crash', async () => {
+  const { orca, d, paths, argv } = await startedWorker()
+  writeFileSync(paths.payload, JSON.stringify(GOOD))
+  for (const [schema, what] of [[join(dirname(paths.schema), 'missing.json'), 'missing'], [paths.schema, 'not JSON']]) {
+    if (what === 'not JSON') writeFileSync(paths.schema, '{ type: ')
+    const r = await runSubmit(argv.map((a) => (a === paths.schema ? schema : a)), orca)
+    assert.equal(r.code, 2, what)
+    assert.match(r.err[0], /^submit: cannot read schema /, what)
+  }
+  assert.equal(existsSync(paths.result), false)
+  assert.equal(doneCalls(orca).length, 0)
+  assert.equal(d.settled, false)
 })
 
 test('submit: as a process, a bad result exits 1 and prints the errors on stderr', async () => {
@@ -508,23 +522,25 @@ const submittingValue = (value) => async ({ prompt, preamble, orca }) => {
   assert.equal((await runSubmit(argv, orca)).code, 0)
 }
 
-test('agent(): the harness, model and effort of each call, and the permission mode, reach the worker start', async () => {
+test('agent(): the harness, model and effort of each call (a pi worker takes piModel, never model) and the permission mode, reach the worker start', async () => {
   const orca = fakeOrca({ worker: submittingValue(GOOD) })
   const script = `const S = ${JSON.stringify(SCHEMA)}
 await agent('a', { harness: 'claude', model: 'opus', effort: 'high', label: 'hard', schema: S })
-await agent('b', { harness: 'pi', model: 'openai/gpt-5', effort: 'low', label: 'cheap', schema: S })
-return await agent('c', { label: 'plain', schema: S })`
+await agent('b', { harness: 'pi', piModel: 'openai/gpt-5', model: 'sonnet', effort: 'low', label: 'cheap', schema: S })
+await agent('c', { harness: 'claude', piModel: 'openai/gpt-5', model: 'haiku', label: 'claude-ignores-piModel', schema: S })
+return await agent('d', { label: 'plain', schema: S })`
   await runScript(script, { orca, stateDir: tmp(), out: () => {}, settings: FAST, permissionMode: 'auto' })
   const starts = orca.calls.filter((c) => c.verb === 'workerStart').map(({ harness, model, effort, permissionMode }) => ({ harness, model, effort, permissionMode }))
   assert.deepEqual(starts, [
     { harness: 'claude', model: 'opus', effort: 'high', permissionMode: 'auto' },
     { harness: 'pi', model: 'openai/gpt-5', effort: 'low', permissionMode: null },
+    { harness: 'claude', model: 'haiku', effort: undefined, permissionMode: 'auto' },
     { harness: 'claude', model: undefined, effort: undefined, permissionMode: 'auto' },
   ])
 })
 
 test('agent(): an unknown harness, or a launch word a shell could misread, throws before any worker starts', async () => {
-  for (const opts of ["{ harness: 'codex' }", "{ harness: 'pi', model: 'opus; rm -rf /' }"]) {
+  for (const opts of ["{ harness: 'codex' }", "{ harness: 'pi', piModel: 'opus; rm -rf /' }"]) {
     const orca = fakeOrca()
     await assert.rejects(runScript(`return await agent('x', ${opts})`, { orca, stateDir: tmp(), out: () => {} }), /unknown harness "codex"|refusing to type/)
     assert.equal(orca.calls.length, 0)
