@@ -35,16 +35,17 @@ export function fakeOrca({ worker = async () => {}, clock = null } = {}) {
       return { runId: `run_fake${++runs}` }
     },
 
-    async workerStart({ run, prompt, title, agent = 'claude' }) {
+    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode }) {
       const n = ++seq
       const preamble = { handle: `term_fake${n}`, capability: `cap_fake${n}`, taskId: `task_fake${n}`, dispatchId: `ctx_fake${n}` }
+      const launch = { harness, model, effort, permissionMode }
       // Like Claude Code, the agent titles its own tab from its prompt.
       const d = {
-        ...preamble, run, title, agent, prompt, tabTitle: prompt.slice(0, 30), settled: false, outcome: null, released: false, stopped: false,
+        ...preamble, run, title, ...launch, prompt, tabTitle: prompt.slice(0, 30), settled: false, outcome: null, released: false, stopped: false,
         gone: false, exited: false, idle: false, waiting: null, lastOutputAt: null, onNudge: null, nudges: [],
       }
       dispatches.set(d.dispatchId, d)
-      record({ verb: 'workerStart', dispatchId: d.dispatchId, title })
+      record({ verb: 'workerStart', dispatchId: d.dispatchId, title, ...launch })
       // A worker that throws is an agent that died: its Dispatch fails.
       d.finished = Promise.resolve()
         .then(() => worker({ prompt, preamble, orca, state: d }))

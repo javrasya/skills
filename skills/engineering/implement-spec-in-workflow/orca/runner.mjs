@@ -4,7 +4,7 @@
 // worker. Launch it from its own Orca terminal — the Run it creates binds to
 // that terminal.
 //
-//   node runner.mjs <rendered-script.js> [--state-dir <dir>] [--resume]
+//   node runner.mjs <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]
 //
 // Every settled agent() result is journaled in the state dir, which defaults
 // to <notes-dir>/orca-run for the rendered <notes-dir>/workflow.js. --resume
@@ -16,7 +16,7 @@ import { createHash } from 'crypto'
 import { basename, dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { checkSchema, validate } from './schema.mjs'
-import { orcaCli } from './orca-cli.mjs'
+import { orcaCli, launchCommand, HARNESSES } from './orca-cli.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 
 export const SUBMIT = fileURLToPath(new URL('./submit.mjs', import.meta.url))
@@ -110,7 +110,10 @@ const NUDGE = 'The workflow has not received your result: your final message is 
 
 // `settings` overrides entries of SETTINGS; `clock` is what the liveness
 // limits are measured against, so tests can drive time.
-export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) => console.log(s), settings = {}, clock = realClock, fallbackObjective = 'workflow run', resume = false }) {
+// permissionMode: the orchestrating session's, which Claude workers start in
+// as Workflow subagents inherit it. Without one, Orca's setting for new agent
+// tabs decides how a Claude worker runs.
+export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) => console.log(s), settings = {}, clock = realClock, fallbackObjective = 'workflow run', resume = false, permissionMode = null }) {
   const limits = { ...SETTINGS, ...settings }
   const { MAX_LIVE } = limits
   const script = loadScript(text)
@@ -120,6 +123,7 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) =>
   let run = null
   let currentPhase = null
   let count = 0
+  let toldNoMode = false
 
   mkdirSync(stateDir, { recursive: true })
   const journalPath = join(stateDir, 'journal.jsonl')
@@ -236,6 +240,11 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) =>
 
   async function agent(prompt, opts = {}) {
     if (opts.schema) checkSchema(opts.schema)
+    const harness = opts.harness ?? 'claude'
+    if (!HARNESSES.includes(harness)) throw new Error(`agent(): unknown harness "${harness}": expected one of ${HARNESSES.join(', ')}`)
+    const launch = { harness, model: opts.model, effort: opts.effort, permissionMode: harness === 'claude' ? permissionMode : null }
+    // Refused here, before any worker, like an unsatisfiable schema.
+    launchCommand(launch)
     const n = ++count
     const label = opts.label || `agent-${n}`
     const title = `[${opts.phase ?? currentPhase ?? 'Run'}] ${label}`
@@ -268,23 +277,28 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) =>
     const { runId } = await run
     await live.acquire(() => out(`.. ${title}: queued, ${MAX_LIVE} agents are live`))
     try {
-      return await supervise(runId, prompt, opts, { key, n, title, schemaPath, resultPath, payloadPath })
+      return await supervise(runId, prompt, opts, launch, { key, n, title, schemaPath, resultPath, payloadPath })
     } finally {
       live.release()
     }
   }
 
-  async function supervise(runId, prompt, opts, { key, n, title, schemaPath, resultPath, payloadPath }) {
+  async function supervise(runId, prompt, opts, launch, { key, n, title, schemaPath, resultPath, payloadPath }) {
+    if (launch.harness === 'claude' && !permissionMode && !toldNoMode) {
+      toldNoMode = true
+      out("!! no --permission-mode given: Claude workers run as Orca's setting for new agent tabs says, not in the orchestrator's mode.")
+    }
     journal({ type: 'started', key, n, title })
     let w
     try {
-      w = await orca.workerStart({ run: runId, prompt: workerPrompt(prompt, { schemaPath, resultPath, payloadPath }), title })
+      w = await orca.workerStart({ run: runId, prompt: workerPrompt(prompt, { schemaPath, resultPath, payloadPath }), title, ...launch })
     } catch (e) {
       out(`!! ${title}: its worker did not start: ${e.message}; agent() returns null`)
       journal({ type: 'result', key, n, title, result: null })
       return null
     }
-    out(`>> ${title}: started as dispatch ${w.dispatchId}${w.terminal ? ` in terminal ${w.terminal}` : ''}`)
+    const on = [launch.harness, launch.model, launch.effort && `${launch.effort} effort`, launch.permissionMode && `${launch.permissionMode} mode`].filter(Boolean).join(', ')
+    out(`>> ${title}: started on ${on} as dispatch ${w.dispatchId}${w.terminal ? ` in terminal ${w.terminal}` : ''}`)
     if (w.mode !== 'terminal' || !w.terminal) {
       out(`!! ${title} has no terminal tab to watch (mode: ${w.mode ?? 'unknown'}). Orca's setting for new agent tabs decides this; set it to terminal. ${w.modeDetail}`)
     } else {
@@ -328,21 +342,30 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) =>
 const isMain = process.argv[1] && resolve(process.argv[1]).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase()
 if (isMain) {
   const args = process.argv.slice(2)
+  let bad = false
   const r = args.indexOf('--resume')
   const resume = r >= 0 && !!args.splice(r, 1)
-  const at = args.indexOf('--state-dir')
-  const stateDir = at >= 0 ? resolve(args.splice(at, 2)[1]) : null
+  const option = (name) => {
+    const at = args.indexOf(name)
+    if (at < 0) return null
+    const [, value] = args.splice(at, 2)
+    if (!value || value.startsWith('--')) bad = true
+    return value ?? null
+  }
+  const stateDir = option('--state-dir')
+  const permissionMode = option('--permission-mode')
   const [scriptPath] = args
-  if (!scriptPath || args.length > 1 || (at >= 0 && !stateDir)) {
-    console.error('usage: node runner.mjs <rendered-script.js> [--state-dir <dir>] [--resume]')
+  if (!scriptPath || args.length > 1 || bad) {
+    console.error('usage: node runner.mjs <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <orchestrator\'s Claude permission mode>]')
     process.exit(2)
   }
   const path = resolve(scriptPath)
   try {
     const result = await runScript(readFileSync(path, 'utf8'), {
-      stateDir: stateDir ?? join(dirname(path), 'orca-run'),
+      stateDir: stateDir ? resolve(stateDir) : join(dirname(path), 'orca-run'),
       fallbackObjective: `workflow ${basename(path)}`,
       resume,
+      permissionMode,
     })
     console.log('== Result')
     console.log(JSON.stringify(result, null, 2))

@@ -150,6 +150,7 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('A: no unmet', result.unmet.length === 0, JSON.stringify(result.unmet))
   check('A: explore effort low / dispatch high / publish low', calls.find((c) => c.label.startsWith('explore')).effort === 'low' && calls.find((c) => c.label === 'dispatch:#10').effort === 'high' && calls.find((c) => c.label === 'publish:#10').effort === 'low', '')
   check('A: slice effort taken from dispatcher verdict', calls.find((c) => c.label === 'impl:#10').effort === 'medium', '')
+  check('A: an untouched harness table runs every agent on Claude opus', calls.every((c) => c.opts.harness === 'claude' && c.opts.model === 'opus'), JSON.stringify(calls.filter((c) => c.opts.harness !== 'claude' || c.opts.model !== 'opus').map((c) => c.label)))
 }
 
 // --- scenario B: slice bails, re-dispatch finishes --------------------------

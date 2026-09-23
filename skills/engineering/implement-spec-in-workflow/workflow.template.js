@@ -13,6 +13,31 @@ export const meta = {
   ],
 }
 
+// ---- harness and model per role -----------------------------------------
+// The one table an operator edits to move a role between harnesses — cheap
+// roles on pi, hard ones on Claude. Every agent() call spreads its role's row.
+// harness: 'claude' (Claude Code) or 'pi'. model: a Claude model name for
+// claude, a pi model pattern ('provider/id') for pi.
+// Only the Orca runner reads `harness`. The Workflow runner ignores it and runs
+// every role on Claude, still passing `model` — so a pi row's model must be
+// one Claude also accepts if the run may land on the Workflow runner.
+const CLAUDE = { harness: 'claude', model: 'opus' }
+const ROLES = {
+  graph: CLAUDE,         // Graph: read the spec, return the ticket graph
+  explore: CLAUDE,       // Explore: one research note
+  layer0: CLAUDE,        // Setup: the layer-0 PR
+  dispatch: CLAUDE,      // Implement: size a ticket into slices
+  impl: CLAUDE,          // Implement: one slice
+  gate: CLAUDE,          // Gate: code-review one ticket
+  fixDispatch: CLAUDE,   // Gate, Review: route findings into fix slices
+  fix: CLAUDE,           // Gate, Review: one fix slice
+  publish: CLAUDE,       // Stack, Review: a ticket's PR, or the integration PR
+  review: CLAUDE,        // Review: code-review the whole stack
+  reclaim: CLAUDE,       // Finalize: reclaim worktrees when nothing was published
+  finalize: CLAUDE,      // Finalize: reconcile and ready the stack
+  retrospective: CLAUDE, // Finalize: the validation report
+}
+
 // ---- interpolated by the skill ------------------------------------------
 const REPO = '__REPO__'                            // owner/name
 const SPEC = __SPEC__                              // spec issue number
@@ -27,7 +52,6 @@ const VALIDATION_RAW = String.raw`__VALIDATION__`
 // -------------------------------------------------------------------------
 const VALIDATION = VALIDATION_RAW.split('\n').map((s) => s.trim()).filter((s) => s && !s.startsWith('#'))
 
-const M = { model: 'opus' }
 const POINTERS = `Repo ${REPO}, checkout ${REPO_DIR}. Spec: \`gh issue view ${SPEC}\`. Research notes: ${NOTES_DIR}.`
 // Every agent in this run works in a worktree LINKED to one clone — one object
 // store, one ref namespace — so a commit any agent makes is reachable by name
@@ -528,7 +552,7 @@ Set needs_human on a ticket that cannot be completed by an agent alone: it needs
 start_ref: if work for this spec already sits on a branch (the spec or a ticket names one, or a branch exists whose commits are for this spec), return that branch — it becomes the bottom layer of the stack rather than being orphaned. Otherwise return "${BASE_REF}".
 
 explorations: propose up to 4 research questions whose answers implementers will need — the code paths, the external API contracts, the existing test arrangement. A question need not serve every ticket: give each a label that names its subject plainly, so an implementer can tell whether it bears on their ticket. Ask what is expensive to discover, not what a ticket already states.`,
-  { ...M, phase: 'Graph', schema: GRAPH_SCHEMA, label: `graph:spec-${SPEC}` },
+  { ...ROLES.graph, phase: 'Graph', schema: GRAPH_SCHEMA, label: `graph:spec-${SPEC}` },
 )
 if (!graph) throw new Error('graph discovery failed')
 
@@ -567,7 +591,7 @@ Keep the note under 300 lines. Every reader ingests it whole at full price, so c
 ${ECONOMY}
 
 Return the absolute path you wrote.`,
-      { ...M, effort: 'low', phase: 'Explore', label: `explore:${e.label}` },
+      { ...ROLES.explore, effort: 'low', phase: 'Explore', label: `explore:${e.label}` },
     ),
   ),
 )).filter(Boolean)
@@ -608,7 +632,7 @@ Do not disturb the user's working copy: leave ${REPO_DIR}'s checked-out branch a
 ${WORKTREE}
 
 Return the PR url and number, what the mirror found, and your worktree.`,
-    { ...M, effort: 'low', phase: 'Setup', schema: LAYER0_SCHEMA, isolation: 'worktree', label: `layer0:${graph.start_ref}` },
+    { ...ROLES.layer0, effort: 'low', phase: 'Setup', schema: LAYER0_SCHEMA, isolation: 'worktree', label: `layer0:${graph.start_ref}` },
   )
   if (!layer0) throw new Error('layer-0 PR failed — prior work would be orphaned')
   noteWorktree('layer0', graph.start_ref, layer0)
@@ -669,7 +693,7 @@ Default to ONE slice. Slice only when one agent plausibly cannot finish in rough
 Each brief is under 3,000 characters and has four sections, nothing else: (1) the acceptance criteria this slice owns, copied verbatim from the ticket; (2) the files you expect it to touch; (3) which of these research notes to read — ${notes.length ? notes.join(', ') : 'none exist'} — by filename, the ones whose subject bears on its criteria; (4) what is out of scope because another slice owns it. Every criterion of the ticket is owned by exactly one slice, including any test the ticket demands. Set each slice's effort: 'high' for the gnarly ones, 'medium' otherwise.
 
 Also return ticket_brief: one short paragraph on the whole ticket, for later fix agents.`,
-    { ...M, effort: 'high', phase: 'Implement', schema: DISPATCH_SCHEMA, label: `dispatch:#${t.number}${remainder ? ':re' : ''}` },
+    { ...ROLES.dispatch, effort: 'high', phase: 'Implement', schema: DISPATCH_SCHEMA, label: `dispatch:#${t.number}${remainder ? ':re' : ''}` },
   )
 }
 
@@ -706,7 +730,7 @@ Every command must pass on the commit you return. Commit, then move the ticket b
 ${WORKTREE}
 
 Return the branch, a one-line summary, one result per validation command with its seconds and runs, every other build or test command you ran in \`other_runs\`, the sha the list passed on in \`validated_sha\`, anything from the brief you did not reach in \`unmet\`, any question in \`decisions_needed\`, and your worktree.`,
-      { ...M, effort: s.effort, phase: 'Implement', schema: IMPL_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}` },
+      { ...ROLES.impl, effort: s.effort, phase: 'Implement', schema: IMPL_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}` },
     )
     if (!r) throw new Error(`slice implementer for #${t.number} died (${s.title})`)
     noteWorktree(t.number, `ticket/${t.number}`, r)
@@ -822,7 +846,7 @@ You are the only agent publishing right now. After the PR exists, the branch is 
 ${WORKTREE}
 
 Return whether it published, the PR url and number, what you resolved, one result per validation command with its seconds and runs plus the sha they hold for, how the stack link went, any note, the reclaim count and kept list, and your worktree.`,
-      { ...M, effort: 'low', phase: 'Stack', schema: PUBLISH_SCHEMA, isolation: 'worktree', label: `publish:#${t.number}` },
+      { ...ROLES.publish, effort: 'low', phase: 'Stack', schema: PUBLISH_SCHEMA, isolation: 'worktree', label: `publish:#${t.number}` },
     ).then((r) => {
       recordValidation('publish', t.number, r, cutFrom !== base ? null : impl.validated)
       if (!r || !r.published) {
@@ -891,7 +915,7 @@ Size this work, do not do it. \`git fetch origin\`, then skim at \`${skimRef}\`:
 Default to ONE slice. Slice only when one agent plausibly cannot finish in roughly 70 tool calls; when unsure, do not slice. A finding naming a rename and one naming an extraction read alike in a line and differ by two orders of magnitude in work — that difference, not the finding count, is what you are judging. Slices run sequentially on one branch, so each must leave the branch consistent — building, tests green.
 
 Every finding above belongs to exactly one slice: none dropped, none in two. Each brief must be self-contained — the findings it owns copied in full with their suggested fixes, the files they touch, and every constraint from the distilled work above that bears on them; its fixer reads no issue, no spec and no review.`,
-    { ...M, effort: 'medium', phase: ph, schema: FIX_DISPATCH_SCHEMA, label: `${tag}:dispatch` },
+    { ...ROLES.fixDispatch, effort: 'medium', phase: ph, schema: FIX_DISPATCH_SCHEMA, label: `${tag}:dispatch` },
   )
 }
 
@@ -927,7 +951,7 @@ Every command must pass on the commit you return — a fix that leaves one red i
 ${WORKTREE}
 
 Return one verdict per finding in your brief you fixed or rejected, the \`location\` of any you did not reach, one result per validation command with its seconds and runs, every other build or test command you ran in \`other_runs\`, the sha the list passed on in \`validated_sha\`, and your worktree.`,
-      { ...M, effort: s.effort, phase: ph, schema: FIX_SLICE_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}` },
+      { ...ROLES.fix, effort: s.effort, phase: ph, schema: FIX_SLICE_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}` },
     )
     // A dead fixer is not fatal — it is the next reviewer's problem, and that
     // reviewer reads the branch rather than anyone's account of it. But the
@@ -1057,7 +1081,7 @@ ${rejected.map((v) => `- ${v.location} — ${v.issue}\n  judged wrong because: $
         : ''}
 
 ${WORKTREE}`,
-      { ...M, phase: 'Gate', schema: GATE_REVIEW_SCHEMA, isolation: 'worktree', label: `gate:#${t.number}:r${round}` },
+      { ...ROLES.gate, phase: 'Gate', schema: GATE_REVIEW_SCHEMA, isolation: 'worktree', label: `gate:#${t.number}:r${round}` },
     )
     noteWorktree(t.number, impl.branch, r)
     recordValidation('gate', t.number, r, validated)
@@ -1196,7 +1220,7 @@ ${strayStep()}
 
 ${POINTERS}
 Delete no branches: any work these worktrees carried is on its \`ticket/<n>\` branch in ${REPO_DIR}'s clone, and the operator may want it.`,
-      { ...M, effort: 'low', phase: 'Finalize', schema: RECLAIM_SCHEMA, label: 'reclaim' },
+      { ...ROLES.reclaim, effort: 'low', phase: 'Finalize', schema: RECLAIM_SCHEMA, label: 'reclaim' },
     )
     : null
   if (reclaim) markReclaimed(leftovers, reclaim)
@@ -1224,7 +1248,7 @@ Invoke the \`code-review\` skill with \`${ref(BASE_REF)}\` as the fixed point an
 Every ticket was already reviewed alone on its own branch, so look hardest at what that could not see: two implementations of one helper, abstractions that contradict each other, a contract one ticket relies on that another changed. Return every finding; change no code yourself.
 
 ${WORKTREE}`,
-  { ...M, phase: 'Review', schema: REVIEW_SCHEMA, isolation: 'worktree', label: `review:spec-${SPEC}` },
+  { ...ROLES.review, phase: 'Review', schema: REVIEW_SCHEMA, isolation: 'worktree', label: `review:spec-${SPEC}` },
 )
 noteWorktree('review', tip, review)
 // Fail closed: a review that never returned is not a review with zero findings.
@@ -1288,7 +1312,7 @@ ${reclaimStep(integrationReclaim)}
 ${WORKTREE}
 
 Return the PR url and number, the branch, the reclaim count and kept list, and your worktree.`,
-      { ...M, effort: 'low', phase: 'Review', schema: INTEGRATION_SCHEMA, isolation: 'worktree', label: 'publish:integration' },
+      { ...ROLES.publish, effort: 'low', phase: 'Review', schema: INTEGRATION_SCHEMA, isolation: 'worktree', label: 'publish:integration' },
     )
     if (integration && integration.pr_number) {
       // The prompt reclaims only after the PR exists, so a returned-but-unopened
@@ -1380,7 +1404,7 @@ ${complete
 Do not merge anything — merging is the operator's.
 
 Return one line on the stack — whether it registered and how many PRs went ready — plus the reclaim count and kept list.`,
-  { ...M, effort: 'low', phase: 'Finalize', schema: FINALIZE_SCHEMA, label: 'finalize' },
+  { ...ROLES.finalize, effort: 'low', phase: 'Finalize', schema: FINALIZE_SCHEMA, label: 'finalize' },
 )
 if (finalize) markReclaimed(finalReclaim, finalize)
 
@@ -1411,7 +1435,7 @@ Write the report in this order:
 Nothing applies these proposals: a human decides, and validation.md is theirs to edit.
 
 Return two or three sentences of summary, the report path, and the proposals as a list.`,
-    { ...M, effort: 'low', phase: 'Finalize', label: 'retrospective', schema: RETRO_SCHEMA },
+    { ...ROLES.retrospective, effort: 'low', phase: 'Finalize', label: 'retrospective', schema: RETRO_SCHEMA },
   )
   : null
 

@@ -13,10 +13,10 @@ export class OrcaError extends Error {
 
 const SETTLED_DISPATCH = new Set(['completed', 'failed', 'cancelled', 'canceled'])
 
-export function orcaCli({ bin = process.env.ORCA_BIN || 'orca' } = {}) {
-  // No shell: arguments reach Orca verbatim, prompts included. Windows still
-  // caps a command line at 32767 characters, so one prompt must stay under it.
-  function call(args) {
+// No shell: arguments reach Orca verbatim, prompts included. Windows still
+// caps a command line at 32767 characters, so one prompt must stay under it.
+function execOrca(bin) {
+  return (args) => {
     const verb = args.slice(0, 2).join(' ')
     return new Promise((resolve, reject) => {
       execFile(bin, [...args, '--json'], { maxBuffer: 64 << 20, windowsHide: true }, (err, stdout, stderr) => {
@@ -33,6 +33,64 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca' } = {}) {
       })
     })
   }
+}
+
+export const HARNESSES = ['claude', 'pi']
+
+// Typed into the new terminal's shell (PowerShell on Windows), so every word
+// must be one no shell reads as syntax.
+const WORD = /^[\w.:/@+=-]+$/
+
+// What worker-start cannot carry: it has no permission-mode flag, it forwards
+// --model/--effort to Claude only, and --effort only beside --model — pi's
+// trust, model and thinking never reach pi through it (ADR-0011). A worker
+// needing any of that starts from this command line instead; null means
+// worker-start's own `--agent` launch carries everything asked for.
+export function launchCommand({ harness = 'claude', model, effort, permissionMode }) {
+  let argv
+  if (harness === 'pi') {
+    // --approve trusts project-local files: an unattended pi worker would
+    // otherwise stop at pi's trust prompt with nobody to answer it.
+    argv = ['pi', '--approve', model && ['--model', model], effort && ['--thinking', effort]]
+  } else if (harness === 'claude') {
+    if (!permissionMode && (model || !effort)) return null
+    argv = ['claude', permissionMode && ['--permission-mode', permissionMode], model && ['--model', model], effort && ['--effort', effort]]
+  } else {
+    throw new Error(`unknown harness "${harness}": expected one of ${HARNESSES.join(', ')}`)
+  }
+  const words = argv.flat().filter(Boolean)
+  const bad = words.find((w) => !WORD.test(w))
+  if (bad) throw new Error(`refusing to type "${bad}" into a shell to launch ${harness}: use plain model, effort and mode names`)
+  return words.join(' ')
+}
+
+export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(bin) } = {}) {
+  // Terminals this runner created for a custom launch, by dispatch. Orca's
+  // release retains a terminal the worker did not create, so the runner
+  // closes these itself once the worker is released.
+  const ownTerminals = new Map()
+
+  const closeQuietly = (handle) => call(['terminal', 'close', '--terminal', handle]).catch(() => {})
+
+  // A prompt typed into a TUI that is still starting is lost, so the worker is
+  // dispatched only once the agent sits idle. A timed-out wait may exit 1 or
+  // print satisfied:false; either way it is retried once, longer.
+  async function waitIdle(handle, command) {
+    for (const ms of [60000, 180000]) {
+      try {
+        const r = await call(['terminal', 'wait', '--terminal', handle, '--for', 'tui-idle', '--timeout-ms', String(ms)])
+        if (r?.wait?.satisfied) return
+      } catch (e) {
+        if (e.code !== 'timeout') throw e
+      }
+    }
+    throw new OrcaError('agent_not_ready', `\`${command}\` in terminal ${handle} never reached an idle prompt`, 'terminal wait')
+  }
+
+  function receipt(r) {
+    const tab = (r.effects || []).find((e) => e.kind === 'terminal' && e.role === 'agent')
+    return { dispatchId: r.dispatchId, taskId: r.taskId, mode: r.mode?.mode ?? null, modeDetail: r.mode?.detail ?? '', terminal: tab?.id ?? null }
+  }
 
   return {
     // Run from the runner's own terminal: Orca binds the Run to the caller
@@ -42,10 +100,27 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca' } = {}) {
       return { runId: r.run?.id ?? r.id }
     },
 
-    async workerStart({ run, prompt, title, agent = 'claude' }) {
-      const r = await call(['orchestration', 'worker-start', '--run', run, '--spec', prompt, '--task-title', title, '--agent', agent, '--worktree', 'current'])
-      const tab = (r.effects || []).find((e) => e.kind === 'terminal' && e.role === 'agent')
-      return { dispatchId: r.dispatchId, taskId: r.taskId, mode: r.mode?.mode ?? null, modeDetail: r.mode?.detail ?? '', terminal: tab?.id ?? null }
+    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode }) {
+      const command = launchCommand({ harness, model, effort, permissionMode })
+      const start = ['orchestration', 'worker-start', '--run', run, '--spec', prompt, '--task-title', title, '--worktree', 'current']
+      if (!command) {
+        const launch = [...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : [])]
+        return receipt(await call([...start, '--agent', harness, ...launch]))
+      }
+      // Orca's documented route for custom argv under supervision: create the
+      // agent's terminal, then worker-start takes ownership of it. The
+      // terminal opens in the runner's worktree, which `current` names.
+      const t = await call(['terminal', 'create', '--title', title, '--command', command])
+      const handle = t.terminal.handle
+      try {
+        await waitIdle(handle, command)
+        const r = await call([...start, '--terminal', handle])
+        ownTerminals.set(r.dispatchId, handle)
+        return { ...receipt(r), mode: 'terminal', terminal: handle }
+      } catch (e) {
+        await closeQuietly(handle)
+        throw e
+      }
     },
 
     async workerShow({ dispatch }) {
@@ -90,6 +165,11 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca' } = {}) {
 
     async workerRelease({ dispatch }) {
       await call(['orchestration', 'worker-release', '--dispatch', dispatch])
+      const own = ownTerminals.get(dispatch)
+      if (own) {
+        ownTerminals.delete(dispatch)
+        await closeQuietly(own)
+      }
     },
 
     // Sets the tab label the operator sees. `terminal show` keeps reporting

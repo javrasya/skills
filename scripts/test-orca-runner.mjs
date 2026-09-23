@@ -13,6 +13,7 @@ import { submit } from '../skills/engineering/implement-spec-in-workflow/orca/su
 import { runScript, journalKey, SUBMIT, SETTINGS } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
 import { fakeOrca } from '../skills/engineering/implement-spec-in-workflow/orca/fake-orca.mjs'
 import { RUNNER_SETTINGS } from '../skills/engineering/implement-spec-in-workflow/orca/settings.mjs'
+import { orcaCli } from '../skills/engineering/implement-spec-in-workflow/orca/orca-cli.mjs'
 
 const SCHEMA = {
   type: 'object',
@@ -497,4 +498,100 @@ test('parallel(): a throwing thunk resolves to null and the call never rejects',
   const r = await runOne(async ({ state }) => { state.gone = true }, { script })
   assert.deepEqual(r.result, [null, null, 7, null])
   assert.ok(r.lines.some((l) => l.includes('thunk 0 threw (sync boom)')), r.lines.join('\n'))
+})
+
+// A worker that submits a schema-valid result, whatever it is asked.
+const submittingValue = (value) => async ({ prompt, preamble, orca }) => {
+  const argv = submitArgvIn(prompt, preamble)
+  writeFileSync(argv[argv.indexOf('--payload') + 1], JSON.stringify(value))
+  assert.equal((await runSubmit(argv, orca)).code, 0)
+}
+
+test('agent(): the harness, model and effort of each call, and the permission mode, reach the worker start', async () => {
+  const orca = fakeOrca({ worker: submittingValue(GOOD) })
+  const script = `const S = ${JSON.stringify(SCHEMA)}
+await agent('a', { harness: 'claude', model: 'opus', effort: 'high', label: 'hard', schema: S })
+await agent('b', { harness: 'pi', model: 'openai/gpt-5', effort: 'low', label: 'cheap', schema: S })
+return await agent('c', { label: 'plain', schema: S })`
+  await runScript(script, { orca, stateDir: tmp(), out: () => {}, settings: FAST, permissionMode: 'auto' })
+  const starts = orca.calls.filter((c) => c.verb === 'workerStart').map(({ harness, model, effort, permissionMode }) => ({ harness, model, effort, permissionMode }))
+  assert.deepEqual(starts, [
+    { harness: 'claude', model: 'opus', effort: 'high', permissionMode: 'auto' },
+    { harness: 'pi', model: 'openai/gpt-5', effort: 'low', permissionMode: null },
+    { harness: 'claude', model: undefined, effort: undefined, permissionMode: 'auto' },
+  ])
+})
+
+test('agent(): an unknown harness, or a launch word a shell could misread, throws before any worker starts', async () => {
+  for (const opts of ["{ harness: 'codex' }", "{ harness: 'pi', model: 'opus; rm -rf /' }"]) {
+    const orca = fakeOrca()
+    await assert.rejects(runScript(`return await agent('x', ${opts})`, { orca, stateDir: tmp(), out: () => {} }), /unknown harness "codex"|refusing to type/)
+    assert.equal(orca.calls.length, 0)
+  }
+})
+
+// The CLI adapter with Orca's process replaced: every argv it would run is
+// recorded, and each verb answers with the shape real Orca returns.
+function recordingCli(replies = {}) {
+  const argvs = []
+  const defaults = {
+    'terminal create': { terminal: { handle: 'term_own' } },
+    'terminal wait': { wait: { satisfied: true } },
+    'orchestration worker-start': { dispatchId: 'ctx_1', taskId: 'task_1', mode: { mode: 'terminal', detail: '' }, effects: [{ kind: 'terminal', role: 'agent', id: 'term_orca' }] },
+  }
+  const call = async (args) => {
+    argvs.push(args)
+    const verb = args.slice(0, 2).join(' ')
+    const reply = verb in replies ? replies[verb] : defaults[verb]
+    return typeof reply === 'function' ? reply(args) : reply ?? {}
+  }
+  return { argvs, orca: orcaCli({ call }) }
+}
+const flag = (argv, name) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined)
+const verbsOf = (argvs) => argvs.map((a) => a.slice(0, 2).join(' '))
+const START = { run: 'run_1', prompt: 'p', title: '[Implement] impl:#1' }
+
+test('orca-cli: a Claude worker with no permission mode starts through worker-start, model and effort forwarded', async () => {
+  const { argvs, orca } = recordingCli()
+  const w = await orca.workerStart({ ...START, harness: 'claude', model: 'opus', effort: 'low' })
+  assert.deepEqual(verbsOf(argvs), ['orchestration worker-start'])
+  const [argv] = argvs
+  assert.deepEqual([flag(argv, '--agent'), flag(argv, '--model'), flag(argv, '--effort'), flag(argv, '--worktree')], ['claude', 'opus', 'low', 'current'])
+  assert.equal(w.terminal, 'term_orca')
+})
+
+test('orca-cli: a Claude worker starts in the given permission mode, in a terminal worker-start then supervises', async () => {
+  const { argvs, orca } = recordingCli()
+  const w = await orca.workerStart({ ...START, harness: 'claude', model: 'opus', effort: 'high', permissionMode: 'auto' })
+  assert.deepEqual(verbsOf(argvs), ['terminal create', 'terminal wait', 'orchestration worker-start'])
+  assert.equal(flag(argvs[0], '--command'), 'claude --permission-mode auto --model opus --effort high')
+  assert.equal(flag(argvs[0], '--title'), START.title)
+  assert.equal(flag(argvs[1], '--for'), 'tui-idle')
+  const start = argvs[2]
+  assert.equal(flag(start, '--terminal'), 'term_own')
+  assert.equal(flag(start, '--spec'), 'p')
+  for (const f of ['--agent', '--model', '--effort']) assert.equal(start.includes(f), false, `worker-start refuses ${f} beside --terminal`)
+  assert.equal(w.terminal, 'term_own')
+
+  // Orca's release keeps a terminal the worker did not create; the runner closes its own.
+  await orca.workerRelease({ dispatch: w.dispatchId })
+  assert.deepEqual(verbsOf(argvs.slice(3)), ['orchestration worker-release', 'terminal close'])
+  assert.equal(flag(argvs[4], '--terminal'), 'term_own')
+})
+
+test('orca-cli: a pi worker starts with project-local files trusted, its model and effort on its own command line', async () => {
+  const { argvs, orca } = recordingCli()
+  await orca.workerStart({ ...START, harness: 'pi', model: 'openai/gpt-5', effort: 'low' })
+  assert.equal(flag(argvs[0], '--command'), 'pi --approve --model openai/gpt-5 --thinking low')
+  assert.equal(flag(argvs[2], '--terminal'), 'term_own')
+
+  const bare = recordingCli()
+  await bare.orca.workerStart({ ...START, harness: 'pi' })
+  assert.equal(flag(bare.argvs[0], '--command'), 'pi --approve')
+})
+
+test('orca-cli: an agent whose TUI never goes idle is not dispatched, and its terminal is closed', async () => {
+  const { argvs, orca } = recordingCli({ 'terminal wait': { wait: { satisfied: false } } })
+  await assert.rejects(orca.workerStart({ ...START, harness: 'pi' }), /agent_not_ready/)
+  assert.deepEqual(verbsOf(argvs), ['terminal create', 'terminal wait', 'terminal wait', 'terminal close'])
 })
