@@ -10,7 +10,7 @@ Your context is the scarce resource here. The spec body, the ticket bodies, the 
 
 `workflow.template.js`, beside this file, is the script. It carries every step; you render it and launch it.
 
-**Requires** a harness with a workflow primitive that runs a script of `agent()` calls — Claude Code's `Workflow` tool, or an equivalent. The script is plain JavaScript against four hooks: `agent()`, `parallel()`, `phase()`, `log()`. Native stack registration additionally requires the `gh-stack` extension — gated below, never auto-installed.
+**Requires** a runner for a script of `agent()` calls — either the **Workflow runner**, a harness's workflow primitive (Claude Code's `Workflow` tool, or an equivalent), or the **Orca runner**, `orca/runner.mjs` beside this file, which needs Node and a session inside an Orca terminal whose runtime is ready (ADR-0011). The script is plain JavaScript against four hooks: `agent()`, `parallel()`, `phase()`, `log()`, and is the same under both. Native stack registration additionally requires the `gh-stack` extension — gated below, never auto-installed.
 
 ## Steps
 
@@ -18,6 +18,12 @@ Your context is the scarce resource here. The spec body, the ticket bodies, the 
 
    - `gh extension list | grep -q gh-stack` — **missing → stop.** Tell the user to run `gh extension install github/gh-stack` and wait. Install it yourself only if the user explicitly says to.
    - `gh api "repos/<owner>/<repo>/stacks" --silent` — **404 → stacks are not enabled for this repo** (org rollout policy, or a host without the preview; installing nothing fixes it). Put it to the user: GitHub's native stacked PRs give a stack map on every PR and a one-click atomic whole-stack merge — enabling is described at <https://docs.github.com/en/pull-requests/tutorials/roll-out-stacked-prs> — or the run can degrade to a plain `--base` chain merged bottom-up by hand. Their call, never a silent fallback. HTTP 200 (even with `[]`) → native mode.
+
+   **The runner.** Offered only inside Orca, and asked alongside the stack gate:
+
+   - **Probe.** Both `TERM_PROGRAM` is `Orca` and `ORCA_TERMINAL_HANDLE` is set, **and** `orca status --json` exits 0 with `ok: true`, `result.runtime.state: "ready"` and `result.runtime.reachable: true`. Anything else — a variable missing, a non-zero exit, stdout that is not JSON, any other state — means the Orca runner is not offered: the run goes on the Workflow runner, exactly as it would without this step, and **nothing is asked**.
+   - **Probe passed → ask**, and wait: run on the **Orca runner**, where every agent is a live Orca tab the operator can watch, type into and answer, and the run lives in its own terminal that outlives this session — or on the **Workflow runner**, the host's workflow primitive, as before. The operator picks. Never choose for them, including by defaulting when they do not answer.
+   - **Orca chosen → how workers run.** A Claude worker starts in the permission mode the runner is given (`--permission-mode`); without one it runs as Orca's setting for new agent tabs says. When your own session runs in a mode that never prompts (`bypassPermissions`, `dontAsk`), pass that mode on and ask nothing more. In any other mode — or when you cannot tell which mode you are in — a worker in your mode would stop at permission prompts the operator has to answer tab by tab, so **ask the operator** how workers run: `bypassPermissions`, `acceptEdits`, your own mode, or no flag (Orca's new-agent-tab setting decides). Wait for the answer; it becomes the launch's `--permission-mode`, or none.
 
 2. Resolve eight values. Use `gh issue view <n> --json title -q .title` and `git remote -v` only — titles and refs, never bodies. The one exception is the validation list below, which may read CI config.
 
@@ -28,17 +34,28 @@ Your context is the scarce resource here. The spec body, the ticket bodies, the 
    | `__REPO_DIR__` | absolute path of that checkout |
    | `__BASE_REF__` | the branch the stack merges into. The user naming one settles it. Otherwise check `git branch --show-current` against the repo's default branch: when they match, use the default branch silently; when the checkout sits on some other branch, **ask the user** which branch the stack merges into — the default branch, or the one they are on — and wait. A checkout parked on a long-lived branch often means the work targets that branch, and a wrong base miscuts every PR in the stack, so this is never guessed. Prior work already sitting on a feature branch is **not** this value: the workflow's discovery agent finds that branch itself and it becomes the stack's bottom layer. |
    | `__STACK_MODE__` | `native` when both probes in step 1 passed; `chain` when the user chose the fallback |
-   | `__RUNNER__` | `orca` when the run goes on the Orca runner, `workflow` otherwise. It picks the worktree wording: on Orca an isolated agent's worktree is an Orca child of the run's worktree, and reclaim removes it with `orca worktree rm`, never `git worktree remove` |
+   | `__RUNNER__` | `orca` when the operator chose the Orca runner in step 1, `workflow` otherwise. It picks the worktree wording: on Orca an isolated agent's worktree is an Orca child of the run's worktree, and reclaim removes it with `orca worktree rm`, never `git worktree remove` |
    | `__NOTES_DIR__` | `~/.claude/spec-notes/<repo-name>-<spec>`, absolute — durable, outside every checkout, readable by every agent |
    | `__VALIDATION__` | the contents of `<notes-dir>/validation.md`: the project's mechanical checks — format, lint, test — one command per line, `#` for comments. **If the file exists, use it as is.** If not: infer the commands from the tech stack and the repo's CI config (workflow files, Makefile, package scripts — config, never source), show the user the list you intend to write, and **wait for confirmation** exactly as with the stack gate. Then write the file. A project with no discoverable checks gets an empty list, and the user is told so; readiness then reduces to "the tests you ran are green". Every implementer, fixer and gate reviewer runs this same list and returns one result per command, so a check omitted here is a check the run never makes. |
 
 3. Render the script: copy `workflow.template.js` to `<notes-dir>/workflow.js` and substitute the eight placeholders. Substitute, do not rewrite — the publish lane and the frontier scheduling are load-bearing.
 
-4. Launch it against the rendered path. It runs in the background and notifies you when it returns; do not poll it, and do not do any of its work yourself while it runs.
+4. Launch it against the rendered path, on the runner step 1 settled. Do not do any of its work yourself while it runs.
 
-5. Report what it returned: the stack bottom-to-top with each PR's url and state, the merge instructions for the mode the run ended in, tickets that failed, tickets deferred to a human and why, the worktrees the run kept and why, the notes directory, and the **retrospective** — its summary sentences, the path of `validation-report.md`, and its proposals as a list. Say plainly that nothing applies the proposals: the next run reads `validation.md` exactly as it stands, and a human, or a session the human points at the report, edits the list. The workflow's return value is already a summary — pass it on rather than re-deriving it from the PRs.
+   - **Workflow runner.** It runs in the background and notifies you when it returns; do not poll it.
+   - **Orca runner.** Start the runner as its own Orca terminal, titled after the spec, so its log is watchable and the run survives this session:
 
-To iterate after a failure, edit `<notes-dir>/workflow.js` and relaunch it with the runner's resume handle — `resumeFromRunId` on the Workflow runner, `--resume` on the Orca runner, which replays from the journal in `<notes-dir>/orca-run/journal.jsonl`: the unchanged prefix of `agent()` calls returns from cache and only the edited call onward re-runs.
+     ```
+     orca terminal create --title "implement-spec #<spec>: <spec title>" --command "node \"<skill-dir>/orca/runner.mjs\" \"<notes-dir>/workflow.js\" [--permission-mode <mode>]; exit" --json
+     ```
+
+     `<skill-dir>` is the directory holding this file. `--command` is typed into the terminal's shell, so the trailing `; exit` is what makes the terminal exit when the runner does. Keep `result.terminal.handle`; if `result.terminal.surface` is not `visible`, tell the operator the run has no visible tab. Then wait for the terminal to exit — `orca terminal wait --terminal <handle> --for exit --timeout-ms 3600000 --json`, as a background command where your harness has one. An exit 1 with `error.code: "timeout"` only means the hour passed: issue the same wait again. `terminal_handle_stale` means the terminal is already gone. Do not read the terminal's log while it runs.
+
+     Once it has exited, read `<notes-dir>/orca-run/summary.json`: `ok: true` carries the workflow's return value in `result`, `ok: false` carries the runner's `error`. A missing file means the runner died before it could write one — say so, and point the operator at the terminal's log.
+
+5. Report what it returned, and **name the runner the run used** — the Workflow runner, or the Orca runner with its terminal's title: the stack bottom-to-top with each PR's url and state, the merge instructions for the mode the run ended in, tickets that failed, tickets deferred to a human and why, the worktrees the run kept and why, the notes directory, and the **retrospective** — its summary sentences, the path of `validation-report.md`, and its proposals as a list. Say plainly that nothing applies the proposals: the next run reads `validation.md` exactly as it stands, and a human, or a session the human points at the report, edits the list. The workflow's return value is already a summary — pass it on rather than re-deriving it from the PRs.
+
+To iterate after a failure, edit `<notes-dir>/workflow.js` and relaunch it with the runner's resume handle — `resumeFromRunId` on the Workflow runner, `--resume` on the Orca runner (the same launch as step 4 with `--resume` added, waited on the same way), which replays from the journal in `<notes-dir>/orca-run/journal.jsonl`: the unchanged prefix of `agent()` calls returns from cache and only the edited call onward re-runs.
 
 ## What the workflow does
 

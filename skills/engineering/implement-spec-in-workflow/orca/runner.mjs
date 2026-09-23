@@ -10,7 +10,8 @@
 // to <notes-dir>/orca-run for the rendered <notes-dir>/workflow.js. --resume
 // replays the unchanged prefix of agent() calls from that journal without
 // launching anything; the first call not in it, and every call after it, runs
-// live. The Workflow runner's resumeFromRunId promises the same.
+// live. The Workflow runner's resumeFromRunId promises the same. On exit the
+// runner writes summary.json to the state dir: {runner, ok, result | error}.
 //
 // No change to this directory is done until the runner contract test passes
 // under both runners (README.md). The offline tests do not replace it.
@@ -397,17 +398,28 @@ if (isMain) {
     process.exit(2)
   }
   const path = resolve(scriptPath)
+  const dir = stateDir ? resolve(stateDir) : join(dirname(path), 'orca-run')
+  // The arming session reads the run's outcome from this file once the
+  // runner's terminal exits (SKILL.md step 4); a stale one from an earlier
+  // run must never pass for this run's.
+  const summaryPath = join(dir, 'summary.json')
+  rmSync(summaryPath, { force: true })
+  let summary
   try {
     const result = await runScript(readFileSync(path, 'utf8'), {
-      stateDir: stateDir ? resolve(stateDir) : join(dirname(path), 'orca-run'),
+      stateDir: dir,
       fallbackObjective: `workflow ${basename(path)}`,
       resume,
       permissionMode,
     })
     console.log('== Result')
     console.log(JSON.stringify(result, null, 2))
+    summary = { runner: 'orca', ok: true, result }
   } catch (e) {
     console.error(e?.stack ?? String(e))
     process.exitCode = 1
+    summary = { runner: 'orca', ok: false, error: e?.stack ?? String(e) }
   }
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(summaryPath, JSON.stringify(summary, null, 2))
 }

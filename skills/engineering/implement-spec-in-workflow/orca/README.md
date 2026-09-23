@@ -12,8 +12,10 @@ The second runner for `workflow.template.js` (ADR-0011): a Node script, launched
 | `settings.mjs` | every limit the runner enforces, in one table |
 
 ```
-node runner.mjs <rendered-script.js> [--state-dir <dir>] [--resume]
+node runner.mjs <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]
 ```
+
+The state dir defaults to `orca-run/` beside the rendered script, which is `<notes-dir>/orca-run` for a run the skill armed. When the runner exits it writes `summary.json` there — `{"runner": "orca", "ok": true, "result": …}`, or `"ok": false` with the `error` — and that file, not the terminal's log, is what the arming session reads and reports. It is removed at start, so a file left by an earlier run never passes for this one's.
 
 ## Two checks, and when each runs
 

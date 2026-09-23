@@ -9,6 +9,7 @@ import { mkdtempSync, writeFileSync, existsSync, readFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawnSync } from 'child_process'
+import { fileURLToPath } from 'url'
 import { submit } from '../skills/engineering/implement-spec-in-workflow/orca/submit.mjs'
 import { runScript, journalKey, SUBMIT, SETTINGS } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
 import { fakeOrca } from '../skills/engineering/implement-spec-in-workflow/orca/fake-orca.mjs'
@@ -664,4 +665,37 @@ test('worktrees: a dead agent\'s worktree is retained and named in the run\'s re
   assert.equal(result.worktrees_kept[0].path, bPath)
   assert.match(result.worktrees_kept[0].reason, /impl:b\) died before reporting, so it was never removed/)
   assert.ok(lines.some((l) => l.startsWith(`!! kept ${bPath}:`)), lines.join('\n'))
+})
+
+// The entry point the skill launches in its own terminal. A script that starts
+// no agent never reaches Orca, so the real adapter is safe here.
+const RUNNER = fileURLToPath(new URL('../skills/engineering/implement-spec-in-workflow/orca/runner.mjs', import.meta.url))
+function runEntry(body) {
+  const dir = tmp()
+  const script = join(dir, 'workflow.js')
+  writeFileSync(script, body)
+  const code = spawnSync(process.execPath, [RUNNER, script], { encoding: 'utf8' }).status
+  const summaryPath = join(dir, 'orca-run', 'summary.json')
+  return { code, summaryPath, script, summary: () => JSON.parse(readFileSync(summaryPath, 'utf8')) }
+}
+
+test('entry point: the run\'s result is written to summary.json in the state dir, naming the runner', () => {
+  const r = runEntry(`log('hi')\nreturn { stack: [], n: 1 }`)
+  assert.equal(r.code, 0)
+  assert.deepEqual(r.summary(), { runner: 'orca', ok: true, result: { stack: [], n: 1 } })
+})
+
+test('entry point: a script that throws still leaves a summary, with the error, and exits non-zero', () => {
+  const r = runEntry(`throw new Error('boom')`)
+  assert.equal(r.code, 1)
+  assert.equal(r.summary().ok, false)
+  assert.match(r.summary().error, /boom/)
+})
+
+test('entry point: a summary left by an earlier run never passes for this one', () => {
+  const r = runEntry(`return 1`)
+  assert.ok(existsSync(r.summaryPath))
+  writeFileSync(r.script, `process.exit(3)`)
+  assert.equal(spawnSync(process.execPath, [RUNNER, r.script]).status, 3)
+  assert.equal(existsSync(r.summaryPath), false)
 })
