@@ -8,6 +8,7 @@ export function fakeOrca({ worker = async () => {} } = {}) {
   const calls = []
   const dispatches = new Map()
   let seq = 0
+  let runs = 0
 
   function dispatch(id, verb) {
     const d = dispatches.get(id)
@@ -21,13 +22,14 @@ export function fakeOrca({ worker = async () => {} } = {}) {
 
     async runCreate({ objective }) {
       calls.push({ verb: 'runCreate', objective })
-      return { runId: 'run_fake' }
+      return { runId: `run_fake${++runs}` }
     },
 
     async workerStart({ run, prompt, title, agent = 'claude' }) {
       const n = ++seq
       const preamble = { handle: `term_fake${n}`, capability: `cap_fake${n}`, taskId: `task_fake${n}`, dispatchId: `ctx_fake${n}` }
-      const d = { ...preamble, run, title, agent, prompt, settled: false, outcome: null, released: false }
+      // Like Claude Code, the agent titles its own tab from its prompt.
+      const d = { ...preamble, run, title, agent, prompt, tabTitle: prompt.slice(0, 30), settled: false, outcome: null, released: false }
       dispatches.set(d.dispatchId, d)
       calls.push({ verb: 'workerStart', dispatchId: d.dispatchId, title })
       // A worker that throws is an agent that died: its Dispatch fails.
@@ -50,6 +52,13 @@ export function fakeOrca({ worker = async () => {} } = {}) {
       const d = dispatch(id, 'orchestration worker-release')
       calls.push({ verb: 'workerRelease', dispatchId: id })
       d.released = true
+    },
+
+    async terminalRename({ terminal, title }) {
+      const d = [...dispatches.values()].find((x) => x.handle === terminal && !x.released)
+      if (!d) throw new OrcaError('terminal_handle_stale', `no terminal ${terminal}`, 'terminal rename')
+      calls.push({ verb: 'terminalRename', dispatchId: d.dispatchId, title })
+      d.tabTitle = title
     },
 
     // Real Orca settles a Dispatch only for the exact pane and IDs it issued.

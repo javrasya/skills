@@ -61,6 +61,12 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca' } = {}) {
       await call(['orchestration', 'worker-release', '--dispatch', dispatch])
     },
 
+    // Sets the tab label the operator sees. `terminal show` keeps reporting
+    // the agent's own title, so never look a tab up by what this sets.
+    async terminalRename({ terminal, title }) {
+      await call(['terminal', 'rename', '--terminal', terminal, '--title', title])
+    },
+
     // Sent by submit from inside the worker's own pane: Orca settles a
     // Dispatch only on a worker_done from the pane it was dispatched to.
     async workerDone({ from, capability, taskId, dispatchId, subject, body }) {

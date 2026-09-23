@@ -20,12 +20,42 @@ import { orcaCli } from './orca-cli.mjs'
 
 export const SUBMIT = fileURLToPath(new URL('./submit.mjs', import.meta.url))
 
+// The runner settings table. Every limit the runner enforces lives here.
+export const SETTINGS = Object.freeze({
+  // Agents live at once — started and not yet released. Orca's own cap for
+  // this runner, not the Workflow runner's; further agent() calls queue.
+  MAX_LIVE: 10,
+  // How often a live worker is asked whether it has settled.
+  POLL_MS: 5000,
+})
+
 // The same loading the workflow simulator does: the script's one ESM line
 // becomes a plain const, and the body runs as an async function body so its
-// top-level `return` is the run's result.
+// top-level `return` is the run's result. meta is also handed out as it is
+// declared, so the Run's objective can name the spec the script is for.
 export function loadScript(text) {
-  const body = text.replace(/^export const meta/m, 'const meta')
-  return new Function('agent', 'parallel', 'phase', 'log', 'return (async () => {' + body + '\n})()')
+  const body = text.replace(/^export const meta\s*=/m, 'const meta = __meta.value =')
+  return new Function('agent', 'parallel', 'phase', 'log', '__meta', 'return (async () => {' + body + '\n})()')
+}
+
+export const objectiveOf = (meta, fallback) => [meta?.name, meta?.description].filter(Boolean).join(': ') || fallback
+
+// FIFO slots: a freed slot passes straight to the longest-waiting call.
+function slots(max) {
+  let live = 0
+  const waiting = []
+  return {
+    async acquire(onQueue) {
+      if (live < max) return void live++
+      onQueue()
+      await new Promise((r) => waiting.push(r))
+    },
+    release() {
+      const next = waiting.shift()
+      if (next) next()
+      else live--
+    },
+  }
 }
 
 export function workerPrompt(prompt, { schemaPath, resultPath, payloadPath }) {
@@ -78,8 +108,12 @@ export function readJournal(path) {
 const slug = (s) => s.replace(/[^\w.-]+/g, '_').slice(0, 60)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) => console.log(s), pollMs = 5000, objective = 'workflow run', resume = false }) {
+export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) => console.log(s), settings = {}, fallbackObjective = 'workflow run', resume = false }) {
+  const { MAX_LIVE, POLL_MS } = { ...SETTINGS, ...settings }
   const script = loadScript(text)
+  const meta = {}
+  const live = slots(MAX_LIVE)
+  // One Run per workflow run: every agent's worker is dispatched into it.
   let run = null
   let currentPhase = null
   let count = 0
@@ -145,17 +179,34 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) =>
     // A state dir reused across runs must not hand this agent an older result.
     rmSync(resultPath, { force: true })
 
-    run ??= orca.runCreate({ objective })
+    run ??= orca.runCreate({ objective: objectiveOf(meta.value, fallbackObjective) })
     const { runId } = await run
+    await live.acquire(() => out(`.. ${title}: queued, ${MAX_LIVE} agents are live`))
+    try {
+      return await supervise(runId, prompt, opts, { key, n, title, schemaPath, resultPath, payloadPath })
+    } finally {
+      live.release()
+    }
+  }
+
+  async function supervise(runId, prompt, opts, { key, n, title, schemaPath, resultPath, payloadPath }) {
     journal({ type: 'started', key, n, title })
     const w = await orca.workerStart({ run: runId, prompt: workerPrompt(prompt, { schemaPath, resultPath, payloadPath }), title })
     out(`>> ${title}: started as dispatch ${w.dispatchId}${w.terminal ? ` in terminal ${w.terminal}` : ''}`)
     if (w.mode !== 'terminal' || !w.terminal) {
       out(`!! ${title} has no terminal tab to watch (mode: ${w.mode ?? 'unknown'}). Orca's setting for new agent tabs decides this; set it to terminal. ${w.modeDetail}`)
+    } else {
+      // The agent titles its own tab and drops --task-title (ADR-0011), so the
+      // tab is renamed to the title the operator finds it by.
+      try {
+        await orca.terminalRename({ terminal: w.terminal, title })
+      } catch (e) {
+        out(`!! ${title}: could not title its tab: ${e.message}`)
+      }
     }
 
     let s
-    while (!(s = await orca.workerShow({ dispatch: w.dispatchId })).settled) await sleep(pollMs)
+    while (!(s = await orca.workerShow({ dispatch: w.dispatchId })).settled) await sleep(POLL_MS)
     const result = readResult(resultPath, opts.schema)
     try {
       await orca.workerRelease({ dispatch: w.dispatchId })
@@ -171,7 +222,7 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) =>
     return value
   }
 
-  return script(agent, parallel, phase, log)
+  return script(agent, parallel, phase, log, meta)
 }
 
 const isMain = process.argv[1] && resolve(process.argv[1]).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase()
@@ -190,7 +241,7 @@ if (isMain) {
   try {
     const result = await runScript(readFileSync(path, 'utf8'), {
       stateDir: stateDir ?? join(dirname(path), 'orca-run'),
-      objective: `workflow ${basename(path)}`,
+      fallbackObjective: `workflow ${basename(path)}`,
       resume,
     })
     console.log('== Result')

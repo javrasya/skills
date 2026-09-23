@@ -1,5 +1,6 @@
-// Offline tests for the Orca runner: submit, one agent() round trip, and
-// resume from the journal, with the fake Orca standing in for the CLI adapter.
+// Offline tests for the Orca runner: submit, the agent() round trip, the live
+// cap, how a run is laid out in Orca, and resume from the journal, with the
+// fake Orca standing in for the CLI adapter.
 //   node scripts/test-orca-runner.mjs
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -8,7 +9,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawnSync } from 'child_process'
 import { submit } from '../skills/engineering/implement-spec-in-workflow/orca/submit.mjs'
-import { runScript, journalKey, SUBMIT } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
+import { runScript, journalKey, SUBMIT, SETTINGS } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
 import { fakeOrca } from '../skills/engineering/implement-spec-in-workflow/orca/fake-orca.mjs'
 
 const SCHEMA = {
@@ -33,6 +34,8 @@ const BAD_ERRORS = [
 ]
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'orca-runner-test-'))
+const FAST = { POLL_MS: 1 }
+const TEMPLATE = new URL('../skills/engineering/implement-spec-in-workflow/workflow.template.js', import.meta.url)
 
 // A dispatched worker as submit sees it: its preamble IDs and its files.
 async function startedWorker() {
@@ -139,7 +142,7 @@ test('agent(): a worker that repairs its payload returns a schema-valid object t
       assert.equal((await runSubmit(argv, orca)).code, 0)
     },
   })
-  const result = await runScript(SCRIPT, { orca, stateDir: tmp(), out: (s) => lines.push(s), pollMs: 1 })
+  const result = await runScript(SCRIPT, { orca, stateDir: tmp(), out: (s) => lines.push(s), settings: FAST })
   assert.deepEqual(result, { r: GOOD })
 
   const verbs = orca.calls.map((c) => c.verb)
@@ -164,7 +167,7 @@ test('agent(): the runner re-validates, so a result that skipped submit reaches 
       await orca.workerDone({ from: preamble.handle, capability: preamble.capability, taskId: preamble.taskId, dispatchId: preamble.dispatchId, subject: 's', body: 'b' })
     },
   })
-  const result = await runScript(SCRIPT, { orca, stateDir: tmp(), out: (s) => lines.push(s), pollMs: 1 })
+  const result = await runScript(SCRIPT, { orca, stateDir: tmp(), out: (s) => lines.push(s), settings: FAST })
   assert.deepEqual(result, { r: null })
   assert.ok(lines.some((l) => l.includes('recorded result fails its schema') && l.includes('$.count: expected integer, got string')), lines.join('\n'))
 })
@@ -200,7 +203,7 @@ test('resume: the unchanged prefix replays from the journal without launching; t
   const stateDir = tmp()
   const go = (script, run, resume) => {
     const orca = answering(run)
-    return runScript(script, { orca, stateDir, out: () => {}, pollMs: 1, resume }).then((result) => ({ orca, result }))
+    return runScript(script, { orca, stateDir, out: () => {}, settings: FAST, resume }).then((result) => ({ orca, result }))
   }
 
   const first = await go(chain('Build it.'), 1, false)
@@ -236,4 +239,97 @@ test('resume: the key covers every option, in any order', () => {
   assert.equal(journalKey('p', opts), journalKey('p', { schema: { properties: { x: { type: 'string' } }, type: 'object' }, phase: 'P', label: 'a' }))
   assert.notEqual(journalKey('p', opts), journalKey('p', { ...opts, model: 'opus' }))
   assert.notEqual(journalKey('p', opts), journalKey('q', opts))
+})
+
+// A worker that holds its slot for `hold` ms, then submits a valid result.
+const submitting = (hold = 0) => async ({ prompt, preamble, orca }) => {
+  await new Promise((r) => setTimeout(r, hold))
+  const argv = submitArgvIn(prompt, preamble)
+  writeFileSync(argv[argv.indexOf('--payload') + 1], JSON.stringify(GOOD))
+  assert.equal((await runSubmit(argv, orca)).code, 0)
+}
+
+// Most workers live at once over the run: started and not yet released.
+function liveHighWater(calls) {
+  let live = 0
+  let max = 0
+  for (const c of calls) {
+    if (c.verb === 'workerStart') max = Math.max(max, ++live)
+    if (c.verb === 'workerRelease') live--
+  }
+  return max
+}
+
+const fanOut = (n, phase) => `const S = ${JSON.stringify(SCHEMA)}
+return await parallel(Array.from({ length: ${n} }, (_, i) => () => agent('Name a thing.', { label: 'fan:' + i, phase: '${phase}', schema: S })))`
+
+test('live cap: at most MAX_LIVE workers are live at once; the rest queue and run as slots free', async () => {
+  assert.equal(SETTINGS.MAX_LIVE, 10)
+  const lines = []
+  const orca = fakeOrca({ worker: submitting(5) })
+  const result = await runScript(fanOut(25, 'Fan'), { orca, stateDir: tmp(), out: (s) => lines.push(s), settings: FAST })
+  assert.deepEqual(result, Array(25).fill(GOOD))
+  assert.equal(liveHighWater(orca.calls), 10)
+  assert.equal(orca.calls.filter((c) => c.verb === 'workerStart').length, 25)
+  assert.equal(lines.filter((l) => l.endsWith(': queued, 10 agents are live')).length, 15, lines.join('\n'))
+})
+
+test('live cap: a worker that dies frees its slot for the next queued call', async () => {
+  let n = 0
+  const orca = fakeOrca({
+    worker: async (w) => {
+      if (++n === 1) throw new Error('agent died')
+      return submitting()(w)
+    },
+  })
+  const result = await runScript(fanOut(2, 'Fan'), { orca, stateDir: tmp(), out: () => {}, settings: { ...FAST, MAX_LIVE: 1 } })
+  assert.deepEqual(result, [null, GOOD])
+  assert.equal(liveHighWater(orca.calls), 1)
+})
+
+test('one run: every agent of a workflow run is dispatched into one Orca Run whose objective names the spec', async () => {
+  const orca = fakeOrca({ worker: submitting() })
+  const script = `export const meta = { name: 'implement-spec-21', description: 'Implement spec #21 as a stack of PRs', phases: [] }
+const S = ${JSON.stringify(SCHEMA)}
+await parallel([1, 2, 3].map((i) => () => agent('Name a thing.', { label: 'impl:#' + i, phase: 'Implement', schema: S })))
+return await agent('Name a thing.', { label: 'finalize', phase: 'Finalize', schema: S })`
+  assert.deepEqual(await runScript(script, { orca, stateDir: tmp(), out: () => {}, settings: FAST }), GOOD)
+  const creates = orca.calls.filter((c) => c.verb === 'runCreate')
+  assert.equal(creates.length, 1)
+  assert.equal(creates[0].objective, 'implement-spec-21: Implement spec #21 as a stack of PRs')
+  assert.equal(orca.dispatches.size, 4)
+  assert.deepEqual([...new Set([...orca.dispatches.values()].map((d) => d.run))], ['run_fake1'])
+})
+
+test('one run: the rendered workflow template names its spec in the Run objective', async () => {
+  const text = readFileSync(TEMPLATE, 'utf8').replace(/__SPEC__/g, '227').replace(/__[A-Z_]+__/g, 'x')
+  const orca = fakeOrca({ worker: async () => { throw new Error('agent died') } })
+  await runScript(text, { orca, stateDir: tmp(), out: () => {}, settings: FAST }).catch(() => {})
+  const creates = orca.calls.filter((c) => c.verb === 'runCreate')
+  assert.equal(creates.length, 1)
+  assert.match(creates[0].objective, /spec #227\b/)
+})
+
+test('titles: every agent is titled [Phase] label, on its task and on its tab', async () => {
+  const orca = fakeOrca({ worker: submitting() })
+  const script = `const S = ${JSON.stringify(SCHEMA)}
+phase('Implement')
+await agent('Name a thing.', { label: 'impl:#227', schema: S })
+await agent('Name a thing.', { label: 'gate:#227:r2', phase: 'Gate', schema: S })
+await agent('Name a thing.', { schema: S })
+return null`
+  await runScript(script, { orca, stateDir: tmp(), out: () => {}, settings: FAST })
+  const want = ['[Implement] impl:#227', '[Gate] gate:#227:r2', '[Implement] agent-3']
+  const ds = [...orca.dispatches.values()]
+  assert.deepEqual(ds.map((d) => d.title), want)
+  assert.deepEqual(ds.map((d) => d.tabTitle), want)
+})
+
+test('titles: a tab that cannot be renamed is reported, and the agent still runs', async () => {
+  const lines = []
+  const orca = fakeOrca({ worker: submitting() })
+  orca.terminalRename = async () => { throw new Error('terminal_handle_stale') }
+  const result = await runScript(SCRIPT, { orca, stateDir: tmp(), out: (s) => lines.push(s), settings: FAST })
+  assert.deepEqual(result, { r: GOOD })
+  assert.ok(lines.some((l) => l.startsWith('!! [Tracer] tracer:thing: could not title its tab')), lines.join('\n'))
 })
