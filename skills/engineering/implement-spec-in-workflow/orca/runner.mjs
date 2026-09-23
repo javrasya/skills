@@ -11,6 +11,9 @@
 // replays the unchanged prefix of agent() calls from that journal without
 // launching anything; the first call not in it, and every call after it, runs
 // live. The Workflow runner's resumeFromRunId promises the same.
+//
+// No change to this directory is done until the runner contract test passes
+// under both runners (README.md). The offline tests do not replace it.
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, appendFileSync } from 'fs'
 import { createHash } from 'crypto'
 import { basename, dirname, join, resolve } from 'path'
