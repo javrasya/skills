@@ -95,6 +95,14 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
     return { dispatchId: r.dispatchId, taskId: r.taskId, mode: r.mode?.mode ?? null, modeDetail: r.mode?.detail ?? '', terminal: tab?.id ?? null, worktree }
   }
 
+  // The path of the worktree `worktree create` made: its `path`, or the path
+  // half of its `<repoId>::<path>` id.
+  function createdPath(r) {
+    const w = r?.worktree ?? r ?? {}
+    if (typeof w.path === 'string' && w.path) return w.path
+    return typeof w.id === 'string' && w.id.includes('::') ? w.id.slice(w.id.indexOf('::') + 2) : null
+  }
+
   return {
     // Run from the runner's own terminal: Orca binds the Run to the caller
     // and refuses a mutation made on another terminal's behalf.
@@ -108,26 +116,51 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
     // worktree of it. Either way `worktree` is the path it runs in.
     async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, child = null }) {
       const command = launchCommand({ harness, model, effort, permissionMode })
-      const where = child ? ['--worktree', 'new-child', '--name', child.name, '--display-name', child.displayName] : ['--worktree', 'current']
-      const start = ['orchestration', 'worker-start', '--run', run, '--spec', prompt, '--task-title', title, ...where]
+      const start = ['orchestration', 'worker-start', '--run', run, '--spec', prompt, '--task-title', title]
       if (!command) {
+        const where = child ? ['--worktree', 'new-child', '--name', child.name, '--display-name', child.displayName] : ['--worktree', 'current']
         const launch = [...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : [])]
-        return receipt(await call([...start, '--agent', harness, ...launch]))
+        return receipt(await call([...start, ...where, '--agent', harness, ...launch]))
       }
       // Orca's documented route for custom argv under supervision: create the
-      // agent's terminal, then worker-start takes ownership of it. The
-      // terminal opens in the runner's worktree, which `current` names.
-      const t = await call(['terminal', 'create', '--title', title, '--command', command])
-      const handle = t.terminal.handle
+      // agent's terminal, then worker-start takes ownership of it. Without
+      // `child` the terminal opens in the runner's worktree, which `current`
+      // names. With it, a process already running cannot be moved into a
+      // worktree worker-start makes, so the child is made first, the terminal
+      // opens in it, and worker-start is told that is where it runs.
+      let worktree = null
+      let place = ['--worktree', 'current']
+      let terminalIn = []
+      if (child) {
+        const c = await call(['worktree', 'create', '--name', child.name, '--parent-worktree', 'current'])
+        worktree = createdPath(c)
+        if (!worktree) throw new OrcaError('bad_output', `worktree create named no path for ${child.name}`, 'worktree create')
+        place = terminalIn = ['--worktree', `path:${worktree}`]
+        // Orca opens a plain shell in a new worktree; the agent gets its own.
+        if (c?.startupTerminal?.handle) await closeQuietly(c.startupTerminal.handle)
+        // worktree create has no --display-name; new-child sets it on the agent-launch path.
+        await call(['worktree', 'set', ...place, '--display-name', child.displayName]).catch(() => {})
+      }
+      let handle = null
       try {
+        const t = await call(['terminal', 'create', ...terminalIn, '--title', title, '--command', command])
+        handle = t.terminal.handle
         await waitIdle(handle, command)
-        const r = await call([...start, '--terminal', handle])
+        const r = await call([...start, ...place, '--terminal', handle])
         ownTerminals.set(r.dispatchId, handle)
-        return { ...receipt(r), mode: 'terminal', terminal: handle }
+        return { ...receipt(r), mode: 'terminal', terminal: handle, worktree: worktree ?? receipt(r).worktree }
       } catch (e) {
-        await closeQuietly(handle)
+        if (handle) await closeQuietly(handle)
+        // The caller names a worktree made for a worker that never started.
+        if (worktree && e instanceof Object) e.worktree = worktree
         throw e
       }
+    },
+
+    // Board status of a worktree the runner created, by path: todo,
+    // in-progress, in-review or completed.
+    async worktreeStatus({ worktree, status }) {
+      await call(['worktree', 'set', '--worktree', `path:${worktree}`, '--workspace-status', status])
     },
 
     async workerShow({ dispatch }) {

@@ -11,7 +11,7 @@ import { join } from 'path'
 import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { submit } from '../skills/engineering/implement-spec-in-workflow/orca/submit.mjs'
-import { runScript, journalKey, SUBMIT, SETTINGS } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
+import { runScript, journalKey, failureSummary, SUBMIT, SETTINGS } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
 import { fakeOrca } from '../skills/engineering/implement-spec-in-workflow/orca/fake-orca.mjs'
 import { RUNNER_SETTINGS } from '../skills/engineering/implement-spec-in-workflow/orca/settings.mjs'
 import { orcaCli } from '../skills/engineering/implement-spec-in-workflow/orca/orca-cli.mjs'
@@ -690,6 +690,7 @@ test('entry point: a script that throws still leaves a summary, with the error, 
   assert.equal(r.code, 1)
   assert.equal(r.summary().ok, false)
   assert.match(r.summary().error, /boom/)
+  assert.deepEqual(r.summary().worktrees_kept, [])
 })
 
 test('entry point: a summary left by an earlier run never passes for this one', () => {
@@ -698,4 +699,213 @@ test('entry point: a summary left by an earlier run never passes for this one', 
   writeFileSync(r.script, `process.exit(3)`)
   assert.equal(spawnSync(process.execPath, [RUNNER, r.script]).status, 3)
   assert.equal(existsSync(r.summaryPath), false)
+})
+
+// --- seams between the runner's pieces ---------------------------------------
+
+// A custom launch (a permission mode, or pi) into a child worktree: the child
+// is made first and the agent's terminal opens in it, since a running process
+// cannot be moved into a worktree worker-start makes afterwards.
+const CHILD = { name: 'run_1-3', displayName: '[Implement] impl:#1' }
+const CHILD_PATH = 'C:/wt/run_1-3'
+const childCli = (replies = {}) => recordingCli({ 'worktree create': { worktree: { id: `repo::${CHILD_PATH}`, path: CHILD_PATH }, startupTerminal: { handle: 'term_shell' } }, ...replies })
+
+for (const [what, launch, command] of [
+  ['a Claude worker in a permission mode', { harness: 'claude', model: 'opus', permissionMode: 'auto' }, 'claude --permission-mode auto --model opus'],
+  ['a pi worker', { harness: 'pi', model: 'openai/gpt-5' }, 'pi --approve --model openai/gpt-5'],
+]) {
+  test(`orca-cli: ${what} isolated in a child worktree runs its terminal in that child, made first`, async () => {
+    const { argvs, orca } = childCli()
+    const w = await orca.workerStart({ ...START, ...launch, child: CHILD })
+    assert.deepEqual(verbsOf(argvs), ['worktree create', 'terminal close', 'worktree set', 'terminal create', 'terminal wait', 'orchestration worker-start'])
+    const [create, close, set, term, , start] = argvs
+    assert.equal(flag(create, '--name'), CHILD.name)
+    assert.equal(flag(create, '--parent-worktree'), 'current')
+    assert.equal(flag(close, '--terminal'), 'term_shell')
+    assert.equal(flag(set, '--display-name'), CHILD.displayName)
+    assert.equal(flag(term, '--worktree'), `path:${CHILD_PATH}`)
+    assert.equal(flag(term, '--command'), command)
+    assert.equal(flag(start, '--worktree'), `path:${CHILD_PATH}`)
+    assert.equal(flag(start, '--terminal'), 'term_own')
+    for (const f of ['--name', '--display-name']) assert.equal(start.includes(f), false, `worker-start refuses ${f} for an existing worktree`)
+    assert.equal(w.worktree, CHILD_PATH)
+    assert.equal(w.terminal, 'term_own')
+  })
+}
+
+test('orca-cli: a custom launch that fails after its child worktree was made names that worktree on the error', async () => {
+  const { argvs, orca } = childCli({ 'terminal wait': { wait: { satisfied: false } } })
+  const e = await orca.workerStart({ ...START, harness: 'pi', child: CHILD }).catch((x) => x)
+  assert.match(e.message, /agent_not_ready/)
+  assert.equal(e.worktree, CHILD_PATH)
+  assert.equal(flag(argvs.at(-1), '--terminal'), 'term_own', 'its agent terminal is closed')
+})
+
+test('orca-cli: a worktree\'s board status is set by path', async () => {
+  const { argvs, orca } = recordingCli()
+  await orca.worktreeStatus({ worktree: CHILD_PATH, status: 'in-review' })
+  assert.deepEqual(argvs, [['worktree', 'set', '--worktree', `path:${CHILD_PATH}`, '--workspace-status', 'in-review']])
+})
+
+// Board status: in progress while an isolated agent works, in review for a
+// Gate agent, completed once an agent reports the PR it published.
+const PUB_SCHEMA = { type: 'object', required: ['worktree', 'pr_url', 'published'], properties: { worktree: { type: 'string' }, pr_url: { type: 'string' }, published: { type: 'boolean' } } }
+const BOARD_SCRIPT = `const WT = ${JSON.stringify(WT_SCHEMA)}
+const PUB = ${JSON.stringify(PUB_SCHEMA)}
+await agent('Build.', { label: 'impl', phase: 'Implement', schema: WT, isolation: 'worktree' })
+await agent('Die.', { label: 'dead', phase: 'Implement', schema: WT, isolation: 'worktree' })
+await agent('Gate.', { label: 'gate', phase: 'Gate', schema: WT, isolation: 'worktree' })
+await agent('Publish.', { label: 'publish', phase: 'Stack', schema: PUB, isolation: 'worktree' })
+await agent('Refuse.', { label: 'held', phase: 'Stack', schema: PUB, isolation: 'worktree' })
+return await agent('Plain.', { label: 'plain', phase: 'Finalize', schema: WT })`
+
+const boardOrca = () => fakeOrca({
+  worker: async ({ prompt, preamble, worktree, orca }) => {
+    if (prompt.startsWith('Die.')) throw new Error('the agent died')
+    const pub = prompt.startsWith('Publish.') || prompt.startsWith('Refuse.')
+    return submitValue(prompt, preamble, orca, pub ? { worktree, pr_url: 'https://x/pull/1', published: prompt.startsWith('Publish.') } : { worktree })
+  },
+})
+
+test('board status: in-progress while an isolated agent works, in-review for Gate, completed once it published', async () => {
+  const orca = boardOrca()
+  await runScript(BOARD_SCRIPT, { orca, stateDir: tmp(), out: () => {}, settings: FAST })
+  const history = (title) => orca.calls.filter((c) => c.verb === 'worktreeStatus' && c.worktree === startedAs(orca, title).worktree).map((c) => c.status)
+  assert.deepEqual(history('[Implement] impl'), ['in-progress'])
+  assert.deepEqual(history('[Implement] dead'), ['in-progress'], 'a dead agent\'s worktree is retained as it stood')
+  assert.deepEqual(history('[Gate] gate'), ['in-review'])
+  assert.deepEqual(history('[Stack] publish'), ['in-progress', 'completed'])
+  assert.deepEqual(history('[Stack] held'), ['in-progress'], 'a publisher that did not publish is not done')
+  assert.deepEqual(history('[Finalize] plain'), [], 'the run\'s own worktree is never touched')
+  assert.equal(orca.worktrees.get(startedAs(orca, '[Stack] publish').worktree).status, 'completed')
+})
+
+test('board status: a status Orca refuses is logged, and the agent still delivers', async () => {
+  const lines = []
+  const orca = boardOrca()
+  orca.worktreeStatus = async () => { throw new Error('orca worktree set: selector_not_found') }
+  const result = await runScript(BOARD_SCRIPT, { orca, stateDir: tmp(), out: (s) => lines.push(s), settings: FAST })
+  assert.equal(result.worktree, 'C:/fake/run')
+  assert.ok(lines.some((l) => l.startsWith("!! [Gate] gate: could not set its worktree's board status to in-review")), lines.join('\n'))
+})
+
+// Resume, as the Workflow runner does it: a dead agent is journaled as failed,
+// and a resume runs it live again instead of replaying its null.
+async function submitText(prompt, preamble, orca, text) {
+  const argv = submitArgvIn(prompt, preamble)
+  writeFileSync(argv[argv.indexOf('--payload') + 1], text)
+  assert.equal((await runSubmit(argv, orca)).code, 0)
+}
+
+test('resume: an agent that died runs live again on resume, and every call after it', async () => {
+  const stateDir = tmp()
+  const first = fakeOrca({
+    worker: async ({ prompt, preamble, orca }) => {
+      if (prompt.startsWith('Build it.')) throw new Error('the agent died')
+      return submitText(prompt, preamble, orca, `${prompt.split('\n')[0]} @1`)
+    },
+  })
+  assert.deepEqual(await runScript(chain('Build it.'), { orca: first, stateDir, out: () => {}, settings: FAST }), ['Plan it. @1', null, 'Check it. @1'])
+  const journal = readFileSync(join(stateDir, 'journal.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+  const b = journal.filter((e) => e.key === journalKey('Build it.', { label: 'b', phase: 'Chain' }) && e.type !== 'started')
+  assert.deepEqual(b.map((e) => [e.type, 'result' in e]), [['failed', false]])
+
+  const lines = []
+  const second = answering(2)
+  const result = await runScript(chain('Build it.'), { orca: second, stateDir, out: (s) => lines.push(s), settings: FAST, resume: true })
+  assert.deepEqual(result, ['Plan it. @1', 'Build it. @2', 'Check it. @2'])
+  assert.deepEqual(started(second), ['[Chain] b', '[Chain] c'])
+  assert.ok(lines.includes('>> [Chain] b: failed in the last run; this call and every one after it run live'), lines.join('\n'))
+})
+
+test('resume: a failed call keeps its place among identical calls, so a later one\'s result is never replayed into it', async () => {
+  const stateDir = tmp()
+  const script = `const x = await agent('Same.', { label: 's' })
+const y = await agent('Same.', { label: 's' })
+return [x, y]`
+  let n = 0
+  const first = fakeOrca({
+    worker: async ({ prompt, preamble, orca }) => {
+      if (++n === 1) throw new Error('the agent died')
+      return submitText(prompt, preamble, orca, 'Same. @1')
+    },
+  })
+  assert.deepEqual(await runScript(script, { orca: first, stateDir, out: () => {}, settings: FAST }), [null, 'Same. @1'])
+  const second = answering(2)
+  assert.deepEqual(await runScript(script, { orca: second, stateDir, out: () => {}, settings: FAST, resume: true }), ['Same. @2', 'Same. @2'])
+  assert.equal(started(second).length, 2)
+})
+
+test('resume: a dead agent\'s worktree from the earlier run stays named in the result, resume after resume', async () => {
+  const stateDir = tmp()
+  const one = worktreeOrca()
+  const r1 = await runScript(WT_SCRIPT, { orca: one, stateDir, out: () => {}, settings: FAST })
+  const deadPath = startedAs(one, '[Implement] impl:b').worktree
+  assert.deepEqual(r1.worktrees_kept.map((k) => k.path), [deadPath])
+
+  // impl:b re-runs live in a new worktree and delivers; its old one is still on disk.
+  const two = fakeOrca({
+    worker: async ({ prompt, preamble, worktree, orca }) =>
+      submitValue(prompt, preamble, orca, prompt.startsWith('Reclaim') ? { removed: 0 } : { worktree }),
+  })
+  two.runCreate = async () => ({ runId: 'run_second' })
+  const lines = []
+  const r2 = await runScript(WT_SCRIPT, { orca: two, stateDir, out: (s) => lines.push(s), settings: FAST, resume: true })
+  assert.notEqual(r2.b.worktree, deadPath)
+  assert.deepEqual(r2.worktrees_kept.map((k) => k.path), [deadPath])
+  assert.match(r2.worktrees_kept[0].reason, /impl:b\) died before reporting/)
+  assert.ok(lines.some((l) => l.startsWith(`!! kept ${deadPath}:`)), lines.join('\n'))
+
+  const three = fakeOrca()
+  const r3 = await runScript(WT_SCRIPT, { orca: three, stateDir, out: () => {}, settings: FAST, resume: true })
+  assert.deepEqual(three.calls, [], 'everything replays')
+  assert.deepEqual(r3.worktrees_kept.map((k) => k.path), [deadPath])
+})
+
+test('worktrees: a worktree made for a worker that never started is retained and named', async () => {
+  const orca = fakeOrca()
+  orca.workerStart = async () => { throw Object.assign(new Error('orca terminal wait: agent_not_ready'), { worktree: 'C:/fake/worktrees/orphan' }) }
+  const script = `const a = await agent('Build.', { label: 'impl', phase: 'Implement', isolation: 'worktree' })
+return { a, worktrees_kept: [] }`
+  const result = await runScript(script, { orca, stateDir: tmp(), out: () => {}, settings: FAST })
+  assert.equal(result.a, null)
+  assert.deepEqual(result.worktrees_kept.map((k) => k.path), ['C:/fake/worktrees/orphan'])
+  assert.match(result.worktrees_kept[0].reason, /whose worker never started/)
+})
+
+test('worktrees: a run that throws still names what it kept, and its failure summary carries it', async () => {
+  const orca = worktreeOrca()
+  const script = `const b = await agent('Build b.', { label: 'layer0', phase: 'Setup', schema: ${JSON.stringify(WT_SCHEMA)}, isolation: 'worktree' })
+if (!b) throw new Error('layer-0 PR failed')
+return b`
+  const e = await runScript(script, { orca, stateDir: tmp(), out: () => {}, settings: FAST }).catch((x) => x)
+  assert.match(e.message, /layer-0 PR failed/)
+  const deadPath = startedAs(orca, '[Setup] layer0').worktree
+  const summary = failureSummary(e)
+  assert.equal(summary.ok, false)
+  assert.match(summary.error, /layer-0 PR failed/)
+  assert.deepEqual(summary.worktrees_kept.map((k) => k.path), [deadPath])
+  assert.match(summary.worktrees_kept[0].reason, /layer0\) died before reporting/)
+})
+
+test('one run: a Run Orca cannot create is that agent\'s null, and the next agent() creates it', async () => {
+  const lines = []
+  const orca = fakeOrca({ worker: submitting() })
+  const create = orca.runCreate
+  let tries = 0
+  orca.runCreate = async (a) => {
+    if (++tries === 1) throw new Error('orca orchestration run-create: runtime_unavailable')
+    return create(a)
+  }
+  const script = `const S = ${JSON.stringify(SCHEMA)}
+const a = await agent('Name a thing.', { label: 'a', schema: S })
+const b = await agent('Name a thing.', { label: 'b', schema: S })
+return [a, b]`
+  const stateDir = tmp()
+  assert.deepEqual(await runScript(script, { orca, stateDir, out: (s) => lines.push(s), settings: FAST }), [null, GOOD])
+  assert.equal(tries, 2)
+  assert.deepEqual(started(orca), ['[Run] b'])
+  assert.ok(lines.some((l) => l.includes("[Run] a: Orca could not create this run's Run") && l.includes('runtime_unavailable')), lines.join('\n'))
+  const journal = readFileSync(join(stateDir, 'journal.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+  assert.equal(journal.find((e) => e.title === '[Run] a').type, 'failed')
 })
