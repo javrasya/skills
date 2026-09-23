@@ -89,7 +89,10 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
 
   function receipt(r) {
     const tab = (r.effects || []).find((e) => e.kind === 'terminal' && e.role === 'agent')
-    return { dispatchId: r.dispatchId, taskId: r.taskId, mode: r.mode?.mode ?? null, modeDetail: r.mode?.detail ?? '', terminal: tab?.id ?? null }
+    // A worktree effect's id is the `<repoId>::<path>` selector.
+    const wt = (r.effects || []).find((e) => e.kind === 'worktree')?.id ?? null
+    const worktree = wt && wt.includes('::') ? wt.slice(wt.indexOf('::') + 2) : wt
+    return { dispatchId: r.dispatchId, taskId: r.taskId, mode: r.mode?.mode ?? null, modeDetail: r.mode?.detail ?? '', terminal: tab?.id ?? null, worktree }
   }
 
   return {
@@ -100,9 +103,13 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       return { runId: r.run?.id ?? r.id }
     },
 
-    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode }) {
+    // No `child`: the worker runs in the coordinator's worktree — the runner's,
+    // which is the run's. `child: { name, displayName }`: in a new Orca child
+    // worktree of it. Either way `worktree` is the path it runs in.
+    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, child = null }) {
       const command = launchCommand({ harness, model, effort, permissionMode })
-      const start = ['orchestration', 'worker-start', '--run', run, '--spec', prompt, '--task-title', title, '--worktree', 'current']
+      const where = child ? ['--worktree', 'new-child', '--name', child.name, '--display-name', child.displayName] : ['--worktree', 'current']
+      const start = ['orchestration', 'worker-start', '--run', run, '--spec', prompt, '--task-title', title, ...where]
       if (!command) {
         const launch = [...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : [])]
         return receipt(await call([...start, '--agent', harness, ...launch]))

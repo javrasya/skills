@@ -5,11 +5,13 @@
 // `exited`, `idle`, `waiting` or `lastOutputAt`, and `onNudge` to react to a
 // nudge. `calls` records every Orca call in order, stamped with `clock`'s time
 // when one is given, so a test can assert on the sequence and its timing.
+// `worktrees` holds every worktree Orca knows, the run's own included, by path.
 import { OrcaError } from './orca-cli.mjs'
 
-export function fakeOrca({ worker = async () => {}, clock = null } = {}) {
+export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run' } = {}) {
   const calls = []
   const dispatches = new Map()
+  const worktrees = new Map([[runWorktree, { parent: null, name: null, displayName: null, removed: false }]])
   let seq = 0
   let runs = 0
   const record = (c) => calls.push(clock ? { ...c, at: clock.now() } : c)
@@ -29,31 +31,38 @@ export function fakeOrca({ worker = async () => {}, clock = null } = {}) {
   const orca = {
     calls,
     dispatches,
+    worktrees,
 
     async runCreate({ objective }) {
       record({ verb: 'runCreate', objective })
       return { runId: `run_fake${++runs}` }
     },
 
-    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode }) {
+    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, child = null }) {
       const n = ++seq
       const preamble = { handle: `term_fake${n}`, capability: `cap_fake${n}`, taskId: `task_fake${n}`, dispatchId: `ctx_fake${n}` }
       const launch = { harness, model, effort, permissionMode }
+      let worktree = runWorktree
+      if (child) {
+        worktree = `C:/fake/worktrees/${child.name}`
+        if (worktrees.has(worktree)) throw new OrcaError('worktree_exists', `${worktree} already exists`, 'orchestration worker-start')
+        worktrees.set(worktree, { parent: runWorktree, name: child.name, displayName: child.displayName, removed: false })
+      }
       // Like Claude Code, the agent titles its own tab from its prompt.
       const d = {
-        ...preamble, run, title, ...launch, prompt, tabTitle: prompt.slice(0, 30), settled: false, outcome: null, released: false, stopped: false,
+        ...preamble, run, title, ...launch, prompt, worktree, tabTitle: prompt.slice(0, 30), settled: false, outcome: null, released: false, stopped: false,
         gone: false, exited: false, idle: false, waiting: null, lastOutputAt: null, onNudge: null, nudges: [],
       }
       dispatches.set(d.dispatchId, d)
-      record({ verb: 'workerStart', dispatchId: d.dispatchId, title, ...launch })
+      record({ verb: 'workerStart', dispatchId: d.dispatchId, title, ...launch, placement: child ? 'new-child' : 'current', worktree })
       // A worker that throws is an agent that died: its Dispatch fails.
       d.finished = Promise.resolve()
-        .then(() => worker({ prompt, preamble, orca, state: d }))
+        .then(() => worker({ prompt, preamble, worktree, orca, state: d }))
         .catch((e) => {
           d.error = e
           if (!d.settled) Object.assign(d, { settled: true, outcome: 'failed' })
         })
-      return { dispatchId: d.dispatchId, taskId: d.taskId, mode: 'terminal', modeDetail: '', terminal: d.handle }
+      return { dispatchId: d.dispatchId, taskId: d.taskId, mode: 'terminal', modeDetail: '', terminal: d.handle, worktree }
     },
 
     async workerShow({ dispatch: id }) {
@@ -100,6 +109,15 @@ export function fakeOrca({ worker = async () => {}, clock = null } = {}) {
       }
       record({ verb: 'workerDone', dispatchId, subject, body })
       Object.assign(d, { settled: true, outcome: 'succeeded' })
+    },
+
+    // Not an adapter method: the runner never removes a worktree. This is the
+    // `orca worktree rm --worktree path:<path> --force` a reclaimer runs itself.
+    async worktreeRemove({ path }) {
+      const w = worktrees.get(path)
+      if (!w || w.removed) throw new OrcaError('selector_not_found', `no worktree ${path}`, 'worktree rm')
+      record({ verb: 'worktreeRemove', path })
+      w.removed = true
     },
   }
   return orca

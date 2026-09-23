@@ -45,6 +45,7 @@ const REPO_DIR = String.raw`__REPO_DIR__`          // main checkout
 const NOTES_DIR = String.raw`__NOTES_DIR__`        // research notes, outside the repo
 const BASE_REF = '__BASE_REF__'                    // branch the stack merges into
 const STACK_MODE = '__STACK_MODE__'                // 'native' (gh-stack + stacks API) or 'chain' (plain --base chain)
+const RUNNER = '__RUNNER__'                        // 'orca' on the Orca runner; anything else is the Workflow runner
 // The project's mechanical checks — format, lint, test — one command per line,
 // confirmed by the user before launch and saved in <notes-dir>/validation.md.
 // Empty is honest: readiness then reduces to "the tests you ran are green".
@@ -98,7 +99,15 @@ const mirror = (branches) => `\`git fetch origin\`, then mirror origin into the 
 // moment its PR exists, and the only safe way to know which those are is for
 // each agent to name its own — an agent for the next ticket sits clean at the
 // same commit and is indistinguishable by git state alone.
-const WORKTREE = `Your worktree is throwaway and per agent. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. This run reclaims it — uncommitted leftovers included — once the work it holds is published.`
+//
+// On the Orca runner that worktree is an Orca child of the run's worktree, and
+// Orca must be the one to remove it: a plain `git worktree remove` leaves
+// Orca listing a worktree that is gone.
+const ON_ORCA = RUNNER === 'orca'
+const WORKTREE = `Your worktree is ${ON_ORCA ? "an Orca child worktree of this run's worktree, " : ''}throwaway and per agent. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. This run reclaims it${ON_ORCA ? ' through Orca' : ''} — uncommitted leftovers included — once the work it holds is published.`
+const REMOVER = ON_ORCA
+  ? { tool: 'Orca', gone: 'count it removed', remove: `\`orca worktree rm --worktree path:<path> --force\` — never \`git worktree remove\`, which leaves Orca listing a worktree that is gone. Force on purpose`, finish: '' }
+  : { tool: 'git', gone: 'count it removed — the harness already cleaned it', remove: `\`git worktree remove --force <path>\` — force on purpose`, finish: ' Finish with `git worktree prune`.' }
 
 // --- the worktree ledger ---------------------------------------------------
 // Every path an isolated agent reports, keyed by what it worked on, beside the
@@ -108,7 +117,8 @@ const WORKTREE = `Your worktree is throwaway and per agent. Before you return, r
 // meant to keep and the rest is build output — in a repo whose build rewrites
 // tracked generated files every worktree is dirty, and a rule that spared
 // them would reclaim nothing. A dead agent never reports a path, so its
-// worktree is never in here and never removed: finalize names it instead.
+// worktree is never in here and never removed: finalize names it instead, or
+// on the Orca runner the runner does, having created it.
 const worktreesOf = new Map() // key → { branch, paths: [] }
 function noteWorktree(key, branch, r) {
   if (!r || !r.worktree) return
@@ -139,17 +149,19 @@ function markReclaimed(entries, r) {
 const reclaimStep = (entries) => entries.length
   ? `Reclaim these worktrees — exact paths, nothing else. Each belonged to an agent of this run that has finished, and the branch beside it holds that agent's work:
 ${entries.map((e) => `   - ${e.path} → ${ref(e.branch)}`).join('\n')}
-   For each path: if it no longer exists, count it removed — the harness already cleaned it. Otherwise \`git -C <path> merge-base --is-ancestor HEAD <branch>\` must succeed; if it fails the worktree holds a commit its branch does not, so keep it and report why. Then \`git worktree remove --force <path>\` — force on purpose: the agent that used it returned and committed what it meant to keep, so whatever is uncommitted there is build output, and the ancestor check above is the real guard. If git still refuses (a file lock, say), keep the worktree and report \`{path, reason}\`. Never remove your own worktree, ${REPO_DIR}, or any path not in this list. Finish with \`git worktree prune\`. Return how many you removed and every one you kept.`
+   For each path: if it no longer exists, ${REMOVER.gone}. Otherwise \`git -C <path> merge-base --is-ancestor HEAD <branch>\` must succeed; if it fails the worktree holds a commit its branch does not, so keep it and report why. Then ${REMOVER.remove}: the agent that used it returned and committed what it meant to keep, so whatever is uncommitted there is build output, and the ancestor check above is the real guard. If ${REMOVER.tool} still refuses (a file lock, say), keep the worktree and report \`{path, reason}\`. Never remove your own worktree, ${REPO_DIR}, or any path not in this list.${REMOVER.finish} Return how many you removed and every one you kept.`
   : `No worktrees to reclaim this time: report 0 removed and none kept.`
 // A dead agent never reported a path, so its worktree is not in the ledger.
 // The harness names a run's worktrees `wf_<run>-<n>`; the prefix is read off
 // any reported path so a reclaimer can NAME the strays without touching them.
+// The Orca runner needs no such guess: it created every child worktree, and
+// names a dead agent's in the run's result itself.
 const strayPrefix = () => {
   for (const e of worktreesOf.values()) for (const p of e.paths) { const m = /^(.*[\\/]wf_[^\\/]+-)\d+$/.exec(p); if (m) return m[1] }
   return null
 }
 const strayStep = () => {
-  const prefix = strayPrefix()
+  const prefix = ON_ORCA ? null : strayPrefix()
   return prefix
     ? `Then \`git worktree list --porcelain\`: any worktree whose path starts with \`${prefix}\` and is NOT in the list above belonged to an agent of this run that died before reporting. Do not remove it — it may hold the only copy of that agent's work — but add it to \`worktrees_kept\` with the reason "not in the ledger: its agent died before reporting".`
     : ''
@@ -341,7 +353,7 @@ const RECLAIM_FIELDS = {
       type: 'object',
       additionalProperties: false,
       required: ['path', 'reason'],
-      properties: { path: { type: 'string' }, reason: { type: 'string', description: 'why it was kept: dirty, HEAD not on its branch, or the refusal git gave' } },
+      properties: { path: { type: 'string' }, reason: { type: 'string', description: `why it was kept: dirty, HEAD not on its branch, or the refusal ${REMOVER.tool} gave` } },
     },
   },
 }

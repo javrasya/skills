@@ -7,7 +7,7 @@ const TPL = fileURLToPath(new URL('../skills/engineering/implement-spec-in-workf
 
 const SIM_CHECK = 'npm t'
 
-function render() {
+function render(runner) {
   let s = readFileSync(TPL, 'utf8')
   s = s
     .replace(/__SPEC__/g, '224')
@@ -16,6 +16,7 @@ function render() {
     .replace(/__NOTES_DIR__/g, '/tmp/n')
     .replace(/__BASE_REF__/g, 'main')
     .replace(/__STACK_MODE__/g, 'native')
+    .replace(/__RUNNER__/g, runner)
     .replace(/__VALIDATION__/g, SIM_CHECK)
     .replace(/^export const meta/m, 'const meta')
   return s
@@ -56,7 +57,7 @@ function completeToSchema(result, opts, label) {
   return filled
 }
 
-async function run(overrides = {}) {
+async function run(overrides = {}, { runner = 'workflow' } = {}) {
   const calls = []
   const defaults = {
     graph: () => ({
@@ -120,7 +121,7 @@ async function run(overrides = {}) {
   const log = (m) => logs.push(m)
   const phase = () => {}
 
-  const fn = new Function('agent', 'parallel', 'phase', 'log', 'return (async () => {' + render() + '\n})()')
+  const fn = new Function('agent', 'parallel', 'phase', 'log', 'return (async () => {' + render(runner) + '\n})()')
   const result = await fn(agent, parallel, phase, log)
   EVERY_CALL.push(...calls)
   return { result, calls, logs }
@@ -433,11 +434,25 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('H5: finalize is told it is the first registration, and why', /first registration/.test(finalize.prompt) && /the last failure: #11/.test(finalize.prompt), finalize.prompt.slice(0, 1500))
 }
 
+// --- scenario R: reclaim wording follows the runner --------------------------
+{
+  const reclaimed = (calls) => calls.find((c) => c.label === 'publish:#10').prompt
+  const onWorkflow = reclaimed((await run()).calls)
+  const { result, calls } = await run({}, { runner: 'orca' })
+  const onOrca = reclaimed(calls)
+  check('R: both runners hand the publisher the same exact paths', /\/wt\/impl:#10 → ticket\/10/.test(onWorkflow) && /\/wt\/impl:#10 → ticket\/10/.test(onOrca), onOrca.slice(0, 1500))
+  check('R: the Workflow runner removes with git', /`git worktree remove --force <path>`/.test(onWorkflow) && /git worktree prune/.test(onWorkflow) && !/orca worktree rm/.test(onWorkflow), '')
+  check('R: the Orca runner removes through Orca, never with git', /`orca worktree rm --worktree path:<path> --force`/.test(onOrca) && !/git worktree remove --force|git worktree prune/.test(onOrca), '')
+  check('R: an Orca agent is told its worktree is a child of the run\'s', /an Orca child worktree of this run's worktree/.test(calls.find((c) => c.label === 'impl:#10').prompt), '')
+  check('R: no Orca prompt guesses strays from harness paths', !calls.some((c) => /not in the ledger/.test(c.prompt)), '')
+  check('R: the Orca-worded run completes', result.state.startsWith('complete'), result.state)
+}
+
 // --- run-wide: every prompt of every scenario ------------------------------
 {
   const offenders = (re) => [...new Set(EVERY_CALL.filter((c) => re.test(c.prompt)).map((c) => c.label))].join(' | ')
   const noForce = /--force(?!` or `--force-with-lease` to any push)/
-  check('ALL: no prompt tells an agent to force-push', !EVERY_CALL.some((c) => noForce.test(c.prompt.replace(/^- Never pass.*$/gm, '').replace(/git worktree remove --force/g, ''))), offenders(/--force-with-lease origin|--force origin/))
+  check('ALL: no prompt tells an agent to force-push', !EVERY_CALL.some((c) => noForce.test(c.prompt.replace(/^- Never pass.*$/gm, '').replace(/git worktree remove --force|orca worktree rm --worktree path:<path> --force/g, ''))), offenders(/--force-with-lease origin|--force origin/))
   check('ALL: no prompt tells an agent to check a branch out', !EVERY_CALL.some((c) => /git checkout -B|git checkout ticket\//.test(c.prompt)), offenders(/git checkout -B/))
   check('ALL: no prompt interpolates a helper instead of a value', !EVERY_CALL.some((c) => /runRefs\.has|\(r\) =>|=> \(\{/.test(c.prompt)), offenders(/runRefs\.has|\(r\) =>/))
   // `--open` readies the PRs, and the drafts are half the "still adding

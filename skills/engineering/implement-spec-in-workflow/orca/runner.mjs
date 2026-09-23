@@ -134,6 +134,9 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) =>
   const journal = (entry) => appendFileSync(journalPath, JSON.stringify(entry) + '\n')
   const replays = new Map()
   let replaying = resume
+  // A dead agent never names its worktree to the script, so the script can
+  // never reclaim it; the runner created it and names it instead.
+  const retained = []
 
   const phase = (title) => {
     currentPhase = title
@@ -289,16 +292,23 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) =>
       out("!! no --permission-mode given: Claude workers run as Orca's setting for new agent tabs says, not in the orchestrator's mode.")
     }
     journal({ type: 'started', key, n, title })
+    const isolated = opts.isolation === 'worktree'
     let w
     try {
-      w = await orca.workerStart({ run: runId, prompt: workerPrompt(prompt, { schemaPath, resultPath, payloadPath }), title, ...launch })
+      w = await orca.workerStart({
+        run: runId,
+        prompt: workerPrompt(prompt, { schemaPath, resultPath, payloadPath }),
+        title,
+        ...launch,
+        child: isolated ? { name: `${runId}-${n}`, displayName: title } : null,
+      })
     } catch (e) {
       out(`!! ${title}: its worker did not start: ${e.message}; agent() returns null`)
       journal({ type: 'result', key, n, title, result: null })
       return null
     }
     const on = [launch.harness, launch.model, launch.effort && `${launch.effort} effort`, launch.permissionMode && `${launch.permissionMode} mode`].filter(Boolean).join(', ')
-    out(`>> ${title}: started on ${on} as dispatch ${w.dispatchId}${w.terminal ? ` in terminal ${w.terminal}` : ''}`)
+    out(`>> ${title}: started on ${on} as dispatch ${w.dispatchId}${w.terminal ? ` in terminal ${w.terminal}` : ''}${w.worktree ? ` in ${w.worktree}` : ''}`)
     if (w.mode !== 'terminal' || !w.terminal) {
       out(`!! ${title} has no terminal tab to watch (mode: ${w.mode ?? 'unknown'}). Orca's setting for new agent tabs decides this; set it to terminal. ${w.modeDetail}`)
     } else {
@@ -311,32 +321,56 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) =>
       }
     }
 
-    const end = await watch(w, title)
-    // Read even for a dead worker: one that died after submit recorded its
-    // result still delivered it.
-    const result = readResult(resultPath, opts.schema)
-    if (end.dead) {
+    let delivered = false
+    try {
+      const end = await watch(w, title)
+      // Read even for a dead worker: one that died after submit recorded its
+      // result still delivered it.
+      const result = readResult(resultPath, opts.schema)
+      if (end.dead) {
+        try {
+          await orca.workerStop({ dispatch: w.dispatchId })
+        } catch (e) {
+          out(`!! ${title}: could not stop its worker: ${e.message}`)
+        }
+      }
       try {
-        await orca.workerStop({ dispatch: w.dispatchId })
+        await orca.workerRelease({ dispatch: w.dispatchId })
       } catch (e) {
-        out(`!! ${title}: could not stop its worker: ${e.message}`)
+        out(`!! ${title}: could not release its worker: ${e.message}`)
+      }
+      // A null is journaled like any value, as the Workflow runner journals it:
+      // a resume replays it until the call is edited.
+      const value = result.error ? null : result.value
+      journal({ type: 'result', key, n, title, result: value })
+      if (result.error) out(`!! ${title}: ${end.dead ? `${end.dead}, with no result` : `${result.error} (outcome ${end.outcome})`}; agent() returns null`)
+      else {
+        out(`<< ${title}: result received`)
+        delivered = true
+      }
+      return value
+    } finally {
+      if (isolated && !delivered && w.worktree) {
+        retained.push({ path: w.worktree, reason: `not in the ledger: its agent (${title}) died before reporting, so it was never removed — it may hold the only copy of that agent's work` })
       }
     }
-    try {
-      await orca.workerRelease({ dispatch: w.dispatchId })
-    } catch (e) {
-      out(`!! ${title}: could not release its worker: ${e.message}`)
-    }
-    // A null is journaled like any value, as the Workflow runner journals it:
-    // a resume replays it until the call is edited.
-    const value = result.error ? null : result.value
-    journal({ type: 'result', key, n, title, result: value })
-    if (result.error) out(`!! ${title}: ${end.dead ? `${end.dead}, with no result` : `${result.error} (outcome ${end.outcome})`}; agent() returns null`)
-    else out(`<< ${title}: result received`)
-    return value
   }
 
-  return script(agent, parallel, phase, log, meta)
+  try {
+    return withRetained(await script(agent, parallel, phase, log, meta), retained)
+  } finally {
+    for (const k of retained) out(`!! kept ${k.path}: ${k.reason}`)
+  }
+}
+
+// The run's result names each retained worktree beside the ones a reclaimer
+// kept, in the same {path, reason} shape. A result that is not an object has
+// nowhere to hold them; the log still names them.
+function withRetained(result, retained) {
+  if (!retained.length || !result || typeof result !== 'object' || Array.isArray(result)) return result
+  const kept = Array.isArray(result.worktrees_kept) ? result.worktrees_kept : []
+  const named = new Set(kept.map((k) => k?.path))
+  return { ...result, worktrees_kept: [...kept, ...retained.filter((k) => !named.has(k.path))] }
 }
 
 const isMain = process.argv[1] && resolve(process.argv[1]).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase()

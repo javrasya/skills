@@ -595,3 +595,73 @@ test('orca-cli: an agent whose TUI never goes idle is not dispatched, and its te
   await assert.rejects(orca.workerStart({ ...START, harness: 'pi' }), /agent_not_ready/)
   assert.deepEqual(verbsOf(argvs), ['terminal create', 'terminal wait', 'terminal wait', 'terminal close'])
 })
+
+// Worktrees: the template's ledger and reclaim in miniature. Each isolated
+// agent names its worktree; a non-isolated reclaimer removes exactly the named
+// ones through Orca, as the Orca-runner reclaim wording tells it to.
+const WT_SCHEMA = { type: 'object', required: ['worktree'], properties: { worktree: { type: 'string' } } }
+const RECLAIM_SCHEMA = { type: 'object', required: ['removed'], properties: { removed: { type: 'integer' } } }
+const WT_SCRIPT = `const WT = ${JSON.stringify(WT_SCHEMA)}
+const a = await agent('Build a.', { label: 'impl:a', phase: 'Implement', schema: WT, isolation: 'worktree' })
+const b = await agent('Build b.', { label: 'impl:b', phase: 'Implement', schema: WT, isolation: 'worktree' })
+const named = [a, b].filter(Boolean).map((r) => r.worktree)
+const r = await agent('Reclaim ' + JSON.stringify(named), { label: 'reclaim', phase: 'Finalize', schema: ${JSON.stringify(RECLAIM_SCHEMA)} })
+return { a, b, removed: r.removed, worktrees_kept: [] }`
+
+async function submitValue(prompt, preamble, orca, value) {
+  const argv = submitArgvIn(prompt, preamble)
+  writeFileSync(argv[argv.indexOf('--payload') + 1], JSON.stringify(value))
+  assert.equal((await runSubmit(argv, orca)).code, 0)
+}
+
+
+// impl:b dies; impl:a names its worktree; the reclaimer removes what it is handed.
+const worktreeOrca = () =>
+  fakeOrca({
+    worker: async ({ prompt, preamble, worktree, orca }) => {
+      if (prompt.startsWith('Build b.')) throw new Error('the agent died')
+      if (prompt.startsWith('Build a.')) return submitValue(prompt, preamble, orca, { worktree })
+      const paths = JSON.parse(prompt.split('\n')[0].slice('Reclaim '.length))
+      for (const path of paths) await orca.worktreeRemove({ path })
+      return submitValue(prompt, preamble, orca, { removed: paths.length })
+    },
+  })
+
+const startedAs = (orca, title) => orca.calls.find((c) => c.verb === 'workerStart' && c.title === title)
+
+test('worktrees: an isolated agent runs in an Orca child of the run\'s worktree, a non-isolated one in the run\'s own', async () => {
+  const orca = worktreeOrca()
+  await runScript(WT_SCRIPT, { orca, stateDir: tmp(), out: () => {}, settings: FAST })
+  for (const title of ['[Implement] impl:a', '[Implement] impl:b']) {
+    const s = startedAs(orca, title)
+    assert.equal(s.placement, 'new-child', title)
+    assert.notEqual(s.worktree, 'C:/fake/run', title)
+    assert.equal(orca.worktrees.get(s.worktree).parent, 'C:/fake/run', title)
+    assert.equal(orca.worktrees.get(s.worktree).displayName, title)
+  }
+  assert.notEqual(startedAs(orca, '[Implement] impl:a').worktree, startedAs(orca, '[Implement] impl:b').worktree)
+  const reclaim = startedAs(orca, '[Finalize] reclaim')
+  assert.equal(reclaim.placement, 'current')
+  assert.equal(reclaim.worktree, 'C:/fake/run')
+})
+
+test('worktrees: a dead agent\'s worktree is retained and named in the run\'s result, never removed', async () => {
+  const lines = []
+  const orca = worktreeOrca()
+  const result = await runScript(WT_SCRIPT, { orca, stateDir: tmp(), out: (s) => lines.push(s), settings: FAST })
+  const aPath = startedAs(orca, '[Implement] impl:a').worktree
+  const bPath = startedAs(orca, '[Implement] impl:b').worktree
+
+  assert.deepEqual(result.a, { worktree: aPath })
+  assert.equal(result.b, null)
+  assert.equal(result.removed, 1)
+  assert.deepEqual(orca.calls.filter((c) => c.verb === 'worktreeRemove').map((c) => c.path), [aPath])
+  assert.equal(orca.worktrees.get(aPath).removed, true)
+  assert.equal(orca.worktrees.get(bPath).removed, false)
+  assert.equal(orca.worktrees.get('C:/fake/run').removed, false)
+
+  assert.equal(result.worktrees_kept.length, 1)
+  assert.equal(result.worktrees_kept[0].path, bPath)
+  assert.match(result.worktrees_kept[0].reason, /impl:b\) died before reporting, so it was never removed/)
+  assert.ok(lines.some((l) => l.startsWith(`!! kept ${bPath}:`)), lines.join('\n'))
+})
