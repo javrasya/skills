@@ -1,0 +1,3 @@
+# The Workflow tool refuses a script holding a carriage return ("control characters
+# that would be hidden in the approval dialog"), so a CRLF checkout cannot run it.
+*.workflow.js text eol=lf
