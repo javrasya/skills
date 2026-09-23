@@ -71,12 +71,14 @@ log('parallel returned ' + JSON.stringify(par))
 
 // Last, so a resume's unchanged prefix is the two calls above. Outside
 // parallel(), which turns a throw into null and would hide an agent() that
-// throws on a dead agent. A bare `sleep` is refused by some hosts' hooks.
+// throws on a dead agent. The wait is bounded and the prompt asks for nothing
+// an agent refuses: told to never return, a Workflow runner agent returns at
+// once. A bare `sleep` is refused by some hosts' hooks.
 let killed
 try {
   killed = {
     value: await agent(
-      'This agent exists to be killed; it checks that a killed agent returns null. Do not return a result and do not end your turn: run the shell command node -e "setTimeout(() => {}, 540000)" in the foreground with a 600000 ms timeout, and each time it returns, run it again. The person running this check will kill you.',
+      'This agent checks that an agent killed mid-task returns null; the person running the check kills you during the wait below, and that is expected. Your task: run the shell command node -e "setTimeout(() => {}, 540000)" in the foreground with a 600000 ms timeout, which waits nine minutes. When it finishes, your result is done true.',
       { ...C, label: 'contract:kill', schema: DONE },
     ),
   }
