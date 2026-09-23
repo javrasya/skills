@@ -37,7 +37,7 @@ Your context is the scarce resource here. The spec body, the ticket bodies, the 
 
 5. Report what it returned: the stack bottom-to-top with each PR's url and state, the merge instructions for the mode the run ended in, tickets that failed, tickets deferred to a human and why, the worktrees the run kept and why, the notes directory, and the **retrospective** — its summary sentences, the path of `validation-report.md`, and its proposals as a list. Say plainly that nothing applies the proposals: the next run reads `validation.md` exactly as it stands, and a human, or a session the human points at the report, edits the list. The workflow's return value is already a summary — pass it on rather than re-deriving it from the PRs.
 
-To iterate after a failure, edit `<notes-dir>/workflow.js` and relaunch it with the harness's resume handle: the unchanged prefix of `agent()` calls returns from cache and only the edited call onward re-runs.
+To iterate after a failure, edit `<notes-dir>/workflow.js` and relaunch it with the runner's resume handle — `resumeFromRunId` on the Workflow runner, `--resume` on the Orca runner, which replays from the journal in `<notes-dir>/orca-run/journal.jsonl`: the unchanged prefix of `agent()` calls returns from cache and only the edited call onward re-runs.
 
 ## What the workflow does
 

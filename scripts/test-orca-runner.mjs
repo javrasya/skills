@@ -1,5 +1,5 @@
-// Offline tests for the Orca runner's tracer: submit and one agent() round
-// trip, with the fake Orca standing in for the CLI adapter.
+// Offline tests for the Orca runner: submit, one agent() round trip, and
+// resume from the journal, with the fake Orca standing in for the CLI adapter.
 //   node scripts/test-orca-runner.mjs
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -8,7 +8,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawnSync } from 'child_process'
 import { submit } from '../skills/engineering/implement-spec-in-workflow/orca/submit.mjs'
-import { runScript, SUBMIT } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
+import { runScript, journalKey, SUBMIT } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
 import { fakeOrca } from '../skills/engineering/implement-spec-in-workflow/orca/fake-orca.mjs'
 
 const SCHEMA = {
@@ -174,4 +174,66 @@ test('agent(): a schema no result can satisfy throws before any worker starts', 
   const script = `return await agent('x', { schema: { type: 'object', required: ['a'], properties: {} } })`
   await assert.rejects(runScript(script, { orca, stateDir: tmp(), out: () => {} }), /requires properties it does not define: a/)
   assert.equal(orca.calls.length, 0)
+})
+
+// Each worker answers with its prompt's first line and which run it served,
+// so a result shows whether it came from this run or from the journal.
+function answering(run) {
+  return fakeOrca({
+    worker: async ({ prompt, preamble, orca }) => {
+      const argv = submitArgvIn(prompt, preamble)
+      writeFileSync(argv[argv.indexOf('--payload') + 1], `${prompt.split('\n')[0]} @${run}`)
+      assert.equal((await runSubmit(argv, orca)).code, 0)
+    },
+  })
+}
+
+const chain = (second) => `phase('Chain')
+const a = await agent('Plan it.', { label: 'a', phase: 'Chain' })
+const b = await agent(${JSON.stringify(second)}, { label: 'b', phase: 'Chain' })
+const c = await agent('Check it.', { label: 'c', phase: 'Chain' })
+return [a, b, c]`
+
+const started = (orca) => orca.calls.filter((c) => c.verb === 'workerStart').map((c) => c.title)
+
+test('resume: the unchanged prefix replays from the journal without launching; the first changed call onward runs live', async () => {
+  const stateDir = tmp()
+  const go = (script, run, resume) => {
+    const orca = answering(run)
+    return runScript(script, { orca, stateDir, out: () => {}, pollMs: 1, resume }).then((result) => ({ orca, result }))
+  }
+
+  const first = await go(chain('Build it.'), 1, false)
+  assert.deepEqual(first.result, ['Plan it. @1', 'Build it. @1', 'Check it. @1'])
+  const journal = readFileSync(join(stateDir, 'journal.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+  assert.deepEqual(
+    journal.filter((e) => e.type === 'result').map((e) => [e.key, e.result]),
+    [
+      [journalKey('Plan it.', { label: 'a', phase: 'Chain' }), 'Plan it. @1'],
+      [journalKey('Build it.', { label: 'b', phase: 'Chain' }), 'Build it. @1'],
+      [journalKey('Check it.', { label: 'c', phase: 'Chain' }), 'Check it. @1'],
+    ],
+  )
+
+  const same = await go(chain('Build it.'), 2, true)
+  assert.deepEqual(same.result, first.result)
+  assert.deepEqual(same.orca.calls, [], 'an unchanged script touches no Orca at all')
+
+  const edited = await go(chain('Build it twice.'), 3, true)
+  assert.deepEqual(edited.result, ['Plan it. @1', 'Build it twice. @3', 'Check it. @3'])
+  assert.deepEqual(started(edited.orca), ['[Chain] b', '[Chain] c'], 'c is unchanged but follows a changed call')
+
+  const again = await go(chain('Build it twice.'), 4, true)
+  assert.deepEqual(again.result, edited.result, 'the journal describes the latest run')
+  assert.deepEqual(started(again.orca), [])
+
+  const fresh = await go(chain('Build it twice.'), 5, false)
+  assert.deepEqual(fresh.result, ['Plan it. @5', 'Build it twice. @5', 'Check it. @5'])
+})
+
+test('resume: the key covers every option, in any order', () => {
+  const opts = { label: 'a', phase: 'P', schema: { type: 'object', properties: { x: { type: 'string' } } } }
+  assert.equal(journalKey('p', opts), journalKey('p', { schema: { properties: { x: { type: 'string' } }, type: 'object' }, phase: 'P', label: 'a' }))
+  assert.notEqual(journalKey('p', opts), journalKey('p', { ...opts, model: 'opus' }))
+  assert.notEqual(journalKey('p', opts), journalKey('q', opts))
 })
