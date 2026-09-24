@@ -115,7 +115,7 @@ Not yet confirmed against live Orca: that `worker-show` follows a dispatch whose
 ## Two checks, and when each runs
 
 - **Offline:** `node scripts/test-orca-runner.mjs`. Fast and free. It runs the runner against the fake Orca, so it proves the runner does what the fake says Orca does, and nothing about the Workflow runner.
-- **The runner contract test:** `scripts/runner-contract.workflow.js`. Slow, and it spends tokens on six short agents per fresh run, so it runs by hand. It is the only check that the Orca runner gives a script what the Workflow runner gives it, and that is the promise the whole Orca runner rests on.
+- **The runner contract test:** `scripts/runner-contract.workflow.js`. Slow, and it spends tokens on eight short agents per fresh run, so it runs by hand. It is the only check that the Orca runner gives a script what the Workflow runner gives it, and that is the promise the whole Orca runner rests on.
 
 **It gates every Orca runner change.** A change to any file in this directory, or to the template's use of the hooks, is not done until the contract test returns the expected object under both runners, fresh and resumed. The offline tests do not replace it. A guarantee the script comes to rely on gets a case in the contract script first. The script has to stay byte-identical under both runners, and it must never use `Date.now()`, `Math.random()` or an argless `new Date()`.
 
@@ -127,14 +127,24 @@ Not yet confirmed against live Orca: that `worker-show` follows a dispatch whose
 | bad first submit, repaired in-turn | `contract:repair` first returns a result missing a required field, reads the validation error, then returns it correctly | `repaired: {count: 3, first_attempt_rejected: true}` |
 | the role table's options | `contract:options` passes `harness: 'claude'`, `model: 'sonnet'` and `piModel`, the options every template call spreads from its role table | `options: {count: 3, word: "hello"}`: the call is taken, not refused; the Workflow runner ignores `harness` and `piModel` |
 | isolated worktree | `contract:here` and `contract:isolated` (`isolation: 'worktree'`) each return their `git rev-parse --show-toplevel` | `isolated: {own_worktree: true}`: the isolated agent's top level is not the run's |
+| failed start, then success | `contract:retry` (`isolation: 'worktree'`) returns an object against a schema. Under the Orca runner its first worker start fails, injected by the preload the Orca leg is launched with (below), after its terminal and child worktree exist; the retry takes that worktree up. The Workflow runner has no start to fail, so there it is a plain call | `retried: {count: 3, word: "hello"}`: the same on both runners |
 | throwing `parallel` thunk | two thunks throw, one synchronously and one as a rejected promise, beside the agents above | `thrown: [null, null]`, and `parallel()` itself does not reject |
-| killed worker | `contract:kill` runs a nine-minute wait, and you kill it during the wait. It is awaited outside `parallel()`, so an `agent()` that throws on a dead agent cannot hide behind the null | `killed: null` |
-| resume replaying from cache | the same script, relaunched with the runner's resume handle | the same object, with the five `parallel` agents replayed, not re-run |
+| killed worker continued | `contract:continue` runs a nine-minute wait, and you kill it once, during the wait. Told it was interrupted and to carry on, it returns without waiting again | Orca runner: `continued: {done: true}`, its session continued in a new terminal. Workflow runner: `continued: null`, since it has no continuation |
+| killed worker | `contract:kill` runs a nine-minute wait, and you kill it every time it runs: once under the Workflow runner, and under the Orca runner once and then after each of its 3 continuations, which rerun the wait. Both kill cases are awaited outside `parallel()`, so an `agent()` that throws on a dead agent cannot hide behind the null | `killed: null` |
+| resume replaying from cache | the same script, relaunched with the runner's resume handle | the same object, with the six `parallel` agents replayed, not re-run |
 
-Every run must return exactly this:
+The runners legitimately differ in one case, killed worker continued, and the expected object states it rather than shaping the case to hide it: a Workflow runner agent that is killed stays dead, and the Orca runner exists partly to continue it. Every other case returns the same value on both. The script cannot tell which runner runs it, so its own check (`RUNNER_OWN`) takes either value for `continued`; comparing the returned object with its runner's line below is what checks that the Orca runner continued the agent.
+
+Every Orca runner run must return exactly this:
 
 ```json
-{"valid":{"count":3,"word":"hello"},"repaired":{"count":3,"first_attempt_rejected":true},"options":{"count":3,"word":"hello"},"isolated":{"own_worktree":true},"thrown":[null,null],"killed":null,"failures":[]}
+{"valid":{"count":3,"word":"hello"},"repaired":{"count":3,"first_attempt_rejected":true},"options":{"count":3,"word":"hello"},"isolated":{"own_worktree":true},"retried":{"count":3,"word":"hello"},"thrown":[null,null],"continued":{"done":true},"killed":null,"failures":[]}
+```
+
+Every Workflow runner run must return exactly this:
+
+```json
+{"valid":{"count":3,"word":"hello"},"repaired":{"count":3,"first_attempt_rejected":true},"options":{"count":3,"word":"hello"},"isolated":{"own_worktree":true},"retried":{"count":3,"word":"hello"},"thrown":[null,null],"continued":null,"killed":null,"failures":[]}
 ```
 
 The script checks itself as well. A non-empty `failures` names each case that broke, and the runner's log ends with `contract holds` or `N contract failure(s)`.
@@ -143,35 +153,48 @@ The script checks itself as well. A non-empty `failures` names each case that br
 
 Run each runner from an Orca terminal on the repo. `<repo>` is the absolute path of the checkout, and `<dir>` is a scratch state dir outside it.
 
-**Orca runner.** Launch it in its own terminal, so the Run binds to that terminal:
+**Orca runner.** Launch it in its own terminal, so the Run binds to that terminal. `--require` preloads `scripts/runner-contract-orca-fault.cjs`, which fails `contract:retry`'s first `worker-start` as an Orca refusal would; the runner itself carries no test hook:
 
 ```
-orca terminal create --title "runner contract (orca)" --command "node <repo>/skills/engineering/implement-spec-in-workflow/orca/runner.mjs <repo>/scripts/runner-contract.workflow.js --state-dir <dir>"
+orca terminal create --title "runner contract (orca)" --command "node --require <repo>/scripts/runner-contract-orca-fault.cjs <repo>/skills/engineering/implement-spec-in-workflow/orca/runner.mjs <repo>/scripts/runner-contract.workflow.js --state-dir <dir>"
 ```
 
-1. The runner starts the five `parallel` agents (`contract:valid`, `contract:repair`, `contract:options`, `contract:here`, `contract:isolated`). Once their results are in, it starts `contract:kill`. `contract:isolated` leaves a child worktree the runner does not remove; remove it by hand after the resume.
-2. When the log shows `>> [Contract] contract:kill: started … in terminal <handle>`, kill that worker within nine minutes: close its tab, or run `orca terminal close --terminal <handle>`. The runner logs `agent() returns null` and prints `== Result`.
-3. Resume. Run the same command with `--resume` added, against the same `--state-dir`. The five `parallel` agents log `replayed from the journal` and start no worker. `contract:kill` died, so it was journaled as failed and runs live again (see below): kill it the same way, and it prints the same result.
+1. The runner starts the six `parallel` agents (`contract:valid`, `contract:repair`, `contract:options`, `contract:here`, `contract:isolated`, `contract:retry`). `contract:retry` logs `its worker did not start: … contract_fault …; trying again in 30s`, and its second attempt starts in the same `<runId>-<n>` worktree.
+2. Once their results are in, it starts `contract:continue`. When the log shows `>> [Contract] contract:continue: started … in terminal <handle>`, kill that worker within nine minutes: close its tab, or run `orca terminal close --terminal <handle>`. The runner logs `continuing session … in a new terminal`, and the continued agent returns `{done: true}`. Kill it only once.
+3. Then it starts `contract:kill`. Kill it the same way, and kill each new terminal it is continued in: four kills in all. The fourth logs `the cap of 3` and `agent() returns null`, and the runner prints `== Result`, writes `summary.json`, and asks what to reclaim. Answer `n`, so the resume and the checks below still find every agent.
+4. Resume from a new terminal: run the same command with `--resume` added, against the same `--state-dir`, in a new `orca terminal create`. The resumed runner logs taking the Run over (`run-use`), the six `parallel` agents and `contract:continue` log `replayed from the journal` and start no worker, and `contract:kill`, journaled as failed (see below), runs live again: kill it four times as before, and it prints the same result. Its end-of-run prompt names only the agents it ran live: the resume rewrites the journal with the replayed results, which name no worker, so the fresh run's agents are not offered again.
+
+The agents the fresh run kept, the failed ones the resume keeps, and the child worktrees `contract:isolated` and `contract:retry` leave all stay until reclaimed: close their tabs and remove the `<runId>-<n>` worktrees by hand (`orca worktree rm`) after the resume, or reclaim the run from the run view.
 
 **Workflow runner.** Run it in a Claude Code session that has the `Workflow` tool, for example `claude "<prompt>"` in an Orca terminal. Word the prompt so the agents do their own tasks. The Workflow runner can hand each subagent the session's request, and an agent that sees only "run a workflow" goes looking for the Workflow tool first:
 
-> Run a workflow: call the Workflow tool with scriptPath `<repo>/scripts/runner-contract.workflow.js` and no other input. When it completes, resume it exactly once: call the Workflow tool again with the same scriptPath and resumeFromRunId set to the runId the first call returned. This is the runner contract test, and every agent either run starts is part of it: each agent must do exactly what its own prompt says, nothing more. contract:repair returns a wrong result first on purpose, and contract:kill runs a nine-minute wait that I kill by hand, in both runs; neither needs the Workflow tool. Do not edit the script and do nothing else. After each run completes, print its runId and its returned value verbatim as one JSON block.
+> Run a workflow: call the Workflow tool with scriptPath `<repo>/scripts/runner-contract.workflow.js` and no other input. When it completes, resume it exactly once: call the Workflow tool again with the same scriptPath and resumeFromRunId set to the runId the first call returned. This is the runner contract test, and every agent either run starts is part of it: each agent must do exactly what its own prompt says, nothing more. contract:repair returns a wrong result first on purpose, and contract:continue and contract:kill each run a nine-minute wait that I kill by hand, in both runs; none of them needs the Workflow tool. Do not edit the script and do nothing else. After each run completes, print its runId and its returned value verbatim as one JSON block.
 
-1. When `contract:kill` is the one agent still running, open `/workflows`, press Enter to reach the agent list, select `contract:kill`, and press `x`. It shows as `skipped`, and the run completes. If the nine minutes run out first, it returns `{done: true}`, `failures` names `killed`, and the run has to be done again.
-2. On the resume, `contract:kill` runs live again, as it does under the Orca runner (see below). Kill it the same way.
+Type the prompt, or confirm it when asked: Claude Code 2.1.282 treats a prompt that arrives as pasted text alone as not the user's, and starts nothing until the user replies.
+
+1. When `contract:continue` is the one agent still running, open `/workflows`, press Enter to reach the agent list, select `contract:continue`, and press `x`. It shows as `skipped`. Then `contract:kill` starts: kill it the same way, and the run completes. If the nine minutes run out first, the agent returns `{done: true}`, `failures` names it, and the run has to be done again.
+2. On the resume, the six `parallel` agents are replayed, and `contract:continue` and `contract:kill`, which both returned null, run live again (see below). Kill each the same way.
 3. The run record is in `~/.claude/projects/<project>/<session>/workflows/<runId>.json` (`result`). The journal, which shows what was replayed, is in `…/<session>/subagents/workflows/<runId>/journal.jsonl`.
 
-Then compare the four results: Orca fresh, Orca resumed, Workflow fresh, Workflow resumed. All four must equal the object above.
+Then compare the four results: Orca fresh, Orca resumed, Workflow fresh, Workflow resumed. Each must equal its runner's object above.
 
 The script must reach the Workflow tool with LF line endings. The tool refuses a script that holds a carriage return ("script contains control characters that would be hidden in the approval dialog"), which is what a Windows checkout with `core.autocrlf` produces. `.gitattributes` pins `*.workflow.js` to LF. A checkout made before that line was added needs the file checked out again.
 
-Last pass: 2026-09-23, Orca 1.4.207 and Claude Code 2.1.280 on Windows 11, with the runner as of #30, whose entry point writes `summary.json`. All four results were equal to the expected object. The Orca fresh and resumed runs each left a `summary.json` with `"runner": "orca", "ok": true` and that object as `result`. The Orca resume started no worker. The Workflow resume replayed `contract:valid` and `contract:repair` and re-ran `contract:kill`.
+**For spec #43 the pass ran once, in #53, rather than per ticket** (decision D1 on #43). Its other tickets relied on the offline tests alone, and #53 ran the pass once the reliability work (#46, #47, #49, #50) had landed. Every other change still gates on its own pass.
 
-Not yet re-run since the runner and this script changed on `spec/21-integration`: the script gained `contract:options` and the isolated-worktree case (so the object above is not yet confirmed on either runner), a dead agent is now journaled as failed (below), so the Orca resume re-runs `contract:kill` too, and custom launches into a child worktree now create it first. Since #45, every worker is a custom launch with a runner-assigned `--session-id`. Since #46, every Orca call has a timeout and a failed start is retried; the retry's `worktree list --limit 10000` lookup reads `path`, `branch` and `truncated`, as probed on Orca 1.4.209 (whose list defaults to 200 rows, and `--limit 3` returned 3 of 10 with `truncated: true`), but no retry has run against real Orca yet, nor has a create that answers `<name>-2`. Since #47, a stuck or dead session is continued before the agent is given up, so `contract:kill` is continued in a new terminal up to 3 times and has to be killed 4 times. The next pass must confirm both runners again.
+Last pass: 2026-09-25 (#53), Orca 1.4.209 and Claude Code 2.1.282 on Windows 11, with the runner as of #50. **The contract does not hold yet.**
+
+- **Orca runner, fresh and resumed from a new terminal:** both returned the Orca object above except `continued: null` where `{done: true}` is expected, with `failures: []` (the script's own check takes either value). Everything else held:
+  - `contract:retry`'s first start failed on the injected `contract_fault`, and the retry 30s later started in the same `<runId>-6` worktree, found by `worktree list --limit 10000`; Orca made no `-6-2`. So a retry has now run against real Orca.
+  - The resume took the Run over from its new terminal: a second `run` line in the journal, with the same Run id and the new terminal. It replayed the six `parallel` agents and ran `contract:continue` and `contract:kill` live, since both had returned null.
+  - `contract:isolated`'s prompt landed as an unsubmitted draft in its TUI. The idle nudge 2 minutes later got it going, and it returned its result.
+- **Why `continued` is null:** closing a worker's tab, by `orca terminal close --terminal`, makes Orca settle its dispatch itself, about 5 seconds later: `worker-show` gives `dispatch.status: failed`, `stage: process_exited`, and `orphaned: true` on the terminal. The runner reads that as `settled without submitting a result (outcome failed)` and returns null without continuing the session. So `contract:continue` was never continued, and `contract:kill` died at its first kill, not its fourth. The runner has to treat a dispatch that Orca failed because its pane went away as dead, not settled; that work belongs to #47's session continuation. The pass has to run again once it is fixed.
+- **Release and retain:** nothing was released during either run. After the fresh run, whose end-of-run prompt was answered `n`, all 8 workers were `terminalState: retained` with `releaseState: not_requested`. Every settled worker's tab was still open, and both child worktrees were still there. The resume's prompt named only its own two agents, and Enter kept both, since both had failed.
+- **Workflow runner, fresh and resumed:** not run in #53. The pass was driven by an agent. Claude Code asked for the prompt to be confirmed by the user, and the agent does not answer that on the user's behalf. Both Workflow runs are still to do, by hand.
 
 ## A dead agent on resume
 
-Both runners journal an agent that returned `null` as failed, with no result: a worker that died by any of the runner's liveness limits, one whose worker never started, and one whose Run Orca could not create. A resume therefore runs that call live again, and every call after it, as it does for an edited call. A failed entry keeps its place among identical calls, so the k-th call with a key never replays a later call's result. In the contract test this means `contract:kill` has to be killed a second time on the resume, under either runner.
+Both runners journal an agent that returned `null` as failed, with no result: a worker that died by any of the runner's liveness limits, one whose worker never started, and one whose Run Orca could not create. A resume therefore runs that call live again, and every call after it, as it does for an edited call. A failed entry keeps its place among identical calls, so the k-th call with a key never replays a later call's result. In the contract test this means `contract:kill` runs live again on the resume, under either runner, and has to be killed again as on the fresh run. Under the Workflow runner `contract:continue` returned null too, so it also runs live again and is killed once more; under the Orca runner it returned a value and is replayed.
 
 ## Harness and model
 
