@@ -14,7 +14,8 @@
 // call not in it or journaled as failed, and every call after it, runs live.
 // The Workflow runner's resumeFromRunId promises the same. On exit the runner
 // writes summary.json to the state dir: {runner, ok, result | error}, and on a
-// failure also worktrees_kept, the worktrees it retained.
+// failure also worktrees_kept, the worktrees it retained. Every line it prints
+// is also appended, timestamped, to runner.log there.
 //
 // No change to this directory is done until the runner contract test passes
 // under both runners (README.md). The offline tests do not replace it.
@@ -55,6 +56,24 @@ function canonical(v) {
 export const journalKey = (prompt, opts = {}) =>
   'v1:' + createHash('sha256').update(JSON.stringify([prompt, canonical(opts)])).digest('hex')
 
+// Every journal entry type and the fields it always carries, beside `type`.
+// `at` is an ISO timestamp from the runner's clock. A failed entry may also
+// carry `retained`, the worktree it left; a replayed result carries
+// `replayed: true`. retry, nudge, continued and reattached are written by the
+// behaviours that make them: a new attempt of a call, a nudge typed to a
+// worker, a finished session continued in its terminal, and a resumed runner
+// taking up a worker an earlier one started.
+export const JOURNAL_ENTRIES = Object.freeze({
+  started: ['at', 'key', 'n', 'title', 'dispatchId', 'harness', 'sessionId', 'worktree', 'terminal'],
+  result: ['at', 'key', 'n', 'title', 'result'],
+  failed: ['at', 'key', 'n', 'title', 'reason', 'attempts'],
+  retained: ['at', 'retained'],
+  retry: ['at', 'key', 'n', 'title', 'attempt', 'reason'],
+  nudge: ['at', 'key', 'n', 'title', 'dispatchId', 'reason', 'count'],
+  continued: ['at', 'key', 'n', 'title', 'dispatchId', 'sessionId', 'terminal', 'reason'],
+  reattached: ['at', 'key', 'n', 'title', 'dispatchId', 'sessionId', 'terminal', 'worktree'],
+})
+
 // calls: key -> what was journaled under it, in journal order — { result }
 // for a call that returned a value, { failed: true } for one that returned
 // null. A failed entry holds its call's place but replays nothing, so a resume
@@ -63,6 +82,8 @@ export const journalKey = (prompt, opts = {}) =>
 // run was killed during: it replays nothing. A torn last line is one it was
 // killed while writing. retained: every worktree a dead agent left, from its
 // failed entry or from a `retained` line an earlier resume carried forward.
+// Only type, key, result and retained are read, so a journal written before
+// entries carried timestamps and launch fields resumes the same way.
 export function readJournal(path) {
   const calls = new Map()
   const retained = []
@@ -84,26 +105,41 @@ export function readJournal(path) {
 
 export const realClock = { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) }
 
+const iso = (clock) => new Date(clock.now()).toISOString()
+
+// print, but every line also appended to <stateDir>/runner.log first, so the
+// log holds what the operator saw even once the runner's tab is gone. The log
+// is appended to across runs; the journal, not the log, is the resume state.
+export function runnerLog(stateDir, print, clock = realClock) {
+  mkdirSync(stateDir, { recursive: true })
+  const path = join(stateDir, 'runner.log')
+  return (s) => {
+    const at = iso(clock)
+    appendFileSync(path, String(s).split('\n').map((l) => `${at} ${l}\n`).join(''))
+    print(s)
+  }
+}
+
 // `settings` overrides entries of SETTINGS; `clock` is what the liveness
 // limits are measured against, so tests can drive time.
 // permissionMode: the orchestrating session's, which Claude workers start in
-// as Workflow subagents inherit it. Without one, Orca's setting for new agent
-// tabs decides how a Claude worker runs.
-export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) => console.log(s), settings = {}, clock = realClock, fallbackObjective = 'workflow run', resume = false, permissionMode = null }) {
+// as Workflow subagents inherit it. Without one, a Claude worker starts in
+// Claude's own default mode.
+export async function runScript(text, { orca = orcaCli(), stateDir, out: print = (s) => console.log(s), settings = {}, clock = realClock, fallbackObjective = 'workflow run', resume = false, permissionMode = null }) {
   const limits = { ...SETTINGS, ...settings }
+  const out = runnerLog(stateDir, print, clock)
   const script = loadScript(text)
   const meta = {}
   let currentPhase = null
   let count = 0
 
-  mkdirSync(stateDir, { recursive: true })
   const journalPath = join(stateDir, 'journal.jsonl')
   const earlier = resume ? readJournal(journalPath) : { calls: new Map(), retained: [] }
   const journaled = earlier.calls
   // Rewritten from empty, replayed calls included, so the journal always
   // describes the latest run and a later resume replays from it alone.
   writeFileSync(journalPath, '')
-  const journal = (entry) => appendFileSync(journalPath, JSON.stringify(entry) + '\n')
+  const journal = (entry) => appendFileSync(journalPath, JSON.stringify({ type: entry.type, at: iso(clock), ...entry }) + '\n')
   const replays = new Map()
   let replaying = resume
   // A dead agent never names its worktree to the script, so the script can
@@ -153,7 +189,7 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out = (s) =>
     const entry = replaying && cached && k < cached.length ? cached[k] : null
     if (entry && !entry.failed) {
       replays.set(key, k + 1)
-      journal({ type: 'result', key, n, title, result: entry.result })
+      journal({ type: 'result', key, n, title, result: entry.result, replayed: true })
       out(`<< ${title}: replayed from the journal`)
       return entry.result
     }
@@ -216,6 +252,8 @@ if (isMain) {
   // run must never pass for this run's.
   const summaryPath = join(dir, 'summary.json')
   rmSync(summaryPath, { force: true })
+  const say = runnerLog(dir, (s) => console.log(s))
+  const sayError = runnerLog(dir, (s) => console.error(s))
   let summary
   try {
     const result = await runScript(readFileSync(path, 'utf8'), {
@@ -224,11 +262,11 @@ if (isMain) {
       resume,
       permissionMode,
     })
-    console.log('== Result')
-    console.log(JSON.stringify(result, null, 2))
+    say('== Result')
+    say(JSON.stringify(result, null, 2))
     summary = { runner: 'orca', ok: true, result }
   } catch (e) {
-    console.error(e?.stack ?? String(e))
+    sayError(e?.stack ?? String(e))
     process.exitCode = 1
     summary = failureSummary(e)
   }

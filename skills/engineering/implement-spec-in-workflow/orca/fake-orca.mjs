@@ -7,7 +7,7 @@
 // when one is given, so a test can assert on the sequence and its timing.
 // `worktrees` holds every worktree Orca knows, the run's own included, by path,
 // with the board `status` last set on it.
-import { OrcaError } from './orca-cli.mjs'
+import { OrcaError, launchCommand, workerStartArgs } from './orca-cli.mjs'
 
 export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run' } = {}) {
   const calls = []
@@ -39,7 +39,12 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       return { runId: `run_fake${++runs}` }
     },
 
-    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, child = null }) {
+    // Only the custom launch exists: the harness command, carrying the
+    // runner's session id, in a terminal worker-start then adopts. `command`
+    // and `argv` are what the real adapter would type and run.
+    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null }) {
+      if (!sessionId) throw new Error(`fake orca: ${title} was started without a runner-assigned --session-id`)
+      const command = launchCommand({ harness, model, effort, permissionMode, sessionId })
       const n = ++seq
       const preamble = { handle: `term_fake${n}`, capability: `cap_fake${n}`, taskId: `task_fake${n}`, dispatchId: `ctx_fake${n}` }
       const launch = { harness, model, effort, permissionMode }
@@ -49,13 +54,15 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
         if (worktrees.has(worktree)) throw new OrcaError('worktree_exists', `${worktree} already exists`, 'orchestration worker-start')
         worktrees.set(worktree, { parent: runWorktree, name: child.name, displayName: child.displayName, removed: false, status: null })
       }
+      const argv = workerStartArgs({ run, prompt, title, place: ['--worktree', child ? `path:${worktree}` : 'current'], terminal: preamble.handle })
+      if (argv.includes('--agent')) throw new Error(`fake orca: worker-start for ${title} was called with --agent`)
       // Like Claude Code, the agent titles its own tab from its prompt.
       const d = {
-        ...preamble, run, title, ...launch, prompt, worktree, tabTitle: prompt.slice(0, 30), settled: false, outcome: null, released: false, stopped: false,
+        ...preamble, run, title, ...launch, sessionId, command, prompt, worktree, tabTitle: prompt.slice(0, 30), settled: false, outcome: null, released: false, stopped: false,
         gone: false, exited: false, idle: false, waiting: null, lastOutputAt: null, onNudge: null, nudges: [],
       }
       dispatches.set(d.dispatchId, d)
-      record({ verb: 'workerStart', dispatchId: d.dispatchId, title, ...launch, placement: child ? 'new-child' : 'current', worktree })
+      record({ verb: 'workerStart', dispatchId: d.dispatchId, title, ...launch, sessionId, command, argv, placement: child ? 'new-child' : 'current', worktree })
       // A worker that throws is an agent that died: its Dispatch fails.
       d.finished = Promise.resolve()
         .then(() => worker({ prompt, preamble, worktree, orca, state: d }))
@@ -63,7 +70,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
           d.error = e
           if (!d.settled) Object.assign(d, { settled: true, outcome: 'failed' })
         })
-      return { dispatchId: d.dispatchId, taskId: d.taskId, mode: 'terminal', modeDetail: '', terminal: d.handle, worktree }
+      return { dispatchId: d.dispatchId, taskId: d.taskId, terminal: d.handle, worktree }
     },
 
     async workerShow({ dispatch: id }) {

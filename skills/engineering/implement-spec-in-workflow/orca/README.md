@@ -4,7 +4,7 @@ The second runner for `workflow.template.js` (ADR-0011): a Node script, launched
 
 | file | what it is |
 |---|---|
-| `runner.mjs` | the runner: the four hooks, naming each `agent()` call, replay and the resume journal, the retained worktrees |
+| `runner.mjs` | the runner: the four hooks, naming each `agent()` call, replay and the resume journal, `runner.log`, the retained worktrees |
 | `lifecycle.mjs` | one live agent's life: the run's Run, the live cap, its worker's start, liveness, its result, its board status |
 | `submit.mjs` | the worker's end of `agent()`: validates the payload, records it, sends `worker_done` |
 | `orca-cli.mjs` | the one place anything talks to Orca |
@@ -17,6 +17,28 @@ node runner.mjs <rendered-script.js> [--state-dir <dir>] [--resume] [--permissio
 ```
 
 The state dir defaults to `orca-run/` beside the rendered script, which is `<notes-dir>/orca-run` for a run the skill armed. When the runner exits it writes `summary.json` there — `{"runner": "orca", "ok": true, "result": …}`, or `"ok": false` with the `error` and `worktrees_kept`, every worktree the runner retained (below) — and that file, not the terminal's log, is what the arming session reads and reports. It is removed at start, so a file left by an earlier run never passes for this one's.
+
+## What a run leaves on disk
+
+Together, the journal and the log say what happened in a run, whether or not the runner's tab is still open.
+
+- **`runner.log`** holds every line the runner printed, each prefixed with an ISO timestamp, including the result or the error it ended with. Each run appends to the log, so a resumed run follows the earlier one.
+- **`journal.jsonl`** holds one JSON entry per line. Every entry has a `type` and `at`, an ISO timestamp. `JOURNAL_ENTRIES` in `runner.mjs` lists the fields each type always carries:
+
+| type | written when | fields besides `type` and `at` |
+|---|---|---|
+| `started` | a worker started | `key`, `n`, `title`, `dispatchId`, `harness`, `sessionId`, `worktree` (the path it runs in), `terminal` (its handle) |
+| `result` | a call returned a value | `key`, `n`, `title`, `result`, and `replayed: true` if it came from the journal |
+| `failed` | a call returned null: its worker never started, died, went over a limit, or left no valid result, or its Run could not be created | `key`, `n`, `title`, `reason` (human-readable), `attempts`, and `retained` if it left a worktree |
+| `retained` | a resume carries forward a worktree an earlier run kept | `retained` |
+| `retry` | a call starts another attempt | `key`, `n`, `title`, `attempt`, `reason` |
+| `nudge` | the runner typed a nudge to a worker | `key`, `n`, `title`, `dispatchId`, `reason`, `count` |
+| `continued` | a finished session was continued in its terminal | `key`, `n`, `title`, `dispatchId`, `sessionId`, `terminal`, `reason` |
+| `reattached` | a resumed runner took up a worker an earlier one started | `key`, `n`, `title`, `dispatchId`, `sessionId`, `terminal`, `worktree` |
+
+The first four types are written today. `retry`, `nudge`, `continued` and `reattached` are defined here, and the behaviours that produce them write them. A resume reads only `type`, `key`, `result` and `retained`, so a journal from before timestamps and launch fields were added still resumes.
+
+The runner assigns each worker's session id. It generates the id and starts the harness with `--session-id`; both `claude` and `pi` accept that flag.
 
 ## Two checks, and when each runs
 
@@ -73,7 +95,7 @@ The script must reach the Workflow tool with LF line endings. The tool refuses a
 
 Last pass: 2026-09-23, Orca 1.4.207 and Claude Code 2.1.280 on Windows 11, with the runner as of #30, whose entry point writes `summary.json`. All four results were equal to the expected object. The Orca fresh and resumed runs each left a `summary.json` with `"runner": "orca", "ok": true` and that object as `result`. The Orca resume started no worker. The Workflow resume replayed `contract:valid` and `contract:repair` and re-ran `contract:kill`.
 
-Not yet re-run since the runner and this script changed on `spec/21-integration`: the script gained `contract:options` and the isolated-worktree case (so the object above is not yet confirmed on either runner), a dead agent is now journaled as failed (below), so the Orca resume re-runs `contract:kill` too, and custom launches into a child worktree now create it first. The next pass must confirm both runners again.
+Not yet re-run since the runner and this script changed on `spec/21-integration`: the script gained `contract:options` and the isolated-worktree case (so the object above is not yet confirmed on either runner), a dead agent is now journaled as failed (below), so the Orca resume re-runs `contract:kill` too, and custom launches into a child worktree now create it first. Since #45, every worker is a custom launch with a runner-assigned `--session-id`. The next pass must confirm both runners again.
 
 ## A dead agent on resume
 
@@ -85,7 +107,7 @@ Each template call spreads its role's row from the `ROLES` table: `harness` (`cl
 
 ## Worktrees and the board
 
-An `agent()` with `isolation: 'worktree'` runs in a new Orca child worktree of the run's worktree. A worker that `worker-start` launches itself gets it from `--worktree new-child`. A worker started from a custom command line (a Claude worker given `--permission-mode`, and every pi worker) cannot be moved once its process runs, so the child is made first with `orca worktree create --parent-worktree current`, its terminal opens there with `terminal create --worktree path:<child>`, and `worker-start --terminal` is told the same worktree.
+An `agent()` with `isolation: 'worktree'` runs in a new Orca child worktree of the run's worktree. Every worker starts from its harness's own command line, carrying its session id, in a terminal the runner creates. `worker-start --terminal` then adopts that terminal, and `--agent` is never used. A process that is already running cannot be moved into another worktree, so the child is made first with `orca worktree create --parent-worktree current`. The worker's terminal opens there with `terminal create --worktree path:<child>`, and `worker-start --terminal` is told the same worktree.
 
 The runner sets each child worktree's board status with `orca worktree set --workspace-status`: `in-progress` when its worker starts (`in-review` for an agent in the `Gate` phase), and `completed` when its agent reports a PR it published (a result with a `pr_url` and `published` not false). A reclaimed worktree leaves the board with its removal. A status Orca refuses is logged and the agent carries on. The run's own worktree is never touched.
 

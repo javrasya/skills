@@ -41,20 +41,22 @@ export const HARNESSES = ['claude', 'pi']
 // must be one no shell reads as syntax.
 const WORD = /^[\w.:/@+=-]+$/
 
-// What worker-start cannot carry: it has no permission-mode flag, it forwards
-// --model/--effort to Claude only, and --effort only beside --model — pi's
-// trust, model and thinking never reach pi through it (ADR-0011). A worker
-// needing any of that starts from this command line instead; null means
-// worker-start's own `--agent` launch carries everything asked for.
-export function launchCommand({ harness = 'claude', model, effort, permissionMode }) {
+// Every worker's harness starts from this command line, never from
+// worker-start's own `--agent` launch (ADR-0011): worker-start has no
+// permission-mode or session-id flag, and forwards --model/--effort to Claude
+// only. The session id is the runner's, so it is known before the agent runs;
+// both harnesses take `--session-id`, and Claude requires a UUID. Without one
+// the command is still built, which is how a call's launch words are checked
+// before any worker starts.
+export function launchCommand({ harness = 'claude', model, effort, permissionMode, sessionId }) {
   let argv
+  const session = sessionId && ['--session-id', sessionId]
   if (harness === 'pi') {
     // --approve trusts project-local files: an unattended pi worker would
     // otherwise stop at pi's trust prompt with nobody to answer it.
-    argv = ['pi', '--approve', model && ['--model', model], effort && ['--thinking', effort]]
+    argv = ['pi', '--approve', session, model && ['--model', model], effort && ['--thinking', effort]]
   } else if (harness === 'claude') {
-    if (!permissionMode && (model || !effort)) return null
-    argv = ['claude', permissionMode && ['--permission-mode', permissionMode], model && ['--model', model], effort && ['--effort', effort]]
+    argv = ['claude', session, permissionMode && ['--permission-mode', permissionMode], model && ['--model', model], effort && ['--effort', effort]]
   } else {
     throw new Error(`unknown harness "${harness}": expected one of ${HARNESSES.join(', ')}`)
   }
@@ -63,6 +65,14 @@ export function launchCommand({ harness = 'claude', model, effort, permissionMod
   if (bad) throw new Error(`refusing to type "${bad}" into a shell to launch ${harness}: use plain model, effort and mode names`)
   return words.join(' ')
 }
+
+// The one worker-start argv: it adopts a terminal the runner made, so it never
+// carries --agent. fake-orca.mjs builds its starts from this too.
+export const workerStartArgs = ({ run, prompt, title, place, terminal }) =>
+  ['orchestration', 'worker-start', '--run', run, '--spec', prompt, '--task-title', title, ...place, '--terminal', terminal]
+
+// The path half of a `<repoId>::<path>` worktree id.
+const pathOf = (id) => (typeof id === 'string' && id.includes('::') ? id.slice(id.indexOf('::') + 2) : null)
 
 export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(bin) } = {}) {
   // Terminals this runner created for a custom launch, by dispatch. Orca's
@@ -87,20 +97,12 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
     throw new OrcaError('agent_not_ready', `\`${command}\` in terminal ${handle} never reached an idle prompt`, 'terminal wait')
   }
 
-  function receipt(r) {
-    const tab = (r.effects || []).find((e) => e.kind === 'terminal' && e.role === 'agent')
-    // A worktree effect's id is the `<repoId>::<path>` selector.
-    const wt = (r.effects || []).find((e) => e.kind === 'worktree')?.id ?? null
-    const worktree = wt && wt.includes('::') ? wt.slice(wt.indexOf('::') + 2) : wt
-    return { dispatchId: r.dispatchId, taskId: r.taskId, mode: r.mode?.mode ?? null, modeDetail: r.mode?.detail ?? '', terminal: tab?.id ?? null, worktree }
-  }
-
   // The path of the worktree `worktree create` made: its `path`, or the path
   // half of its `<repoId>::<path>` id.
   function createdPath(r) {
     const w = r?.worktree ?? r ?? {}
     if (typeof w.path === 'string' && w.path) return w.path
-    return typeof w.id === 'string' && w.id.includes('::') ? w.id.slice(w.id.indexOf('::') + 2) : null
+    return pathOf(w.id)
   }
 
   return {
@@ -113,15 +115,11 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
 
     // No `child`: the worker runs in the coordinator's worktree — the runner's,
     // which is the run's. `child: { name, displayName }`: in a new Orca child
-    // worktree of it. Either way `worktree` is the path it runs in.
-    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, child = null }) {
-      const command = launchCommand({ harness, model, effort, permissionMode })
-      const start = ['orchestration', 'worker-start', '--run', run, '--spec', prompt, '--task-title', title]
-      if (!command) {
-        const where = child ? ['--worktree', 'new-child', '--name', child.name, '--display-name', child.displayName] : ['--worktree', 'current']
-        const launch = [...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : [])]
-        return receipt(await call([...start, ...where, '--agent', harness, ...launch]))
-      }
+    // worktree of it. Either way `worktree` is the path it runs in, and
+    // `terminal` the handle of the tab the runner made for it.
+    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null }) {
+      if (!sessionId) throw new Error(`workerStart: ${title} has no session id; the runner assigns one to every worker`)
+      const command = launchCommand({ harness, model, effort, permissionMode, sessionId })
       // Orca's documented route for custom argv under supervision: create the
       // agent's terminal, then worker-start takes ownership of it. Without
       // `child` the terminal opens in the runner's worktree, which `current`
@@ -138,7 +136,7 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
         place = terminalIn = ['--worktree', `path:${worktree}`]
         // Orca opens a plain shell in a new worktree; the agent gets its own.
         if (c?.startupTerminal?.handle) await closeQuietly(c.startupTerminal.handle)
-        // worktree create has no --display-name; new-child sets it on the agent-launch path.
+        // worktree create has no --display-name.
         await call(['worktree', 'set', ...place, '--display-name', child.displayName]).catch(() => {})
       }
       let handle = null
@@ -146,9 +144,10 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
         const t = await call(['terminal', 'create', ...terminalIn, '--title', title, '--command', command])
         handle = t.terminal.handle
         await waitIdle(handle, command)
-        const r = await call([...start, ...place, '--terminal', handle])
+        const r = await call(workerStartArgs({ run, prompt, title, place, terminal: handle }))
         ownTerminals.set(r.dispatchId, handle)
-        return { ...receipt(r), mode: 'terminal', terminal: handle, worktree: worktree ?? receipt(r).worktree }
+        const effect = (r.effects || []).find((e) => e.kind === 'worktree')?.id
+        return { dispatchId: r.dispatchId, taskId: r.taskId, terminal: handle, worktree: worktree ?? pathOf(effect) ?? pathOf(t.terminal.worktreeId) }
       } catch (e) {
         if (handle) await closeQuietly(handle)
         // The caller names a worktree made for a worker that never started.

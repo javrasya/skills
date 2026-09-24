@@ -11,7 +11,7 @@ import { join, dirname } from 'path'
 import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { submit } from '../skills/engineering/implement-spec-in-workflow/orca/submit.mjs'
-import { runScript, journalKey, failureSummary, SUBMIT, SETTINGS, realClock } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
+import { runScript, journalKey, failureSummary, SUBMIT, SETTINGS, realClock, JOURNAL_ENTRIES } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
 import { agentLifecycle } from '../skills/engineering/implement-spec-in-workflow/orca/lifecycle.mjs'
 import { fakeOrca } from '../skills/engineering/implement-spec-in-workflow/orca/fake-orca.mjs'
 import { RUNNER_SETTINGS } from '../skills/engineering/implement-spec-in-workflow/orca/settings.mjs'
@@ -39,6 +39,8 @@ const BAD_ERRORS = [
 ]
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'orca-runner-test-'))
+const SID = '0b7f3c2e-5d1a-4c8e-9f60-2a4b6c8d0e1f'
+const journalOf = (stateDir) => readFileSync(join(stateDir, 'journal.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
 const FAST = { pollMs: 1 }
 const TEMPLATE = new URL('../skills/engineering/implement-spec-in-workflow/workflow.template.js', import.meta.url)
 
@@ -46,7 +48,7 @@ const TEMPLATE = new URL('../skills/engineering/implement-spec-in-workflow/workf
 async function startedWorker() {
   const dir = tmp()
   const orca = fakeOrca()
-  const w = await orca.workerStart({ run: 'run_fake', prompt: '', title: 't' })
+  const w = await orca.workerStart({ run: 'run_fake', prompt: '', title: 't', sessionId: SID })
   const d = orca.dispatches.get(w.dispatchId)
   const paths = { schema: join(dir, 'schema.json'), result: join(dir, 'result.json'), payload: join(dir, 'payload.json') }
   writeFileSync(paths.schema, JSON.stringify(SCHEMA))
@@ -295,13 +297,15 @@ const ONE = `return await agent('Do a thing.', { label: 'one', phase: 'P', schem
 
 // Runs a script (one agent() by default) on the default settings table, each
 // worker played by `worker`.
-async function runOne(worker, { script = ONE, orcaPatch = {} } = {}) {
+async function runOne(worker, { script = ONE, orcaPatch = {}, permissionMode = null } = {}) {
   const clock = fakeClock()
   const lines = []
+  const stateDir = tmp()
   const orca = Object.assign(fakeOrca({ worker: (w) => worker({ ...w, clock }), clock }), orcaPatch)
-  const result = await runScript(script, { orca, stateDir: tmp(), out: (s) => lines.push(s), clock })
+  const result = await runScript(script, { orca, stateDir, out: (s) => lines.push(s), clock, permissionMode })
   const of = (verb) => orca.calls.filter((c) => c.verb === verb)
-  return { result, lines, nudges: of('terminalSend'), stop: of('workerStop')[0], released: of('workerRelease').length }
+  const log = readFileSync(join(stateDir, 'runner.log'), 'utf8').trimEnd().split('\n')
+  return { result, lines, nudges: of('terminalSend'), stop: of('workerStop')[0], released: of('workerRelease').length, orca, journal: journalOf(stateDir), log }
 }
 
 async function submitGood({ prompt, preamble, orca }) {
@@ -567,22 +571,35 @@ function recordingCli(replies = {}) {
 }
 const flag = (argv, name) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined)
 const verbsOf = (argvs) => argvs.map((a) => a.slice(0, 2).join(' '))
-const START = { run: 'run_1', prompt: 'p', title: '[Implement] impl:#1' }
+const START = { run: 'run_1', prompt: 'p', title: '[Implement] impl:#1', sessionId: SID }
 
-test('orca-cli: a Claude worker with no permission mode starts through worker-start, model and effort forwarded', async () => {
+test('orca-cli: a Claude worker with no permission mode starts from its own command line too, with its session id, never through --agent', async () => {
   const { argvs, orca } = recordingCli()
   const w = await orca.workerStart({ ...START, harness: 'claude', model: 'opus', effort: 'low' })
-  assert.deepEqual(verbsOf(argvs), ['orchestration worker-start'])
-  const [argv] = argvs
-  assert.deepEqual([flag(argv, '--agent'), flag(argv, '--model'), flag(argv, '--effort'), flag(argv, '--worktree')], ['claude', 'opus', 'low', 'current'])
-  assert.equal(w.terminal, 'term_orca')
+  assert.deepEqual(verbsOf(argvs), ['terminal create', 'terminal wait', 'orchestration worker-start'])
+  assert.equal(flag(argvs[0], '--command'), `claude --session-id ${SID} --model opus --effort low`)
+  const start = argvs[2]
+  assert.deepEqual([flag(start, '--worktree'), flag(start, '--terminal')], ['current', 'term_own'])
+  for (const f of ['--agent', '--model', '--effort']) assert.equal(start.includes(f), false, `worker-start refuses ${f} beside --terminal`)
+  assert.equal(w.terminal, 'term_own')
+})
+
+test('orca-cli: a worker with no session id is refused before Orca is called', async () => {
+  const { argvs, orca } = recordingCli()
+  await assert.rejects(orca.workerStart({ ...START, sessionId: undefined }), /no session id/)
+  assert.deepEqual(argvs, [])
+})
+
+test("orca-cli: a worker in the run's own worktree is named with that worktree's path, from its terminal", async () => {
+  const { orca } = recordingCli({ 'terminal create': { terminal: { handle: 'term_own', worktreeId: 'repo::C:/wt/run' } } })
+  assert.equal((await orca.workerStart(START)).worktree, 'C:/wt/run')
 })
 
 test('orca-cli: a Claude worker starts in the given permission mode, in a terminal worker-start then supervises', async () => {
   const { argvs, orca } = recordingCli()
   const w = await orca.workerStart({ ...START, harness: 'claude', model: 'opus', effort: 'high', permissionMode: 'auto' })
   assert.deepEqual(verbsOf(argvs), ['terminal create', 'terminal wait', 'orchestration worker-start'])
-  assert.equal(flag(argvs[0], '--command'), 'claude --permission-mode auto --model opus --effort high')
+  assert.equal(flag(argvs[0], '--command'), `claude --session-id ${SID} --permission-mode auto --model opus --effort high`)
   assert.equal(flag(argvs[0], '--title'), START.title)
   assert.equal(flag(argvs[1], '--for'), 'tui-idle')
   const start = argvs[2]
@@ -600,12 +617,12 @@ test('orca-cli: a Claude worker starts in the given permission mode, in a termin
 test('orca-cli: a pi worker starts with project-local files trusted, its model and effort on its own command line', async () => {
   const { argvs, orca } = recordingCli()
   await orca.workerStart({ ...START, harness: 'pi', model: 'openai/gpt-5', effort: 'low' })
-  assert.equal(flag(argvs[0], '--command'), 'pi --approve --model openai/gpt-5 --thinking low')
+  assert.equal(flag(argvs[0], '--command'), `pi --approve --session-id ${SID} --model openai/gpt-5 --thinking low`)
   assert.equal(flag(argvs[2], '--terminal'), 'term_own')
 
   const bare = recordingCli()
   await bare.orca.workerStart({ ...START, harness: 'pi' })
-  assert.equal(flag(bare.argvs[0], '--command'), 'pi --approve')
+  assert.equal(flag(bare.argvs[0], '--command'), `pi --approve --session-id ${SID}`)
 })
 
 test('orca-cli: an agent whose TUI never goes idle is not dispatched, and its terminal is closed', async () => {
@@ -728,8 +745,9 @@ const CHILD_PATH = 'C:/wt/run_1-3'
 const childCli = (replies = {}) => recordingCli({ 'worktree create': { worktree: { id: `repo::${CHILD_PATH}`, path: CHILD_PATH }, startupTerminal: { handle: 'term_shell' } }, ...replies })
 
 for (const [what, launch, command] of [
-  ['a Claude worker in a permission mode', { harness: 'claude', model: 'opus', permissionMode: 'auto' }, 'claude --permission-mode auto --model opus'],
-  ['a pi worker', { harness: 'pi', model: 'openai/gpt-5' }, 'pi --approve --model openai/gpt-5'],
+  ['a Claude worker', { harness: 'claude', model: 'opus' }, `claude --session-id ${SID} --model opus`],
+  ['a Claude worker in a permission mode', { harness: 'claude', model: 'opus', permissionMode: 'auto' }, `claude --session-id ${SID} --permission-mode auto --model opus`],
+  ['a pi worker', { harness: 'pi', model: 'openai/gpt-5' }, `pi --approve --session-id ${SID} --model openai/gpt-5`],
 ]) {
   test(`orca-cli: ${what} isolated in a child worktree runs its terminal in that child, made first`, async () => {
     const { argvs, orca } = childCli()
@@ -744,7 +762,7 @@ for (const [what, launch, command] of [
     assert.equal(flag(term, '--command'), command)
     assert.equal(flag(start, '--worktree'), `path:${CHILD_PATH}`)
     assert.equal(flag(start, '--terminal'), 'term_own')
-    for (const f of ['--name', '--display-name']) assert.equal(start.includes(f), false, `worker-start refuses ${f} for an existing worktree`)
+    for (const f of ['--name', '--display-name', '--agent']) assert.equal(start.includes(f), false, `worker-start refuses ${f} for an existing worktree`)
     assert.equal(w.worktree, CHILD_PATH)
     assert.equal(w.terminal, 'term_own')
   })
@@ -985,6 +1003,139 @@ test('lifecycle: an isolated worker that never started leaves its worktree retai
   const { life, call, journal, kept } = lifecycleOn(orca)
   assert.equal(await life(call('impl', { isolated: true })), null)
   assert.deepEqual(kept.map((k) => k.path), ['C:/fake/worktrees/orphan'])
-  assert.deepEqual(journal.map((e) => e.type), ['started', 'failed'])
-  assert.equal(journal[1].retained, kept[0])
+  assert.deepEqual(journal.map((e) => e.type), ['failed'], 'a worker that never started has no started line')
+  assert.equal(journal[0].retained, kept[0])
+  assert.equal(journal[0].reason, 'its worker did not start: agent_not_ready')
+})
+
+// --- the journal and the log say what happened --------------------------------
+
+const ISO = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+// Every entry is timestamped and carries every field its type defines.
+function assertEntries(journal) {
+  for (const e of journal) {
+    assert.ok(JOURNAL_ENTRIES[e.type], `unknown entry type ${e.type}`)
+    for (const f of JOURNAL_ENTRIES[e.type]) assert.ok(f in e, `${e.type} entry lacks ${f}: ${JSON.stringify(e)}`)
+    assert.match(e.at, ISO)
+  }
+}
+
+const iso = (ms) => new Date(ms).toISOString()
+
+test("journal: every entry is timestamped from the runner's clock", async () => {
+  const r = await runOne(async ({ state, clock }) => {
+    state.onNudge = () => { state.lastOutputAt = clock.now() + 1000 }
+  })
+  assertEntries(r.journal)
+  assert.deepEqual(r.journal.map((e) => [e.type, e.at]), [['started', iso(0)], ['failed', iso(r.stop.at)]])
+  assert.ok(r.stop.at >= 40 * MIN)
+})
+
+test('journal: started names the dispatch, harness, runner-assigned session, worktree and terminal of Claude and pi workers alike', async () => {
+  const script = `const S = ${JSON.stringify(SCHEMA)}
+await agent('a', { label: 'claude', schema: S })
+await agent('b', { label: 'claude-wt', schema: S, isolation: 'worktree' })
+await agent('c', { harness: 'pi', piModel: 'openai/gpt-5', label: 'pi', schema: S })
+return await agent('d', { harness: 'pi', label: 'pi-wt', schema: S, isolation: 'worktree' })`
+  for (const permissionMode of [null, 'auto']) {
+    const r = await runOne(submitGood, { script, permissionMode })
+    assertEntries(r.journal)
+    const starts = r.orca.calls.filter((c) => c.verb === 'workerStart')
+    const journaled = r.journal.filter((e) => e.type === 'started')
+    assert.equal(journaled.length, 4)
+    for (const [i, e] of journaled.entries()) {
+      const s = starts[i]
+      const d = r.orca.dispatches.get(s.dispatchId)
+      assert.deepEqual(
+        { dispatchId: e.dispatchId, harness: e.harness, sessionId: e.sessionId, worktree: e.worktree, terminal: e.terminal },
+        { dispatchId: d.dispatchId, harness: i < 2 ? 'claude' : 'pi', sessionId: s.sessionId, worktree: d.worktree, terminal: d.handle },
+      )
+      assert.match(e.sessionId, UUID)
+      // The custom path, with or without a mode: the harness command carries the id.
+      assert.ok(s.command.startsWith(i < 2 ? `claude --session-id ${e.sessionId}` : `pi --approve --session-id ${e.sessionId}`), s.command)
+      assert.equal(s.argv.includes('--agent'), false)
+      assert.equal(s.argv[s.argv.indexOf('--terminal') + 1], d.handle)
+    }
+    assert.equal(new Set(journaled.map((e) => e.sessionId)).size, 4, 'every worker has its own session')
+    assert.deepEqual(journaled.map((e) => e.worktree === 'C:/fake/run'), [true, false, true, false])
+  }
+})
+
+test('fake orca: a worker start without a runner-assigned session id is refused', async () => {
+  const orca = fakeOrca()
+  await assert.rejects(orca.workerStart({ run: 'run_fake', prompt: '', title: 't' }), /without a runner-assigned --session-id/)
+  assert.deepEqual(orca.calls, [])
+})
+
+// Every way agent() returns null, and the failed entry it leaves.
+const FAILURES = [
+  ['never started', async () => {}, { orcaPatch: { workerStart: async () => { throw new Error('orca orchestration worker-start: outcome_unknown') } } },
+    /^its worker did not start: orca orchestration worker-start: outcome_unknown$/],
+  ['died', async ({ state }) => { state.gone = true }, {}, /^its terminal is gone, with no result$/],
+  ['over a limit', async () => {}, {}, /^silent for 40 minutes, with no result$/],
+  ['invalid result', async ({ prompt, preamble, orca }) => {
+    const argv = submitArgvIn(prompt, preamble)
+    writeFileSync(argv[argv.indexOf('--result') + 1], JSON.stringify(BAD))
+    await orca.workerDone({ from: preamble.handle, capability: preamble.capability, taskId: preamble.taskId, dispatchId: preamble.dispatchId, subject: 's', body: 'b' })
+  }, {}, /^recorded result fails its schema: .*\$\.count: expected integer, got string.* \(outcome succeeded\)$/],
+  ['Run creation failed', async () => {}, { orcaPatch: { runCreate: async () => { throw new Error('orca orchestration run-create: runtime_unavailable') } } },
+    /^Orca could not create this run's Run: orca orchestration run-create: runtime_unavailable$/],
+]
+
+for (const [what, worker, opts, reason] of FAILURES) {
+  test(`journal: a call that ends in null (${what}) is journaled failed with its reason and attempt count`, async () => {
+    const r = await runOne(worker, opts)
+    assert.equal(r.result, null)
+    assertEntries(r.journal)
+    const failed = r.journal.filter((e) => e.type === 'failed')
+    assert.equal(failed.length, 1)
+    assert.match(failed[0].reason, reason)
+    assert.equal(failed[0].attempts, 1)
+    assert.equal(r.journal.some((e) => e.type === 'started'), what !== 'never started' && what !== 'Run creation failed')
+  })
+}
+
+test('runner.log: every line the runner printed, in order and timestamped, the one for a worker that never started included', async () => {
+  const r = await runOne(async () => {}, { orcaPatch: { workerStart: async () => { throw new Error('orca terminal wait: agent_not_ready') } } })
+  assert.ok(r.lines.some((l) => l.includes('its worker did not start')), r.lines.join('\n'))
+  for (const l of r.log) assert.match(l.slice(0, 24), ISO)
+  assert.deepEqual(r.log.map((l) => l.slice(25)), r.lines)
+})
+
+test("runner.log: each line carries the clock's time when it was printed", async () => {
+  const r = await runOne(async ({ state }) => { state.idle = true })
+  const nudges = r.log.filter((l) => l.includes('nudging it'))
+  assert.equal(nudges.length, 2)
+  assert.deepEqual(nudges.map((l) => l.slice(0, 24)), r.nudges.map((n) => iso(n.at)))
+})
+
+test('entry point: what it prints itself, the result included, is in runner.log too', () => {
+  const r = runEntry(`log('hi')\nreturn { n: 1 }`)
+  assert.equal(r.code, 0)
+  const log = readFileSync(join(dirname(r.summaryPath), 'runner.log'), 'utf8')
+  assert.match(log, /^\S+ {4}hi$/m)
+  assert.match(log, /^\S+ == Result$/m)
+  assert.match(log, /^\S+ {3}"n": 1$/m)
+})
+
+test('resume: a journal written before entries carried timestamps and launch fields still resumes', async () => {
+  const stateDir = tmp()
+  const key = (p, label) => journalKey(p, { label, phase: 'Chain' })
+  const old = [
+    { type: 'started', key: key('Plan it.', 'a'), n: 1, title: '[Chain] a' },
+    { type: 'result', key: key('Plan it.', 'a'), n: 1, title: '[Chain] a', result: 'Plan it. @old' },
+    { type: 'started', key: key('Build it.', 'b'), n: 2, title: '[Chain] b' },
+    { type: 'failed', key: key('Build it.', 'b'), n: 2, title: '[Chain] b', retained: { path: 'C:/old/wt', reason: 'its agent died' } },
+    { type: 'started', key: key('Check it.', 'c'), n: 3, title: '[Chain] c' },
+  ]
+  writeFileSync(join(stateDir, 'journal.jsonl'), old.map((e) => JSON.stringify(e)).join('\n') + '\n')
+  const orca = answering(2)
+  const result = await runScript(chain('Build it.'), { orca, stateDir, out: () => {}, settings: FAST, resume: true })
+  assert.deepEqual(result, ['Plan it. @old', 'Build it. @2', 'Check it. @2'])
+  assert.deepEqual(started(orca), ['[Chain] b', '[Chain] c'])
+  const journal = journalOf(stateDir)
+  assertEntries(journal)
+  assert.deepEqual(journal.slice(0, 2).map((e) => [e.type, e.retained?.path ?? e.result, e.replayed]), [['retained', 'C:/old/wt', undefined], ['result', 'Plan it. @old', true]])
 })

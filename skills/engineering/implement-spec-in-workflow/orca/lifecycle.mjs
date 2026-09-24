@@ -5,6 +5,7 @@
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
+import { randomUUID } from 'crypto'
 import { validate } from './schema.mjs'
 
 export const SUBMIT = fileURLToPath(new URL('./submit.mjs', import.meta.url))
@@ -77,6 +78,10 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   // One Run per workflow run: every agent's worker is dispatched into it.
   let run = null
   let toldNoMode = false
+
+  // Every way a call ends in null journals one of these. A call launches one
+  // worker until retries exist, so it has made one attempt.
+  const fail = ({ key, n, title }, reason, retained) => journal({ type: 'failed', key, n, title, reason, attempts: 1, ...(retained && { retained }) })
 
   // The board card of a worktree the runner created. Cosmetic: a failure is
   // logged and the agent carries on.
@@ -170,9 +175,10 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   async function supervise(runId, { prompt, schema, isolated, launch, key, n, title, phaseName, schemaPath, resultPath, payloadPath }) {
     if (launch.harness === 'claude' && !launch.permissionMode && !toldNoMode) {
       toldNoMode = true
-      out("!! no --permission-mode given: Claude workers run as Orca's setting for new agent tabs says, not in the orchestrator's mode.")
+      out("!! no --permission-mode given: Claude workers start in Claude's own default permission mode, not in the orchestrator's.")
     }
-    journal({ type: 'started', key, n, title })
+    // Assigned, not discovered: the harness is started with it (decision D2 on #43).
+    const sessionId = randomUUID()
     let w
     try {
       w = await orca.workerStart({
@@ -180,29 +186,28 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
         prompt: workerPrompt(prompt, { schemaPath, resultPath, payloadPath }),
         title,
         ...launch,
+        sessionId,
         child: isolated ? { name: `${runId}-${n}`, displayName: title } : null,
       })
     } catch (e) {
-      out(`!! ${title}: its worker did not start: ${e.message}; agent() returns null`)
+      const reason = `its worker did not start: ${e?.message ?? e}`
+      out(`!! ${title}: ${reason}; agent() returns null`)
       // A worktree Orca made before the start failed is named like a dead
       // agent's: the runner never removes one.
       const kept = isolated && e?.worktree ? keep({ path: e.worktree, reason: `not in the ledger: created for ${title}, whose worker never started, so no agent ever reported it` }) : null
-      journal({ type: 'failed', key, n, title, ...(kept && { retained: kept }) })
+      fail({ key, n, title }, reason, kept)
       return null
     }
+    journal({ type: 'started', key, n, title, dispatchId: w.dispatchId, harness: launch.harness, sessionId, worktree: w.worktree ?? null, terminal: w.terminal })
     if (isolated && w.worktree) await setStatus(w.worktree, phaseName === 'Gate' ? 'in-review' : 'in-progress', title)
     const on = [launch.harness, launch.model, launch.effort && `${launch.effort} effort`, launch.permissionMode && `${launch.permissionMode} mode`].filter(Boolean).join(', ')
-    out(`>> ${title}: started on ${on} as dispatch ${w.dispatchId}${w.terminal ? ` in terminal ${w.terminal}` : ''}${w.worktree ? ` in ${w.worktree}` : ''}`)
-    if (w.mode !== 'terminal' || !w.terminal) {
-      out(`!! ${title} has no terminal tab to watch (mode: ${w.mode ?? 'unknown'}). Orca's setting for new agent tabs decides this; set it to terminal. ${w.modeDetail}`)
-    } else {
-      // The agent titles its own tab and drops --task-title (ADR-0011), so the
-      // tab is renamed to the title the operator finds it by.
-      try {
-        await orca.terminalRename({ terminal: w.terminal, title })
-      } catch (e) {
-        out(`!! ${title}: could not title its tab: ${e.message}`)
-      }
+    out(`>> ${title}: started on ${on} as dispatch ${w.dispatchId}, session ${sessionId}, in terminal ${w.terminal}${w.worktree ? ` in ${w.worktree}` : ''}`)
+    // The agent titles its own tab and drops --task-title (ADR-0011), so the
+    // tab is renamed to the title the operator finds it by.
+    try {
+      await orca.terminalRename({ terminal: w.terminal, title })
+    } catch (e) {
+      out(`!! ${title}: could not title its tab: ${e.message}`)
     }
 
     let delivered = false
@@ -232,9 +237,9 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       // agent: a resume runs the call live again. The worktree it leaves rides
       // along, so a resume still names it.
       if (result.error) {
-        const k = retain()
-        journal({ type: 'failed', key, n, title, ...(k && { retained: k }) })
-        out(`!! ${title}: ${end.dead ? `${end.dead}, with no result` : `${result.error} (outcome ${end.outcome})`}; agent() returns null`)
+        const reason = end.dead ? `${end.dead}, with no result` : `${result.error} (outcome ${end.outcome})`
+        fail({ key, n, title }, reason, retain())
+        out(`!! ${title}: ${reason}; agent() returns null`)
         return null
       }
       journal({ type: 'result', key, n, title, result: result.value })
@@ -267,8 +272,9 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       ;({ runId } = await creating)
     } catch (e) {
       if (run === creating) run = null
-      out(`!!!!!!!! ${title}: Orca could not create this run's Run: ${e?.message ?? e}; agent() returns null, and the next agent() asks again`)
-      journal({ type: 'failed', key, n, title })
+      const reason = `Orca could not create this run's Run: ${e?.message ?? e}`
+      out(`!!!!!!!! ${title}: ${reason}; agent() returns null, and the next agent() asks again`)
+      fail(call, reason)
       return null
     }
     // Held until the worker is released, not merely settled: an earlier
