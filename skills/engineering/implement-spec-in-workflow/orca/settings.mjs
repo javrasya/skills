@@ -29,4 +29,10 @@ export const RUNNER_SETTINGS = Object.freeze({
   // Orca calls that fail in a row while watching a worker before it counts
   // as dead: one transient CLI failure must not kill a long agent.
   watchErrors: 3,
+  // One Orca call, beyond any wait it asks Orca for: one that has not
+  // answered by then is killed and counts as failed.
+  orcaCallMs: 2 * MIN,
+  // A worker start, or the Run's creation, that fails is tried again after
+  // each of these waits in turn; once they are spent, agent() is null.
+  retryBackoffMs: Object.freeze([30_000, 2 * MIN, 5 * MIN]),
 })

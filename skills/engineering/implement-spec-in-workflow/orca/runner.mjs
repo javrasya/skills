@@ -28,7 +28,7 @@ import { createHash } from 'crypto'
 import { basename, dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { checkSchema } from './schema.mjs'
-import { orcaCli, launchCommand, HARNESSES } from './orca-cli.mjs'
+import { orcaCli, launchCommand, HARNESSES, realTimer } from './orca-cli.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { agentLifecycle } from './lifecycle.mjs'
 import { runRegistry, REGISTRY_PATH } from './registry.mjs'
@@ -64,16 +64,19 @@ export const journalKey = (prompt, opts = {}) =>
 // Every journal entry type and the fields it always carries, beside `type`.
 // `at` is an ISO timestamp from the runner's clock. A failed entry may also
 // carry `retained`, the worktree it left; a replayed result carries
-// `replayed: true`. retry, nudge, continued and reattached are written by the
-// behaviours that make them: a new attempt of a call, a nudge typed to a
-// worker, a finished session continued in its terminal, and a resumed runner
-// taking up a worker an earlier one started.
+// `replayed: true`. retry is a new attempt of a call's start or of its Run's
+// creation, with why the last one failed; warning, something that went wrong
+// without failing the call. nudge, continued and reattached are written by the
+// behaviours that make them: a nudge typed to a worker, a finished session
+// continued in its terminal, and a resumed runner taking up a worker an
+// earlier one started.
 export const JOURNAL_ENTRIES = Object.freeze({
   started: ['at', 'key', 'n', 'title', 'dispatchId', 'harness', 'sessionId', 'worktree', 'terminal'],
   result: ['at', 'key', 'n', 'title', 'result'],
   failed: ['at', 'key', 'n', 'title', 'reason', 'attempts'],
   retained: ['at', 'retained'],
   retry: ['at', 'key', 'n', 'title', 'attempt', 'reason'],
+  warning: ['at', 'key', 'n', 'title', 'reason'],
   nudge: ['at', 'key', 'n', 'title', 'dispatchId', 'reason', 'count'],
   continued: ['at', 'key', 'n', 'title', 'dispatchId', 'sessionId', 'terminal', 'reason'],
   reattached: ['at', 'key', 'n', 'title', 'dispatchId', 'sessionId', 'terminal', 'worktree'],
@@ -108,7 +111,7 @@ export function readJournal(path) {
   return { calls, retained }
 }
 
-export const realClock = { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) }
+export const realClock = { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)), timer: realTimer }
 
 const iso = (clock) => new Date(clock.now()).toISOString()
 
@@ -126,7 +129,7 @@ export function runnerLog(stateDir, print, clock = realClock) {
 }
 
 // `settings` overrides entries of SETTINGS; `clock` is what the liveness
-// limits are measured against, so tests can drive time.
+// limits and the retry backoff are measured against, so tests can drive time.
 // permissionMode: the orchestrating session's, which Claude workers start in
 // as Workflow subagents inherit it. Without one, a Claude worker starts in
 // Claude's own default mode.

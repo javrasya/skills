@@ -50,6 +50,7 @@ const published = (v) => !!v && typeof v === 'object' && typeof v.pr_url === 'st
 
 const slug = (s) => s.replace(/[^\w.-]+/g, '_').slice(0, 60)
 const mins = (ms) => Math.round(ms / 60_000)
+const wait = (ms) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms / 6_000) / 10} min`)
 
 const NUDGE = 'The workflow has not received your result: your final message is not read. Finish the task, then run the submit command from your instructions until it exits 0.'
 
@@ -80,17 +81,56 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   let run = null
   let toldNoMode = false
 
-  // Every way a call ends in null journals one of these. A call launches one
-  // worker until retries exist, so it has made one attempt.
-  const fail = ({ key, n, title }, reason, retained) => journal({ type: 'failed', key, n, title, reason, attempts: 1, ...(retained && { retained }) })
+  // Every way a call ends in null journals one of these. attempts counts the
+  // starts, or Run creations, it made; one that started a worker made one more
+  // start than it retried.
+  const fail = ({ key, n, title }, reason, retained, attempts = 1) => journal({ type: 'failed', key, n, title, reason, attempts, ...(retained && { retained }) })
+
+  // Something that went wrong without failing the agent: logged and
+  // journaled, never swallowed.
+  const warn = ({ key, n, title }, reason) => {
+    out(`!! ${title}: ${reason}`)
+    journal({ type: 'warning', key, n, title, reason })
+  }
+
+  // Runs attempt(1), attempt(2)… until one returns, one throws an error
+  // marked `final`, or the settings table's backoff is spent. The last error
+  // is thrown carrying `reason` (what failed, and why) and `attempts`. Each
+  // new attempt is journaled as retry, with why the one before it failed.
+  async function retrying({ key, n, title }, what, attempt) {
+    const waits = limits.retryBackoffMs
+    for (let i = 1; ; i++) {
+      try {
+        return await attempt(i)
+      } catch (err) {
+        const e = err instanceof Object ? err : new Error(String(err))
+        Object.assign(e, { reason: `${what}: ${e.message}`, attempts: i })
+        if (e.final || i > waits.length) throw e
+        out(`!! ${title}: ${e.reason}; trying again in ${wait(waits[i - 1])} (attempt ${i + 1} of ${waits.length + 1})`)
+        await clock.sleep(waits[i - 1])
+        journal({ type: 'retry', key, n, title, attempt: i + 1, reason: e.reason })
+      }
+    }
+  }
+
+  // Every agent's worker is dispatched into the one Run. Concurrent calls
+  // share its creation, retries included; once it has failed for good, the
+  // next call asks Orca again.
+  function ensureRun(call) {
+    const creating = (run ??= retrying(call, "Orca could not create this run's Run", () => orca.runCreate({ objective: objective() }).then((r) => (onRun(r), r))))
+    return creating.catch((e) => {
+      if (run === creating) run = null
+      throw e
+    })
+  }
 
   // The board card of a worktree the runner created. Cosmetic: a failure is
-  // logged and the agent carries on.
-  async function setStatus(worktree, status, title) {
+  // a warning and the agent carries on.
+  async function setStatus(call, worktree, status) {
     try {
       await orca.worktreeStatus({ worktree, status })
     } catch (e) {
-      out(`!! ${title}: could not set its worktree's board status to ${status}: ${e?.message ?? e}`)
+      warn(call, `could not set its worktree's board status to ${status}: ${e?.message ?? e}`)
     }
   }
 
@@ -173,34 +213,48 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     }
   }
 
-  async function supervise(runId, { prompt, schema, isolated, launch, key, n, title, phaseName, schemaPath, resultPath, payloadPath }) {
+  async function supervise(runId, call) {
+    const { prompt, schema, isolated, launch, key, n, title, phaseName, schemaPath, resultPath, payloadPath } = call
     if (launch.harness === 'claude' && !launch.permissionMode && !toldNoMode) {
       toldNoMode = true
       out("!! no --permission-mode given: Claude workers start in Claude's own default permission mode, not in the orchestrator's.")
     }
-    // Assigned, not discovered: the harness is started with it (decision D2 on #43).
-    const sessionId = randomUUID()
-    let w
+    // The child worktree a failed attempt made. Every attempt of a call asks
+    // for the same `<runId>-<n>` name, so a retry takes that one up again.
+    let made = null
+    let w, sessionId
     try {
-      w = await orca.workerStart({
-        run: runId,
-        prompt: workerPrompt(prompt, { schemaPath, resultPath, payloadPath }),
-        title,
-        ...launch,
-        sessionId,
-        child: isolated ? { name: `${runId}-${n}`, displayName: title } : null,
-      })
+      ;({ w, sessionId } = await retrying(call, 'its worker did not start', async (attempt) => {
+        // Assigned, not discovered: the harness is started with it (decision
+        // D2 on #43). A new one per attempt: a failed attempt's harness may
+        // already have taken the last one.
+        const sessionId = randomUUID()
+        try {
+          const w = await orca.workerStart({
+            run: runId,
+            prompt: workerPrompt(prompt, { schemaPath, resultPath, payloadPath }),
+            title,
+            ...launch,
+            sessionId,
+            child: isolated ? { name: `${runId}-${n}`, displayName: title, retry: attempt > 1 } : null,
+          })
+          return { w, sessionId }
+        } catch (e) {
+          if (e?.worktree) made = e.worktree
+          throw e
+        }
+      }))
     } catch (e) {
-      const reason = `its worker did not start: ${e?.message ?? e}`
-      out(`!! ${title}: ${reason}; agent() returns null`)
+      out(`!! ${title}: ${e.reason}; agent() returns null`)
       // A worktree Orca made before the start failed is named like a dead
       // agent's: the runner never removes one.
-      const kept = isolated && e?.worktree ? keep({ path: e.worktree, reason: `not in the ledger: created for ${title}, whose worker never started, so no agent ever reported it` }) : null
-      fail({ key, n, title }, reason, kept)
+      const kept = isolated && made ? keep({ path: made, reason: `not in the ledger: created for ${title}, whose worker never started, so no agent ever reported it` }) : null
+      fail(call, e.reason, kept, e.attempts)
       return null
     }
+    for (const why of w.warnings ?? []) warn(call, why)
     journal({ type: 'started', key, n, title, dispatchId: w.dispatchId, harness: launch.harness, sessionId, worktree: w.worktree ?? null, terminal: w.terminal })
-    if (isolated && w.worktree) await setStatus(w.worktree, phaseName === 'Gate' ? 'in-review' : 'in-progress', title)
+    if (isolated && w.worktree) await setStatus(call, w.worktree, phaseName === 'Gate' ? 'in-review' : 'in-progress')
     const on = [launch.harness, launch.model, launch.effort && `${launch.effort} effort`, launch.permissionMode && `${launch.permissionMode} mode`].filter(Boolean).join(', ')
     out(`>> ${title}: started on ${on} as dispatch ${w.dispatchId}, session ${sessionId}, in terminal ${w.terminal}${w.worktree ? ` in ${w.worktree}` : ''}`)
     // The agent titles its own tab and drops --task-title (ADR-0011), so the
@@ -246,7 +300,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       journal({ type: 'result', key, n, title, result: result.value })
       out(`<< ${title}: result received`)
       delivered = true
-      if (isolated && w.worktree && published(result.value)) await setStatus(w.worktree, 'completed', title)
+      if (isolated && w.worktree && published(result.value)) await setStatus(call, w.worktree, 'completed')
       return result.value
     } finally {
       if (!delivered) retain()
@@ -267,15 +321,12 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
 
     // Like a worker that cannot start, a Run Orca cannot create is this
     // agent's null, never a throw; the next agent() asks Orca again.
-    const creating = (run ??= orca.runCreate({ objective: objective() }).then((r) => (onRun(r), r)))
     let runId
     try {
-      ;({ runId } = await creating)
+      ;({ runId } = await ensureRun(call))
     } catch (e) {
-      if (run === creating) run = null
-      const reason = `Orca could not create this run's Run: ${e?.message ?? e}`
-      out(`!!!!!!!! ${title}: ${reason}; agent() returns null, and the next agent() asks again`)
-      fail(call, reason)
+      out(`!!!!!!!! ${title}: ${e.reason}; agent() returns null, and the next agent() asks again`)
+      fail(call, e.reason, null, e.attempts)
       return null
     }
     // Held until the worker is released, not merely settled: an earlier
