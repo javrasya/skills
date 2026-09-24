@@ -12,18 +12,25 @@
 // not reach) as failed, with no result. --resume replays the unchanged prefix
 // of agent() calls from that journal without launching anything; the first
 // call not in it or journaled as failed, and every call after it, runs live.
-// The Workflow runner's resumeFromRunId promises the same. On exit the runner
-// writes summary.json to the state dir: {runner, ok, result | error}, and on a
-// failure also worktrees_kept, the worktrees it retained. Every line it prints
-// is also appended, timestamped, to runner.log there.
+// The Workflow runner's resumeFromRunId promises the same. When the script
+// settles the runner writes summary.json to the state dir: {runner, ok, result
+// | error}, and on a failure also worktrees_kept, the worktrees it retained.
+// Every line it prints is also appended, timestamped, to runner.log there.
+//
+// Nothing is reclaimed during a run (ADR-0012): no worker is released, no tab
+// closed, no worktree removed. Only after summary.json is written does the
+// runner ask the operator what to reclaim (reclaim.mjs); it exits once
+// answered.
 //
 // The run itself is recorded in the machine-wide run registry (registry.mjs,
 // ~/.claude/orca-runs.jsonl): `armed` and the runner's terminal when the Run
-// is created, `ended` with ok, partial or failed when the script settles.
+// is created, `ended` with ok, partial or failed when the script settles, and
+// `reclaimed` for what the operator reclaims at the end.
 //
 // No change to this directory is done until the runner contract test passes
 // under both runners (README.md). The offline tests do not replace it.
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, appendFileSync } from 'fs'
+import { createInterface } from 'readline'
 import { createHash } from 'crypto'
 import { basename, dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
@@ -33,6 +40,7 @@ import { RUNNER_SETTINGS } from './settings.mjs'
 import { agentLifecycle } from './lifecycle.mjs'
 import { runRegistry, REGISTRY_PATH } from './registry.mjs'
 import { sessionTranscripts } from './transcript.mjs'
+import { agentsOf, endOfRunPrompt, gitUnpushed } from './reclaim.mjs'
 
 export { SUBMIT, workerPrompt } from './lifecycle.mjs'
 
@@ -63,8 +71,9 @@ export const journalKey = (prompt, opts = {}) =>
   'v1:' + createHash('sha256').update(JSON.stringify([prompt, canonical(opts)])).digest('hex')
 
 // Every journal entry type and the fields it always carries, beside `type`.
-// `at` is an ISO timestamp from the runner's clock. A failed entry may also
-// carry `retained`, the worktree it left, and `continuations`, how often its
+// `at` is an ISO timestamp from the runner's clock; `run` is the Orca Run the
+// worker was dispatched into. A failed entry may also carry `retained`, the
+// worktree it left, `run`, once the Run existed, and `continuations`, how often its
 // session was continued; a replayed result carries `replayed: true`. retry is
 // a new attempt of a call's start or of its Run's creation, with why the last
 // one failed; warning, something that went wrong without failing the call. A
@@ -73,7 +82,7 @@ export const journalKey = (prompt, opts = {}) =>
 // written by the behaviour that makes it: a resumed runner taking up a worker
 // an earlier one started.
 export const JOURNAL_ENTRIES = Object.freeze({
-  started: ['at', 'key', 'n', 'title', 'dispatchId', 'harness', 'sessionId', 'worktree', 'terminal'],
+  started: ['at', 'key', 'n', 'title', 'run', 'dispatchId', 'harness', 'sessionId', 'worktree', 'terminal'],
   result: ['at', 'key', 'n', 'title', 'result'],
   failed: ['at', 'key', 'n', 'title', 'reason', 'attempts'],
   retained: ['at', 'retained'],
@@ -264,6 +273,36 @@ function withRetained(result, retained) {
   return { ...result, worktrees_kept: [...kept, ...retained.filter((k) => !named.has(k.path))] }
 }
 
+// The end of a run: summary.json first, since the arming session waits for it
+// and not for this tab, then the result, then the end-of-run prompt over the
+// agents this run's journal names. `ask(question)` resolves to the operator's
+// answer, or null once none can come; `registry` is a runRegistry writer, or
+// null; `unpushed(path)` counts a worktree's unpushed commits.
+export async function finish({ stateDir, summary, orca, ask, out, registry = null, unpushed = gitUnpushed }) {
+  mkdirSync(stateDir, { recursive: true })
+  writeFileSync(join(stateDir, 'summary.json'), JSON.stringify(summary, null, 2))
+  if (summary.ok) {
+    out('== Result')
+    out(JSON.stringify(summary.result, null, 2))
+  }
+  return endOfRunPrompt({ agents: agentsOf(join(stateDir, 'journal.jsonl')), ask, out, orca, unpushed, registry })
+}
+
+// One question at a time on this tab's stdin. Once stdin ends, every question
+// is answered null.
+function stdinAsker() {
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
+  let closed = false
+  rl.on('close', () => { closed = true })
+  return {
+    ask: (question) => (closed ? Promise.resolve(null) : new Promise((r) => {
+      rl.once('close', () => r(null))
+      rl.question(question, r)
+    })),
+    close: () => rl.close(),
+  }
+}
+
 const isMain = process.argv[1] && resolve(process.argv[1]).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase()
 if (isMain) {
   const args = process.argv.slice(2)
@@ -286,30 +325,34 @@ if (isMain) {
   }
   const path = resolve(scriptPath)
   const dir = stateDir ? resolve(stateDir) : join(dirname(path), 'orca-run')
-  // The arming session reads the run's outcome from this file once the
-  // runner's terminal exits (SKILL.md step 4); a stale one from an earlier
-  // run must never pass for this run's.
-  const summaryPath = join(dir, 'summary.json')
-  rmSync(summaryPath, { force: true })
+  // The arming session reads the run's outcome from summary.json (SKILL.md
+  // step 4); a stale one from an earlier run must never pass for this run's.
+  rmSync(join(dir, 'summary.json'), { force: true })
   const say = runnerLog(dir, (s) => console.log(s))
   const sayError = runnerLog(dir, (s) => console.error(s))
+  const orca = orcaCli()
   let summary
   try {
     const result = await runScript(readFileSync(path, 'utf8'), {
+      orca,
       stateDir: dir,
       fallbackObjective: `workflow ${basename(path)}`,
       resume,
       permissionMode,
       registry: REGISTRY_PATH,
     })
-    say('== Result')
-    say(JSON.stringify(result, null, 2))
     summary = { runner: 'orca', ok: true, result }
   } catch (e) {
     sayError(e?.stack ?? String(e))
     process.exitCode = 1
     summary = failureSummary(e)
   }
-  mkdirSync(dir, { recursive: true })
-  writeFileSync(summaryPath, JSON.stringify(summary, null, 2))
+  const asker = stdinAsker()
+  try {
+    await finish({ stateDir: dir, summary, orca, ask: asker.ask, out: say, registry: runRegistry(REGISTRY_PATH) })
+  } catch (e) {
+    sayError(`!! reclaim: ${e?.stack ?? e}`)
+  } finally {
+    asker.close()
+  }
 }

@@ -129,11 +129,6 @@ const TAB_GONE = new Set(['terminal_not_writable', 'terminal_exited', 'terminal_
 // call(args, timeoutMs) and git(cwd, args, timeoutMs) run one Orca or git
 // command; clock.timer bounds every call at callMs, plus any wait it asks for.
 export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(bin), git = execGit, clock = { timer: realTimer }, callMs = RUNNER_SETTINGS.orcaCallMs } = {}) {
-  // Terminals this runner created for a custom launch, by dispatch. Orca's
-  // release retains a terminal the worker did not create, so the runner
-  // closes these itself once the worker is released.
-  const ownTerminals = new Map()
-
   const orca = (args, waitMs = 0) => withTimeout(clock, callMs + waitMs, call(args, callMs + waitMs), args.slice(0, 2).join(' '))
   const gitIn = (cwd, args) => withTimeout(clock, callMs, git(cwd, args, callMs), `git ${args[0]}`)
 
@@ -250,7 +245,6 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
         handle = t.terminal.handle
         await waitIdle(handle, command)
         const r = await orca(workerStartArgs({ run, prompt, title, place, terminal: handle }))
-        ownTerminals.set(r.dispatchId, handle)
         const effect = (r.effects || []).find((e) => e.kind === 'worktree')?.id
         return { dispatchId: r.dispatchId, taskId: r.taskId, terminal: handle, worktree: worktree ?? pathOf(effect) ?? pathOf(t.terminal.worktreeId), warnings }
       } catch (e) {
@@ -306,17 +300,6 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       await orca(['orchestration', 'worker-stop', '--dispatch', dispatch])
     },
 
-    // keepTerminal: the agent failed and is kept (ADR-0012), so its tab stays
-    // open for the operator.
-    async workerRelease({ dispatch, keepTerminal = false }) {
-      await orca(['orchestration', 'worker-release', '--dispatch', dispatch])
-      const own = ownTerminals.get(dispatch)
-      if (own) {
-        ownTerminals.delete(dispatch)
-        if (!keepTerminal) await closeQuietly(own)
-      }
-    },
-
     // Session continuation (decision D3 on #43). With its tab alive, the
     // stalled process is stopped, the harness resumes the same session in
     // the same terminal, and `prompt` is typed to it; the dispatch is
@@ -350,12 +333,38 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       try {
         await waitIdle(handle, command)
         const r = await orca(workerStartArgs({ run, prompt, title, place, terminal: handle }))
-        ownTerminals.set(r.dispatchId, handle)
         return { dispatchId: r.dispatchId, taskId: r.taskId, terminal: handle, worktree: worktree ?? pathOf(t.terminal.worktreeId), reopened: true }
       } catch (e) {
         await closeQuietly(handle)
         throw e
       }
+    },
+
+    // Orca's release keeps a terminal the worker did not create — every one
+    // the runner launched — so a reclaim closes the tab itself (terminalClose).
+    async workerRelease({ dispatch }) {
+      await orca(['orchestration', 'worker-release', '--dispatch', dispatch])
+    },
+
+    // The handles of the tabs open now. A closed tab is absent from the list,
+    // though `terminal show` still answers for it, orphaned. Never read
+    // openness from a worker's `retained` state: Orca sets it for good on any
+    // terminal the runner launched, closed or not (ADR-0012).
+    async terminalList() {
+      const r = await orca(['terminal', 'list'])
+      return (r?.terminals ?? []).filter((t) => t && !t.orphaned && t.handle).map((t) => t.handle)
+    },
+
+    async terminalClose({ terminal }) {
+      await orca(['terminal', 'close', '--terminal', terminal, '--tab'])
+    },
+
+    // Always forced: Orca refuses a dirty worktree otherwise, and uncommitted
+    // files never keep one (D6 on #43). Whether it holds unpushed commits is
+    // the caller's check (reclaim.mjs), made before this. A worktree Orca no
+    // longer knows fails `selector_not_found`.
+    async worktreeRemove({ path }) {
+      await orca(['worktree', 'rm', '--worktree', `path:${path}`, '--force'])
     },
 
     // Sets the tab label the operator sees. `terminal show` keeps reporting

@@ -6,8 +6,9 @@
 const MIN = 60_000
 
 export const RUNNER_SETTINGS = Object.freeze({
-  // Agents live at once — started and not yet released. Orca's own cap for
-  // this runner, not the Workflow runner's; further agent() calls queue.
+  // Agents live at once — started and not yet settled or stopped. Orca's own
+  // cap for this runner, not the Workflow runner's; further agent() calls
+  // queue. A settled worker's tab stays open until reclaimed, and costs no slot.
   MAX_LIVE: 10,
   // How often a live worker is looked at.
   pollMs: 5_000,

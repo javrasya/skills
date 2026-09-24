@@ -8,8 +8,12 @@
 // records every Orca call in order, stamped with `clock`'s time when one is
 // given, so a test can assert on the sequence and its timing. `worktrees`
 // holds every worktree Orca knows, the run's own included, by path, with the
-// board `status` last set on it and the `dirty` and `commits` a retried start
-// checks before taking it up.
+// board `status` last set on it, the `dirty` and `commits` a retried start
+// checks before taking it up, and `unpushed`, the commits a test says its
+// HEAD holds that no remote-tracking ref contains (git's side, not Orca's:
+// `unpushedOf` answers for it). Every worker's terminal is one the runner
+// launched, so, as in real Orca, its `terminalState` is `retained` for good;
+// whether its tab is open is `terminalList`'s to say.
 //
 // `faults` fails a step the way real Orca can: step -> ({ count, ...ctx }) =>
 // an error to throw, 'hang' for a call Orca never answers (it fails as the
@@ -30,7 +34,7 @@ export const fakeTranscripts = (orca) => ({
 export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run', runPrefix = 'run_fake', coordinator = 'term_runner', faults = {}, callMs = RUNNER_SETTINGS.orcaCallMs } = {}) {
   const calls = []
   const dispatches = new Map()
-  const worktrees = new Map([[runWorktree, { parent: null, name: null, displayName: null, removed: false, status: null, dirty: false, commits: 0 }]])
+  const worktrees = new Map([[runWorktree, { parent: null, name: null, displayName: null, removed: false, status: null, dirty: false, commits: 0, unpushed: 0 }]])
   const counts = {}
   let seq = 0
   let runs = 0
@@ -119,7 +123,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
           let name = child.name
           for (let i = 2; worktrees.has(`C:/fake/worktrees/${name}`); i++) name = `${child.name}-${i}`
           made = `C:/fake/worktrees/${name}`
-          worktrees.set(made, { parent: runWorktree, name, displayName: name, removed: false, status: null, dirty: false, commits: 0 })
+          worktrees.set(made, { parent: runWorktree, name, displayName: name, removed: false, status: null, dirty: false, commits: 0, unpushed: 0 })
           record({ verb: 'worktreeCreate', name: child.name, worktree: made })
         }
         worktree = made
@@ -145,7 +149,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       if (argv.includes('--agent')) throw new Error(`fake orca: worker-start for ${title} was called with --agent`)
       // Like Claude Code, the agent titles its own tab from its prompt.
       const d = {
-        ...preamble, run, title, ...launch, sessionId, command, prompt, worktree, tabTitle: prompt.slice(0, 30), ...fresh(), transcript: null, onNudge: null, onContinue: null,
+        ...preamble, run, title, ...launch, sessionId, command, prompt, worktree, tabTitle: prompt.slice(0, 30), ...fresh(), transcript: null, onNudge: null, onContinue: null, terminalState: 'retained',
       }
       dispatches.set(d.dispatchId, d)
       record({ verb: 'workerStart', dispatchId: d.dispatchId, title, ...launch, sessionId, command, argv, placement: child ? 'new-child' : 'current', worktree })
@@ -198,18 +202,19 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       await d.onNudge?.(text)
     },
 
+    // A stopped Dispatch is cancelled: settled, so no longer live.
     async workerStop({ dispatch: id }) {
       const d = dispatch(id, 'orchestration worker-stop')
       record({ verb: 'workerStop', dispatchId: id })
       d.stopped = true
+      if (!d.settled) Object.assign(d, { settled: true, outcome: 'cancelled' })
     },
 
-    // Without keepTerminal the runner closes the tab it made for the worker.
-    async workerRelease({ dispatch: id, keepTerminal = false }) {
+    // Orca keeps a tab the worker did not create: releasing closes nothing.
+    async workerRelease({ dispatch: id }) {
       const d = dispatch(id, 'orchestration worker-release')
-      record({ verb: 'workerRelease', dispatchId: id, keepTerminal })
+      record({ verb: 'workerRelease', dispatchId: id })
       d.released = true
-      d.tabClosed = !keepTerminal
     },
 
     async terminalRename({ terminal, title }) {
@@ -237,14 +242,32 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       w.status = status
     },
 
-    // Not an adapter method: the runner never removes a worktree. This is the
-    // `orca worktree rm --worktree path:<path> --force` a reclaimer runs itself.
+    // Open tabs only: the runner's own, and every worker's whose tab is
+    // neither gone nor closed. No row names a run or a dispatch.
+    async terminalList() {
+      record({ verb: 'terminalList' })
+      return [coordinator, ...[...dispatches.values()].filter((d) => !d.gone).map((d) => d.handle)]
+    },
+
+    async terminalClose({ terminal: handle }) {
+      const d = [...dispatches.values()].find((x) => x.handle === handle)
+      if (!d) throw new OrcaError('terminal_handle_stale', `no terminal ${handle}`, 'terminal close')
+      if (d.gone) throw new OrcaError('terminal_exited', `terminal ${handle} has exited`, 'terminal close')
+      record({ verb: 'terminalClose', dispatchId: d.dispatchId, terminal: handle })
+      d.gone = true
+    },
+
+    // `orca worktree rm --force`: it also kills every terminal in the worktree.
     async worktreeRemove({ path }) {
       const w = worktrees.get(path)
       if (!w || w.removed) throw new OrcaError('selector_not_found', `no worktree ${path}`, 'worktree rm')
       record({ verb: 'worktreeRemove', path })
       w.removed = true
+      for (const d of dispatches.values()) if (d.worktree === path) d.gone = true
     },
+
+    // Not Orca: git's answer for a fake worktree, in reclaim's `unpushed` shape.
+    unpushedOf: async (path) => worktrees.get(path)?.unpushed ?? 0,
   }
   return orca
 }

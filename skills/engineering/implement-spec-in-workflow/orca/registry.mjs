@@ -52,6 +52,7 @@ export function runRegistry(path = REGISTRY_PATH, clock = { now: () => Date.now(
       if (!OUTCOMES.includes(outcome)) throw new Error(`run registry: unknown outcome "${outcome}": expected one of ${OUTCOMES.join(', ')}`)
       append({ type: 'ended', runId, outcome })
     },
+    reclaimed: ({ runId, agent = null }) => append({ type: 'reclaimed', runId, ...(agent && { agent }) }),
   }
 }
 

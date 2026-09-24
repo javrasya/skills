@@ -3,6 +3,8 @@
 // nudged and continued on the way), its result, and
 // what the journal, the board and the retained list learn from it. runner.mjs
 // decides which calls reach here (replay does not) and names each one.
+// Nothing is reclaimed here (ADR-0012): a settled worker is never released, and
+// its tab and worktree stay until the operator reclaims them (reclaim.mjs).
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
@@ -91,9 +93,10 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   // Every way a call ends in null journals one of these. attempts counts the
   // starts, or Run creations, it made; one that started a worker made one more
   // start than it retried. continuations counts how often a started worker's
-  // session was continued; a continuation carries on that attempt's session.
-  const fail = ({ key, n, title }, reason, retained, attempts = 1, continuations = 0) =>
-    journal({ type: 'failed', key, n, title, reason, attempts, ...(continuations && { continuations }), ...(retained && { retained }) })
+  // session was continued; a continuation carries on that attempt's session. `run` is
+  // the Run it failed in, once there is one: reclaim names a retained worktree by it.
+  const fail = ({ key, n, title }, reason, retained, attempts = 1, continuations = 0, run = null) =>
+    journal({ type: 'failed', key, n, title, reason, attempts, ...(run && { run }), ...(continuations && { continuations }), ...(retained && { retained }) })
 
   // Something that went wrong without failing the agent: logged and
   // journaled, never swallowed.
@@ -295,12 +298,12 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       // agent's: the runner never removes one. The failed line carries the
       // first; a `retained` line names each other one.
       const [kept, ...more] = isolated ? [...made].map((path) => keep({ path, reason: `not in the ledger: created for ${title}, whose worker never started, so no agent ever reported it` })) : []
-      fail(call, e.reason, kept ?? null, e.attempts)
+      fail(call, e.reason, kept ?? null, e.attempts, 0, runId)
       for (const retained of more) journal({ type: 'retained', retained })
       return null
     }
     for (const why of w.warnings ?? []) warn(call, why)
-    journal({ type: 'started', key, n, title, dispatchId: w.dispatchId, harness: launch.harness, sessionId, worktree: w.worktree ?? null, terminal: w.terminal })
+    journal({ type: 'started', key, n, title, run: runId, dispatchId: w.dispatchId, harness: launch.harness, sessionId, worktree: w.worktree ?? null, terminal: w.terminal })
     if (isolated && w.worktree) await setStatus(call, w.worktree, phaseName === 'Gate' ? 'in-review' : 'in-progress')
     const on = [launch.harness, launch.model, launch.effort && `${launch.effort} effort`, launch.permissionMode && `${launch.permissionMode} mode`].filter(Boolean).join(', ')
     out(`>> ${title}: started on ${on} as dispatch ${w.dispatchId}, session ${sessionId}, in terminal ${w.terminal}${w.worktree ? ` in ${w.worktree}` : ''}`)
@@ -355,7 +358,6 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
           // Its old pane is gone, so nothing can settle the old dispatch.
           const old = w.dispatchId
           await quietly('stop its old worker', () => orca.workerStop({ dispatch: old }))
-          await quietly('release its old worker', () => orca.workerRelease({ dispatch: old }))
           await quietly('title its new tab', () => orca.terminalRename({ terminal: next.terminal, title }))
         }
         w = { ...w, dispatchId: next.dispatchId, terminal: next.terminal, worktree: next.worktree ?? w.worktree }
@@ -363,18 +365,18 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       // Read even for a dead worker: one that died after submit recorded its
       // result still delivered it.
       const result = readResult(resultPath, schema)
-      // Failed and kept (ADR-0012): its tab and worktree stay as they stand
-      // for the operator, so its process is not stopped either.
+      // Failed and kept (ADR-0012): its process is not stopped either. No
+      // worker is released during the run: its tab and worktree stay for the
+      // operator to reclaim at the end (reclaim.mjs).
       const kept = !!(end.capped || end.blocked) && !!result.error
       if (end.dead && !kept) await quietly('stop its worker', () => orca.workerStop({ dispatch: w.dispatchId }))
-      await quietly('release its worker', () => orca.workerRelease({ dispatch: w.dispatchId, keepTerminal: kept }))
       // A null is journaled as failed, as the Workflow runner journals a dead
       // agent: a resume runs the call live again. The worktree it leaves rides
       // along, so a resume still names it.
       if (result.error) {
         const reason = end.dead ? `${end.dead}, with no result` : `${result.error} (outcome ${end.outcome})`
         if (kept) out(`!! ${title}: its tab ${w.terminal} is kept open`)
-        fail({ key, n, title }, reason, retain(), attempts, continued)
+        fail({ key, n, title }, reason, retain(), attempts, continued, runId)
         out(`!! ${title}: ${reason}; agent() returns null`)
         return null
       }
@@ -410,8 +412,8 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       fail(call, e.reason, null, e.attempts)
       return null
     }
-    // Held until the worker is released, not merely settled: an earlier
-    // release lets a new worker start while this one is still live.
+    // Held until the worker settles or is stopped. It is never released during
+    // the run, so its tab stays open, but a settled worker no longer works.
     await live.acquire(() => out(`.. ${title}: queued, ${limits.MAX_LIVE} agents are live`))
     try {
       return await supervise(runId, { ...call, schemaPath, resultPath, payloadPath })
