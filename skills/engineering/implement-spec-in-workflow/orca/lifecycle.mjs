@@ -219,9 +219,10 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       toldNoMode = true
       out("!! no --permission-mode given: Claude workers start in Claude's own default permission mode, not in the orchestrator's.")
     }
-    // The child worktree a failed attempt made. Every attempt of a call asks
-    // for the same `<runId>-<n>` name, so a retry takes that one up again.
-    let made = null
+    // The child worktrees failed attempts left. Every attempt of a call asks
+    // for the same `<runId>-<n>` name, so a retry takes that one up again;
+    // one Orca made under a suffixed name leaves both it and that one.
+    const made = new Set()
     let w, sessionId
     try {
       ;({ w, sessionId } = await retrying(call, 'its worker did not start', async (attempt) => {
@@ -240,16 +241,18 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
           })
           return { w, sessionId }
         } catch (e) {
-          if (e?.worktree) made = e.worktree
+          for (const path of [e?.worktree, ...(Array.isArray(e?.worktrees) ? e.worktrees : [])]) if (path) made.add(path)
           throw e
         }
       }))
     } catch (e) {
       out(`!! ${title}: ${e.reason}; agent() returns null`)
       // A worktree Orca made before the start failed is named like a dead
-      // agent's: the runner never removes one.
-      const kept = isolated && made ? keep({ path: made, reason: `not in the ledger: created for ${title}, whose worker never started, so no agent ever reported it` }) : null
-      fail(call, e.reason, kept, e.attempts)
+      // agent's: the runner never removes one. The failed line carries the
+      // first; a `retained` line names each other one.
+      const [kept, ...more] = isolated ? [...made].map((path) => keep({ path, reason: `not in the ledger: created for ${title}, whose worker never started, so no agent ever reported it` })) : []
+      fail(call, e.reason, kept ?? null, e.attempts)
+      for (const retained of more) journal({ type: 'retained', retained })
       return null
     }
     for (const why of w.warnings ?? []) warn(call, why)

@@ -849,6 +849,27 @@ test('orca-cli: a retry refuses a worktree of its name that holds work, for good
   }
 })
 
+test("orca-cli: a retry asks for Orca's whole worktree list, and a page still truncated fails the attempt, retryable, never read as 'not found'", async () => {
+  const { argvs, orca } = childCli({ 'worktree list': { worktrees: [{ path: 'C:/wt/other', branch: 'refs/heads/u/other' }], truncated: true } }, { git: gitStub().git })
+  const e = await orca.workerStart({ ...START, child: { ...CHILD, retry: true } }).catch((x) => x)
+  assert.equal(e.code, 'worktree_list_truncated')
+  assert.match(e.message, /could not be ruled out/)
+  assert.notEqual(e.final, true, 'a truncated page is retried')
+  assert.deepEqual(argvs, [['worktree', 'list', '--limit', '10000']], 'no create, no terminal')
+})
+
+test('orca-cli: a create Orca answers with <name>-2 fails for good, naming the new worktree and the earlier one of its name', async () => {
+  const taken = `${CHILD_PATH}-2`
+  const { argvs, orca } = childCli({ 'worktree create': { worktree: { id: `repo::${taken}`, path: taken }, startupTerminal: { handle: 'term_shell' } } })
+  const e = await orca.workerStart({ ...START, child: CHILD }).catch((x) => x)
+  assert.equal(e.code, 'worktree_name_taken')
+  assert.match(e.message, /asked for run_1-3, Orca made run_1-3-2/)
+  assert.equal(e.final, true)
+  assert.equal(e.worktree, taken)
+  assert.deepEqual(e.worktrees, [taken, CHILD_PATH])
+  assert.deepEqual(verbsOf(argvs), ['worktree create', 'terminal close'], 'its startup shell is closed; no agent terminal, no worker-start')
+})
+
 test('orca-cli: a display name Orca refuses is a warning the start returns, and the start goes on', async () => {
   const { orca } = childCli({ 'worktree set': () => { throw new OrcaError('selector_not_found', 'gone', 'worktree set') } })
   const w = await orca.workerStart({ ...START, child: CHILD })
@@ -1096,6 +1117,33 @@ test('lifecycle: an isolated worker that never started leaves its worktree retai
   assert.deepEqual(journal.map((e) => e.type), ['retry', 'retry', 'retry', 'failed'], 'a worker that never started has no started line')
   assert.equal(journal[3].retained, kept[0])
   assert.equal(journal[3].reason, 'its worker did not start: agent_not_ready')
+})
+
+// The CLI adapter's own workerStart, whose create names each worktree as asked.
+const cliStart = (replies) => childCli({ 'worktree create': (args) => ({ worktree: { path: `C:/wt/${flag(args, '--name')}` } }), ...replies }, { git: gitStub().git }).orca.workerStart
+
+test('lifecycle: a retry whose worktree list is truncated journals retry, then failed with that reason, and keeps the first attempt\'s worktree', async () => {
+  const orca = fakeOrca()
+  orca.workerStart = cliStart({ 'terminal wait': { wait: { satisfied: false } }, 'worktree list': { worktrees: [], truncated: true } })
+  const { life, call, journal, kept } = lifecycleOn(orca)
+  assert.equal(await life(call('impl', { isolated: true })), null)
+  assert.deepEqual(journal.map((e) => e.type), ['retry', 'retry', 'retry', 'failed'])
+  assert.match(journal[1].reason, /worktree_list_truncated/)
+  assert.match(journal[3].reason, /worktree_list_truncated/)
+  assert.equal(kept.length, 1)
+  assert.equal(journal[3].retained, kept[0])
+})
+
+test('lifecycle: a create Orca answers under a suffixed name fails at once, retaining both worktrees', async () => {
+  const orca = fakeOrca()
+  orca.workerStart = cliStart({ 'worktree create': (args) => ({ worktree: { path: `C:/wt/${flag(args, '--name')}-2` } }) })
+  const { life, call, journal, kept } = lifecycleOn(orca)
+  assert.equal(await life(call('impl', { isolated: true })), null)
+  assert.deepEqual(journal.map((e) => e.type), ['failed', 'retained'], 'final: never retried into a -3')
+  assert.match(journal[0].reason, /worktree_name_taken/)
+  const name = journal[0].reason.match(/asked for (\S+),/)[1]
+  assert.deepEqual(kept.map((k) => k.path), [`C:/wt/${name}-2`, `C:/wt/${name}`])
+  assert.deepEqual([journal[0].retained, journal[1].retained], kept)
 })
 
 // --- the journal and the log say what happened --------------------------------

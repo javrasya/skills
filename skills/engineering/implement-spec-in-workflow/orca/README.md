@@ -61,12 +61,15 @@ Every Orca call is bounded by `orcaCallMs` in `settings.mjs`, plus any wait the 
 
 A worker's start that fails, timed out or otherwise, is retried after each wait in `retryBackoffMs` (30s, 2 min, 5 min), so a call gets four attempts before `agent()` returns null. Each new attempt is journaled as `retry`, and the null as `failed` with the last attempt's reason. Creating the Run follows the same policy; calls that are waiting on it share one creation and its retries.
 
-A start is safe to repeat. An isolated agent's child worktree is always named `<runId>-<n>`. Orca answers a second `worktree create --name` with a new `<name>-2` rather than an error, so a retry first looks its name up in `worktree list`:
+A start is safe to repeat. An isolated agent's child worktree is always named `<runId>-<n>`. Orca answers a second `worktree create --name` with a new `<name>-2` rather than an error, so a retry first looks its name up in `worktree list --limit 10000`. Orca pages that list at 200 rows across every repo on the machine by default, and the runner keeps every worktree until the operator reclaims it, so it asks for as many rows as Orca's own UI does:
 
+- If the list still comes back `truncated`, the name cannot be ruled out, so that attempt fails and is retried. It is never read as "not found".
 - If no worktree has that name, the retry creates it.
 - If the worktree is clean and no agent runs in it, the retry takes it up.
 - If an agent still runs in it (`terminal list`), only that attempt fails.
 - If it has uncommitted changes (`git status --porcelain`), or commits no other branch holds, the start fails for good with that reason. The worktree is retained, like a dead agent's.
+
+Every `worktree create`, first attempt or retry, is checked against the name it asked for. If Orca made `<name>-2` instead, a worktree of that name already exists that the start did not take up. The start fails for good with that reason, because a retry that missed it again would make a `-3`. Both worktrees are retained: the new one on the `failed` journal line, and the earlier one on a `retained` line.
 
 ## Two checks, and when each runs
 
@@ -123,7 +126,7 @@ The script must reach the Workflow tool with LF line endings. The tool refuses a
 
 Last pass: 2026-09-23, Orca 1.4.207 and Claude Code 2.1.280 on Windows 11, with the runner as of #30, whose entry point writes `summary.json`. All four results were equal to the expected object. The Orca fresh and resumed runs each left a `summary.json` with `"runner": "orca", "ok": true` and that object as `result`. The Orca resume started no worker. The Workflow resume replayed `contract:valid` and `contract:repair` and re-ran `contract:kill`.
 
-Not yet re-run since the runner and this script changed on `spec/21-integration`: the script gained `contract:options` and the isolated-worktree case (so the object above is not yet confirmed on either runner), a dead agent is now journaled as failed (below), so the Orca resume re-runs `contract:kill` too, and custom launches into a child worktree now create it first. Since #45, every worker is a custom launch with a runner-assigned `--session-id`. Since #46, every Orca call has a timeout and a failed start is retried; the retry's `worktree list` lookup reads `path` and `branch`, as probed on Orca 1.4.209, but no retry has run against real Orca yet. The next pass must confirm both runners again.
+Not yet re-run since the runner and this script changed on `spec/21-integration`: the script gained `contract:options` and the isolated-worktree case (so the object above is not yet confirmed on either runner), a dead agent is now journaled as failed (below), so the Orca resume re-runs `contract:kill` too, and custom launches into a child worktree now create it first. Since #45, every worker is a custom launch with a runner-assigned `--session-id`. Since #46, every Orca call has a timeout and a failed start is retried; the retry's `worktree list --limit 10000` lookup reads `path`, `branch` and `truncated`, as probed on Orca 1.4.209 (whose list defaults to 200 rows, and `--limit 3` returned 3 of 10 with `truncated: true`), but no retry has run against real Orca yet, nor has a create that answers `<name>-2`. The next pass must confirm both runners again.
 
 ## A dead agent on resume
 
