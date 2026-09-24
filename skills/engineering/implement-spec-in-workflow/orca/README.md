@@ -8,7 +8,8 @@ The second runner for `workflow.template.js` (ADR-0011): a Node script, launched
 | `registry.mjs` | the machine-wide run registry: its writer and the fold that reads each run's current state |
 | `reclaim.mjs` | reclaiming an agent or a whole run, and the end-of-run prompt; the run view reuses it |
 | `lifecycle.mjs` | one live agent's life: the run's Run, the live cap, its worker's start, liveness, nudges and session continuation, its result, its board status |
-| `transcript.mjs` | where a Claude or pi session writes its transcript, found from its session id, and how big it is |
+| `run-view-model.mjs` | the run view's model (header, phase and agent rows, the bottom pane) and what each key and click does, with no terminal |
+| `transcript.mjs` | where a Claude or pi session writes its transcript, found from its session id, how big it is, and its context size and tokens |
 | `submit.mjs` | the worker's end of `agent()`: validates the payload, records it, sends `worker_done` |
 | `orca-cli.mjs` | the one place anything talks to Orca |
 | `fake-orca.mjs` | an in-memory Orca behind the same methods, for the offline tests |
@@ -34,6 +35,7 @@ Together, the journal and the log say what happened in a run, whether or not the
 
 | type | written when | fields besides `type` and `at` |
 |---|---|---|
+| `queued` | a call waits for a live slot, `MAX_LIVE` agents being live | `key`, `n`, `title` |
 | `started` | a worker started | `key`, `n`, `title`, `dispatchId`, `harness`, `sessionId`, `worktree` (the path it runs in), `terminal` (its handle), `dir` (its agent's files, relative to the state dir, which its prompt names) |
 | `result` | a call returned a value | `key`, `n`, `title`, `result`, and `replayed: true` if it came from the journal |
 | `failed` | a call returned null: its worker never started, died past the continuation cap, was blocked on a human too long, went over a limit, or left no valid result, or its Run could not be created | `key`, `n`, `title`, `reason` (human-readable; after retries, the last attempt's), `attempts` (starts or Run creations made), `continuations` if its session was continued, `retained` if it left a worktree, and `workerOut: true` when a resume could not take its Run over and its worker is still out: the call stays unsettled, and the next resume takes that worker up |

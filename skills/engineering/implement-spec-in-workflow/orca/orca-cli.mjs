@@ -378,6 +378,18 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       await orca(['terminal', 'close', '--terminal', terminal, '--tab'])
     },
 
+    // Brings the tab to the front, and its worktree with it. A closed tab
+    // fails terminal_exited; one Orca never issued, terminal_handle_stale.
+    async terminalSwitch({ terminal }) {
+      const r = await orca(['terminal', 'switch', '--terminal', terminal])
+      return { terminal: r?.focus?.handle ?? terminal, worktreeId: r?.focus?.worktreeId ?? null }
+    },
+
+    // Opens a file in Orca's editor. A missing one fails runtime_error (ENOENT).
+    async fileOpen({ path }) {
+      await orca(['file', 'open', '--path', path])
+    },
+
     // Always forced: Orca refuses a dirty worktree otherwise, and uncommitted
     // files never keep one (D6 on #43). Whether it holds unpushed commits is
     // the caller's check (reclaim.mjs), made before this. A worktree Orca no

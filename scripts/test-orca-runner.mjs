@@ -5,7 +5,7 @@
 //   node scripts/test-orca-runner.mjs
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, existsSync, readFileSync, mkdirSync, appendFileSync } from 'fs'
+import { mkdtempSync, writeFileSync, existsSync, readFileSync, mkdirSync, appendFileSync, copyFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join, dirname } from 'path'
 import { spawnSync } from 'child_process'
@@ -19,6 +19,7 @@ import { orcaCli, OrcaError } from '../skills/engineering/implement-spec-in-work
 import { runRegistry, readRegistry, OUTCOMES } from '../skills/engineering/implement-spec-in-workflow/orca/registry.mjs'
 import { transcriptPath, sessionTranscripts, claudeSlug, piDir } from '../skills/engineering/implement-spec-in-workflow/orca/transcript.mjs'
 import { agentsOf, reclaimAgent, gitUnpushed, parseChoice } from '../skills/engineering/implement-spec-in-workflow/orca/reclaim.mjs'
+import { runView, bandOf } from '../skills/engineering/implement-spec-in-workflow/orca/run-view-model.mjs'
 
 const SCHEMA = {
   type: 'object',
@@ -1360,11 +1361,13 @@ test('lifecycle: calls waiting on the same Run share its creation and its retrie
 
 test('lifecycle: calls share one Run and the live cap, and a queued call starts only once the live one settles', async () => {
   const orca = fakeOrca({ worker: submitting(5) })
-  const { life, call, lines } = lifecycleOn(orca, { ...FAST, MAX_LIVE: 1 })
+  const { life, call, lines, journal } = lifecycleOn(orca, { ...FAST, MAX_LIVE: 1 })
   assert.deepEqual(await Promise.all([life(call('a')), life(call('b'))]), [GOOD, GOOD])
   assert.equal(orca.calls.filter((c) => c.verb === 'runCreate').length, 1)
   assert.equal(liveHighWater(orca.calls), 1)
   assert.deepEqual(lines.filter((l) => l.endsWith('queued, 1 agents are live')), ['.. [P] b: queued, 1 agents are live'])
+  assert.deepEqual(journal.filter((e) => e.title === '[P] b').map((e) => e.type), ['queued', 'started', 'result'])
+  assert.equal(journal.some((e) => e.title === '[P] a' && e.type === 'queued'), false)
 })
 
 test('lifecycle: an isolated worker that never started leaves its worktree retained, and on its failed journal line', async () => {
@@ -2262,4 +2265,258 @@ test('orca-cli: a worker taken up from an earlier runner is shown as Orca sees i
   assert.deepEqual([s.settled, s.gone, s.exited, s.terminal], [false, false, false, 'term_w'])
   await orca.workerRelease({ dispatch: 'ctx_9' })
   assert.deepEqual(argvs.slice(-1), [['orchestration', 'worker-release', '--dispatch', 'ctx_9']])
+})
+
+// --- the run view: its model and what each key does --------------------------
+
+const VIEW_SID = { claude: 'c1a0de00-0000-4000-8000-000000000001', pi: '01a01ad8-220c-76a3-8c00-2ed3657f9e05' }
+const fixture = (name) => fileURLToPath(new URL(`./fixtures/run-view/${name}`, import.meta.url))
+const wt = (n) => `C:/fake/worktrees/run_fake1-${n}`
+
+// A home holding the Claude fixture as the transcript of a session run in
+// worktree `claude`, and the pi fixture as one run in worktree `pi`.
+function transcriptHome({ claude, pi }) {
+  const home = tmp()
+  const dirC = join(home, '.claude', 'projects', claudeSlug(claude))
+  const dirP = join(home, '.pi', 'agent', 'sessions', piDir(pi))
+  mkdirSync(dirC, { recursive: true })
+  mkdirSync(dirP, { recursive: true })
+  const paths = { claude: join(dirC, `${VIEW_SID.claude}.jsonl`), pi: join(dirP, `2026-08-19T16-26-07-244Z_${VIEW_SID.pi}.jsonl`) }
+  copyFileSync(fixture('claude-transcript.jsonl'), paths.claude)
+  copyFileSync(fixture('pi-transcript.jsonl'), paths.pi)
+  return { home, paths }
+}
+
+test('transcripts: context is the last main-chain turn, each message counted once and sidechains skipped; tokens add up every message once', () => {
+  const { home, paths } = transcriptHome({ claude: wt(1), pi: wt(2) })
+  const t = sessionTranscripts({ home, env: {} })
+  // msg_A on 2 lines and msg_B on 3; the sidechain turns msg_S and msg_S2,
+  // the last one written, leave the context alone but spent their tokens.
+  assert.deepEqual(t.usage({ harness: 'claude', sessionId: VIEW_SID.claude, worktree: wt(1) }), { path: paths.claude, context: 5 + 150000 + 60000, tokens: 1530 + 900100 + 210045 + 400001 })
+  assert.deepEqual(t.usage({ harness: 'pi', sessionId: VIEW_SID.pi, worktree: wt(2) }), { path: paths.pi, context: 2000 + 360000 + 1000, tokens: 361050 + 363100 })
+  assert.equal(t.usage({ harness: 'claude', sessionId: SID, worktree: wt(1) }), null, 'no transcript, no usage')
+
+  // Read on from where it stopped: a torn line waits for its end, and a
+  // message repeated later is still counted once.
+  const line = JSON.stringify({ isSidechain: false, type: 'assistant', message: { id: 'msg_C', role: 'assistant', usage: { input_tokens: 1, cache_read_input_tokens: 99, cache_creation_input_tokens: 0, output_tokens: 10 } } }) + '\n'
+  appendFileSync(paths.claude, line.slice(0, 40))
+  assert.equal(t.usage({ harness: 'claude', sessionId: VIEW_SID.claude, worktree: wt(1) }).context, 210005)
+  appendFileSync(paths.claude, line.slice(40) + line)
+  assert.deepEqual(t.usage({ harness: 'claude', sessionId: VIEW_SID.claude, worktree: wt(1) }), { path: paths.claude, context: 100, tokens: 1511676 + 110 })
+})
+
+test('transcripts: context bands are green below 200k, yellow from 200k to 350k, red above', () => {
+  assert.deepEqual([null, 0, 199_999, 200_000, 350_000, 350_001].map(bandOf), [null, 'green', 'green', 'yellow', 'yellow', 'red'])
+})
+
+const at = (min) => isoAt(min * MIN)
+const J = (type, n, title, min, more = {}) => ({ type, at: at(min), key: `k${n}`, n, title, ...more })
+const startedJ = (n, title, min, harness, sessionId) =>
+  J('started', n, title, min, { run: 'run_fake1', dispatchId: `ctx_fake${n}`, harness, sessionId, worktree: wt(n), terminal: `term_fake${n}` })
+
+// A run half way through, as its journal tells it, over a fake Orca that
+// holds a tab for each of the five workers it started (all still live) and
+// the one a continuation opened, with the Claude and pi fixtures as the
+// transcripts of agents 1 and 2, and the runner alive. At 30 minutes:
+//   Discover   1 done
+//   Implement  2 running (pi), 3 stuck, 4 continued twice, 5 queued, 6 failed before it started
+//   Gate       7 done, replayed from an earlier run's journal
+async function viewedRun() {
+  const clock = fakeClock()
+  const orca = fakeOrca({ worker: () => new Promise(() => {}), clock })
+  for (let n = 1; n <= 5; n++) await orca.workerStart({ run: 'run_fake1', prompt: 'p', title: `t${n}`, sessionId: SID, child: { name: `run_fake1-${n}`, displayName: `t${n}` } })
+  const stateDir = tmp()
+  const journal = [
+    J('result', 7, '[Gate] gate:a', 0, { result: GOOD, replayed: true }),
+    startedJ(1, '[Discover] discover', 0, 'claude', VIEW_SID.claude),
+    startedJ(2, '[Implement] impl:a', 1, 'pi', VIEW_SID.pi),
+    startedJ(3, '[Implement] impl:b', 2, 'claude', 'sid-3'),
+    startedJ(4, '[Implement] impl:c', 3, 'claude', 'sid-4'),
+    J('retry', 6, '[Implement] impl:e', 4, { attempt: 2, reason: 'its worker did not start: orca worktree create: call_timeout' }),
+    J('queued', 5, '[Implement] impl:d', 5),
+    J('result', 1, '[Discover] discover', 10, { result: GOOD }),
+    J('failed', 6, '[Implement] impl:e', 12, { reason: 'its worker did not start: orca worktree create: call_timeout', attempts: 4, run: 'run_fake1', retained: { path: wt(6), reason: 'not in the ledger' } }),
+    J('continued', 4, '[Implement] impl:c', 13, { dispatchId: 'ctx_fake4', sessionId: 'sid-4', terminal: 'term_fake4', reason: 'it exited', attempt: 1, reopened: false }),
+    J('nudge', 4, '[Implement] impl:c', 20, { dispatchId: 'ctx_fake4', reason: 'it went idle without submitting (nudge 1 of 3)', attempt: 1 }),
+    J('nudge', 3, '[Implement] impl:b', 22, { dispatchId: 'ctx_fake3', reason: 'no movement in its transcript or terminal for 20 minutes', attempt: 1 }),
+    J('continued', 4, '[Implement] impl:c', 25, { dispatchId: 'ctx_fake5', sessionId: 'sid-4', terminal: 'term_fake5', reason: 'its terminal is gone', attempt: 2, reopened: true }),
+  ]
+  writeFileSync(join(stateDir, 'journal.jsonl'), journal.map((e) => JSON.stringify(e)).join('\n') + '\n')
+  writeFileSync(join(stateDir, 'runner.pid'), String(process.pid))
+  writeFileSync(join(stateDir, 'runner.log'), `${at(0)} == Discover\n`)
+  const registry = registryIn()
+  runRegistry(registry, { now: () => 0 }).armed({ runId: 'run_fake1', project: 'C:/repos/controlayer', runDir: stateDir, spec: 'implement-spec-783' })
+  const { home } = transcriptHome({ claude: wt(1), pi: wt(2) })
+  clock.t = 30 * MIN
+  const view = runView({ stateDir, orca, clock, transcripts: sessionTranscripts({ home, env: {} }), registry, unpushed: orca.unpushedOf })
+  await view.refresh()
+  const agent = (n) => view.model.phases.flatMap((p) => p.agents).find((a) => a.n === n)
+  const rowOf = (key) => view.model.rows.findIndex((r) => r.key === key)
+  const since = orca.calls.length
+  return { orca, clock, stateDir, registry, view, agent, rowOf, after: () => orca.calls.slice(since) }
+}
+
+test('run view: the journal gives each agent its row, its state and its phase, phases in the order the run reached them', async () => {
+  const { view, agent } = await viewedRun()
+  const m = view.model
+  assert.deepEqual(m.header, { name: 'implement-spec-783', project: 'controlayer', runId: 'run_fake1', spec: '#783', alive: true, elapsedMs: 30 * MIN, counts: { running: 1, continued: 1, stuck: 1, failed: 1, queued: 1, done: 2 } })
+  assert.deepEqual(m.phases.map((p) => [p.name, p.agents.map((a) => a.n)]), [['Discover', [1]], ['Implement', [2, 3, 4, 5, 6]], ['Gate', [7]]])
+  assert.deepEqual([1, 2, 3, 4, 5, 6, 7].map((n) => [agent(n).label, agent(n).state]), [
+    ['discover', 'done'], ['impl:a', 'running'], ['impl:b', 'stuck'], ['impl:c', 'continued'], ['impl:d', 'queued'], ['impl:e', 'failed'], ['gate:a', 'done'],
+  ])
+  assert.equal(agent(3).reason, 'no movement in its transcript or terminal for 20 minutes')
+  assert.equal(agent(4).continuations, 2)
+  assert.equal(agent(4).terminal, 'term_fake5', 'a continuation that reopened runs in its new tab')
+  assert.equal(agent(4).reason, null, 'a continuation clears the nudge before it')
+  assert.deepEqual([agent(6).reason, agent(6).worktree, agent(6).terminal, agent(6).tabOpen], ['its worker did not start: orca worktree create: call_timeout', wt(6), null, null])
+  assert.equal(agent(7).replayed, true)
+  assert.deepEqual([agent(2).harness, agent(2).sessionId, agent(2).worktree, agent(2).dispatchId], ['pi', VIEW_SID.pi, wt(2), 'ctx_fake2'])
+  // A phase whose every agent is done starts folded: its agents have no rows.
+  assert.deepEqual(m.rows.map((r) => r.key), ['phase:Discover', 'phase:Implement', 'agent:2', 'agent:3', 'agent:4', 'agent:5', 'agent:6', 'phase:Gate'])
+  assert.equal(m.selected, 0)
+  assert.equal(m.pane.kind, 'phase')
+})
+
+test('run view: a folded phase sums its agents up: done of total, its mix of states and its peak context', async () => {
+  const { view } = await viewedRun()
+  const [discover, implement, gate] = view.model.phases
+  assert.deepEqual([discover.folded, discover.done, discover.total, discover.peakContext], [true, 1, 1, 210005])
+  assert.deepEqual(discover.mix, { running: 0, continued: 0, stuck: 0, failed: 0, queued: 0, done: 1 })
+  assert.deepEqual([implement.folded, implement.done, implement.total, implement.peakContext], [false, 0, 5, 363000])
+  assert.deepEqual(implement.mix, { running: 1, continued: 1, stuck: 1, failed: 1, queued: 1, done: 0 })
+  assert.deepEqual([gate.folded, gate.done, gate.total, gate.peakContext], [true, 1, 1, null], 'a replayed agent ran no session here')
+  // A selected phase's pane names its failed and stuck agents, each with its reason.
+  await view.key('DOWN')
+  assert.deepEqual(view.model.pane.problems.map((p) => [p.agent.n, p.reason]), [
+    [3, 'no movement in its transcript or terminal for 20 minutes'],
+    [6, 'its worker did not start: orca worktree create: call_timeout'],
+  ])
+})
+
+test('run view: context size, its band and tokens come from each agent\'s Claude or pi transcript', async () => {
+  const { view, agent } = await viewedRun()
+  assert.deepEqual([agent(1).context, agent(1).band, agent(1).tokens], [210005, 'yellow', 1511676])
+  assert.deepEqual([agent(2).context, agent(2).band, agent(2).tokens], [363000, 'red', 724150])
+  assert.match(agent(1).transcript, new RegExp(`${VIEW_SID.claude}\\.jsonl$`))
+  assert.match(agent(2).transcript, new RegExp(`_${VIEW_SID.pi}\\.jsonl$`))
+  for (const n of [3, 5, 6, 7]) assert.deepEqual([agent(n).context, agent(n).band, agent(n).tokens, agent(n).transcript], [null, null, null, null], `agent ${n}`)
+  // The selected agent's pane is the agent itself.
+  await view.click(3)
+  assert.equal(view.model.pane.kind, 'agent')
+  assert.equal(view.model.pane.agent.n, 3)
+})
+
+test('run view: elapsed time runs on the clock for a live agent and the run, and stops at settlement', async () => {
+  const { view, agent, clock, stateDir } = await viewedRun()
+  assert.deepEqual([1, 2, 3, 5, 6, 7].map((n) => agent(n).elapsedMs), [10 * MIN, 29 * MIN, 28 * MIN, null, 8 * MIN, null])
+  clock.t += 5 * MIN
+  await view.refresh()
+  assert.deepEqual([1, 2, 3, 6].map((n) => agent(n).elapsedMs), [10 * MIN, 34 * MIN, 33 * MIN, 8 * MIN])
+  assert.equal(view.model.header.elapsedMs, 35 * MIN)
+  // A runner that is gone: the run's time stops at its last journal entry.
+  rmSync(join(stateDir, 'runner.pid'))
+  await view.refresh()
+  assert.deepEqual([view.model.header.alive, view.model.header.elapsedMs], [false, 25 * MIN])
+})
+
+test('run view: a tab is open or closed as Orca\'s terminal list says, whatever its worker\'s state', async () => {
+  const { view, agent, orca } = await viewedRun()
+  assert.deepEqual([1, 2, 3, 4].map((n) => agent(n).tabOpen), [true, true, true, true], "a done agent's tab stays open")
+  await orca.terminalClose({ terminal: 'term_fake2' })
+  await view.refresh()
+  const d = orca.dispatches.get('ctx_fake2')
+  assert.deepEqual([d.settled, d.terminalState], [false, 'retained'], 'Orca still calls its worker live and its terminal retained')
+  assert.equal(agent(2).state, 'running')
+  assert.equal(agent(2).tabOpen, false)
+  assert.equal(agent(1).tabOpen, true)
+})
+
+test('run view: Enter or a click on an agent switches to its tab; a closed tab says why it could not', async () => {
+  const { view, rowOf, after, orca } = await viewedRun()
+  await view.key('DOWN')
+  await view.key('DOWN')
+  assert.equal(view.model.rows[view.model.selected].key, 'agent:2')
+  assert.deepEqual(await view.key('ENTER'), { switched: 'term_fake2' })
+  assert.deepEqual(await view.click(rowOf('agent:4')), { switched: 'term_fake5' })
+  assert.equal(view.model.pane.agent.n, 4)
+  assert.deepEqual(after().filter((c) => c.verb === 'terminalSwitch').map((c) => c.terminal), ['term_fake2', 'term_fake5'])
+
+  await orca.terminalClose({ terminal: 'term_fake3' })
+  const r = await view.click(rowOf('agent:3'))
+  assert.match(r.message, /could not focus \[Implement\] impl:b's tab term_fake3: .*terminal_exited/)
+  assert.equal(view.model.message, r.message)
+  const none = await view.click(rowOf('agent:5'))
+  assert.match(none.message, /has no tab/)
+  assert.equal(after().filter((c) => c.verb === 'terminalSwitch').length, 2)
+})
+
+test('run view: a click, Enter, ← or → on a phase toggles its fold, and switches to no tab', async () => {
+  const { view, rowOf, after } = await viewedRun()
+  const folded = (name) => view.model.phases.find((p) => p.name === name).folded
+  await view.click(rowOf('phase:Implement'))
+  assert.equal(folded('Implement'), true)
+  assert.deepEqual(view.model.rows.map((r) => r.key), ['phase:Discover', 'phase:Implement', 'phase:Gate'])
+  assert.equal(view.model.rows[view.model.selected].key, 'phase:Implement')
+  await view.key('ENTER')
+  assert.equal(folded('Implement'), false)
+  await view.key('LEFT')
+  assert.equal(folded('Implement'), true)
+  await view.key('RIGHT')
+  assert.equal(folded('Implement'), false)
+  await view.click(rowOf('phase:Discover'))
+  assert.equal(folded('Discover'), false)
+  assert.deepEqual(view.model.rows.slice(0, 3).map((r) => r.key), ['phase:Discover', 'agent:1', 'phase:Implement'])
+  // The operator's fold outlives a refresh.
+  await view.refresh()
+  assert.deepEqual([folded('Discover'), folded('Implement')], [false, false])
+  assert.equal(view.model.rows[view.model.selected].key, 'phase:Discover')
+  assert.deepEqual(after().filter((c) => c.verb === 'terminalSwitch'), [])
+})
+
+test('run view: r reclaims through the reclaim rules: a live agent is refused, unpushed commits only go when forced', async () => {
+  const { view, rowOf, after, orca, registry, agent } = await viewedRun()
+  await view.click(rowOf('agent:2'))
+  const live = await view.key('r')
+  assert.deepEqual(live.reclaim, { reclaimed: false, reason: 'it is still live' })
+  assert.match(view.model.message, /kept \[Implement\] impl:a: it is still live/)
+  assert.deepEqual(after().filter((c) => MUTATING.includes(c.verb)), [])
+
+  await view.click(rowOf('phase:Discover'))
+  await view.click(rowOf('agent:1'))
+  orca.dispatches.get('ctx_fake1').settled = true
+  orca.worktrees.get(wt(1)).unpushed = 2
+  const ahead = await view.key('r')
+  assert.deepEqual(ahead.reclaim, { reclaimed: false, reason: `${wt(1)} holds 2 unpushed commits; only a forced reclaim removes it` })
+  assert.deepEqual(after().filter((c) => MUTATING.includes(c.verb)), [])
+
+  const forced = await view.reclaim({ force: true })
+  assert.deepEqual(forced.reclaim, { reclaimed: true, notes: [] })
+  assert.deepEqual(after().filter((c) => MUTATING.includes(c.verb)).map((c) => c.verb), ['workerRelease', 'terminalClose', 'worktreeRemove'])
+  assert.equal(orca.worktrees.get(wt(1)).removed, true)
+  assert.deepEqual(linesOf(registry).filter((e) => e.type === 'reclaimed').map((e) => e.agent), ['run_fake1-1'])
+  assert.deepEqual([agent(1).tabOpen, agent(1).reclaimed], [false, true])
+  assert.match(view.model.message, /reclaimed \[Discover\] discover/)
+
+  await view.click(rowOf('agent:5'))
+  assert.match((await view.key('r')).message, /has nothing to reclaim/)
+})
+
+test('run view: l opens runner.log in Orca\'s editor, and q quits the view only', async () => {
+  const { view, stateDir, after } = await viewedRun()
+  await view.key('l')
+  assert.deepEqual(after().filter((c) => c.verb === 'fileOpen').map((c) => c.path), [join(stateDir, 'runner.log')])
+  rmSync(join(stateDir, 'runner.log'))
+  assert.match((await view.key('l')).message, /could not open .*runtime_error/)
+  assert.deepEqual(await view.key('q'), { quit: true })
+  assert.deepEqual(after().filter((c) => MUTATING.includes(c.verb)), [])
+})
+
+test('orca-cli: the view switches to a tab by handle and opens a file by path', async () => {
+  const { argvs, orca } = recordingCli({ 'terminal switch': { focus: { handle: 'term_a', tabId: 't', worktreeId: 'repo::C:/wt', navigated: true } } })
+  assert.deepEqual(await orca.terminalSwitch({ terminal: 'term_a' }), { terminal: 'term_a', worktreeId: 'repo::C:/wt' })
+  await orca.fileOpen({ path: 'C:/notes/orca-run/runner.log' })
+  assert.deepEqual(argvs, [
+    ['terminal', 'switch', '--terminal', 'term_a'],
+    ['file', 'open', '--path', 'C:/notes/orca-run/runner.log'],
+  ])
 })

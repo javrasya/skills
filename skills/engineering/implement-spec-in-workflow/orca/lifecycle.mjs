@@ -484,7 +484,12 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     }
     // Held until the worker settles or is stopped. It is never released during
     // the run, so its tab stays open, but a settled worker no longer works.
-    await live.acquire(() => out(`.. ${title}: queued, ${limits.MAX_LIVE} agents are live`))
+    // Journaled so the run view can show a call that waits here: nothing
+    // else about it is written until its worker starts.
+    await live.acquire(() => {
+      out(`.. ${title}: queued, ${limits.MAX_LIVE} agents are live`)
+      journal({ type: 'queued', key: call.key, n, title })
+    })
     try {
       return await supervise(runId, { ...call, dir: rel, schemaPath, resultPath, payloadPath })
     } finally {

@@ -30,6 +30,7 @@
 // any other is refused consumer_fenced; read, stop and release are not fenced.
 // A Run this fake did not create (a test's own runCreate) is not fenced.
 // closeTab(handle) closes a runner's tab: Orca still holds its Runs.
+import { existsSync } from 'fs'
 import { OrcaError, launchCommand, resumeCommand, workerStartArgs, withTimeout } from './orca-cli.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 
@@ -308,6 +309,18 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       if (d.gone) throw new OrcaError('terminal_exited', `terminal ${handle} has exited`, 'terminal close')
       record({ verb: 'terminalClose', dispatchId: d.dispatchId, terminal: handle })
       d.gone = true
+    },
+
+    // The runner's own tab, or a worker's; a closed one is refused as exited.
+    async terminalSwitch({ terminal: handle }) {
+      if (handle !== coordinator) terminal(handle, 'terminal switch', 'terminal_exited')
+      record({ verb: 'terminalSwitch', terminal: handle })
+      return { terminal: handle, worktreeId: null }
+    },
+
+    async fileOpen({ path }) {
+      if (!existsSync(path)) throw new OrcaError('runtime_error', `ENOENT: no such file or directory, open '${path}'`, 'file open')
+      record({ verb: 'fileOpen', path })
     },
 
     // `orca worktree rm --force`: it also kills every terminal in the worktree.

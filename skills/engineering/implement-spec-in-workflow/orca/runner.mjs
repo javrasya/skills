@@ -93,8 +93,10 @@ export const journalKey = (prompt, opts = {}) =>
 // `continuations` as reattached does. run: the Run every worker is
 // dispatched into and the runner terminal it is bound to, when it is created
 // or taken over; a resume carries the last one forward first, with `lastN`,
-// the highest call number that Run has used.
+// the highest call number that Run has used. queued: a call waiting for a
+// live slot.
 export const JOURNAL_ENTRIES = Object.freeze({
+  queued: ['at', 'key', 'n', 'title'],
   started: ['at', 'key', 'n', 'title', 'run', 'dispatchId', 'harness', 'sessionId', 'worktree', 'terminal', 'dir'],
   result: ['at', 'key', 'n', 'title', 'result'],
   failed: ['at', 'key', 'n', 'title', 'reason', 'attempts'],
