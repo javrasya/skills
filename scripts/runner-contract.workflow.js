@@ -1,9 +1,12 @@
 export const meta = { name: 'runner-contract', description: 'the guarantees the implement-spec script takes from its runner, checked with cheap agents', phases: [{ title: 'Contract' }] }
 
 // The runner contract test (ADR-0011): run it under the Workflow runner and
-// under the Orca runner, then resume each run; all four must return EXPECTED.
-// How to run it, and the one hand step (killing contract:kill), is in
-// skills/engineering/implement-spec-in-workflow/orca/README.md.
+// under the Orca runner, then resume each run; each of the four must return
+// its runner's expected object in
+// skills/engineering/implement-spec-in-workflow/orca/README.md: EXPECTED, with
+// each RUNNER_OWN case at that runner's value. How to run it, and the one hand
+// step (killing contract:continue once and contract:kill until it stays dead),
+// is in that README.
 //
 // Byte-identical under both runners: no Date.now(), Math.random() or argless
 // new Date() (the Workflow runner throws on them, and they would break resume),
@@ -14,8 +17,18 @@ const EXPECTED = {
   repaired: { count: 3, first_attempt_rejected: true },
   options: { word: 'hello', count: 3 },
   isolated: { own_worktree: true },
+  retried: { word: 'hello', count: 3 },
   thrown: [null, null],
+  continued: { done: true },
   killed: null,
+}
+// Where the runners legitimately differ, every value a runner may give. A
+// killed Workflow runner agent stays dead; the Orca runner continues its
+// session (ADR-0013), so the same kill returns the agent's result. The script
+// cannot tell which runner runs it, so its own check takes either, and the
+// README names the value each runner must give.
+const RUNNER_OWN = {
+  continued: [{ done: true }, null],
 }
 
 const HELLO = {
@@ -46,6 +59,9 @@ const NOT_A_TASK = 'This is a check of the workflow runner, not a task: read no 
 // only for a pi worker).
 const ROLE = { harness: 'claude', model: 'sonnet', piModel: 'openai/gpt-5' }
 const TOP = `${NOT_A_TASK} Run the shell command git rev-parse --show-toplevel once; your result is toplevel set to its output, exactly.`
+// Bounded, and nothing an agent refuses: told to never return, a Workflow
+// runner agent returns at once. A bare `sleep` is refused by some hosts' hooks.
+const WAIT = 'run the shell command node -e "setTimeout(() => {}, 540000)" in the foreground with a 600000 ms timeout, which waits nine minutes'
 
 // Key order is whatever the agent wrote; the comparison and the returned
 // object must not depend on it.
@@ -55,9 +71,24 @@ const canon = (v) =>
   : v
 const failures = []
 const expect = (what, got) => {
-  const want = EXPECTED[what]
-  if (JSON.stringify(canon(got)) !== JSON.stringify(canon(want))) failures.push(`${what}: expected ${JSON.stringify(want)}, got ${JSON.stringify(got)}`)
+  const wants = RUNNER_OWN[what] ?? [EXPECTED[what]]
+  if (!wants.some((want) => JSON.stringify(canon(got)) === JSON.stringify(canon(want)))) failures.push(`${what}: expected ${wants.map((w) => JSON.stringify(w)).join(' or ')}, got ${JSON.stringify(got)}`)
   return canon(got)
+}
+
+// Awaited outside parallel(), which turns a throw into null and would hide an
+// agent() that throws on a dead agent.
+const awaited = async (call) => {
+  try {
+    return { value: await call() }
+  } catch (e) {
+    return { threw: String(e?.message ?? e) }
+  }
+}
+const settled = (what, r) => {
+  if (r.threw) failures.push(`${what}: agent() threw (${r.threw}); a dead agent must return null`)
+  log(`${what} returned ` + JSON.stringify(r))
+  return r.threw ? '<threw>' : r.value
 }
 
 phase('Contract')
@@ -73,6 +104,11 @@ try {
     () => agent(`${NOT_A_TASK} Your result is word "hello" and count 3.`, { ...C, ...ROLE, label: 'contract:options', schema: HELLO }),
     () => agent(TOP, { ...C, label: 'contract:here', schema: TOPLEVEL }),
     () => agent(TOP, { ...C, label: 'contract:isolated', schema: TOPLEVEL, isolation: 'worktree' }),
+    // Failed start, then success. The Orca leg is launched with a preload
+    // that fails this agent's first worker start (README), so its retry takes
+    // up the worktree the failed attempt made; the Workflow runner has no
+    // start to fail. Either way the call returns the agent's result.
+    () => agent(`${NOT_A_TASK} Your result is word "hello" and count 3.`, { ...C, label: 'contract:retry', schema: HELLO, isolation: 'worktree' }),
     () => {
       throw new Error('contract: this thunk throws before returning a promise')
     },
@@ -82,7 +118,7 @@ try {
   ])
 } catch (e) {
   failures.push(`parallel: rejected (${e?.message ?? e}); it must resolve with null in the throwing thunks' places`)
-  par = [null, null, null, null, null, null, null]
+  par = [null, null, null, null, null, null, null, null]
 }
 log('parallel returned ' + JSON.stringify(par))
 
@@ -94,32 +130,30 @@ const here = top(par[3])
 const isolatedTop = top(par[4])
 log(`contract:here in ${here}, contract:isolated in ${isolatedTop}`)
 
-// Last, so a resume's unchanged prefix is the five calls above. Outside
-// parallel(), which turns a throw into null and would hide an agent() that
-// throws on a dead agent. The wait is bounded and the prompt asks for nothing
-// an agent refuses: told to never return, a Workflow runner agent returns at
-// once. A bare `sleep` is refused by some hosts' hooks.
-let killed
-try {
-  killed = {
-    value: await agent(
-      'This agent checks that an agent killed mid-task returns null; the person running the check kills you during the wait below, and that is expected. Your task: run the shell command node -e "setTimeout(() => {}, 540000)" in the foreground with a 600000 ms timeout, which waits nine minutes. When it finishes, your result is done true.',
-      { ...C, label: 'contract:kill', schema: DONE },
-    ),
-  }
-} catch (e) {
-  killed = { threw: String(e?.message ?? e) }
-}
-if (killed.threw) failures.push(`killed: agent() threw (${killed.threw}); a dead agent must return null`)
-log('contract:kill returned ' + JSON.stringify(killed))
+// Killed once. After parallel(), so a resume's unchanged prefix is the six
+// agents above; before contract:kill, so a resume replays it wherever it
+// returned a value.
+const continued = await awaited(() => agent(
+  `This agent checks what an agent killed once mid-task returns; the person running the check kills you during the wait below, and that is expected. Your task: ${WAIT}. When it finishes, your result is done true. If you are told you were interrupted and to carry on, do not wait again: your result is done true.`,
+  { ...C, label: 'contract:continue', schema: DONE },
+))
+
+// Killed every time it runs, until the runner gives it up. Last, so every
+// call before it is in a resume's prefix.
+const killed = await awaited(() => agent(
+  `This agent checks that an agent killed mid-task returns null; the person running the check kills you during the wait below, and that is expected. Your task: ${WAIT}. When it finishes, your result is done true. If you are told you were interrupted and to carry on, run the wait again from its start: your result is done true only once a wait has run to its end.`,
+  { ...C, label: 'contract:kill', schema: DONE },
+))
 
 const result = {
   valid: expect('valid', par[0]),
   repaired: expect('repaired', par[1]),
   options: expect('options', par[2]),
   isolated: expect('isolated', { own_worktree: !!here && !!isolatedTop && here !== isolatedTop }),
-  thrown: expect('thrown', [par[5], par[6]]),
-  killed: expect('killed', killed.threw ? '<threw>' : killed.value),
+  retried: expect('retried', par[5]),
+  thrown: expect('thrown', [par[6], par[7]]),
+  continued: expect('continued', settled('contract:continue', continued)),
+  killed: expect('killed', settled('contract:kill', killed)),
 }
 for (const f of failures) log('FAIL ' + f)
 log(failures.length ? `${failures.length} contract failure(s)` : 'contract holds')
