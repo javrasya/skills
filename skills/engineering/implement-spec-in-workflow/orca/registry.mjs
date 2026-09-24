@@ -6,7 +6,8 @@
 // not in it and are never backfilled (D9 on #43).
 //
 // Entries, each with `type`, `runId` and `at` (ISO time):
-//   armed      project, runDir, spec: the runner created the Run
+//   armed      project, runDir, spec: the runner created the Run; script and
+//              permissionMode, when it had them: what a resume relaunches it with
 //   runner     terminal: a runner started on the run — at creation, and again
 //              whenever one takes it up on a resume
 //   ended      outcome: ok, partial or failed
@@ -46,7 +47,8 @@ export function runRegistry(path = REGISTRY_PATH, clock = { now: () => Date.now(
   }
   return {
     path,
-    armed: ({ runId, project, runDir, spec }) => append({ type: 'armed', runId, project, runDir, spec }),
+    armed: ({ runId, project, runDir, spec, script = null, permissionMode = null }) =>
+      append({ type: 'armed', runId, project, runDir, spec, ...(script && { script }), ...(permissionMode && { permissionMode }) }),
     runner: ({ runId, terminal }) => append({ type: 'runner', runId, terminal: terminal ?? null }),
     ended: ({ runId, outcome }) => {
       if (!OUTCOMES.includes(outcome)) throw new Error(`run registry: unknown outcome "${outcome}": expected one of ${OUTCOMES.join(', ')}`)
@@ -57,7 +59,7 @@ export function runRegistry(path = REGISTRY_PATH, clock = { now: () => Date.now(
 }
 
 // Every run the registry knows, in the order they were armed:
-//   { runId, project, runDir, spec, armedAt,
+//   { runId, project, runDir, spec, script, permissionMode, armedAt,
 //     state: 'running' | 'ok' | 'partial' | 'failed', endedAt,
 //     runner: { terminal, at } | null   — where a runner was last seen on it,
 //     reclaimed: boolean, reclaimedAt,  — the whole run
@@ -80,7 +82,8 @@ export function readRegistry(path = REGISTRY_PATH) {
     if (e.type === 'armed') {
       if (!runs.has(e.runId)) {
         runs.set(e.runId, {
-          runId: e.runId, project: e.project ?? null, runDir: e.runDir ?? null, spec: e.spec ?? null, armedAt: e.at ?? null,
+          runId: e.runId, project: e.project ?? null, runDir: e.runDir ?? null, spec: e.spec ?? null,
+          script: e.script ?? null, permissionMode: e.permissionMode ?? null, armedAt: e.at ?? null,
           state: 'running', endedAt: null, runner: null, reclaimed: false, reclaimedAt: null, reclaimedAgents: [],
         })
       }

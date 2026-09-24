@@ -69,8 +69,9 @@ export function agentsOf(journalPath) {
   return [...agents.values()].sort((a, b) => a.n - b.n)
 }
 
-// The worktree reclaim may remove: one the run created, by its name.
-const ownWorktree = (a) => (a.worktree && basename(a.worktree).startsWith(`${a.runId}-`) ? a.worktree : null)
+// The worktree reclaim may remove, and the run view may show: one the run
+// created, by its name.
+export const ownWorktree = (a) => (a.worktree && basename(a.worktree).startsWith(`${a.runId}-`) ? a.worktree : null)
 
 // Reclaims one agent: { reclaimed: true, notes } or { reclaimed: false, reason }.
 // Every check runs before anything is changed, so a refused agent is left

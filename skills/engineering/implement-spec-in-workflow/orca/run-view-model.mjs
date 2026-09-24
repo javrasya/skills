@@ -1,14 +1,19 @@
 // The run view's model and its actions (ADR-0012; design reference in
 // docs/design/orca-run-view-tree.md), with no terminal in sight: a renderer
 // draws `view.model` and hands each key or click to `view.key` / `view.click`.
+// runView is one run's tree, the whole of attached mode; runsView is
+// standalone mode, every run the registry knows, each opened into a runView.
 // The model is read from the run's journal, its agents' session transcripts,
 // Orca's terminal list and the run registry; the actions go to Orca, and a
 // reclaim goes through reclaim.mjs, so the view keeps the end-of-run rules.
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from 'fs'
-import { basename, join, resolve } from 'path'
+import { basename, dirname, join, resolve } from 'path'
+import { fileURLToPath } from 'url'
 import { sessionTranscripts } from './transcript.mjs'
-import { agentsOf, gitUnpushed, reclaimAgent } from './reclaim.mjs'
+import { agentsOf, gitUnpushed, ownWorktree, reclaimAgent, reclaimRun } from './reclaim.mjs'
 import { REGISTRY_PATH, readRegistry, runRegistry } from './registry.mjs'
+
+export const RUNNER_PATH = fileURLToPath(new URL('./runner.mjs', import.meta.url))
 
 // In the order a phase row lists its mix.
 export const STATES = Object.freeze(['running', 'continued', 'stuck', 'failed', 'queued', 'done'])
@@ -146,7 +151,9 @@ const samePath = (a, b) => !!a && !!b && (process.platform === 'win32' ? resolve
 //   latest  the last line of runner.log, the run's latest event, or null
 // An agent is { n, label, title, phase, state, continuations, reason,
 // replayed, runId, dispatchId, harness, sessionId, worktree, terminal,
-// tabOpen, reclaimed, context, band, tokens, elapsedMs, transcript }. tabOpen
+// tabOpen, reclaimed, context, band, tokens, elapsedMs, transcript }. worktree
+// is only ever one named `<runId>-<n>`: any other, the run's own checkout
+// included, is the operator's and never shown. tabOpen
 // is whether Orca's terminal list shows its tab, never what its worker's
 // state says: Orca marks every tab the runner launched retained for good. It
 // is null when the agent has no tab or the list could not be read. context,
@@ -211,6 +218,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     for (const a of agents) {
       const usage = a.sessionId ? transcripts.usage({ harness: a.harness, sessionId: a.sessionId, worktree: a.worktree }) : null
       Object.assign(a, {
+        worktree: ownWorktree(a),
         tabOpen: a.terminal && open ? open.has(a.terminal) : null,
         reclaimed: !!a.runId && (run?.reclaimed === true || reclaimedNames.has(`${a.runId}-${a.n}`)),
         context: usage?.context ?? null,
@@ -388,4 +396,225 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   }
 
   return view
+}
+
+const pathKey = (p) => (process.platform === 'win32' ? resolve(p).toLowerCase() : resolve(p))
+
+// runs = runsView({ orca, … }); await runs.refresh() reads the registry again,
+// and runs.model is then:
+//   projects  [{ key, name, path, folded, runs }], the project of the latest
+//             run first, each project's runs latest first
+//   rows      [{ kind: 'project', key, project } | { kind: 'run', key, run, project }]
+//   selected  the index of the selected row
+//   message   the latest action's outcome, or null
+//   opened    { runId, view }: the run Enter opened, as a runView, or null
+// A run is { runId, name, spec, project, runDir, script, permissionMode,
+// terminal, outcome, alive, kept, reclaimed, armedAt, ageMs, resumable }.
+// outcome is ok, partial or failed, or null while no `ended` is recorded.
+// alive is whether its runner's terminal, the registry's or the one R opened,
+// is in Orca's terminal list, and null when the list could not be read. kept
+// counts the agents its journal names that are not reclaimed. R resumes a
+// run only when it is resumable, alive being false.
+//
+// Only the registry's runs are listed, so a worktree no run made never is.
+// Read, stop and release are not fenced to a Run's coordinator, so a reclaim
+// needs no takeover. runner is the runner.mjs a resume runs; the rest is as
+// runView's.
+export function runsView({ orca, clock = { now: () => Date.now() }, registry = REGISTRY_PATH, transcripts = sessionTranscripts(), unpushed = gitUnpushed, alive = runnerAlive, runner = RUNNER_PATH }) {
+  const folds = new Map()
+  // runId -> the tab R opened: alive before its runner reaches the registry.
+  const launched = new Map()
+  let projects = []
+  let selectedKey = null
+  let selected = 0
+  let message = null
+  let opened = null
+  const runs = { model: null, refresh, key, click, open, reclaim, resume, opened: () => opened?.view ?? null }
+
+  function layout() {
+    const rows = []
+    for (const project of projects) {
+      project.folded = folds.get(project.key) ?? false
+      rows.push({ kind: 'project', key: `project:${project.key}`, project })
+      if (!project.folded) for (const run of project.runs) rows.push({ kind: 'run', key: `run:${run.runId}`, run, project })
+    }
+    selectedKey ??= rows.find((r) => r.kind === 'run')?.key ?? null
+    const at = rows.findIndex((r) => r.key === selectedKey)
+    selected = at >= 0 ? at : Math.max(0, Math.min(selected, rows.length - 1))
+    selectedKey = rows[selected]?.key ?? null
+    runs.model = { projects, rows, selected, message, opened }
+    return runs.model
+  }
+
+  async function refresh() {
+    let entries = []
+    try {
+      entries = readRegistry(registry)
+    } catch (e) {
+      message = `could not read the run registry ${registry}: ${e?.message ?? e}`
+    }
+    let open = null
+    try {
+      open = new Set(await orca.terminalList())
+    } catch {}
+    const now = clock.now()
+    const byProject = new Map()
+    for (const r of entries) {
+      const done = new Set(r.reclaimedAgents.map((a) => a.agent))
+      const agents = r.runDir ? agentsOf(join(r.runDir, 'journal.jsonl')).filter((a) => a.runId === r.runId) : []
+      const handles = [r.runner?.terminal, launched.get(r.runId)].filter(Boolean)
+      const live = open ? handles.some((h) => open.has(h)) : null
+      const armedAt = Date.parse(r.armedAt)
+      const number = /spec-(\d+)/.exec(r.spec ?? '')?.[1]
+      const run = {
+        runId: r.runId, name: r.spec, spec: number ? `#${number}` : null, project: r.project, runDir: r.runDir,
+        script: r.script, permissionMode: r.permissionMode, terminal: launched.get(r.runId) ?? r.runner?.terminal ?? null,
+        outcome: r.state === 'running' ? null : r.state, alive: live, reclaimed: r.reclaimed,
+        kept: r.reclaimed ? 0 : agents.filter((a) => !done.has(a.name)).length,
+        armedAt: Number.isFinite(armedAt) ? armedAt : null, ageMs: Number.isFinite(armedAt) ? Math.max(0, now - armedAt) : null, resumable: live === false,
+      }
+      const key = r.project ? pathKey(r.project) : ''
+      if (!byProject.has(key)) byProject.set(key, { key, name: r.project ? basename(r.project) : '(no project)', path: r.project, folded: false, runs: [] })
+      byProject.get(key).runs.push(run)
+    }
+    const newest = (run) => run.armedAt ?? -Infinity
+    for (const p of byProject.values()) p.runs.sort((a, b) => newest(b) - newest(a))
+    projects = [...byProject.values()].sort((a, b) => newest(b.runs[0]) - newest(a.runs[0]))
+    if (opened) await opened.view.refresh()
+    return layout()
+  }
+
+  const say = (text) => {
+    message = text
+    layout()
+    return { message: text }
+  }
+  const current = () => runs.model?.rows[selected] ?? null
+  const runOf = (runId) => projects.flatMap((p) => p.runs).find((r) => r.runId === runId) ?? null
+  const labelOf = (run) => `${run.name ?? 'run'} ${run.runId}`
+
+  // Enter on a run: its tree, the one attached mode shows.
+  async function open(runId) {
+    const run = runOf(runId)
+    if (!run) return say(`no run ${runId} in the run registry`)
+    if (!run.runDir) return say(`${labelOf(run)} has no run directory recorded`)
+    opened = { runId, view: runView({ stateDir: run.runDir, orca, clock, transcripts, registry, unpushed, alive }) }
+    await opened.view.refresh()
+    message = null
+    layout()
+    return { opened: runId }
+  }
+
+  function close() {
+    const runId = opened?.runId
+    opened = null
+    layout()
+    return { closed: runId }
+  }
+
+  function toggle(project) {
+    folds.set(project.key, !project.folded)
+    layout()
+    return { folded: project.key }
+  }
+
+  // Every agent of the run the registry does not already record reclaimed,
+  // by the reclaim rules, as the end-of-run prompt's `a` does; the run is
+  // recorded reclaimed once none of its agents is left.
+  async function reclaim(runId = current()?.run?.runId) {
+    const run = runOf(runId)
+    if (!run) return say('select a run to reclaim')
+    const label = labelOf(run)
+    if (run.reclaimed) return say(`${label} is already reclaimed`)
+    const notes = []
+    let r
+    let left
+    try {
+      const done = new Set(readRegistry(registry).find((e) => e.runId === runId)?.reclaimedAgents.map((a) => a.agent) ?? [])
+      left = run.runDir ? agentsOf(join(run.runDir, 'journal.jsonl')).filter((a) => a.runId === runId && !done.has(a.name)) : []
+      const writer = runRegistry(registry, clock)
+      r = await reclaimRun(left, { orca, unpushed, registry: writer, out: (s) => notes.push(s.replace(/^!! /, '')) })
+      if (!left.length) writer.reclaimed({ runId })
+    } catch (e) {
+      return say(`could not reclaim ${label}: ${e?.message ?? e}`)
+    }
+    await refresh()
+    const text = r.kept.length
+      ? `reclaimed ${r.reclaimed.length} of ${left.length} agents of ${label}; ${r.kept.map(({ agent, reason }) => `kept ${agent.title}: ${reason}`).join('; ')}`
+      : `reclaimed ${label}${left.length ? `: ${left.length} agent${left.length === 1 ? '' : 's'}` : ''}`
+    return { ...say(notes.length ? `${text}; ${notes.join('; ')}` : text), reclaimed: r.reclaimed, kept: r.kept }
+  }
+
+  // A new tab in the run's worktree running the runner with --resume, which
+  // takes the Run over. Refused while its runner's tab is open, or while Orca
+  // cannot say whether it is.
+  async function resume(runId = opened?.runId ?? current()?.run?.runId) {
+    const run = runOf(runId)
+    if (!run) return say('select a run to resume')
+    const label = labelOf(run)
+    if (run.alive === true) return say(`${label}'s runner is alive, in tab ${run.terminal}: nothing to resume`)
+    if (run.alive === null) return say(`could not tell whether ${label}'s runner is alive: Orca's terminal list did not answer`)
+    if (!run.project || !run.runDir) return say(`${label} has no ${run.project ? 'run directory' : 'worktree'} recorded to resume in`)
+    // A run armed before the registry named its script was launched by the
+    // skill, whose state dir is orca-run/ beside the rendered workflow.js.
+    const script = run.script ?? join(dirname(run.runDir), 'workflow.js')
+    let t
+    try {
+      t = await orca.resumeRunner({ worktree: run.project, title: `${run.name ?? run.runId} (resumed)`, runner, script, stateDir: run.runDir, permissionMode: run.permissionMode })
+    } catch (e) {
+      return say(`could not resume ${label}: ${e?.message ?? e}`)
+    }
+    if (t.terminal) launched.set(runId, t.terminal)
+    await refresh()
+    return { ...say(`resumed ${label} in tab ${t.terminal}`), resumed: t.terminal }
+  }
+
+  const activate = (row) => (!row ? {} : row.kind === 'project' ? toggle(row.project) : open(row.run.runId))
+
+  // Key names as terminal-kit gives them. With a run open its tree takes the
+  // keys, except R, and q or Escape, which go back to the list; q on the
+  // list returns { quit }.
+  async function key(name) {
+    if (opened) {
+      if (name === 'q' || name === 'ESCAPE') return close()
+      if (name === 'R') return resume()
+      return opened.view.key(name)
+    }
+    const rows = runs.model?.rows ?? []
+    switch (name) {
+      case 'UP':
+      case 'DOWN':
+        if (rows.length) {
+          selected = Math.max(0, Math.min(rows.length - 1, selected + (name === 'UP' ? -1 : 1)))
+          selectedKey = rows[selected].key
+          layout()
+        }
+        return {}
+      case 'ENTER':
+        return activate(current())
+      case 'LEFT':
+      case 'RIGHT':
+        return current()?.kind === 'project' ? toggle(current().project) : {}
+      case 'r':
+        return reclaim()
+      case 'R':
+        return resume()
+      case 'q':
+        return { quit: true }
+      default:
+        return {}
+    }
+  }
+
+  async function click(index) {
+    if (opened) return opened.view.click(index)
+    const row = runs.model?.rows[index]
+    if (!row) return {}
+    selected = index
+    selectedKey = row.key
+    layout()
+    return activate(row)
+  }
+
+  return runs
 }

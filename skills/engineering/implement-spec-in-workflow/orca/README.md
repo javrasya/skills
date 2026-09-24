@@ -8,8 +8,8 @@ The second runner for `workflow.template.js` (ADR-0011): a Node script, launched
 | `registry.mjs` | the machine-wide run registry: its writer and the fold that reads each run's current state |
 | `reclaim.mjs` | reclaiming an agent or a whole run, and the end-of-run prompt; the run view reuses it |
 | `lifecycle.mjs` | one live agent's life: the run's Run, the live cap, its worker's start, liveness, nudges and session continuation, its result, its board status |
-| `run-view-model.mjs` | the run view's model (header, phase and agent rows, the bottom pane) and what each key and click does, with no terminal |
-| `run-view/` | the run view's terminal: `view.mjs`, the entry the runner starts in its tab, `draw.mjs`, the screen drawn from the model, and `package.json` for terminal-kit (below) |
+| `run-view-model.mjs` | the run view's model, with no terminal: one run's tree (header, phase and agent rows, the bottom pane), every run in the registry for standalone mode, and what each key and click does |
+| `run-view/` | the run view's terminal: `view.mjs`, the entry the runner starts in its tab and the `orca-runs` skill opens standalone, `draw.mjs`, the screen drawn from the model, and `package.json` for terminal-kit (below) |
 | `transcript.mjs` | where a Claude or pi session writes its transcript, found from its session id, how big it is, and its context size and tokens |
 | `submit.mjs` | the worker's end of `agent()`: validates the payload, records it, sends `worker_done` |
 | `orca-cli.mjs` | the one place anything talks to Orca |
@@ -71,7 +71,7 @@ Beyond its state dir, every run is recorded in **`~/.claude/orca-runs.jsonl`**, 
 
 | type | written when | carries |
 |---|---|---|
-| `armed` | the runner creates the Run, at its first live `agent()` | `project` (the runner's working directory), `runDir` (the state dir), `spec` (the script's `meta.name`) |
+| `armed` | the runner creates the Run, at its first live `agent()` | `project` (the runner's working directory), `runDir` (the state dir), `spec` (the script's `meta.name`), and `script` (the rendered script's path) and `permissionMode` when it has them, which a resume from the standalone view relaunches it with |
 | `runner` | a runner starts on the Run | `terminal`, the runner's own terminal |
 | `ended` | the script settles | `outcome`: `ok`, `partial` if any `agent()` returned `null`, `failed` if the script threw |
 | `reclaimed` | an agent or the whole run is reclaimed (not written by the runner) | `agent`, the worktree name `<runId>-<n>`; none for the whole run |
@@ -239,3 +239,15 @@ The view exits 0 when the operator quits it and 3 when it cannot run here (`run-
 The view's one dependency, terminal-kit, is pinned in `run-view/package.json` with a committed lockfile. It is installed beside `view.mjs` on the view's first start (`npm ci`, its output in `runner.log`), because the installed skill may be a copy of the repo rather than a link to it, and the copy is where the view runs. This departs from ADR-0001's self-contained repo: nothing is vendored, so the first view needs npm and the network. If the install fails, the view exits 3 and the runner prints its log in the tab. The offline tests import `draw.mjs` and the model, never terminal-kit, so they need no install.
 
 To look at the view without a run, point it at a run dir: `node run-view/view.mjs --attached <state-dir> [--registry <registry file>]`. `--registry` is for a fixture run, whose header comes from a registry file of its own rather than the machine's.
+
+## The run view standalone
+
+`node run-view/view.mjs --standalone [--registry <registry file>]`, which the [`orca-runs`](../../orca-runs/SKILL.md) skill opens in a new Orca tab (D8 on #43), lists every run in the run registry, grouped by project, the project of the latest run first. No runner needs to be going. Each run shows its spec, its outcome (`ok`, `partial` or `failed`, or none while no `ended` is recorded), whether its runner is alive, how many agents it keeps (those its journal names that no `reclaimed` entry has taken), and its age since it was armed. A runner is alive when the terminal the registry last recorded for it is in Orca's terminal list; when that list cannot be read, the view says it does not know. Two runs in one repo are two rows, keyed by Run id.
+
+Its keys, on the list:
+
+- **Enter** or a click opens the run into the same tree attached mode shows, with the same keys, which the runs list hands on to it. **q** or Escape goes back to the list; **q** on the list closes the view.
+- **r** reclaims the whole run: every agent it keeps, one by one, under the reclaim rules above. A live agent, or one whose worktree holds unpushed commits, is kept and named with why; forcing one is done inside the run, with `r` then `f`. Each reclaimed agent is appended to the registry, and once none of the run's agents is left, the run is recorded reclaimed.
+- **R** resumes a run whose runner is dead: a new Orca terminal in the run's worktree (its `project`), brought to the front, running `node runner.mjs <script> --state-dir <runDir> --resume [--permission-mode <mode>]`, which takes the Run over as a resume from a new terminal does (above). A run armed before the registry recorded its script resumes `workflow.js` beside its state dir, as the skill lays them out. **R** is not offered while the runner is alive, or while Orca cannot say; the terminal it opened counts as the run's runner at once, so a second **R** opens nothing. Inside an opened run, **R** resumes that run.
+
+Only the registry's runs are listed, and a worktree is shown, and touched, only when it is named `<runId>-<n>`: an agent that ran in the run's own checkout shows no worktree, and a worktree the operator made is never listed or removed. Reading, stopping and releasing a worker are not fenced to the Run's coordinator (live, Orca 1.4.209), so the view reclaims any run without taking it over. With no terminal the standalone view exits 3 and says so; npm's output, on its first start, goes to `orca-runs-view.log` beside the registry.

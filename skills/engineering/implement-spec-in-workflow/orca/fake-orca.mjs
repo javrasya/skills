@@ -29,7 +29,9 @@
 // created it or last took it over with runUse, and worker-start into it from
 // any other is refused consumer_fenced; read, stop and release are not fenced.
 // A Run this fake did not create (a test's own runCreate) is not fenced.
-// closeTab(handle) closes a runner's tab: Orca still holds its Runs.
+// closeTab(handle) closes a runner's tab: Orca still holds its Runs. `tabs`
+// are other tabs open from the start, such as earlier runners' own; a closed
+// tab is gone from terminalList.
 //
 // A worker's tab closed (`gone`, by a test or by terminalClose) is failed by
 // Orca itself, as real Orca does about 5 s after the close: worker-show then
@@ -37,7 +39,7 @@
 // so the runner never sees the window before, and reads worker-show through
 // the adapter's own workerStatus.
 import { existsSync } from 'fs'
-import { OrcaError, launchCommand, resumeCommand, tailCommand, workerStartArgs, withTimeout, workerStatus } from './orca-cli.mjs'
+import { OrcaError, launchCommand, resumeCommand, resumeRunnerCommand, tailCommand, workerStartArgs, withTimeout, workerStatus } from './orca-cli.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 
 // The runner's transcript reader, over the fake's sessions: a session's size
@@ -46,7 +48,7 @@ export const fakeTranscripts = (orca) => ({
   size: ({ sessionId }) => [...orca.dispatches.values()].filter((d) => d.sessionId === sessionId).at(-1)?.transcript ?? null,
 })
 
-export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run', runPrefix = 'run_fake', coordinator = 'term_runner', faults = {}, callMs = RUNNER_SETTINGS.orcaCallMs } = {}) {
+export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run', runPrefix = 'run_fake', coordinator = 'term_runner', tabs = [], faults = {}, callMs = RUNNER_SETTINGS.orcaCallMs } = {}) {
   const calls = []
   const dispatches = new Map()
   const worktrees = new Map([[runWorktree, { parent: null, name: null, displayName: null, removed: false, status: null, dirty: false, commits: 0, unpushed: 0 }]])
@@ -56,6 +58,8 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
   // runId -> { coordinator, generation }
   const runs = new Map()
   const closedTabs = new Set()
+  const openTabs = new Set(tabs)
+  let resumes = 0
   let seq = 0
   const record = (c) => calls.push(clock ? { ...c, at: clock.now() } : c)
 
@@ -319,7 +323,8 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     // neither gone nor closed. No row names a run or a dispatch.
     async terminalList() {
       record({ verb: 'terminalList' })
-      return [coordinator, ...[...logTabs].filter(([, t]) => t.open).map(([h]) => h), ...[...dispatches.values()].filter((d) => !d.gone).map((d) => d.handle)]
+      return [coordinator, ...openTabs, ...[...logTabs].filter(([, t]) => t.open).map(([h]) => h), ...[...dispatches.values()].filter((d) => !d.gone).map((d) => d.handle)]
+        .filter((h) => !closedTabs.has(h))
     },
 
     async terminalClose({ terminal: handle }) {
@@ -360,6 +365,18 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       logTabs.set(handle, { path, title, open: true })
       record({ verb: 'logTail', path, title, command: tailCommand(path), terminal: handle })
       return { terminal: handle }
+    },
+
+    // A tab in a worktree Orca knows, running the runner's resume: `command`
+    // is what the real adapter types into it.
+    async resumeRunner({ worktree, title, runner, script, stateDir, permissionMode = null }) {
+      const command = resumeRunnerCommand({ runner, script, stateDir, permissionMode })
+      const w = worktrees.get(worktree)
+      if (!w || w.removed) throw new OrcaError('selector_not_found', `no worktree ${worktree}`, 'terminal create')
+      const handle = `term_resumed${++resumes}`
+      openTabs.add(handle)
+      record({ verb: 'resumeRunner', worktree, title, command, terminal: handle })
+      return { terminal: handle, command }
     },
 
     // `orca worktree rm --force`: it also kills every terminal in the worktree.

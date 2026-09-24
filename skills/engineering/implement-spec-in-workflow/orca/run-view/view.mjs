@@ -1,24 +1,31 @@
 #!/usr/bin/env node
-// The run view (ADR-0012): the run as a tree that keeps updating in place, in
-// the runner's own tab. The runner starts it as its child (D5 on #43):
+// The run view (ADR-0012): runs as trees that keep updating in place. Two
+// modes (D5 and D8 on #43):
 //
-//   node view.mjs --attached <run-dir>
+//   node view.mjs --attached <run-dir>   the runner starts it as its child, in
+//                                        its own tab, on that one run
+//   node view.mjs --standalone           every run in the run registry, by
+//                                        project; the orca-runs skill opens it
+//                                        in a tab of its own
 //
-// It reads the run from its run dir and Orca (run-view-model.mjs), never from
-// the runner, so a crash here never touches the run; the runner restarts it.
-// Over IPC it takes only the end-of-run prompt ({type: 'endPrompt', title,
-// lines, question}), answered with {type: 'endChoice', answer}, and it sends
-// {type: 'detach'} before the operator's quit. Exit codes: exit-codes.mjs.
+// It reads runs from their run dirs, the registry and Orca (run-view-model.mjs),
+// never from a runner, so a crash here never touches a run; the runner restarts
+// an attached view. Over IPC an attached view takes only the end-of-run prompt
+// ({type: 'endPrompt', title, lines, question}), answered with {type:
+// 'endChoice', answer}, and it sends {type: 'detach'} before the operator's
+// quit. Exit codes: exit-codes.mjs.
 //
 // terminal-kit is installed beside this file on first use (npm ci), because
-// the skill may be a detached copy of the repo; npm's output goes to runner.log.
+// the skill may be a detached copy of the repo; npm's output goes to the log:
+// the run's runner.log attached, orca-runs-view.log beside the registry standalone.
 import { spawnSync } from 'child_process'
 import { appendFileSync, closeSync, openSync } from 'fs'
 import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
-import { runView } from '../run-view-model.mjs'
+import { runView, runsView } from '../run-view-model.mjs'
+import { REGISTRY_PATH } from '../registry.mjs'
 import { orcaCli } from '../orca-cli.mjs'
-import { draw } from './draw.mjs'
+import { TREE_HELP, draw, drawRuns } from './draw.mjs'
 import { VIEW_EXIT } from './exit-codes.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -46,21 +53,27 @@ async function terminalKit(logPath) {
 
 const args = process.argv.slice(2)
 const option = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined)
-if (!option('--attached')) {
-  console.error('usage: node view.mjs --attached <run-dir> [--registry <run registry, for a fixture run>]')
+const standalone = args.includes('--standalone')
+if (!standalone && !option('--attached')) {
+  console.error('usage: node view.mjs --attached <run-dir> | --standalone [--registry <run registry, for a fixture>]')
   process.exit(2)
 }
-const runDir = resolve(option('--attached'))
-const logPath = join(runDir, 'runner.log')
+const registry = option('--registry') ? resolve(option('--registry')) : REGISTRY_PATH
+const runDir = standalone ? null : resolve(option('--attached'))
+const logPath = standalone ? join(dirname(registry), 'orca-runs-view.log') : join(runDir, 'runner.log')
 const logLine = (s) => {
   try {
     appendFileSync(logPath, String(s).split('\n').map((l) => `${new Date().toISOString()} ${l}\n`).join(''))
   } catch {}
 }
-if (!process.stdout.isTTY || !process.stdin.isTTY) process.exit(VIEW_EXIT.unavailable)
+if (!process.stdout.isTTY || !process.stdin.isTTY) {
+  if (standalone) console.error('the run view needs a terminal: run it in an Orca tab')
+  process.exit(VIEW_EXIT.unavailable)
+}
 const tk = await terminalKit(logPath)
 if (!tk) {
   logLine('!! run view: terminal-kit could not be installed (npm ci, above)')
+  if (standalone) console.error(`the run view could not install terminal-kit: see ${logPath}`)
   process.exit(VIEW_EXIT.unavailable)
 }
 
@@ -86,13 +99,21 @@ process.on('uncaughtException', crash)
 process.on('unhandledRejection', crash)
 process.on('exit', restore)
 
-const view = runView({ stateDir: runDir, orca: orcaCli(), ...(option('--registry') ? { registry: resolve(option('--registry')) } : {}) })
+const orca = orcaCli()
+// Standalone, `runs` takes every key and click, and hands them to the run it
+// opened; `tree()` is the run tree on screen, or null on the list.
+const runs = standalone ? runsView({ orca, registry }) : null
+const view = standalone ? null : runView({ stateDir: runDir, orca, registry })
+const top = runs ?? view
+const tree = () => (runs ? runs.opened() : view)
 let modal = null
 let flash = null
 let rowAt = () => null
 
 function render() {
-  const screen = draw(view.model, { width: term.width, height: term.height, flash: flash ?? view.model?.latest, modal })
+  const t = tree()
+  const size = { width: term.width, height: term.height }
+  const screen = t ? draw(t.model, { ...size, flash: flash ?? t.model?.latest, modal, ...(runs && { help: TREE_HELP }) }) : drawRuns(runs.model, { ...size, flash: flash ?? runs.model?.message })
   rowAt = screen.rowAt
   process.stdout.write('\x1b[H' + screen.lines.join('\r\n'))
 }
@@ -123,11 +144,12 @@ const ANSWERS = { ENTER: '', a: 'a', n: 'n' }
 term.on('key', (name) => {
   if (name === 'CTRL_C') return quit()
   // `f` forces the reclaim of the agent the modal names, the one `r` was
-  // refused for, wherever the selection has moved since.
+  // refused for, wherever the selection has moved since, in the tree it was
+  // refused in.
   if (modal?.force) {
-    const { n } = modal
+    const { n, in: t } = modal
     modal = null
-    return act(async () => (name === 'f' ? said(await view.reclaim({ n, force: true })) : (flash = 'reclaim cancelled')))
+    return act(async () => (name === 'f' ? said(await t.reclaim({ n, force: true })) : (flash = 'reclaim cancelled')))
   }
   if (modal) {
     if (!(name in ANSWERS)) return
@@ -138,10 +160,11 @@ term.on('key', (name) => {
   }
   act(async () => {
     flash = null
-    const r = said(await view.key(name))
+    const t = tree()
+    const r = said(await top.key(name))
     if (r?.quit) return quit()
-    if (r?.reclaim?.unpushed > 0 && r.agent) {
-      modal = { force: true, n: r.agent.n, title: `Reclaim ${r.agent.title}?`, lines: [r.reclaim.reason, '', 'f = force the reclaim, and those commits are lost · any other key cancels'] }
+    if (r?.reclaim?.unpushed > 0 && r.agent && t) {
+      modal = { force: true, n: r.agent.n, in: t, title: `Reclaim ${r.agent.title}?`, lines: [r.reclaim.reason, '', 'f = force the reclaim, and those commits are lost · any other key cancels'] }
     }
   })
 })
@@ -151,20 +174,22 @@ term.on('mouse', (name, d) => {
   if (i === null) return
   act(async () => {
     flash = null
-    said(await view.click(i))
+    said(await top.click(i))
   })
 })
 term.on('resize', () => act(() => {}))
-process.on('message', (m) => {
-  if (m?.type !== 'endPrompt') return
-  modal = { title: m.title, lines: [...m.lines, '', m.question.trim()] }
-  act(() => {})
-})
-// The runner is gone: nothing is left to show the run for.
-process.on('disconnect', quit)
+if (!standalone) {
+  process.on('message', (m) => {
+    if (m?.type !== 'endPrompt') return
+    modal = { title: m.title, lines: [...m.lines, '', m.question.trim()] }
+    act(() => {})
+  })
+  // The runner is gone: nothing is left to show the run for.
+  process.on('disconnect', quit)
+}
 
 term.fullscreen(true)
 term.hideCursor(true)
 term.grabInput({ mouse: 'button' })
-await act(() => view.refresh())
-setInterval(() => act(() => view.refresh()), REFRESH_MS)
+await act(() => top.refresh())
+setInterval(() => act(() => top.refresh()), REFRESH_MS)

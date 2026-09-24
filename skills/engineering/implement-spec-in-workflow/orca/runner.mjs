@@ -211,8 +211,9 @@ export function runnerLog(stateDir, print, clock = realClock) {
 // as Workflow subagents inherit it. Without one, a Claude worker starts in
 // Claude's own default mode.
 // registry: the run registry's path, or null to record nothing there; project:
-// the repo the run works in, recorded beside it.
-export async function runScript(text, { orca = orcaCli(), stateDir, out: print = (s) => console.log(s), settings = {}, clock = realClock, transcripts = sessionTranscripts(), fallbackObjective = 'workflow run', resume = false, permissionMode = null, registry = null, project = process.cwd() }) {
+// the repo the run works in, and script the rendered script's path, recorded
+// beside it with permissionMode, so the standalone run view can resume the run.
+export async function runScript(text, { orca = orcaCli(), stateDir, out: print = (s) => console.log(s), settings = {}, clock = realClock, transcripts = sessionTranscripts(), fallbackObjective = 'workflow run', resume = false, permissionMode = null, registry = null, project = process.cwd(), script: scriptPath = null }) {
   const limits = { ...SETTINGS, ...settings }
   const out = runnerLog(stateDir, print, clock)
   const script = loadScript(text)
@@ -252,7 +253,7 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   const onRun = ({ runId, terminal, takenOver = false }) => {
     armed = runId
     journal({ type: 'run', runId, terminal })
-    if (!takenOver) record('armed', { runId, project, runDir: stateDir, spec: meta.value?.name ?? fallbackObjective })
+    if (!takenOver) record('armed', { runId, project, runDir: stateDir, spec: meta.value?.name ?? fallbackObjective, script: scriptPath, permissionMode })
     record('runner', { runId, terminal })
   }
   // How many calls with each key this run has made.
@@ -604,6 +605,7 @@ if (isMain) {
       resume,
       permissionMode,
       registry: REGISTRY_PATH,
+      script: path,
     })
     summary = { runner: 'orca', ok: true, result }
   } catch (e) {

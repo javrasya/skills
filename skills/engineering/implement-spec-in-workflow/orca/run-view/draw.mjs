@@ -105,10 +105,11 @@ const HELP = ' ↑↓ move · ←→ / click a phase to fold · ⏎/click focus 
 const TOP = 4
 
 // model: runView's model. flash: the flash line's text (an action's outcome,
-// or the latest event). modal: { title, lines } drawn over the middle.
+// or the latest event). modal: { title, lines } drawn over the middle. help:
+// the key line, for a tree the standalone view opened.
 // Returns the screen's lines, height of them, and rowAt(y), the index in
 // model.rows of the row drawn on terminal line y (1-based), or null.
-export function draw(model, { width: W = 140, height: H = 40, flash = null, modal = null } = {}) {
+export function draw(model, { width: W = 140, height: H = 40, flash = null, modal = null, help = HELP } = {}) {
   const rows = model?.rows ?? []
   const selected = model?.selected ?? 0
   const body = Math.max(1, H - TOP - 1 - PANE - 2)
@@ -125,7 +126,7 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, moda
   const paneLines = !pane ? [grey(' no agent has started yet')] : pane.kind === 'agent' ? agentPane(pane.agent) : phasePane(pane.phase, pane.problems)
   for (let i = 0; i < PANE; i++) lines.push(fit(paneLines[i] ?? '', W))
   lines.push(fit(flash ? ' ' + c('1;36', flash) : '', W))
-  lines.push(fit(grey(HELP), W))
+  lines.push(fit(grey(help), W))
 
   if (modal) {
     const mw = Math.min(W - 4, 100)
@@ -141,6 +142,79 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, moda
     rowAt: (y) => {
       const i = top + (y - TOP - 1)
       return y > TOP && y <= TOP + body && i < rows.length && !modal ? i : null
+    },
+  }
+}
+
+// --- standalone: every run the registry knows (runsView's model) ----------
+
+// The tree's key line once the standalone view opened it.
+export const TREE_HELP = ' ↑↓ move · ←→ / click a phase to fold · ⏎/click focus tab · r reclaim · l log · R resume · q back to the runs'
+const RUNS_HELP = ' ↑↓ move · ⏎/click open a run · ←→ fold a project · r reclaim the run · R resume a dead runner · q quit'
+
+export function age(ms) {
+  if (ms == null) return '—'
+  const m = Math.floor(ms / 60_000)
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h${String(m % 60).padStart(2, '0')}m`
+  return `${Math.floor(h / 24)}d${String(h % 24).padStart(2, '0')}h`
+}
+
+const OUTCOME = { ok: '32', partial: '33', failed: '31' }
+const outcomeOf = (r) => (r.outcome ? c(OUTCOME[r.outcome], r.outcome) : r.alive ? c('36', 'running') : grey('unfinished'))
+const runnerOf = (r) => (r.alive === true ? c('32', '● alive') : r.alive === false ? c('31', '○ dead') : grey('? unknown'))
+
+const projectLine = (p) => ` ${p.folded ? '▸' : '▾'} ${bold(p.name)}  ${grey(p.path ?? '')}  ${grey(`${p.runs.length} run${p.runs.length === 1 ? '' : 's'}`)}`
+const runLine = (r) =>
+  `   ${r.runId.padEnd(20)} ${(r.spec ?? r.name ?? '—').padEnd(8)} ${fit(outcomeOf(r), 11)} ${fit(runnerOf(r), 10)} ${String(r.kept).padStart(4)}   ${age(r.ageMs).padStart(7)}${r.reclaimed ? grey('   reclaimed') : ''}`
+
+function runPane(r) {
+  const tab = r.terminal ? `${cyan(shortHandle(r.terminal))}${r.alive === true ? grey(' (open)') : r.alive === false ? grey(' (closed)') : ''}` : grey('—')
+  const does = ['Enter opens its tree', r.reclaimed ? null : 'r reclaims every agent', r.resumable ? 'R resumes it: its runner is dead' : null].filter(Boolean).join(' · ')
+  return [
+    ` ${bold(r.name ?? r.runId)}  ${grey(r.runId)}${r.spec ? `  spec ${r.spec}` : ''}  ${outcomeOf(r)}  ${r.kept} kept${r.reclaimed ? grey('  reclaimed') : ''}`,
+    ` runner tab ${tab}   project ${grey(r.project ?? '—')}`,
+    grey(` run dir ${r.runDir ?? '—'}`),
+    grey(`   ${does}`),
+  ]
+}
+
+// model: runsView's, with no run opened. As draw: the lines, and rowAt(y).
+export function drawRuns(model, { width: W = 140, height: H = 40, flash = null } = {}) {
+  const rows = model?.rows ?? []
+  const selected = model?.selected ?? 0
+  const body = Math.max(1, H - TOP - 1 - PANE - 2)
+  const top = Math.max(0, Math.min(selected - body + 1, rows.length - body))
+  const projects = model?.projects ?? []
+  const all = projects.flatMap((p) => p.runs)
+  const dot = grey(' · ')
+  const count = (n, what) => `${n} ${what}${n === 1 ? '' : 's'}`
+  const lines = [
+    fit(` ${bold('Orca runs')}${dot}${count(all.length, 'run')}${dot}${count(projects.length, 'project')}`, W),
+    fit(` ${c('32', `● ${all.filter((r) => r.alive === true).length} alive`)}  ${c('31', `○ ${all.filter((r) => r.alive === false).length} dead`)}  ${grey(`${all.filter((r) => r.reclaimed).length} reclaimed`)}`, W),
+    fit(grey('─'.repeat(W)), W),
+    fit(grey('   RUN                  SPEC     OUTCOME     RUNNER     KEPT       AGE'), W),
+  ]
+  for (let i = top; i < Math.min(rows.length, top + body); i++) {
+    const r = rows[i]
+    const line = r.kind === 'project' ? projectLine(r.project) : runLine(r.run)
+    lines.push(i === selected ? c('7', fit(strip(line), W)) : fit(line, W))
+  }
+  while (lines.length < TOP + body) lines.push(fit('', W))
+  lines.push(fit(grey('─'.repeat(W)), W))
+  const row = rows[selected]
+  const paneLines = !row ? [grey(' the run registry holds no run yet')]
+    : row.kind === 'run' ? runPane(row.run)
+    : [` ${bold(row.project.name)}  ${grey(row.project.path ?? '')}`, grey(`   ${count(row.project.runs.length, 'run')} · ${row.project.folded ? '→ / Enter to unfold' : '← / Enter to fold'}`)]
+  for (let i = 0; i < PANE; i++) lines.push(fit(paneLines[i] ?? '', W))
+  lines.push(fit(flash ? ' ' + c('1;36', flash) : '', W))
+  lines.push(fit(grey(RUNS_HELP), W))
+  return {
+    lines: lines.slice(0, H),
+    rowAt: (y) => {
+      const i = top + (y - TOP - 1)
+      return y > TOP && y <= TOP + body && i < rows.length ? i : null
     },
   }
 }

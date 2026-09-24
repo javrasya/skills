@@ -113,10 +113,23 @@ function commandLine(harness, session, { model, effort, permissionMode }) {
 // and the log is read as the UTF-8 the runner writes (Windows PowerShell
 // would read it as ANSI), and a POSIX shell elsewhere. A line break would submit the line early.
 export function tailCommand(path, platform = process.platform) {
+  if (platform === 'win32') return `Get-Content -LiteralPath ${quoted(path, platform)} -Encoding UTF8 -Tail 200 -Wait`
+  return `tail -n 200 -F ${quoted(path, platform)}`
+}
+
+function quoted(path, platform) {
   const p = String(path)
   if (/[\x00-\x1f\x7f]/.test(p)) throw new Error(`refusing to type a path holding a control character into a shell: ${JSON.stringify(p)}`)
-  if (platform === 'win32') return `Get-Content -LiteralPath '${p.replace(/'/g, "''")}' -Encoding UTF8 -Tail 200 -Wait`
-  return `tail -n 200 -F '${p.replace(/'/g, `'\\''`)}'`
+  return platform === 'win32' ? `'${p.replace(/'/g, "''")}'` : `'${p.replace(/'/g, `'\\''`)}'`
+}
+
+// The runner's own launch (SKILL.md step 4) with --resume, typed into the
+// shell `resumeRunner` starts, quoted as tailCommand quotes. The state dir is
+// always named, so a run armed with a state dir of its own resumes from it.
+export function resumeRunnerCommand({ runner, script, stateDir, permissionMode = null }, platform = process.platform) {
+  if (permissionMode && !WORD.test(permissionMode)) throw new Error(`refusing to type permission mode "${permissionMode}" into a shell`)
+  const q = (p) => quoted(p, platform)
+  return ['node', q(runner), q(script), '--state-dir', q(stateDir), '--resume', ...(permissionMode ? ['--permission-mode', permissionMode] : [])].join(' ')
 }
 
 // The one worker-start argv: it adopts a terminal the runner made, so it never
@@ -424,6 +437,17 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       const shell = platform === 'win32' ? ['--shell', 'powershell.exe'] : []
       const r = await orca(['terminal', 'create', '--worktree', 'current', '--title', title, ...shell, '--command', tailCommand(path, platform), '--focus'])
       return { terminal: r?.terminal?.handle ?? null }
+    },
+
+    // A dead runner's run taken up again: a new tab in the run's worktree,
+    // brought to the front, running the runner with --resume, which takes the
+    // Run over from there. A worktree Orca no longer knows fails
+    // selector_not_found. PowerShell on Windows, as logTail.
+    async resumeRunner({ worktree, title, runner, script, stateDir, permissionMode = null }) {
+      const command = resumeRunnerCommand({ runner, script, stateDir, permissionMode }, platform)
+      const shell = platform === 'win32' ? ['--shell', 'powershell.exe'] : []
+      const r = await orca(['terminal', 'create', '--worktree', `path:${worktree}`, '--title', title, ...shell, '--command', command, '--focus'])
+      return { terminal: r?.terminal?.handle ?? null, command }
     },
 
     // Always forced: Orca refuses a dirty worktree otherwise, and uncommitted
