@@ -78,6 +78,7 @@ A worker is watched through two signals (ADR-0013): its session transcript growi
 
 - **No movement** for 20 minutes: nudged. For 40: its session is continued.
 - **Idle or exited without submitting**, with neither signal moving for the grace: nudged twice, then continued. A transcript still growing behind an idle terminal is a worker at work.
+- **A nudge's own echo** is not movement: the nudge lands in the transcript and turns the TUI busy even in a hung session. After a nudge, movement counts only when the look it is measured against was taken at least `nudgeEchoMs` after the nudge; an earlier baseline is just replaced. So a runner that looks late never mistakes the echo for the worker.
 - **Gone**, its tab closed: continued at once, in a new terminal.
 - **Blocked on a human**: logged loudly; after 30 minutes it fails and is kept, never continued, since continuing does not answer the question it waits on.
 

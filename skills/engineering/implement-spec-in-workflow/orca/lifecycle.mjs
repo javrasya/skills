@@ -166,6 +166,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     let graceFrom = start
     let stillFrom = start
     let lastNudgeAt = null
+    let lastLookAt = start
     let stuckNudged = false
     let blockedAt = null
     let size = null
@@ -208,8 +209,11 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
         busy = !idle
       }
       // A nudge lands in the transcript and turns the TUI busy even in a
-      // session that is hung: that is the nudge, not the worker.
-      const echo = lastNudgeAt !== null && now - lastNudgeAt <= limits.nudgeEchoMs
+      // session that is hung: that is the nudge, not the worker. What moved
+      // since a look taken before the echo settled is dated by that earlier
+      // look, never by how late this one came: it only re-baselines.
+      const echo = lastNudgeAt !== null && lastLookAt < lastNudgeAt + limits.nudgeEchoMs
+      lastLookAt = now
       if (moved && !echo) {
         stillFrom = now
         stuckNudged = false

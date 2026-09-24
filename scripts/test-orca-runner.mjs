@@ -490,6 +490,36 @@ for (const harness of ['claude', 'pi']) {
   })
 }
 
+test('continuation: a hung worker is still continued at 40 minutes when every look lands late after its nudge', async () => {
+  const LAG = 6_000
+  const r = await runOne(async (w) => {
+    // Each look costs LAG more than the poll: Orca slow under load.
+    const show = w.orca.workerShow
+    w.orca.workerShow = async (a) => {
+      await w.clock.sleep(LAG)
+      return show.call(w.orca, a)
+    }
+    // The nudge lands in the hung session's transcript, in two writes: that
+    // is the nudge, not the worker.
+    w.state.onNudge = () => {
+      w.state.transcript = (w.state.transcript ?? 0) + 120
+      w.clock.at(w.clock.now() + 9_000, () => { w.state.transcript += 40 })
+    }
+    submitsOnContinue(w.state)
+    // A runner that keeps renudging never continues it: end the run anyway.
+    w.clock.at(90 * MIN, () => submitGood(w))
+  })
+  const late =(at, from, what) => assert.ok(at >= from && at < from + POLL + LAG, `${what} at ${at / MIN} min, expected ${from / MIN} min`)
+  assert.deepEqual(r.result, GOOD)
+  assert.equal(r.nudges.length, 1, `nudged at ${r.nudges.map((n) => n.at / MIN).join(', ')} min`)
+  late(r.nudges[0].at, 20 * MIN, 'nudge')
+  assert.equal(r.continues.length, 1)
+  late(r.continues[0].at, 40 * MIN, 'continuation')
+  const [cont] = ofType(r.journal, 'continued')
+  assert.equal(cont.attempt, 1)
+  assert.match(cont.reason, /no movement in its transcript or terminal for 40 minutes/)
+})
+
 test('continuation: a transcript that grows behind an idle terminal is not stuck', async () => {
   const r = await runOne(async (w) => {
     w.state.idle = true

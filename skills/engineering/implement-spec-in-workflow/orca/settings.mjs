@@ -20,8 +20,10 @@ export const RUNNER_SETTINGS = Object.freeze({
   // terminal unmoved, for this long since its start or its last nudge: the
   // prompt needs time to land and turn the TUI busy.
   nudgeGraceMs: 2 * MIN,
-  // Movement this soon after a nudge is taken for the nudge landing in the
-  // transcript and the TUI, not for the worker coming back.
+  // A nudge takes this long to land in the transcript and the TUI. Movement
+  // seen by a look whose previous look came before this long after the nudge
+  // is taken for the nudge landing, not for the worker coming back, however
+  // late that look came.
   nudgeEchoMs: 10_000,
   // Neither the worker's transcript nor its terminal's busy or idle state has
   // moved for this long: nudged once, then its session is continued.
