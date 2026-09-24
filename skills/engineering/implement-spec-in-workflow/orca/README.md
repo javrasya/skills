@@ -4,7 +4,8 @@ The second runner for `workflow.template.js` (ADR-0011): a Node script, launched
 
 | file | what it is |
 |---|---|
-| `runner.mjs` | the runner: the four hooks, the live cap, liveness, the resume journal |
+| `runner.mjs` | the runner: the four hooks, naming each `agent()` call, replay and the resume journal, the retained worktrees |
+| `lifecycle.mjs` | one live agent's life: the run's Run, the live cap, its worker's start, liveness, its result, its board status |
 | `submit.mjs` | the worker's end of `agent()`: validates the payload, records it, sends `worker_done` |
 | `orca-cli.mjs` | the one place anything talks to Orca |
 | `fake-orca.mjs` | an in-memory Orca behind the same methods, for the offline tests |

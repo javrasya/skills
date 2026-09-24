@@ -11,7 +11,8 @@ import { join, dirname } from 'path'
 import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { submit } from '../skills/engineering/implement-spec-in-workflow/orca/submit.mjs'
-import { runScript, journalKey, failureSummary, SUBMIT, SETTINGS } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
+import { runScript, journalKey, failureSummary, SUBMIT, SETTINGS, realClock } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
+import { agentLifecycle } from '../skills/engineering/implement-spec-in-workflow/orca/lifecycle.mjs'
 import { fakeOrca } from '../skills/engineering/implement-spec-in-workflow/orca/fake-orca.mjs'
 import { RUNNER_SETTINGS } from '../skills/engineering/implement-spec-in-workflow/orca/settings.mjs'
 import { orcaCli } from '../skills/engineering/implement-spec-in-workflow/orca/orca-cli.mjs'
@@ -924,4 +925,66 @@ return [a, b]`
   assert.ok(lines.some((l) => l.includes("[Run] a: Orca could not create this run's Run") && l.includes('runtime_unavailable')), lines.join('\n'))
   const journal = readFileSync(join(stateDir, 'journal.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
   assert.equal(journal.find((e) => e.title === '[Run] a').type, 'failed')
+})
+
+// The lifecycle module on its own: one agent call in, its value or null out,
+// with the journal and the retained list as plain arrays.
+function lifecycleOn(orca, settings = FAST) {
+  const journal = []
+  const kept = []
+  const lines = []
+  const life = agentLifecycle({
+    orca, clock: realClock, limits: { ...SETTINGS, ...settings }, out: (s) => lines.push(s), stateDir: tmp(),
+    objective: () => 'the objective', journal: (e) => journal.push(e), keep: (k) => (kept.push(k), k),
+  })
+  let n = 0
+  const call = (label, more = {}) => {
+    const i = ++n
+    return { prompt: 'Name a thing.', schema: SCHEMA, isolated: false, launch: { harness: 'claude', permissionMode: 'auto' }, key: `k${i}`, n: i, label, title: `[P] ${label}`, phaseName: 'P', ...more }
+  }
+  return { life, call, journal, kept, lines }
+}
+
+test('lifecycle: a call journals started then its result, and returns the value once its worker is released', async () => {
+  const orca = fakeOrca({ worker: submitting() })
+  const { life, call, journal } = lifecycleOn(orca)
+  assert.deepEqual(await life(call('a')), GOOD)
+  assert.deepEqual(journal.map((e) => [e.type, e.title]), [['started', '[P] a'], ['result', '[P] a']])
+  assert.deepEqual(journal[1].result, GOOD)
+  const verbs = orca.calls.map((c) => c.verb)
+  assert.deepEqual([verbs[0], verbs[1], verbs.at(-1)], ['runCreate', 'workerStart', 'workerRelease'])
+  assert.equal(orca.calls[0].objective, 'the objective')
+})
+
+test('lifecycle: a Run Orca cannot create journals failed with no started line, and the next call asks again', async () => {
+  const orca = fakeOrca({ worker: submitting() })
+  const create = orca.runCreate
+  let tries = 0
+  orca.runCreate = async (a) => {
+    if (++tries === 1) throw new Error('runtime_unavailable')
+    return create(a)
+  }
+  const { life, call, journal } = lifecycleOn(orca)
+  assert.equal(await life(call('a')), null)
+  assert.deepEqual(await life(call('b')), GOOD)
+  assert.deepEqual(journal.map((e) => [e.type, e.title]), [['failed', '[P] a'], ['started', '[P] b'], ['result', '[P] b']])
+})
+
+test('lifecycle: calls share one Run and the live cap, and a queued call starts only after a release', async () => {
+  const orca = fakeOrca({ worker: submitting(5) })
+  const { life, call, lines } = lifecycleOn(orca, { ...FAST, MAX_LIVE: 1 })
+  assert.deepEqual(await Promise.all([life(call('a')), life(call('b'))]), [GOOD, GOOD])
+  assert.equal(orca.calls.filter((c) => c.verb === 'runCreate').length, 1)
+  assert.equal(liveHighWater(orca.calls), 1)
+  assert.deepEqual(lines.filter((l) => l.endsWith('queued, 1 agents are live')), ['.. [P] b: queued, 1 agents are live'])
+})
+
+test('lifecycle: an isolated worker that never started leaves its worktree retained, and on its failed journal line', async () => {
+  const orca = fakeOrca()
+  orca.workerStart = async () => { throw Object.assign(new Error('agent_not_ready'), { worktree: 'C:/fake/worktrees/orphan' }) }
+  const { life, call, journal, kept } = lifecycleOn(orca)
+  assert.equal(await life(call('impl', { isolated: true })), null)
+  assert.deepEqual(kept.map((k) => k.path), ['C:/fake/worktrees/orphan'])
+  assert.deepEqual(journal.map((e) => e.type), ['started', 'failed'])
+  assert.equal(journal[1].retained, kept[0])
 })
