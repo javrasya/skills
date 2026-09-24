@@ -2794,3 +2794,26 @@ test('run view: the screen is the design\'s tree, a click lands on the row drawn
   assert.ok(modal.lines.map(strip).some((l) => l.includes('The run ended. Reclaim what?')))
   assert.equal(modal.rowAt(5), null)
 })
+
+test('orca-cli: a dispatch Orca failed because its tab closed is a gone worker, not a settled one; one that completed before its tab closed is settled', async () => {
+  // As worker-show answers about 5 s after `terminal close` (live, Orca 1.4.209, #53).
+  const closed = (status, stage) => ({ worker: { agentTerminalHandle: 'term_w', stage, state: status === 'completed' ? 'succeeded' : 'failed' }, dispatch: { status }, projection: { outcome: status === 'completed' ? 'succeeded' : 'failed' }, terminal: { orphaned: true }, observation: { status: 'live', agentWait: null } })
+  for (const verb of ['workerShow', 'workerReattach']) {
+    const failed = await recordingCli({ 'orchestration worker-show': closed('failed', 'process_exited') }).orca[verb]({ dispatch: 'ctx_9', terminal: 'term_w' })
+    assert.deepEqual([failed.settled, failed.gone], [false, true], verb)
+    const done = await recordingCli({ 'orchestration worker-show': closed('completed', 'settled') }).orca[verb]({ dispatch: 'ctx_9', terminal: 'term_w' })
+    assert.deepEqual([done.settled, done.gone, done.outcome], [true, true, 'succeeded'], verb)
+  }
+})
+
+test('continuation: a worker whose tab is closed, and whose dispatch Orca then fails, is continued in a new terminal and returns its result', async () => {
+  const r = await runOne(async ({ state, orca, clock }) => {
+    submitsOnContinue(state)
+    clock.at(5 * MIN, () => orca.terminalClose({ terminal: state.handle }))
+  }, { script: oneOn('claude', ", isolation: 'worktree'") })
+  assert.deepEqual(r.result, GOOD)
+  const [c] = r.continues
+  assert.equal(c.reopened, true)
+  assert.equal(ofType(r.journal, 'continued')[0].reason, 'its terminal is gone')
+  assert.equal(ofType(r.journal, 'failed').length, 0)
+})

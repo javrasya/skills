@@ -30,8 +30,14 @@
 // any other is refused consumer_fenced; read, stop and release are not fenced.
 // A Run this fake did not create (a test's own runCreate) is not fenced.
 // closeTab(handle) closes a runner's tab: Orca still holds its Runs.
+//
+// A worker's tab closed (`gone`, by a test or by terminalClose) is failed by
+// Orca itself, as real Orca does about 5 s after the close: worker-show then
+// answers dispatch `failed` on an orphaned terminal. The fake fails it at once,
+// so the runner never sees the window before, and reads worker-show through
+// the adapter's own workerStatus.
 import { existsSync } from 'fs'
-import { OrcaError, launchCommand, resumeCommand, tailCommand, workerStartArgs, withTimeout } from './orca-cli.mjs'
+import { OrcaError, launchCommand, resumeCommand, tailCommand, workerStartArgs, withTimeout, workerStatus } from './orca-cli.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 
 // The runner's transcript reader, over the fake's sessions: a session's size
@@ -117,7 +123,18 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
   const preambleIn = (d) => ({ handle: d.handle, capability: d.capability, taskId: d.taskId, dispatchId: d.dispatchId })
   const fresh = () => ({ settled: false, outcome: null, released: false, stopped: false, gone: false, exited: false, idle: false, waiting: null, nudges: [] })
 
-  const show = (d) => ({ settled: d.settled, outcome: d.outcome, terminal: d.handle, gone: d.gone, exited: d.exited, waiting: d.waiting })
+  // worker-show's answer, in real Orca's shape (live, Orca 1.4.209).
+  const STATUS = { succeeded: 'completed', failed: 'failed', cancelled: 'cancelled' }
+  const show = (d) => {
+    const failedByClose = !d.settled && d.gone
+    return workerStatus({
+      worker: { agentTerminalHandle: d.handle, stage: d.settled ? 'settled' : failedByClose ? 'process_exited' : 'running' },
+      dispatch: { status: d.settled ? STATUS[d.outcome] : failedByClose ? 'failed' : 'running' },
+      projection: { outcome: d.settled ? d.outcome : failedByClose ? 'failed' : null },
+      terminal: { orphaned: d.gone },
+      observation: { status: d.exited ? 'exited' : 'live', agentWait: d.waiting ? JSON.parse(d.waiting) : null },
+    })
+  }
   const live = (name) => worktrees.has(name) && !worktrees.get(name).removed
 
   const as = (caller) => ({
@@ -235,16 +252,16 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     },
 
     async workerShow({ dispatch: id }) {
-      const d = dispatch(id, 'orchestration worker-show')
-      record({ verb: 'workerShow', dispatchId: id, settled: d.settled })
-      return show(d)
+      const s = show(dispatch(id, 'orchestration worker-show'))
+      record({ verb: 'workerShow', dispatchId: id, settled: s.settled })
+      return s
     },
 
     // Whatever runner started it: Orca's dispatches outlive the runner.
     async workerReattach({ dispatch: id, terminal }) {
-      const d = dispatch(id, 'orchestration worker-show')
-      record({ verb: 'workerReattach', dispatchId: id, terminal, settled: d.settled })
-      return show(d)
+      const s = show(dispatch(id, 'orchestration worker-show'))
+      record({ verb: 'workerReattach', dispatchId: id, terminal, settled: s.settled })
+      return s
     },
 
     async terminalIdle({ terminal: handle }) {

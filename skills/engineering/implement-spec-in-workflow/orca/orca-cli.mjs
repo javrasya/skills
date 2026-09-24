@@ -124,6 +124,29 @@ export function tailCommand(path, platform = process.platform) {
 export const workerStartArgs = ({ run, prompt, title, place, terminal }) =>
   ['orchestration', 'worker-start', '--run', run, '--spec', prompt, '--task-title', title, ...place, '--terminal', terminal]
 
+// A `worker-show` result as the runner reads it. fake-orca.mjs answers in
+// Orca's shape and reads it through this too.
+export function workerStatus(r) {
+  const handle = r.worker?.agentTerminalHandle ?? null
+  // agentWait: an object is a wait only a human can answer; null means
+  // Orca looked and found none; absent means it never looked.
+  const wait = r.observation?.agentWait ?? r.terminal?.agentWait ?? null
+  // A worker never given a terminal is not one whose terminal is gone.
+  const gone = Boolean(handle) && (!r.terminal || r.terminal.orphaned === true)
+  // About 5 s after a worker's tab closes, Orca fails its dispatch itself
+  // (stage process_exited; live, Orca 1.4.209). That is a death whose session
+  // the runner continues, not a worker that settled without a result.
+  const failedByClose = gone && r.dispatch?.status === 'failed'
+  return {
+    settled: !failedByClose && (r.worker?.stage === 'settled' || SETTLED_DISPATCH.has(r.dispatch?.status)),
+    outcome: r.projection?.outcome ?? r.worker?.state ?? null,
+    terminal: handle,
+    gone,
+    exited: r.observation?.status === 'exited',
+    waiting: wait && typeof wait === 'object' ? JSON.stringify(wait).slice(0, 300) : null,
+  }
+}
+
 // The path half of a `<repoId>::<path>` worktree id.
 const pathOf = (id) => (typeof id === 'string' && id.includes('::') ? id.slice(id.indexOf('::') + 2) : null)
 
@@ -198,20 +221,7 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
   }
 
   async function workerShow({ dispatch }) {
-    const r = await orca(['orchestration', 'worker-show', '--dispatch', dispatch])
-    const handle = r.worker?.agentTerminalHandle ?? null
-    // agentWait: an object is a wait only a human can answer; null means
-    // Orca looked and found none; absent means it never looked.
-    const wait = r.observation?.agentWait ?? r.terminal?.agentWait ?? null
-    return {
-      settled: r.worker?.stage === 'settled' || SETTLED_DISPATCH.has(r.dispatch?.status),
-      outcome: r.projection?.outcome ?? r.worker?.state ?? null,
-      terminal: handle,
-      // A worker never given a terminal is not one whose terminal is gone.
-      gone: Boolean(handle) && (!r.terminal || r.terminal.orphaned === true),
-      exited: r.observation?.status === 'exited',
-      waiting: wait && typeof wait === 'object' ? JSON.stringify(wait).slice(0, 300) : null,
-    }
+    return workerStatus(await orca(['orchestration', 'worker-show', '--dispatch', dispatch]))
   }
 
   return {
