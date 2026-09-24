@@ -36,6 +36,17 @@ The reference design for the Orca runner's [run view](../../CONTEXT.md) (spec #4
   - Context size and its bar are coloured by band: green below 200k, yellow from 200k to 350k, red above 350k.
   - States have their own colours. Cumulative tokens are grey. The selected row is shown inverted.
 - **Exact spacing and column widths** are a guide, not a contract.
+- **The key-help line** lists the view's own keys (#51): `l` opens the log; `R` resume, `e` end-of-run and `s` all runs were the prototype's.
+
+## Last design check
+
+2026-09-25, #51: `run-view/view.mjs` against a fixture run shaped like the capture below, in an Orca 1.4.209 tab 120 columns wide on Windows 11, read back with `orca terminal read --screen`. Item by item against the checklist above:
+
+- **Folded phase** (Discover, Layer0, Publish): `▸`, `1/1 done`, `✓1`, `peak ctx`. Matches.
+- **Unfolded phase** (Implement, Gate, Integrate): `▾`, `4/10 done`, `●2 ◐1 ✗1 ·2 ✓4`, one row per agent with number, label, glyph and word (`↻ continued ×1`), bar and size, tokens and elapsed; `—` for an agent that never started. Matches.
+- **Selected phase**: its failed and stuck agents with their reasons, and the fold hint. Matches.
+- **Selected agent** (the failed `impl:#1087:s2`, as in the image): `[Implement] impl:#1087:s2  ✗ failed  ctx —  total —  8m00s`, then worktree, tab and session (`—`), the reason and the transcript. Matches. A worktree is named, not given as a path, and a tab by its handle's first characters, so that line fits 120 columns.
+- **Clicks**: SGR mouse presses, sent into the tab with `orca terminal send`, on the Discover row (it unfolded) and on a running agent's row (`orca terminal switch` brought its tab forward). A physical mouse click was not tried in this check.
 
 ## Plain-text capture
 

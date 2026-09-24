@@ -4,7 +4,7 @@
 // The model is read from the run's journal, its agents' session transcripts,
 // Orca's terminal list and the run registry; the actions go to Orca, and a
 // reclaim goes through reclaim.mjs, so the view keeps the end-of-run rules.
-import { existsSync, readFileSync } from 'fs'
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from 'fs'
 import { basename, join, resolve } from 'path'
 import { sessionTranscripts } from './transcript.mjs'
 import { agentsOf, gitUnpushed, reclaimAgent } from './reclaim.mjs'
@@ -111,6 +111,25 @@ export function runnerAlive(stateDir) {
   }
 }
 
+// The last line of runner.log, its timestamp dropped: the run's latest event,
+// for the flash line while the runner writes to its log alone (D5 on #43).
+// Only the file's end is read, however long the log grows.
+function latestEvent(path) {
+  let fd
+  try {
+    fd = openSync(path, 'r')
+    const size = fstatSync(fd).size
+    const buf = Buffer.alloc(Math.min(size, 8192))
+    readSync(fd, buf, 0, buf.length, size - buf.length)
+    const line = buf.toString('utf8').trimEnd().split('\n').at(-1) ?? ''
+    return line.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z /, '') || null
+  } catch {
+    return null
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+}
+
 const samePath = (a, b) => !!a && !!b && (process.platform === 'win32' ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b))
 
 // view = runView({ stateDir, orca, … }); await view.refresh() reads the run
@@ -124,6 +143,7 @@ const samePath = (a, b) => !!a && !!b && (process.platform === 'win32' ? resolve
 //   pane    { kind: 'agent', agent } | { kind: 'phase', phase, problems: [{ agent, reason }] },
 //           a phase's problems being its failed and stuck agents
 //   message the latest action's outcome, for the flash line, or null
+//   latest  the last line of runner.log, the run's latest event, or null
 // An agent is { n, label, title, phase, state, continuations, reason,
 // replayed, runId, dispatchId, harness, sessionId, worktree, terminal,
 // tabOpen, reclaimed, context, band, tokens, elapsedMs, transcript }. tabOpen
@@ -146,6 +166,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   let selectedKey = null
   let selected = 0
   let message = null
+  let latest = null
   const view = { model: null, refresh, key, click, focus, reclaim, openLog }
 
   function layout() {
@@ -162,12 +183,13 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     const pane = !row ? null
       : row.kind === 'agent' ? { kind: 'agent', agent: row.agent }
       : { kind: 'phase', phase: row.phase, problems: row.phase.agents.filter((a) => a.state === 'failed' || a.state === 'stuck').map((agent) => ({ agent, reason: agent.reason })) }
-    view.model = { header, phases, rows, selected, pane, message }
+    view.model = { header, phases, rows, selected, pane, message, latest }
     return view.model
   }
 
   async function refresh() {
     const entries = journalEntries(journalPath)
+    latest = latestEvent(join(stateDir, 'runner.log'))
     const agents = agentsIn(entries)
     const now = clock.now()
     let open = null

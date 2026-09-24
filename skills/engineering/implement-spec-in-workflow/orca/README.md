@@ -9,6 +9,7 @@ The second runner for `workflow.template.js` (ADR-0011): a Node script, launched
 | `reclaim.mjs` | reclaiming an agent or a whole run, and the end-of-run prompt; the run view reuses it |
 | `lifecycle.mjs` | one live agent's life: the run's Run, the live cap, its worker's start, liveness, nudges and session continuation, its result, its board status |
 | `run-view-model.mjs` | the run view's model (header, phase and agent rows, the bottom pane) and what each key and click does, with no terminal |
+| `run-view/` | the run view's terminal: `view.mjs`, the entry the runner starts in its tab, `draw.mjs`, the screen drawn from the model, and `package.json` for terminal-kit (below) |
 | `transcript.mjs` | where a Claude or pi session writes its transcript, found from its session id, how big it is, and its context size and tokens |
 | `submit.mjs` | the worker's end of `agent()`: validates the payload, records it, sends `worker_done` |
 | `orca-cli.mjs` | the one place anything talks to Orca |
@@ -186,7 +187,7 @@ The runner sets each child worktree's board status with `orca worktree set --wor
 
 Nothing is reclaimed while a run runs (ADR-0012). No worker is released when it returns, no tab is closed, and no worktree is removed — not by the runner, and not by the script: under the Orca runner the template's reclaim steps hand no agent a path to remove. A worktree whose agent died, or whose worker never started, is also named in the run's `worktrees_kept` with its reason, and in the log. It is journaled with the failed call, so a resume, which runs that call again in a new worktree, still names the old one. When the script throws, `summary.json` carries the same list beside the `error`.
 
-Once `summary.json` is written, the runner prints the result and asks, in its tab, what to reclaim of the agents this run's journal names:
+Once `summary.json` is written, the runner prints the result and asks what to reclaim of the agents this run's journal names: as a modal in the run view while one is attached (below), otherwise in its tab. The question, its default and its answers are the same either way:
 
 | answer | reclaims | keeps |
 |---|---|---|
@@ -194,4 +195,21 @@ Once `summary.json` is written, the runner prints the result and asks, in its ta
 | `a` | every agent | none |
 | `n` | none | every agent |
 
-Anything else is asked again. With no answer possible (stdin closed) every agent is kept. Reclaiming an agent releases its worker, closes its tab if Orca's terminal list still shows it, and removes its worktree through Orca. Even then an agent is kept, and named with the reason, when it is still live, when its worktree holds commits no remote-tracking ref contains (only a forced reclaim, from the run view, removes that), or when Orca refuses. A worktree not named `<runId>-<n>` is the operator's own and never touched. Each reclaim is appended to the run registry, and once no agent of a run is left, so is the run. The runner exits once the prompt is answered; the tab stays, holding what it printed.
+Anything else is asked again. With no answer possible (stdin closed) every agent is kept. Reclaiming an agent releases its worker, closes its tab if Orca's terminal list still shows it, and removes its worktree through Orca. Even then an agent is kept, and named with the reason, when it is still live, when its worktree holds commits no remote-tracking ref contains (only a forced reclaim, from the run view, removes that), or when Orca refuses. A worktree not named `<runId>-<n>` is the operator's own and never touched. Each reclaim is appended to the run registry, and once no agent of a run is left, so is the run. The runner exits once the prompt is answered and the operator has quit the run view; the tab stays, holding what it printed.
+
+## The run view in the runner's tab
+
+Launched in a terminal, the runner starts the run view (ADR-0012; the design is `docs/design/orca-run-view-tree.md`) as its child, in its own tab: the run as a tree of phases and agents that updates in place. The view reads the run from the state dir, the run registry and Orca, never from the runner, so what it shows does not depend on the runner. Its keys: ↑↓ move; on a phase, a click, Enter or ←/→ folds it; on an agent, a click or Enter focuses its Orca tab and worktree; `r` reclaims the selected agent by the rules above, and one holding unpushed commits only when `f` confirms; `l` opens `runner.log` in Orca's editor; `q` quits the view, never the run.
+
+While the view is attached (decision D5 on #43):
+
+- The view owns the tab's screen and keys. The runner writes only to `runner.log`, and the view's flash line shows its latest line. Ctrl-C in the view closes the view; a Ctrl-C that reaches the runner is ignored.
+- A crash of the view never touches the run. The runner puts the tab back (main screen, cursor, no mouse reporting, no raw mode) and starts the view again after `viewRestartMs`. At the `viewCrashes`-th crash of a run, the runner stops restarting it and prints its log in the tab again, starting with the log's last 20 lines. Both limits are in `settings.mjs`.
+- `q` ends the view for good: the runner prints its log in the tab again, and asks the end-of-run question there if it is still to come. A view quit or crashed while its prompt is open hands the prompt to the next view, or to the tab.
+- With no terminal (stdout or stdin redirected, as in the offline tests) there is no view, and the runner prints as it always did.
+
+The view exits 0 when the operator quits it and 3 when it cannot run here (`run-view/exit-codes.mjs`); the runner never restarts either. Anything else is a crash.
+
+The view's one dependency, terminal-kit, is pinned in `run-view/package.json` with a committed lockfile. It is installed beside `view.mjs` on the view's first start (`npm ci`, its output in `runner.log`), because the installed skill may be a copy of the repo rather than a link to it, and the copy is where the view runs. This departs from ADR-0001's self-contained repo: nothing is vendored, so the first view needs npm and the network. If the install fails, the view exits 3 and the runner prints its log in the tab. The offline tests import `draw.mjs` and the model, never terminal-kit, so they need no install.
+
+To look at the view without a run, point it at a run dir: `node run-view/view.mjs --attached <state-dir> [--registry <registry file>]`. `--registry` is for a fixture run, whose header comes from a registry file of its own rather than the machine's.

@@ -95,7 +95,7 @@ export async function reclaimAgent(agent, { orca, unpushed = gitUnpushed, force 
     } catch (e) {
       return refuse(`could not tell whether ${worktree} holds unpushed commits: ${e?.message ?? e}`)
     }
-    if (ahead > 0) return refuse(`${worktree} holds ${ahead} unpushed commit${ahead === 1 ? '' : 's'}; only a forced reclaim removes it`)
+    if (ahead > 0) return { ...refuse(`${worktree} holds ${ahead} unpushed commit${ahead === 1 ? '' : 's'}; only a forced reclaim removes it`), unpushed: ahead }
   }
   let tabs = open
   if (agent.terminal && !tabs) {
@@ -198,26 +198,34 @@ export function parseChoice(answer) {
   return null
 }
 
-// The end-of-run prompt: names what the default keeps, asks with `ask(question)`
-// (resolving to the answer, or null once there can be none), reclaims, and
-// names every agent kept and why. No agents, no prompt.
+// The end-of-run prompt: names what the default keeps, asks with
+// `ask(question, { title, lines })` (resolving to the answer, or null once there
+// can be none), reclaims, and names every agent kept and why. title and lines
+// are what was printed before the question, for a caller that shows the
+// prompt somewhere else than the log: the run view draws them as its modal.
+// No agents, no prompt.
 export async function endOfRunPrompt({ agents, ask, out, ...rest }) {
   if (!agents.length) return null
   const byDefault = keepFor('default')
   const keptByDefault = agents.filter((a) => byDefault(a))
+  const lines = []
+  const show = (s) => {
+    lines.push(s.trim())
+    out(s)
+  }
   out('== Reclaim')
-  out(`   ${agents.length} agent${agents.length === 1 ? '' : 's'} kept their tab and worktree through this run. Reclaiming one closes its tab and removes its worktree.`)
+  show(`   ${agents.length} agent${agents.length === 1 ? '' : 's'} kept their tab and worktree through this run. Reclaiming one closes its tab and removes its worktree.`)
   if (keptByDefault.length) {
-    out(`   The default keeps ${keptByDefault.length} failed or dead:`)
-    for (const a of keptByDefault) out(`     ${a.title} (${byDefault(a)})`)
+    show(`   The default keeps ${keptByDefault.length} failed or dead:`)
+    for (const a of keptByDefault) show(`     ${a.title} (${byDefault(a)})`)
   } else {
-    out('   None failed or died.')
+    show('   None failed or died.')
   }
   const question = `   Enter = keep those and reclaim the other ${agents.length - keptByDefault.length}, a = reclaim all, n = keep all: `
   let choice = null
   let answer
   while (!choice) {
-    answer = await ask(question)
+    answer = await ask(question, { title: 'The run ended. Reclaim what?', lines })
     choice = parseChoice(answer)
     if (!choice) out(`?? "${answer}" is not an answer: press Enter, a or n`)
   }

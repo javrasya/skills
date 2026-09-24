@@ -19,6 +19,8 @@
 // runner writes summary.json to the state dir: {runner, ok, result | error},
 // and on a failure also worktrees_kept, the worktrees it retained. Every line
 // it prints is also appended, timestamped, to runner.log there.
+// Launched in a terminal, it gives its tab to the run view (run-view/view.mjs)
+// and writes to runner.log alone while the view lives (attachView).
 //
 // Nothing is reclaimed during a run (ADR-0012): no worker is released, no tab
 // closed, no worktree removed. Only after summary.json is written does the
@@ -35,6 +37,7 @@
 // under both runners (README.md). The offline tests do not replace it.
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, appendFileSync } from 'fs'
 import { createInterface } from 'readline'
+import { spawn } from 'child_process'
 import { createHash } from 'crypto'
 import { basename, dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
@@ -45,6 +48,7 @@ import { agentLifecycle, agentDir } from './lifecycle.mjs'
 import { runRegistry, REGISTRY_PATH } from './registry.mjs'
 import { sessionTranscripts } from './transcript.mjs'
 import { agentsOf, endOfRunPrompt, gitUnpushed } from './reclaim.mjs'
+import { VIEW_EXIT } from './run-view/exit-codes.mjs'
 
 export { SUBMIT, workerPrompt } from './lifecycle.mjs'
 
@@ -389,6 +393,138 @@ export async function finish({ stateDir, summary, orca, ask, out, registry = nul
   return endOfRunPrompt({ agents: agentsOf(join(stateDir, 'journal.jsonl')), ask, out, orca, unpushed, registry })
 }
 
+// The run view attached to the runner's tab (D5 on #43): a child process that
+// owns the tab's screen and keys while it lives. The runner then writes to
+// runner.log alone, and the view shows the log's latest line. A crash of the
+// view never touches the run: the view is started again after viewRestartMs
+// on the clock. At viewCrashes crashes, once the operator quits it, or when
+// it cannot run here, the runner prints in the tab again, the log's last lines
+// first.
+//   spawnView()  starts one view: an emitter of 'message', 'exit' and 'error'
+//                with send(); a view that cannot be spawned throws or emits
+//                'error' with no pid
+//   tab(s)       prints to the tab; log(s) appends to runner.log, and prints
+//                to the tab too once no view is attached
+//   ask(q)       the end-of-run question on the tab's own stdin, for when no
+//                view is left to ask it in
+//   tail()       runner.log's last lines
+//   restore()    puts the tab back after a view exits, as a crashed one cannot
+//   guard(on)    ignores a Ctrl-C that reaches the runner while a view lives:
+//                one that dies outside raw mode lets Ctrl-C reach every
+//                process on the console
+// Returns { start(), gate(print), ask(question, prompt), closed, crashes() }.
+// gate wraps a print so it reaches the tab only once no view is attached. ask
+// puts the end-of-run prompt ({ title, lines }, from endOfRunPrompt) in the
+// view as its modal, again in each view restarted before it is answered.
+// closed resolves once no view is attached.
+export function attachView({ spawnView, tab, log, ask: askTab, tail = () => [], clock = realClock, limits = SETTINGS, restore = () => {}, guard = () => {} }) {
+  let attached = true
+  let crashes = 0
+  let pending = null
+  let child = null
+  let close
+  const closed = new Promise((r) => {
+    close = r
+  })
+  const send = (m) => {
+    try {
+      child?.send(m)
+    } catch {}
+  }
+
+  function fallBack(why) {
+    attached = false
+    child = null
+    guard(false)
+    for (const line of tail()) tab(line)
+    log(`!! ${why}; the runner prints its log in this tab again`)
+    close()
+    if (pending) {
+      const p = pending
+      pending = null
+      askTab(p.question).then(p.resolve, () => p.resolve(null))
+    }
+  }
+
+  function start() {
+    let c
+    try {
+      c = spawnView()
+    } catch (e) {
+      return fallBack(`the run view could not start: ${e?.message ?? e}`)
+    }
+    child = c
+    let over = false
+    let detached = false
+    const ended = (code, signal) => {
+      if (over) return
+      over = true
+      child = null
+      restore()
+      if (detached || code === VIEW_EXIT.quit) return fallBack('the run view was closed')
+      if (code === VIEW_EXIT.unavailable) return fallBack('the run view cannot run in this tab (see runner.log)')
+      crashes++
+      const how = signal ? `signal ${signal}` : code == null ? 'it could not start' : `exit code ${code}`
+      if (crashes >= limits.viewCrashes) return fallBack(`the run view crashed ${crashes} times, the last with ${how}`)
+      log(`!! the run view crashed with ${how}; restarting it (crash ${crashes} of ${limits.viewCrashes})`)
+      clock.sleep(limits.viewRestartMs).then(start)
+    }
+    c.on('message', (m) => {
+      if (m?.type === 'detach') detached = true
+      if (m?.type === 'endChoice' && pending) {
+        const p = pending
+        pending = null
+        p.resolve(m.answer ?? '')
+      }
+    })
+    c.on('exit', ended)
+    c.on('error', (e) => {
+      log(`!! the run view: ${e?.message ?? e}`)
+      if (c.pid === undefined) ended(null, null)
+    })
+    if (pending) send(pending.prompt)
+  }
+
+  return {
+    start() {
+      guard(true)
+      start()
+    },
+    gate: (print) => (s) => {
+      if (!attached) print(s)
+    },
+    ask(question, prompt = {}) {
+      if (!attached) return askTab(question)
+      return new Promise((resolve) => {
+        pending = { question, resolve, prompt: { type: 'endPrompt', title: prompt.title ?? 'The run ended', lines: prompt.lines ?? [], question } }
+        send(pending.prompt)
+      })
+    },
+    closed,
+    crashes: () => crashes,
+  }
+}
+
+const VIEW = join(dirname(fileURLToPath(import.meta.url)), 'run-view', 'view.mjs')
+
+// Mouse reporting off, cursor shown, the main screen back, the keyboard out
+// of raw mode: what a view that crashed left set.
+function restoreTab() {
+  process.stdout.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?25h\x1b[?1049l')
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(false)
+    process.stdin.pause()
+  }
+}
+
+function logTail(stateDir, n = 20) {
+  try {
+    return readFileSync(join(stateDir, 'runner.log'), 'utf8').trimEnd().split('\n').slice(-n)
+  } catch {
+    return []
+  }
+}
+
 // One question at a time on this tab's stdin. Once stdin ends, every question
 // is answered null.
 function stdinAsker() {
@@ -435,14 +571,35 @@ if (isMain) {
   // runner, so the tab cannot say. Written before anything else can fail.
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, 'runner.pid'), String(process.pid))
-  const say = runnerLog(dir, (s) => console.log(s))
-  const sayError = runnerLog(dir, (s) => console.error(s))
+  // The tab's stdin is the view's while one is attached, so it is read only
+  // once a question has to be asked there.
+  let asker = null
+  const askTab = (question) => (asker ??= stdinAsker()).ask(question)
+  const ignore = () => {}
+  // With no terminal (the offline tests, a redirected launch) there is no view,
+  // and the runner prints as it always did.
+  const view = process.stdout.isTTY && process.stdin.isTTY
+    ? attachView({
+      spawnView: () => spawn(process.execPath, [VIEW, '--attached', dir], { stdio: ['inherit', 'inherit', 'inherit', 'ipc'] }),
+      tab: (s) => console.log(s),
+      log: (s) => say(s),
+      ask: askTab,
+      tail: () => logTail(dir),
+      restore: restoreTab,
+      guard: (on) => (on ? process.on('SIGINT', ignore) : process.off('SIGINT', ignore)),
+    })
+    : null
+  const gate = view ? view.gate : (print) => print
+  const say = runnerLog(dir, gate((s) => console.log(s)))
+  const sayError = runnerLog(dir, gate((s) => console.error(s)))
+  view?.start()
   const orca = orcaCli()
   let summary
   try {
     const result = await runScript(readFileSync(path, 'utf8'), {
       orca,
       stateDir: dir,
+      out: gate((s) => console.log(s)),
       fallbackObjective: `workflow ${basename(path)}`,
       resume,
       permissionMode,
@@ -454,12 +611,13 @@ if (isMain) {
     process.exitCode = 1
     summary = failureSummary(e)
   }
-  const asker = stdinAsker()
   try {
-    await finish({ stateDir: dir, summary, orca, ask: asker.ask, out: say, registry: runRegistry(REGISTRY_PATH) })
+    await finish({ stateDir: dir, summary, orca, ask: view ? view.ask : askTab, out: say, registry: runRegistry(REGISTRY_PATH) })
+    // The view stays on the ended run until the operator quits it.
+    await view?.closed
   } catch (e) {
     sayError(`!! reclaim: ${e?.stack ?? e}`)
   } finally {
-    asker.close()
+    asker?.close()
   }
 }

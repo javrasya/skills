@@ -11,7 +11,7 @@ import { join, dirname } from 'path'
 import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { submit } from '../skills/engineering/implement-spec-in-workflow/orca/submit.mjs'
-import { runScript, journalKey, failureSummary, finish, SUBMIT, SETTINGS, realClock, JOURNAL_ENTRIES, readJournal } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
+import { runScript, journalKey, failureSummary, finish, SUBMIT, SETTINGS, realClock, JOURNAL_ENTRIES, readJournal, attachView, runnerLog } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
 import { agentLifecycle } from '../skills/engineering/implement-spec-in-workflow/orca/lifecycle.mjs'
 import { fakeOrca, fakeTranscripts } from '../skills/engineering/implement-spec-in-workflow/orca/fake-orca.mjs'
 import { RUNNER_SETTINGS } from '../skills/engineering/implement-spec-in-workflow/orca/settings.mjs'
@@ -20,6 +20,8 @@ import { runRegistry, readRegistry, OUTCOMES } from '../skills/engineering/imple
 import { transcriptPath, sessionTranscripts, claudeSlug, piDir } from '../skills/engineering/implement-spec-in-workflow/orca/transcript.mjs'
 import { agentsOf, reclaimAgent, gitUnpushed, parseChoice } from '../skills/engineering/implement-spec-in-workflow/orca/reclaim.mjs'
 import { runView, bandOf } from '../skills/engineering/implement-spec-in-workflow/orca/run-view-model.mjs'
+import { draw, strip } from '../skills/engineering/implement-spec-in-workflow/orca/run-view/draw.mjs'
+import { EventEmitter } from 'events'
 
 const SCHEMA = {
   type: 'object',
@@ -2486,7 +2488,7 @@ test('run view: r reclaims through the reclaim rules: a live agent is refused, u
   orca.dispatches.get('ctx_fake1').settled = true
   orca.worktrees.get(wt(1)).unpushed = 2
   const ahead = await view.key('r')
-  assert.deepEqual(ahead.reclaim, { reclaimed: false, reason: `${wt(1)} holds 2 unpushed commits; only a forced reclaim removes it` })
+  assert.deepEqual(ahead.reclaim, { reclaimed: false, reason: `${wt(1)} holds 2 unpushed commits; only a forced reclaim removes it`, unpushed: 2 })
   assert.deepEqual(after().filter((c) => MUTATING.includes(c.verb)), [])
 
   const forced = await view.reclaim({ force: true })
@@ -2519,4 +2521,205 @@ test('orca-cli: the view switches to a tab by handle and opens a file by path', 
     ['terminal', 'switch', '--terminal', 'term_a'],
     ['file', 'open', '--path', 'C:/notes/orca-run/runner.log'],
   ])
+})
+
+// --- the run view in the runner's tab (D5 on #43) -----------------------------
+
+// The run view as the runner spawns it: a fake child per start, stamped with
+// the clock's time, recording what it is sent.
+function fakeViews(clock) {
+  const spawned = []
+  const spawn = () => {
+    const c = new EventEmitter()
+    Object.assign(c, { pid: 1000 + spawned.length, at: clock.now(), sent: [], send: (m) => c.sent.push(m) })
+    spawned.push(c)
+    return c
+  }
+  return { spawned, spawn, last: () => spawned.at(-1) }
+}
+const turns = async (n = 5) => {
+  for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r))
+}
+const logged = (stateDir) => readFileSync(join(stateDir, 'runner.log'), 'utf8').trimEnd().split('\n').map((l) => l.replace(/^\S+ /, ''))
+
+// END with a view attached, wired as the entry point wires it; `onStart(views,
+// w)` runs as each worker starts. Unattached, the same run prints to `tab`.
+async function attachedRun({ onStart = () => {}, attached = true, answers = [] } = {}) {
+  const clock = fakeClock()
+  const stateDir = tmp()
+  const tab = []
+  const guards = []
+  const asked = []
+  const views = fakeViews(clock)
+  let say
+  const view = attachView({
+    spawnView: views.spawn, tab: (s) => tab.push(s), log: (s) => say(s), clock, guard: (on) => guards.push(on),
+    ask: async (q) => (asked.push(q), answers.length ? answers.shift() : null),
+    tail: () => readFileSync(join(stateDir, 'runner.log'), 'utf8').trimEnd().split('\n').slice(-20),
+  })
+  const gate = attached ? view.gate : (print) => print
+  say = runnerLog(stateDir, gate((s) => tab.push(s)), clock)
+  if (attached) view.start()
+  const registry = registryIn()
+  const orca = fakeOrca({ worker: async (w) => {
+    await onStart(views, { ...w, clock })
+    await endWorker({ ...w, clock })
+  }, clock })
+  const result = await runScript(END, { orca, stateDir, out: gate((s) => tab.push(s)), clock, registry, project: 'C:/repo' })
+  const end = () => finish({ stateDir, summary: { runner: 'orca', ok: true, result }, orca, ask: attached ? view.ask : async () => '', out: say, registry: runRegistry(registry, clock), unpushed: orca.unpushedOf })
+  return { clock, stateDir, tab, guards, asked, views, view, orca, result, end, verbs: () => orca.calls.map((c) => c.verb) }
+}
+
+test('run view: with the view attached the runner prints nothing to the tab, and runner.log has every line it would have printed', async () => {
+  const plain = await attachedRun({ attached: false })
+  const run = await attachedRun()
+  assert.equal(run.views.spawned.length, 1)
+  assert.deepEqual(run.guards, [true], 'a Ctrl-C reaching the runner is ignored while the view lives')
+  assert.deepEqual(run.tab, [])
+  assert.ok(plain.tab.length > 3, plain.tab.join('\n'))
+  // Session ids are generated afresh for every start.
+  const same = (lines) => lines.map((l) => l.replace(new RegExp(UUID.source.slice(1, -1), 'g'), '<sid>'))
+  assert.deepEqual(same(logged(run.stateDir)), same(plain.tab.flatMap((s) => s.split('\n'))))
+  assert.deepEqual(run.result, plain.result)
+})
+
+test('run view: a crash restarts the view on the clock without touching the run; at the third crash the runner prints its log in the tab again', async () => {
+  const plain = await attachedRun({ attached: false })
+  let crashedAt = null
+  const run = await attachedRun({ onStart: async (views, w) => {
+    if (!w.prompt.startsWith('Build a.')) return
+    crashedAt = w.clock.now()
+    views.last().emit('exit', 1, null)
+  } })
+  assert.deepEqual(run.result, plain.result, 'the run returns what it returns with no view')
+  assert.deepEqual(run.verbs(), plain.verbs(), 'and asks Orca for exactly the same')
+  await turns()
+  assert.equal(run.views.spawned.length, 2)
+  assert.ok(run.views.spawned[1].at >= crashedAt + SETTINGS.viewRestartMs, `restarted at ${run.views.spawned[1].at}, crashed at ${crashedAt}`)
+  assert.deepEqual(run.tab, [])
+  assert.ok(logged(run.stateDir).includes(`!! the run view crashed with exit code 1; restarting it (crash 1 of ${SETTINGS.viewCrashes})`), logged(run.stateDir).join('\n'))
+
+  run.views.last().emit('exit', null, 'SIGKILL')
+  await turns()
+  assert.equal(run.views.spawned.length, 3, 'a view killed by a signal is a crash too')
+  assert.deepEqual(run.tab, [])
+  run.views.last().emit('exit', 7, null)
+  await turns()
+  assert.equal(run.views.spawned.length, 3, 'the third crash is not restarted')
+  assert.equal(run.view.crashes(), 3)
+  assert.deepEqual(run.guards, [true, false])
+  const log = readFileSync(join(run.stateDir, 'runner.log'), 'utf8').trimEnd().split('\n')
+  assert.deepEqual(run.tab.slice(0, -1), log.slice(-21, -1), "the log's last lines are printed first")
+  assert.match(run.tab.at(-1), /the run view crashed 3 times, the last with exit code 7; the runner prints its log in this tab again/)
+  run.tab.length = 0
+  await run.end()
+  assert.ok(run.tab.includes('== Reclaim'), 'what follows is printed in the tab')
+})
+
+test('run view: q quits the view for good, and a view that cannot run here is not restarted either', async () => {
+  for (const [code, words] of [[0, 'was closed'], [3, 'cannot run in this tab']]) {
+    const clock = fakeClock()
+    const views = fakeViews(clock)
+    const tab = []
+    const view = attachView({ spawnView: views.spawn, tab: (s) => tab.push(s), log: (s) => tab.push(s), ask: async () => '', clock })
+    view.start()
+    views.last().emit('exit', code, null)
+    await turns()
+    await view.closed
+    assert.equal(views.spawned.length, 1, `exit ${code}`)
+    assert.equal(view.crashes(), 0)
+    assert.match(tab.at(-1), new RegExp(words))
+  }
+})
+
+test('end of run: the prompt is the view\'s modal, with the default of keeping the failed and dead agents; a view restarted before the answer shows it again', async () => {
+  const run = await attachedRun()
+  const ending = run.end()
+  await turns()
+  const [prompt] = run.views.last().sent
+  assert.equal(prompt.type, 'endPrompt')
+  assert.equal(prompt.title, 'The run ended. Reclaim what?')
+  assert.ok(prompt.lines.some((l) => l.includes('[P] b') && l.includes('its terminal is gone')), prompt.lines.join('\n'))
+  assert.ok(prompt.lines.some((l) => l.startsWith('The default keeps 1 failed or dead')), prompt.lines.join('\n'))
+  assert.match(prompt.question, /Enter = keep those and reclaim the other 2, a = reclaim all, n = keep all/)
+
+  run.views.last().emit('exit', 1, null)
+  await turns()
+  assert.deepEqual(run.views.last().sent, [prompt])
+  run.views.last().emit('message', { type: 'endChoice', answer: '' })
+  const outcome = await ending
+  assert.equal(outcome.choice, 'default')
+  assert.deepEqual(outcome.reclaimed.map((a) => a.title), ['[P] a', '[P] c'])
+  assert.deepEqual(outcome.kept.map((k) => k.agent.title), ['[P] b'])
+  assert.deepEqual(run.asked, [], 'nothing was asked in the tab')
+  assert.deepEqual(run.tab, [])
+  assert.ok(logged(run.stateDir).includes('<< reclaimed [P] a'))
+
+  // The runner stays until the operator quits the view.
+  let closed = false
+  run.view.closed.then(() => (closed = true))
+  await turns()
+  assert.equal(closed, false)
+  run.views.last().emit('message', { type: 'detach' })
+  run.views.last().emit('exit', 0, null)
+  await turns()
+  assert.equal(closed, true)
+})
+
+test('end of run: a view quit while its prompt is open hands the prompt to the tab, same question, same default', async () => {
+  const run = await attachedRun({ answers: [''] })
+  const ending = run.end()
+  await turns()
+  const [prompt] = run.views.last().sent
+  run.views.last().emit('exit', 0, null)
+  const outcome = await ending
+  assert.deepEqual(run.asked, [prompt.question])
+  assert.equal(outcome.choice, 'default')
+  assert.deepEqual(outcome.kept.map((k) => k.agent.title), ['[P] b'])
+})
+
+test('run view: the screen is the design\'s tree, a click lands on the row drawn under it, and the flash line shows the latest event', async () => {
+  const { view, rowOf } = await viewedRun()
+  const plain = () => draw(view.model, { width: 140, height: 30, flash: view.model.latest }).lines.map(strip)
+  let lines = plain()
+  assert.equal(view.model.latest, '== Discover')
+  assert.equal(lines.length, 30)
+  assert.match(lines[0], /^ implement-spec-783 · controlayer · run_fake1 · spec #783 · runner ● alive · 30m00s/)
+  assert.match(lines[1], /● 1 running {2}↻ 1 continued {2}◐ 1 stuck {2}· 1 queued {2}✓ 2 done {2}✗ 1 failed/)
+  assert.match(lines[4], /^ ▸ Discover +1\/1 done +✓1 +peak ctx 210k/, 'a folded phase')
+  assert.match(lines[5], /^ ▾ Implement +0\/5 done +●1 ↻1 ◐1 ✗1 ·1 *$/, 'an unfolded phase')
+  assert.match(lines[6], /^ +2 +impl:a +● running +█+░* 363k +724k +29m00s/)
+  assert.match(lines[8], /^ +4 +impl:c +↻ continued ×2 /)
+  assert.match(lines[10], /^ +6 +impl:e +✗ failed +░{10} +— +— /, 'an agent that never started')
+  assert.ok(!lines.some((l) => /PROTOTYPE|Tab ▸|Timeline/.test(l)), 'no status bar')
+  assert.match(lines.at(-2), /== Discover/)
+  assert.match(lines.at(-1), /↑↓ move · ←→ \/ click a phase to fold · ⏎\/click focus tab · r reclaim · l log · q quit/)
+
+  // The selected row is inverted; a selected phase's pane names its problems.
+  await view.key('DOWN')
+  const screen = draw(view.model, { width: 140, height: 30 })
+  assert.ok(screen.lines[5].startsWith('\x1b[7m'), 'selected, inverted')
+  lines = plain()
+  const pane = lines.slice(-6, -2)
+  assert.match(pane[0], /Implement {2}5 agents/)
+  assert.match(pane[1], /◐ impl:b: no movement/)
+  assert.match(pane[2], /✗ impl:e: its worker did not start/)
+  assert.equal(screen.rowAt(5), 0)
+  assert.equal(screen.rowAt(7), rowOf('agent:2'))
+  assert.equal(screen.rowAt(3), null)
+
+  // A selected agent's pane: title, state, context, tokens, elapsed, then
+  // its worktree, tab (open or closed), session, reason and transcript.
+  await view.key('DOWN')
+  await view.key('DOWN')
+  lines = plain()
+  assert.match(lines.at(-6), /\[Implement\] impl:b {2}◐ stuck {2}ctx — {2}total — {2}28m00s/)
+  assert.ok(lines.at(-5).includes('worktree run_fake1-3   tab term_fake3 (open)   session sid-3'), lines.at(-5))
+  assert.match(lines.at(-4), /reason no movement in its transcript or terminal for 20 minutes/)
+  assert.match(lines.at(-3), /transcript —/)
+
+  // The end-of-run modal is drawn over the tree, and takes the clicks.
+  const modal = draw(view.model, { width: 140, height: 30, modal: { title: 'The run ended. Reclaim what?', lines: ['a', 'Enter = keep those'] } })
+  assert.ok(modal.lines.map(strip).some((l) => l.includes('The run ended. Reclaim what?')))
+  assert.equal(modal.rowAt(5), null)
 })

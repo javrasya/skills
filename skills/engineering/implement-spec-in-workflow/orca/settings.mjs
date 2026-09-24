@@ -46,4 +46,9 @@ export const RUNNER_SETTINGS = Object.freeze({
   // A worker start, or the Run's creation, that fails is tried again after
   // each of these waits in turn; once they are spent, agent() is null.
   retryBackoffMs: Object.freeze([30_000, 2 * MIN, 5 * MIN]),
+  // The run view in the runner's tab (D5 on #43): a view that crashes is
+  // started again after this wait; at this many crashes in one run the runner
+  // stops restarting it and prints its log in the tab instead.
+  viewRestartMs: 1_000,
+  viewCrashes: 3,
 })
