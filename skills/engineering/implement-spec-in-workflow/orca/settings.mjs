@@ -1,6 +1,8 @@
 // Every limit the Orca runner enforces on a worker, in one table. A worker
-// that crosses one becomes `null` from agent(), as a dead subagent does on the
-// Workflow runner, so the script's own null handling applies unchanged.
+// that crosses one is nudged, then its session is continued (ADR-0013); one
+// past the continuation cap, or blocked on a human too long, becomes `null`
+// from agent(), as a dead subagent does on the Workflow runner, so the
+// script's own null handling applies unchanged.
 const MIN = 60_000
 
 export const RUNNER_SETTINGS = Object.freeze({
@@ -12,20 +14,26 @@ export const RUNNER_SETTINGS = Object.freeze({
   // How long one look waits for the worker's TUI to report idle.
   idleProbeMs: 1_000,
   // A worker idle, or exited, without submitting is nudged this many times;
-  // the next time it is found so, it is dead.
+  // the next time it is found so, its session is continued.
   idleNudges: 2,
-  // After a start or a nudge, idle does not count for this long: the prompt
-  // needs time to land and turn the TUI busy.
+  // Idle counts only once the worker has been idle, with its transcript and
+  // terminal unmoved, for this long since its start or its last nudge: the
+  // prompt needs time to land and turn the TUI busy.
   nudgeGraceMs: 2 * MIN,
-  // Output this soon after a nudge is taken for the nudge's own echo, not for
-  // the worker coming back.
+  // Movement this soon after a nudge is taken for the nudge landing in the
+  // transcript and the TUI, not for the worker coming back.
   nudgeEchoMs: 10_000,
-  // No terminal output for this long: nudged once, then dead.
-  silentNudgeMs: 20 * MIN,
-  silentDeadMs: 40 * MIN,
+  // Neither the worker's transcript nor its terminal's busy or idle state has
+  // moved for this long: nudged once, then its session is continued.
+  stuckNudgeMs: 20 * MIN,
+  stuckContinueMs: 40 * MIN,
+  // Sessions continued per agent; the next death fails it, and its tab and
+  // worktree are kept.
+  maxContinuations: 3,
   // Blocked on something only a human can answer: logged loudly on entry,
-  // dead if nobody answers within this.
-  blockedDeadMs: 30 * MIN,
+  // failed and kept if nobody answers within this. Never continued:
+  // continuing does not answer the question it waits on.
+  blockedFailMs: 30 * MIN,
   // Orca calls that fail in a row while watching a worker before it counts
   // as dead: one transient CLI failure must not kill a long agent.
   watchErrors: 3,

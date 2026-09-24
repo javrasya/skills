@@ -2,12 +2,14 @@
 // worker is played by `worker`, an async function handed what a real worker
 // gets — its prompt and the IDs its injected preamble would carry — plus
 // `state`, the Orca-side view of it a test scripts deaths through: set `gone`,
-// `exited`, `idle`, `waiting` or `lastOutputAt`, and `onNudge` to react to a
-// nudge. `calls` records every Orca call in order, stamped with `clock`'s time
-// when one is given, so a test can assert on the sequence and its timing.
-// `worktrees` holds every worktree Orca knows, the run's own included, by path,
-// with the board `status` last set on it and the `dirty` and `commits` a
-// retried start checks before taking it up.
+// `exited`, `idle` or `waiting`, grow `transcript` (its session transcript's
+// size in bytes, read through fakeTranscripts), set `onNudge` to react to a
+// nudge and `onContinue` to play the session once it is continued. `calls`
+// records every Orca call in order, stamped with `clock`'s time when one is
+// given, so a test can assert on the sequence and its timing. `worktrees`
+// holds every worktree Orca knows, the run's own included, by path, with the
+// board `status` last set on it and the `dirty` and `commits` a retried start
+// checks before taking it up.
 //
 // `faults` fails a step the way real Orca can: step -> ({ count, ...ctx }) =>
 // an error to throw, 'hang' for a call Orca never answers (it fails as the
@@ -16,8 +18,14 @@
 // what Orca holds, a worktree's `dirty` for one. Steps: runCreate, worktreeStatus, and a start's
 // worktreeCreate, worktreeSet, terminalCreate, waitIdle and workerStart, the
 // order the adapter runs them in.
-import { OrcaError, launchCommand, workerStartArgs, withTimeout } from './orca-cli.mjs'
+import { OrcaError, launchCommand, resumeCommand, workerStartArgs, withTimeout } from './orca-cli.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
+
+// The runner's transcript reader, over the fake's sessions: a session's size
+// is its latest dispatch's `transcript`, which a continuation carries over.
+export const fakeTranscripts = (orca) => ({
+  size: ({ sessionId }) => [...orca.dispatches.values()].filter((d) => d.sessionId === sessionId).at(-1)?.transcript ?? null,
+})
 
 export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run', runPrefix = 'run_fake', coordinator = 'term_runner', faults = {}, callMs = RUNNER_SETTINGS.orcaCallMs } = {}) {
   const calls = []
@@ -44,9 +52,12 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     return d
   }
 
-  function terminal(handle, verb) {
+  // Real Orca still knows a closed tab: a verb aimed at it is refused with
+  // `closed`, and only a handle it never issued is stale.
+  function terminal(handle, verb, closed = 'terminal_handle_stale') {
     const d = [...dispatches.values()].find((x) => x.handle === handle)
-    if (!d || d.gone) throw new OrcaError('terminal_handle_stale', 'terminal_handle_stale', verb)
+    if (!d) throw new OrcaError('terminal_handle_stale', 'terminal_handle_stale', verb)
+    if (d.gone) throw new OrcaError(closed, closed, verb)
     return d
   }
 
@@ -62,6 +73,21 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     record({ verb: 'worktreeReuse', worktree: path })
     return path
   }
+
+  // Plays a started or continued session: a worker that throws is an agent
+  // that died, so its Dispatch fails.
+  function play(d, fn) {
+    d.finished = Promise.resolve()
+      .then(fn)
+      .catch((e) => {
+        d.error = e
+        if (!d.settled) Object.assign(d, { settled: true, outcome: 'failed' })
+      })
+  }
+
+  const preambleOf = (n) => ({ handle: `term_fake${n}`, capability: `cap_fake${n}`, taskId: `task_fake${n}`, dispatchId: `ctx_fake${n}` })
+  const preambleIn = (d) => ({ handle: d.handle, capability: d.capability, taskId: d.taskId, dispatchId: d.dispatchId })
+  const fresh = () => ({ settled: false, outcome: null, released: false, stopped: false, gone: false, exited: false, idle: false, waiting: null, nudges: [] })
 
   const orca = {
     calls,
@@ -80,8 +106,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null }) {
       if (!sessionId) throw new Error(`fake orca: ${title} was started without a runner-assigned --session-id`)
       const command = launchCommand({ harness, model, effort, permissionMode, sessionId })
-      const n = ++seq
-      const preamble = { handle: `term_fake${n}`, capability: `cap_fake${n}`, taskId: `task_fake${n}`, dispatchId: `ctx_fake${n}` }
+      const preamble = preambleOf(++seq)
       const launch = { harness, model, effort, permissionMode }
       const warnings = []
       let worktree = runWorktree
@@ -120,25 +145,46 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       if (argv.includes('--agent')) throw new Error(`fake orca: worker-start for ${title} was called with --agent`)
       // Like Claude Code, the agent titles its own tab from its prompt.
       const d = {
-        ...preamble, run, title, ...launch, sessionId, command, prompt, worktree, tabTitle: prompt.slice(0, 30), settled: false, outcome: null, released: false, stopped: false,
-        gone: false, exited: false, idle: false, waiting: null, lastOutputAt: null, onNudge: null, nudges: [],
+        ...preamble, run, title, ...launch, sessionId, command, prompt, worktree, tabTitle: prompt.slice(0, 30), ...fresh(), transcript: null, onNudge: null, onContinue: null,
       }
       dispatches.set(d.dispatchId, d)
       record({ verb: 'workerStart', dispatchId: d.dispatchId, title, ...launch, sessionId, command, argv, placement: child ? 'new-child' : 'current', worktree })
-      // A worker that throws is an agent that died: its Dispatch fails.
-      d.finished = Promise.resolve()
-        .then(() => worker({ prompt, preamble, worktree, orca, state: d }))
-        .catch((e) => {
-          d.error = e
-          if (!d.settled) Object.assign(d, { settled: true, outcome: 'failed' })
-        })
+      play(d, () => worker({ prompt, preamble, worktree, orca, state: d }))
       return { dispatchId: d.dispatchId, taskId: d.taskId, terminal: d.handle, worktree, warnings }
+    },
+
+    // The session resumed with the harness's resume command: in the same
+    // terminal and dispatch while the tab is alive, else in a new terminal in
+    // the same worktree that a new dispatch adopts. The continued session is
+    // played by the `onContinue` its state carries, handed the worker's
+    // original prompt and the preamble it now holds.
+    async workerContinue({ run, dispatch: id, terminal: handle, worktree, title, prompt: text, harness = 'claude', model, effort, permissionMode, sessionId, reopen = false }) {
+      const d = dispatch(id, 'terminal send')
+      if (sessionId !== d.sessionId) throw new Error(`fake orca: ${title} was continued with session ${sessionId}, not its own ${d.sessionId}`)
+      const command = resumeCommand({ harness, model, effort, permissionMode, sessionId })
+      const continued = d.continued ?? 0
+      let c = d
+      if (!reopen && !d.gone) {
+        if (handle !== d.handle) throw new Error(`fake orca: ${title} was continued in ${handle}, not its own terminal ${d.handle}`)
+        // The stalled process is interrupted, and the resume typed after it.
+        record({ verb: 'workerContinue', dispatchId: id, terminal: d.handle, worktree: d.worktree, command, text, reopened: false, interrupted: true })
+        Object.assign(d, { gone: false, exited: false, idle: false, waiting: null })
+      } else {
+        const preamble = preambleOf(++seq)
+        c = { ...d, ...preamble, run, title, command, worktree, ...fresh(), from: id }
+        dispatches.set(c.dispatchId, c)
+        const argv = workerStartArgs({ run, prompt: text, title, place: ['--worktree', worktree ? `path:${worktree}` : 'current'], terminal: c.handle })
+        record({ verb: 'workerContinue', dispatchId: c.dispatchId, from: id, terminal: c.handle, worktree, command, text, argv, reopened: true, interrupted: false })
+      }
+      c.continued = continued + 1
+      play(c, () => c.onContinue?.({ prompt: d.prompt, text, preamble: preambleIn(c), worktree: c.worktree, orca, state: c }))
+      return { dispatchId: c.dispatchId, taskId: c.taskId, terminal: c.handle, worktree: c.worktree, reopened: c !== d }
     },
 
     async workerShow({ dispatch: id }) {
       const d = dispatch(id, 'orchestration worker-show')
       record({ verb: 'workerShow', dispatchId: id, settled: d.settled })
-      return { settled: d.settled, outcome: d.outcome, terminal: d.handle, gone: d.gone, exited: d.exited, waiting: d.waiting, lastOutputAt: d.lastOutputAt }
+      return { settled: d.settled, outcome: d.outcome, terminal: d.handle, gone: d.gone, exited: d.exited, waiting: d.waiting }
     },
 
     async terminalIdle({ terminal: handle }) {
@@ -146,7 +192,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     },
 
     async terminalSend({ terminal: handle, text }) {
-      const d = terminal(handle, 'terminal send')
+      const d = terminal(handle, 'terminal send', 'terminal_not_writable')
       record({ verb: 'terminalSend', dispatchId: d.dispatchId, text })
       d.nudges.push(text)
       await d.onNudge?.(text)
@@ -158,10 +204,12 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       d.stopped = true
     },
 
-    async workerRelease({ dispatch: id }) {
+    // Without keepTerminal the runner closes the tab it made for the worker.
+    async workerRelease({ dispatch: id, keepTerminal = false }) {
       const d = dispatch(id, 'orchestration worker-release')
-      record({ verb: 'workerRelease', dispatchId: id })
+      record({ verb: 'workerRelease', dispatchId: id, keepTerminal })
       d.released = true
+      d.tabClosed = !keepTerminal
     },
 
     async terminalRename({ terminal, title }) {

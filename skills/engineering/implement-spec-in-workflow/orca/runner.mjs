@@ -32,6 +32,7 @@ import { orcaCli, launchCommand, HARNESSES, realTimer } from './orca-cli.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { agentLifecycle } from './lifecycle.mjs'
 import { runRegistry, REGISTRY_PATH } from './registry.mjs'
+import { sessionTranscripts } from './transcript.mjs'
 
 export { SUBMIT, workerPrompt } from './lifecycle.mjs'
 
@@ -63,13 +64,14 @@ export const journalKey = (prompt, opts = {}) =>
 
 // Every journal entry type and the fields it always carries, beside `type`.
 // `at` is an ISO timestamp from the runner's clock. A failed entry may also
-// carry `retained`, the worktree it left; a replayed result carries
-// `replayed: true`. retry is a new attempt of a call's start or of its Run's
-// creation, with why the last one failed; warning, something that went wrong
-// without failing the call. nudge, continued and reattached are written by the
-// behaviours that make them: a nudge typed to a worker, a finished session
-// continued in its terminal, and a resumed runner taking up a worker an
-// earlier one started.
+// carry `retained`, the worktree it left, and `continuations`, how often its
+// session was continued; a replayed result carries `replayed: true`. retry is
+// a new attempt of a call's start or of its Run's creation, with why the last
+// one failed; warning, something that went wrong without failing the call. A
+// nudge's `attempt` is its number since the session started or was last
+// continued; a continuation's is its number, up to the cap. reattached is
+// written by the behaviour that makes it: a resumed runner taking up a worker
+// an earlier one started.
 export const JOURNAL_ENTRIES = Object.freeze({
   started: ['at', 'key', 'n', 'title', 'dispatchId', 'harness', 'sessionId', 'worktree', 'terminal'],
   result: ['at', 'key', 'n', 'title', 'result'],
@@ -77,8 +79,8 @@ export const JOURNAL_ENTRIES = Object.freeze({
   retained: ['at', 'retained'],
   retry: ['at', 'key', 'n', 'title', 'attempt', 'reason'],
   warning: ['at', 'key', 'n', 'title', 'reason'],
-  nudge: ['at', 'key', 'n', 'title', 'dispatchId', 'reason', 'count'],
-  continued: ['at', 'key', 'n', 'title', 'dispatchId', 'sessionId', 'terminal', 'reason'],
+  nudge: ['at', 'key', 'n', 'title', 'dispatchId', 'reason', 'attempt'],
+  continued: ['at', 'key', 'n', 'title', 'dispatchId', 'sessionId', 'terminal', 'reason', 'attempt', 'reopened'],
   reattached: ['at', 'key', 'n', 'title', 'dispatchId', 'sessionId', 'terminal', 'worktree'],
 })
 
@@ -129,13 +131,14 @@ export function runnerLog(stateDir, print, clock = realClock) {
 }
 
 // `settings` overrides entries of SETTINGS; `clock` is what the liveness
-// limits and the retry backoff are measured against, so tests can drive time.
+// limits and the retry backoff are measured against, and `transcripts` what
+// measures a worker's session transcript, so tests can drive both.
 // permissionMode: the orchestrating session's, which Claude workers start in
 // as Workflow subagents inherit it. Without one, a Claude worker starts in
 // Claude's own default mode.
 // registry: the run registry's path, or null to record nothing there; project:
 // the repo the run works in, recorded beside it.
-export async function runScript(text, { orca = orcaCli(), stateDir, out: print = (s) => console.log(s), settings = {}, clock = realClock, fallbackObjective = 'workflow run', resume = false, permissionMode = null, registry = null, project = process.cwd() }) {
+export async function runScript(text, { orca = orcaCli(), stateDir, out: print = (s) => console.log(s), settings = {}, clock = realClock, transcripts = sessionTranscripts(), fallbackObjective = 'workflow run', resume = false, permissionMode = null, registry = null, project = process.cwd() }) {
   const limits = { ...SETTINGS, ...settings }
   const out = runnerLog(stateDir, print, clock)
   const script = loadScript(text)
@@ -185,7 +188,7 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
     return k
   }
   for (const k of earlier.retained) journal({ type: 'retained', retained: keep(k) })
-  const life = agentLifecycle({ orca, clock, limits, out, stateDir, objective: () => objectiveOf(meta.value, fallbackObjective), journal, keep, onRun })
+  const life = agentLifecycle({ orca, clock, limits, out, stateDir, objective: () => objectiveOf(meta.value, fallbackObjective), journal, keep, onRun, transcripts })
 
   const phase = (title) => {
     currentPhase = title

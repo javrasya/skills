@@ -5,7 +5,7 @@
 //   node scripts/test-orca-runner.mjs
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, existsSync, readFileSync } from 'fs'
+import { mkdtempSync, writeFileSync, existsSync, readFileSync, mkdirSync, appendFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join, dirname } from 'path'
 import { spawnSync } from 'child_process'
@@ -13,10 +13,11 @@ import { fileURLToPath } from 'url'
 import { submit } from '../skills/engineering/implement-spec-in-workflow/orca/submit.mjs'
 import { runScript, journalKey, failureSummary, SUBMIT, SETTINGS, realClock, JOURNAL_ENTRIES } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
 import { agentLifecycle } from '../skills/engineering/implement-spec-in-workflow/orca/lifecycle.mjs'
-import { fakeOrca } from '../skills/engineering/implement-spec-in-workflow/orca/fake-orca.mjs'
+import { fakeOrca, fakeTranscripts } from '../skills/engineering/implement-spec-in-workflow/orca/fake-orca.mjs'
 import { RUNNER_SETTINGS } from '../skills/engineering/implement-spec-in-workflow/orca/settings.mjs'
 import { orcaCli, OrcaError } from '../skills/engineering/implement-spec-in-workflow/orca/orca-cli.mjs'
 import { runRegistry, readRegistry, OUTCOMES } from '../skills/engineering/implement-spec-in-workflow/orca/registry.mjs'
+import { transcriptPath, sessionTranscripts, claudeSlug, piDir } from '../skills/engineering/implement-spec-in-workflow/orca/transcript.mjs'
 
 const SCHEMA = {
   type: 'object',
@@ -315,10 +316,13 @@ async function runOne(worker, { script = ONE, orcaPatch = {}, permissionMode = n
   const lines = []
   const stateDir = tmp()
   const orca = Object.assign(fakeOrca({ worker: (w) => worker({ ...w, clock }), clock, faults }), orcaPatch)
-  const result = await runScript(script, { orca, stateDir, out: (s) => lines.push(s), clock, permissionMode, settings })
+  const result = await runScript(script, { orca, stateDir, out: (s) => lines.push(s), clock, permissionMode, settings, transcripts: fakeTranscripts(orca) })
   const of = (verb) => orca.calls.filter((c) => c.verb === verb)
   const log = readFileSync(join(stateDir, 'runner.log'), 'utf8').trimEnd().split('\n')
-  return { result, lines, nudges: of('terminalSend'), stop: of('workerStop')[0], released: of('workerRelease').length, orca, journal: journalOf(stateDir), log }
+  return {
+    result, lines, nudges: of('terminalSend'), stop: of('workerStop')[0], released: of('workerRelease').length, releases: of('workerRelease'),
+    continues: of('workerContinue'), start: of('workerStart')[0], orca, journal: journalOf(stateDir), log,
+  }
 }
 
 async function submitGood({ prompt, preamble, orca }) {
@@ -416,19 +420,123 @@ const within = (at, from, what) => assert.ok(at >= from && at < from + POLL, `${
 
 test('settings: the liveness limits are the ticket\'s, in one table', () => {
   assert.equal(RUNNER_SETTINGS.idleNudges, 2)
-  assert.equal(RUNNER_SETTINGS.silentNudgeMs, 20 * MIN)
-  assert.equal(RUNNER_SETTINGS.silentDeadMs, 40 * MIN)
-  assert.equal(RUNNER_SETTINGS.blockedDeadMs, 30 * MIN)
+  assert.equal(RUNNER_SETTINGS.stuckNudgeMs, 20 * MIN)
+  assert.equal(RUNNER_SETTINGS.stuckContinueMs, 40 * MIN)
+  assert.equal(RUNNER_SETTINGS.maxContinuations, 3)
+  assert.equal(RUNNER_SETTINGS.blockedFailMs, 30 * MIN)
   assert.ok(Object.isFrozen(RUNNER_SETTINGS))
 })
 
-test('liveness: a worker whose terminal is gone with no result is null at the next look, never nudged', async () => {
-  const r = await runOne(async ({ state }) => { state.gone = true })
-  assert.equal(r.result, null)
+// A continued session that finishes the job: it submits with the preamble it
+// now holds, which is a new one when its tab was gone.
+const submitsOnContinue = (state) => { state.onContinue = submitGood }
+const oneOn = (harness, more = '') => `return await agent('Do a thing.', { label: 'one', phase: 'P', schema: ${JSON.stringify(SCHEMA)}${harness === 'pi' ? ", harness: 'pi'" : ''}${more} })`
+const RESUME = { claude: (sid) => `claude --resume ${sid}`, pi: (sid) => `pi --approve --session-id ${sid}` }
+const ofType = (journal, type) => journal.filter((e) => e.type === type)
+
+for (const harness of ['claude', 'pi']) {
+  test(`continuation (${harness}): a worker whose transcript and terminal have not moved is nudged at 20 minutes, then continued at 40 in its own terminal, and its result is returned`, async () => {
+    const r = await runOne(async ({ state }) => {
+      // The nudge lands in the transcript: that is the nudge, not the worker.
+      state.onNudge = () => { state.transcript = (state.transcript ?? 0) + 120 }
+      submitsOnContinue(state)
+    }, { script: oneOn(harness) })
+    assert.deepEqual(r.result, GOOD)
+    assert.equal(r.nudges.length, 1)
+    within(r.nudges[0].at, 20 * MIN, 'nudge')
+    assert.equal(r.continues.length, 1)
+    const [c] = r.continues
+    within(c.at, 40 * MIN, 'continuation')
+    const started = ofType(r.journal, 'started')[0]
+    assert.equal(c.reopened, false)
+    assert.equal(c.interrupted, true, 'the stalled process is stopped first')
+    assert.equal(c.terminal, started.terminal, 'the same terminal')
+    assert.equal(c.dispatchId, started.dispatchId)
+    assert.ok(c.command.startsWith(RESUME[harness](started.sessionId)), c.command)
+    assert.match(c.text, /You were interrupted/)
+    assert.equal(r.stop, undefined)
+    assertEntries(r.journal)
+    assert.deepEqual(ofType(r.journal, 'nudge').map((e) => [e.attempt, e.dispatchId]), [[1, started.dispatchId]])
+    assert.match(ofType(r.journal, 'nudge')[0].reason, /no movement in its transcript or terminal for 20 minutes/)
+    const [cont] = ofType(r.journal, 'continued')
+    assert.deepEqual([cont.attempt, cont.reopened, cont.sessionId, cont.terminal, cont.dispatchId], [1, false, started.sessionId, started.terminal, started.dispatchId])
+    assert.match(cont.reason, /no movement in its transcript or terminal for 40 minutes/)
+    assert.deepEqual(ofType(r.journal, 'result').map((e) => e.result), [GOOD])
+  })
+
+  test(`continuation (${harness}): with its tab gone, the session is resumed in a new terminal in the same worktree, and the continued agent's result is returned`, async () => {
+    const r = await runOne(async ({ state }) => {
+      state.gone = true
+      submitsOnContinue(state)
+    }, { script: oneOn(harness, ", isolation: 'worktree'") })
+    assert.deepEqual(r.result, GOOD)
+    assert.equal(r.nudges.length, 0, 'a gone tab is not nudged')
+    const [c] = r.continues
+    const started = ofType(r.journal, 'started')[0]
+    assert.equal(c.reopened, true)
+    assert.notEqual(started.worktree, 'C:/fake/run')
+    assert.equal(c.worktree, started.worktree, 'the same worktree')
+    assert.notEqual(c.terminal, started.terminal, 'a new terminal')
+    assert.ok(c.command.startsWith(RESUME[harness](started.sessionId)), c.command)
+    assert.equal(c.argv[c.argv.indexOf('--terminal') + 1], c.terminal, 'worker-start adopts the new terminal')
+    assert.ok(c.at <= POLL, `continued at ${c.at}`)
+    // The old dispatch's pane is gone, so it is stopped and released.
+    assert.equal(r.stop.dispatchId, started.dispatchId)
+    assert.deepEqual(r.releases.map((x) => x.dispatchId), [started.dispatchId, c.dispatchId])
+    const [cont] = ofType(r.journal, 'continued')
+    assert.deepEqual([cont.attempt, cont.reopened, cont.terminal, cont.dispatchId, cont.sessionId], [1, true, c.terminal, c.dispatchId, started.sessionId])
+    assert.equal(cont.reason, 'its terminal is gone')
+    assert.equal(r.orca.dispatches.get(c.dispatchId).tabTitle, '[P] one', 'the new tab is titled too')
+  })
+}
+
+test('continuation: a transcript that grows behind an idle terminal is not stuck', async () => {
+  const r = await runOne(async (w) => {
+    w.state.idle = true
+    for (let m = 1; m <= 60; m++) w.clock.at(m * MIN, () => { w.state.transcript = m * 100 })
+    w.clock.at(61 * MIN, () => submitGood(w))
+  })
+  assert.deepEqual(r.result, GOOD)
   assert.equal(r.nudges.length, 0)
-  assert.ok(r.stop && r.stop.at <= POLL, `stopped at ${r.stop?.at}`)
-  assert.equal(r.released, 1)
-  assert.ok(r.lines.some((l) => l.includes('its terminal is gone, with no result; agent() returns null')), r.lines.join('\n'))
+  assert.equal(r.continues.length, 0)
+})
+
+test('continuation: a terminal that keeps changing between busy and idle behind a still transcript is not stuck', async () => {
+  const r = await runOne(async (w) => {
+    for (let k = 1; k <= 40; k++) w.clock.at(k * 90_000, () => { w.state.idle = !w.state.idle })
+    w.clock.at(61 * MIN, () => submitGood(w))
+  })
+  assert.deepEqual(r.result, GOOD)
+  assert.equal(r.nudges.length, 0)
+  assert.equal(r.continues.length, 0)
+})
+
+test('continuation: a fourth death fails the agent with a reason naming the cap, and keeps its tab and worktree', async () => {
+  // Every session goes idle without submitting, the continued ones included.
+  const idleAgain = async ({ state }) => {
+    state.idle = true
+    state.onContinue = idleAgain
+  }
+  const r = await runOne(idleAgain, { script: oneOn('claude', ", isolation: 'worktree'") })
+  assert.equal(r.result, null)
+  assert.equal(r.continues.length, 3)
+  assert.equal(new Set(r.continues.map((c) => c.terminal)).size, 1, 'each continued in its own terminal')
+  assertEntries(r.journal)
+  const started = ofType(r.journal, 'started')[0]
+  assert.deepEqual(ofType(r.journal, 'continued').map((e) => e.attempt), [1, 2, 3])
+  for (const e of ofType(r.journal, 'continued')) assert.equal(e.reason, 'it went idle without submitting, after 2 nudges')
+  assert.deepEqual(ofType(r.journal, 'nudge').map((e) => e.attempt), [1, 2, 1, 2, 1, 2, 1, 2])
+  for (const e of ofType(r.journal, 'nudge')) assert.match(e.reason, /^it went idle without submitting \(nudge [12] of 2\)$/)
+  const [failed] = ofType(r.journal, 'failed')
+  assert.equal(failed.reason, 'it went idle without submitting, after 2 nudges, and its session was already continued 3 times, the cap of 3, with no result')
+  assert.equal(failed.continuations, 3)
+  // Kept: its process is not stopped, its tab not closed, its worktree retained.
+  assert.equal(r.stop, undefined)
+  assert.deepEqual(r.releases.map((x) => x.keepTerminal), [true])
+  assert.equal(r.orca.dispatches.get(started.dispatchId).tabClosed, false)
+  assert.equal(failed.retained.path, started.worktree)
+  assert.ok(r.lines.some((l) => l.startsWith(`!! kept ${started.worktree}:`)), r.lines.join('\n'))
+  assert.ok(r.lines.some((l) => l.includes(`its tab ${started.terminal} is kept open`)), r.lines.join('\n'))
 })
 
 test('liveness: a worker whose terminal is gone after submit recorded its result still delivers it', async () => {
@@ -441,15 +549,20 @@ test('liveness: a worker whose terminal is gone after submit recorded its result
 })
 
 for (const how of ['idle', 'exited']) {
-  test(`liveness: a worker that ${how === 'idle' ? 'goes idle' : 'exits'} without submitting is nudged twice, then null`, async () => {
-    const r = await runOne(async ({ state }) => { state[how] = true })
-    assert.equal(r.result, null)
+  test(`liveness: a worker that ${how === 'idle' ? 'goes idle' : 'exits'} without submitting is nudged twice, then continued`, async () => {
+    const r = await runOne(async ({ state }) => {
+      state[how] = true
+      submitsOnContinue(state)
+    })
+    assert.deepEqual(r.result, GOOD)
     assert.equal(r.nudges.length, 2)
     for (const n of r.nudges) assert.match(n.text, /submit command/)
     within(r.nudges[0].at, RUNNER_SETTINGS.nudgeGraceMs, 'first nudge')
     within(r.nudges[1].at, 2 * RUNNER_SETTINGS.nudgeGraceMs, 'second nudge')
-    within(r.stop.at, 3 * RUNNER_SETTINGS.nudgeGraceMs, 'death')
-    assert.ok(r.lines.some((l) => l.includes('without submitting, after 2 nudges, with no result')), r.lines.join('\n'))
+    assert.equal(r.continues.length, 1)
+    within(r.continues[0].at, 3 * RUNNER_SETTINGS.nudgeGraceMs, 'continuation')
+    assert.equal(r.continues[0].reopened, false)
+    assert.equal(ofType(r.journal, 'continued')[0].reason, `it ${how === 'idle' ? 'went idle' : 'exited'} without submitting, after 2 nudges`)
   })
 }
 
@@ -466,33 +579,26 @@ test('liveness: an idle worker that answers its nudge by submitting returns its 
   assert.equal(r.stop, undefined)
 })
 
-test('liveness: a silent worker is nudged at 20 minutes and is null at 40', async () => {
+test('liveness: transcript growth restarts the no-movement clock', async () => {
   const r = await runOne(async ({ state, clock }) => {
-    // The nudge's own echo is not the worker coming back.
-    state.onNudge = () => { state.lastOutputAt = clock.now() + 1000 }
+    clock.at(30 * MIN, () => { state.transcript = 500 })
+    submitsOnContinue(state)
   })
-  assert.equal(r.result, null)
-  assert.equal(r.nudges.length, 1)
-  within(r.nudges[0].at, 20 * MIN, 'silence nudge')
-  within(r.stop.at, 40 * MIN, 'death')
-  assert.ok(r.lines.some((l) => l.includes('silent for 40 minutes, with no result')), r.lines.join('\n'))
-})
-
-test('liveness: output from the worker restarts the silence clock', async () => {
-  const r = await runOne(async ({ state, clock }) => {
-    clock.at(30 * MIN, () => { state.lastOutputAt = 30 * MIN })
-  })
-  assert.equal(r.result, null)
+  assert.deepEqual(r.result, GOOD)
   assert.equal(r.nudges.length, 2)
-  within(r.nudges[1].at, 50 * MIN, 'second silence nudge')
-  within(r.stop.at, 70 * MIN, 'death')
+  within(r.nudges[1].at, 50 * MIN, 'second nudge')
+  within(r.continues[0].at, 70 * MIN, 'continuation')
 })
 
-test('liveness: a worker blocked on a human is logged loudly once, never nudged, and is null after 30 minutes', async () => {
+test('liveness: a worker blocked on a human is logged loudly once, never nudged, and after 30 minutes fails and is kept, never continued', async () => {
   const r = await runOne(async ({ state }) => { state.waiting = '{"evidence":"prompt-text","text":"Allow this command?"}' })
   assert.equal(r.result, null)
   assert.equal(r.nudges.length, 0)
-  within(r.stop.at, 30 * MIN, 'death')
+  assert.equal(r.continues.length, 0)
+  assert.equal(r.stop, undefined)
+  assert.deepEqual(r.releases.map((x) => [x.keepTerminal, x.at >= 30 * MIN && x.at < 30 * MIN + POLL]), [[true, true]])
+  assert.equal(r.orca.dispatches.get('ctx_fake1').tabClosed, false)
+  assert.equal(ofType(r.journal, 'failed')[0].reason, 'blocked on a human, unanswered for 30 minutes, with no result')
   const loud = r.lines.filter((l) => l.includes('BLOCKED ON A HUMAN'))
   assert.equal(loud.length, 1, r.lines.join('\n'))
   assert.ok(loud[0].includes('[P] one') && loud[0].includes('term_fake1'), loud[0])
@@ -528,7 +634,7 @@ test('parallel(): a throwing thunk resolves to null and the call never rejects',
     () => 7,
     () => agent('Do a thing.', { label: 'dies' }),
   ])`
-  const r = await runOne(async ({ state }) => { state.gone = true }, { script })
+  const r = await runOne(async () => { throw new Error('the agent died') }, { script })
   assert.deepEqual(r.result, [null, null, 7, null])
   assert.ok(r.lines.some((l) => l.includes('thunk 0 threw (sync boom)')), r.lines.join('\n'))
 })
@@ -883,6 +989,100 @@ test('orca-cli: a worktree\'s board status is set by path', async () => {
   assert.deepEqual(argvs, [['worktree', 'set', '--worktree', `path:${CHILD_PATH}`, '--workspace-status', 'in-review']])
 })
 
+// Session continuation through the real adapter.
+const CONTINUE = { run: 'run_1', dispatch: 'ctx_old', terminal: 'term_old', worktree: CHILD_PATH, title: '[Implement] impl:#1', prompt: 'You were interrupted', sessionId: SID }
+
+for (const [harness, launch, command] of [
+  ['claude', { harness: 'claude', model: 'opus', permissionMode: 'auto' }, `claude --resume ${SID} --permission-mode auto --model opus`],
+  ['pi', { harness: 'pi', model: 'openai/gpt-5', effort: 'low' }, `pi --approve --session-id ${SID} --model openai/gpt-5 --thinking low`],
+]) {
+  test(`orca-cli: continuing a ${harness} session with its tab alive stops the process, then resumes the session in the same terminal and prompts it`, async () => {
+    const { argvs, orca } = recordingCli()
+    const w = await orca.workerContinue({ ...CONTINUE, ...launch })
+    assert.deepEqual(verbsOf(argvs), ['terminal send', 'terminal send', 'terminal send', 'terminal send', 'terminal wait', 'terminal send'])
+    for (const a of argvs.slice(0, 3)) assert.deepEqual(a, ['terminal', 'send', '--terminal', 'term_old', '--interrupt'])
+    assert.equal(flag(argvs[3], '--terminal'), 'term_old')
+    assert.equal(flag(argvs[3], '--text'), command)
+    assert.ok(argvs[3].includes('--enter'))
+    assert.equal(flag(argvs[4], '--terminal'), 'term_old')
+    assert.equal(flag(argvs[5], '--text'), 'You were interrupted')
+    assert.deepEqual(w, { dispatchId: 'ctx_old', terminal: 'term_old', worktree: CHILD_PATH, reopened: false })
+  })
+
+  test(`orca-cli: continuing a ${harness} session with its tab gone resumes it in a new terminal in the same worktree, which worker-start adopts`, async () => {
+    const { argvs, orca } = recordingCli()
+    const w = await orca.workerContinue({ ...CONTINUE, ...launch, reopen: true })
+    assert.deepEqual(verbsOf(argvs), ['terminal create', 'terminal wait', 'orchestration worker-start'])
+    assert.equal(flag(argvs[0], '--worktree'), `path:${CHILD_PATH}`)
+    assert.equal(flag(argvs[0], '--command'), command)
+    const start = argvs[2]
+    assert.deepEqual([flag(start, '--terminal'), flag(start, '--worktree'), flag(start, '--spec')], ['term_own', `path:${CHILD_PATH}`, 'You were interrupted'])
+    assert.equal(start.includes('--agent'), false)
+    assert.deepEqual(w, { dispatchId: 'ctx_1', taskId: 'task_1', terminal: 'term_own', worktree: CHILD_PATH, reopened: true })
+  })
+}
+
+test('orca-cli: a tab that refuses the continuation is taken for gone, and the session resumes in a new terminal', async () => {
+  const { argvs, orca } = recordingCli({ 'terminal send': () => { throw new OrcaError('terminal_not_writable', '', 'terminal send') } })
+  const w = await orca.workerContinue(CONTINUE)
+  assert.deepEqual(verbsOf(argvs).slice(-3), ['terminal create', 'terminal wait', 'orchestration worker-start'])
+  assert.equal(w.reopened, true)
+  const other = recordingCli({ 'terminal send': () => { throw new OrcaError('runtime_unavailable', '', 'terminal send') } })
+  await assert.rejects(other.orca.workerContinue(CONTINUE), /runtime_unavailable/)
+  assert.equal(verbsOf(other.argvs).includes('terminal create'), false)
+})
+
+test("orca-cli: a kept agent's release leaves its tab open", async () => {
+  const { argvs, orca } = recordingCli()
+  const w = await orca.workerStart(START)
+  await orca.workerRelease({ dispatch: w.dispatchId, keepTerminal: true })
+  assert.deepEqual(verbsOf(argvs.slice(3)), ['orchestration worker-release'])
+})
+
+// --- transcripts: where each harness writes one, found from its session id ---
+
+test('transcripts: a Claude session is found under its worktree\'s project slug, or by scanning every project', () => {
+  const home = tmp()
+  const wt = join(home, 'wt', 'run_1-3')
+  const projects = join(home, '.claude', 'projects')
+  const at = join(projects, claudeSlug(wt), `${SID}.jsonl`)
+  assert.equal(transcriptPath({ harness: 'claude', sessionId: SID, worktree: wt, home, env: {} }), null)
+  mkdirSync(dirname(at), { recursive: true })
+  writeFileSync(at, '{}\n')
+  assert.ok(!claudeSlug(wt).includes('_') && !claudeSlug(wt).includes(':'))
+  assert.equal(transcriptPath({ harness: 'claude', sessionId: SID, worktree: wt, home, env: {} }), at)
+  const other = '1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f'
+  const elsewhere = join(projects, 'shortened-slug-1a2b', `${other}.jsonl`)
+  mkdirSync(dirname(elsewhere), { recursive: true })
+  writeFileSync(elsewhere, '{}\n')
+  assert.equal(transcriptPath({ harness: 'claude', sessionId: other, worktree: wt, home, env: {} }), elsewhere)
+  assert.equal(transcriptPath({ harness: 'claude', sessionId: other, worktree: wt, scan: false, home, env: {} }), null)
+})
+
+test('transcripts: a pi session is found by its id in its worktree\'s session dir, whatever timestamp its name carries', () => {
+  const home = tmp()
+  const wt = join(home, 'wt', 'run_1-3')
+  assert.ok(piDir(wt).startsWith('--') && piDir(wt).endsWith('run_1-3--'), piDir(wt))
+  const at = join(home, '.pi', 'agent', 'sessions', piDir(wt), `2026-09-24T16-26-07-244Z_${SID}.jsonl`)
+  mkdirSync(dirname(at), { recursive: true })
+  writeFileSync(at, '{"type":"session"}\n')
+  assert.equal(transcriptPath({ harness: 'pi', sessionId: SID, worktree: wt, home, env: {} }), at)
+  assert.equal(transcriptPath({ harness: 'pi', sessionId: SID, worktree: null, home, env: {} }), at, 'found by scanning')
+})
+
+test("transcripts: size is the transcript's bytes as it grows, and null while none is written", () => {
+  const home = tmp()
+  const wt = join(home, 'wt')
+  const t = sessionTranscripts({ home, env: {} })
+  assert.equal(t.size({ harness: 'claude', sessionId: SID, worktree: wt }), null)
+  const at = join(home, '.claude', 'projects', claudeSlug(wt), `${SID}.jsonl`)
+  mkdirSync(dirname(at), { recursive: true })
+  writeFileSync(at, 'abc\n')
+  assert.equal(t.size({ harness: 'claude', sessionId: SID, worktree: wt }), 4)
+  appendFileSync(at, 'defg\n')
+  assert.equal(t.size({ harness: 'claude', sessionId: SID, worktree: wt }), 9)
+})
+
 // Board status: in progress while an isolated agent works, in review for a
 // Gate agent, completed once an agent reports the PR it published.
 const PUB_SCHEMA = { type: 'object', required: ['worktree', 'pr_url', 'published'], properties: { worktree: { type: 'string' }, pr_url: { type: 'string' }, published: { type: 'boolean' } } }
@@ -1055,7 +1255,7 @@ function lifecycleOn(orca, settings = FAST) {
   const lines = []
   const life = agentLifecycle({
     orca, clock: fakeClock(), limits: { ...SETTINGS, ...settings }, out: (s) => lines.push(s), stateDir: tmp(),
-    objective: () => 'the objective', journal: (e) => journal.push(e), keep: (k) => (kept.push(k), k),
+    objective: () => 'the objective', journal: (e) => journal.push(e), keep: (k) => (kept.push(k), k), transcripts: fakeTranscripts(orca),
   })
   let n = 0
   const call = (label, more = {}) => {
@@ -1163,12 +1363,16 @@ function assertEntries(journal) {
 const iso = (ms) => new Date(ms).toISOString()
 
 test("journal: every entry is timestamped from the runner's clock", async () => {
-  const r = await runOne(async ({ state, clock }) => {
-    state.onNudge = () => { state.lastOutputAt = clock.now() + 1000 }
-  })
+  const r = await runOne(async () => {})
   assertEntries(r.journal)
-  assert.deepEqual(r.journal.map((e) => [e.type, e.at]), [['started', iso(0)], ['failed', iso(r.stop.at)]])
-  assert.ok(r.stop.at >= 40 * MIN)
+  const at = (c) => iso(c.at)
+  const [n1, n2, n3, n4] = r.nudges
+  const [c1, c2, c3] = r.continues
+  assert.deepEqual(r.journal.map((e) => [e.type, e.at]), [
+    ['started', iso(0)], ['nudge', at(n1)], ['continued', at(c1)], ['nudge', at(n2)], ['continued', at(c2)],
+    ['nudge', at(n3)], ['continued', at(c3)], ['nudge', at(n4)], ['failed', at(r.releases[0])],
+  ])
+  within(r.releases[0].at, 160 * MIN, 'failure')
 })
 
 test('journal: started names the dispatch, harness, runner-assigned session, worktree and terminal of Claude and pi workers alike', async () => {
@@ -1213,8 +1417,12 @@ const ATTEMPTS = RUNNER_SETTINGS.retryBackoffMs.length + 1
 const FAILURES = [
   ['never started', async () => {}, { orcaPatch: { workerStart: async () => { throw new Error('orca orchestration worker-start: outcome_unknown') } } },
     /^its worker did not start: orca orchestration worker-start: outcome_unknown$/, ATTEMPTS],
-  ['died', async ({ state }) => { state.gone = true }, {}, /^its terminal is gone, with no result$/, 1],
-  ['over a limit', async () => {}, {}, /^silent for 40 minutes, with no result$/, 1],
+  ['died past the continuation cap', async function dies({ state }) {
+    state.gone = true
+    state.onContinue = dies
+  }, {}, /^its terminal is gone, and its session was already continued 3 times, the cap of 3, with no result$/, 1],
+  ['stuck past the continuation cap', async () => {}, {}, /^no movement in its transcript or terminal for 40 minutes, and its session was already continued 3 times, the cap of 3, with no result$/, 1],
+  ['blocked on a human', async ({ state }) => { state.waiting = '{"evidence":"hook"}' }, {}, /^blocked on a human, unanswered for 30 minutes, with no result$/, 1],
   ['invalid result', async ({ prompt, preamble, orca }) => {
     const argv = submitArgvIn(prompt, preamble)
     writeFileSync(argv[argv.indexOf('--result') + 1], JSON.stringify(BAD))
@@ -1364,7 +1572,10 @@ test('runner.log: every line the runner printed, in order and timestamped, the o
 })
 
 test("runner.log: each line carries the clock's time when it was printed", async () => {
-  const r = await runOne(async ({ state }) => { state.idle = true })
+  const r = await runOne(async ({ state }) => {
+    state.idle = true
+    submitsOnContinue(state)
+  })
   const nudges = r.log.filter((l) => l.includes('nudging it'))
   assert.equal(nudges.length, 2)
   assert.deepEqual(nudges.map((l) => l.slice(0, 24)), r.nudges.map((n) => iso(n.at)))

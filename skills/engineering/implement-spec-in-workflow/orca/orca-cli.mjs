@@ -79,8 +79,19 @@ const WORD = /^[\w.:/@+=-]+$/
 // the command is still built, which is how a call's launch words are checked
 // before any worker starts.
 export function launchCommand({ harness = 'claude', model, effort, permissionMode, sessionId }) {
+  return commandLine(harness, sessionId && ['--session-id', sessionId], { model, effort, permissionMode })
+}
+
+// The same launch, carrying on the session it started (session continuation,
+// ADR-0013). Claude refuses a --session-id already in use, so it resumes with
+// --resume; pi's --session-id reopens the session it names.
+export function resumeCommand({ harness = 'claude', model, effort, permissionMode, sessionId }) {
+  if (!sessionId) throw new Error(`resumeCommand: no session id to continue for ${harness}`)
+  return commandLine(harness, harness === 'claude' ? ['--resume', sessionId] : ['--session-id', sessionId], { model, effort, permissionMode })
+}
+
+function commandLine(harness, session, { model, effort, permissionMode }) {
   let argv
-  const session = sessionId && ['--session-id', sessionId]
   if (harness === 'pi') {
     // --approve trusts project-local files: an unattended pi worker would
     // otherwise stop at pi's trust prompt with nobody to answer it.
@@ -111,6 +122,9 @@ const nameOf = (path) => String(path).split(/[\\/]/).pop()
 // Rows a worktree list asks for: Orca's default page is 200, counted across
 // every repo, and its own UI asks for 1e4.
 const WORKTREE_LIST_LIMIT = 10000
+
+// What Orca answers a verb aimed at a tab that is closed, or never existed.
+const TAB_GONE = new Set(['terminal_not_writable', 'terminal_exited', 'terminal_handle_stale'])
 
 // call(args, timeoutMs) and git(cwd, args, timeoutMs) run one Orca or git
 // command; clock.timer bounds every call at callMs, plus any wait it asks for.
@@ -267,7 +281,6 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
         gone: Boolean(handle) && (!r.terminal || r.terminal.orphaned === true),
         exited: r.observation?.status === 'exited',
         waiting: wait && typeof wait === 'object' ? JSON.stringify(wait).slice(0, 300) : null,
-        lastOutputAt: r.terminal?.lastOutputAt ?? null,
       }
     },
 
@@ -293,12 +306,55 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       await orca(['orchestration', 'worker-stop', '--dispatch', dispatch])
     },
 
-    async workerRelease({ dispatch }) {
+    // keepTerminal: the agent failed and is kept (ADR-0012), so its tab stays
+    // open for the operator.
+    async workerRelease({ dispatch, keepTerminal = false }) {
       await orca(['orchestration', 'worker-release', '--dispatch', dispatch])
       const own = ownTerminals.get(dispatch)
       if (own) {
         ownTerminals.delete(dispatch)
-        await closeQuietly(own)
+        if (!keepTerminal) await closeQuietly(own)
+      }
+    },
+
+    // Session continuation (decision D3 on #43). With its tab alive, the
+    // stalled process is stopped, the harness resumes the same session in
+    // the same terminal, and `prompt` is typed to it; the dispatch is
+    // unchanged, so the worker's preamble IDs still settle it. With the tab
+    // gone (`reopen`, or the tab refusing input) the resume runs in a new
+    // terminal in the same worktree, and worker-start adopts it with `prompt`
+    // as its spec: Orca settles a dispatch only from the pane it was issued
+    // to, so the new pane needs a new dispatch, whose preamble the prompt
+    // points the agent at.
+    async workerContinue({ run, dispatch, terminal, worktree, title, prompt, harness = 'claude', model, effort, permissionMode, sessionId, reopen = false }) {
+      const command = resumeCommand({ harness, model, effort, permissionMode, sessionId })
+      if (!reopen && terminal) {
+        try {
+          // Claude exits only on two Ctrl-Cs close together: two sequential
+          // sends a second apart were not enough (live, Orca 1.4.209). At a
+          // shell prompt, as after the agent exited, they are harmless.
+          const interrupt = () => orca(['terminal', 'send', '--terminal', terminal, '--interrupt'])
+          await Promise.all([interrupt(), interrupt()])
+          await interrupt()
+          await orca(['terminal', 'send', '--terminal', terminal, '--text', command, '--enter'])
+          await waitIdle(terminal, command)
+          await orca(['terminal', 'send', '--terminal', terminal, '--text', prompt, '--enter'])
+          return { dispatchId: dispatch, terminal, worktree, reopened: false }
+        } catch (e) {
+          if (!TAB_GONE.has(e?.code)) throw e
+        }
+      }
+      const place = worktree ? ['--worktree', `path:${worktree}`] : ['--worktree', 'current']
+      const t = await orca(['terminal', 'create', ...(worktree ? place : []), '--title', title, '--command', command])
+      const handle = t.terminal.handle
+      try {
+        await waitIdle(handle, command)
+        const r = await orca(workerStartArgs({ run, prompt, title, place, terminal: handle }))
+        ownTerminals.set(r.dispatchId, handle)
+        return { dispatchId: r.dispatchId, taskId: r.taskId, terminal: handle, worktree: worktree ?? pathOf(t.terminal.worktreeId), reopened: true }
+      } catch (e) {
+        await closeQuietly(handle)
+        throw e
       }
     },
 
