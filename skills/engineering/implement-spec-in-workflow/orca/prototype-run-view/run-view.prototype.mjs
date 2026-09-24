@@ -1,13 +1,14 @@
 // PROTOTYPE — throwaway. Question: what should the Orca runner's run view look like? (#43)
-// Three structurally different layouts over the same fake, live-ticking run. Switch with 1/2/3 or v.
-// Everything is fake: no Orca calls, actions only flash the command they would run.
+// One view, three layouts over the same fake, live-ticking run. Tab cycles them instantly; the
+// status bar at the bottom shows which is on (and is clickable). Everything is fake: no Orca
+// calls, actions only flash the command they would run.
 //
-//   A  Phase tree   — htop: one row per agent under its phase, detail pane for the selection
-//   B  Ticket lanes — the task graph: one column per ticket, its agents stacked, blockers shown
-//   C  Timeline     — runs sidebar (standalone mode) + a Gantt of agents over time + runner.log tail
+//   Tree      — htop: phases fold/unfold (click, Enter, ←→), one row per agent, detail pane
+//   Lanes     — the task graph: one lane per ticket, its agents as a pipeline, needs/unblocks
+//   Timeline  — runs sidebar (standalone) + Gantt of agents over time + runner.log tail
 //
-// Keys: ↑↓ (and ←→ in B) move · Enter/click focus tab · r reclaim · R resume · e end-of-run prompt
-//       s standalone run list (A/B) · Tab switch pane (C) · 1/2/3/v variant · q quit
+// Keys: Tab next layout · ↑↓←→ move · Enter/click focus tab · r reclaim · R resume
+//       e end-of-run prompt · s all runs (Tree/Lanes) · q quit
 import termkit from 'terminal-kit'
 
 const term = termkit.terminal
@@ -43,7 +44,7 @@ const agents = [
 ]
 const PHASES = ['Discover', 'Layer0', 'Implement', 'Gate', 'Publish', 'Integrate']
 const TICKETS = [1159, 1160, 1087, 1154, 1156, 1158, 1162, 1163]
-const BLOCKS = { 1154: [1087], 1156: [1087], 1163: [1162] }
+const BLOCKS = { 1154: [1087], 1156: [1087] }
 const RUN = { meta: 'implement-spec-783', project: 'controlayer', id: 'run_55d94954c294', spec: '#783 W5.2', start: min(95), runnerAlive: true }
 const RUNS = [
   { project: 'controlayer', id: 'run_55d94954c294', spec: '#783 W5.2', status: 'live', note: '4 running · 1 stuck · 1 failed', age: '1h35m' },
@@ -100,45 +101,78 @@ const counts = () => {
   return ['running', 'continued', 'stuck', 'queued', 'done', 'failed'].filter((s) => by[s]).map((s) => c(SCOL[s], `${GLYPH[s]} ${by[s]} ${s}`)).join('  ')
 }
 
+
 // ---------- ui state ----------
-let variant = 'A', sel = 0, laneCol = 0, laneRow = 0, pane = 'agents', runSel = 0, standalone = false
+const VIEWS = [['A', 'Tree'], ['B', 'Lanes'], ['C', 'Timeline']]
+let variant = process.env.PROTO_VIEW ?? 'A', sel = +(process.env.PROTO_SEL ?? 0), laneRow = +(process.env.PROTO_LANE ?? 0), laneCol = +(process.env.PROTO_STAGE ?? 0), pane = 'agents', runSel = 0, standalone = false
+const collapsed = new Set((process.env.PROTO_FOLD ?? '').split(',').filter(Boolean))
 let flash = '', modal = null, hits = []
 const say = (m) => { flash = m; render() }
+const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '')
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
+const mix = (as) => ['running', 'continued', 'stuck', 'failed', 'queued', 'done']
+  .map((s) => [s, as.filter((a) => a.state === s).length]).filter(([, n]) => n)
+  .map(([s, n]) => c(SCOL[s], `${GLYPH[s]}${n}`)).join(' ')
 
 function header(W) {
   const run = `${bold(RUN.meta)} ${grey('·')} ${RUN.project} ${grey('·')} ${grey(RUN.id)} ${grey('·')} spec ${RUN.spec} ${grey('·')} runner ${c('32', '● alive')} ${grey('·')} ${dur({ start: RUN.start, state: 'x' })}`
   return [fit(' ' + run, W), fit(' ' + counts(), W), fit(grey('─'.repeat(W)), W)]
 }
-function footer(W) {
-  const keys = variant === 'B' ? '←→↑↓ move' : '↑↓ move'
-  const help = grey(` ${keys} · ⏎/click focus tab · r reclaim · R resume · e end-of-run · ${variant === 'C' ? 'Tab pane' : 's runs'} · q quit`)
-  const names = { A: 'Phase tree', B: 'Ticket lanes', C: 'Timeline' }
-  const bar = c('45;30', ` PROTOTYPE  ◀ ${variant} (${names[variant]}) ▶  1/2/3 or v `)
-  return [fit(flash ? ' ' + c('1;36', flash) : '', W), fit(help, W), fit(' '.repeat(Math.max(0, Math.floor((W - vis(bar)) / 2))) + bar, W)]
+function footer(W, H) {
+  const keysBy = { A: '↑↓ move · ←→ / click a phase to fold', B: '↑↓ ticket · ←→ stage', C: '↑↓ move · ←→ runs ⇄ agents' }
+  const help = grey(` ${keysBy[variant]} · ⏎/click focus tab · r reclaim · R resume · e end-of-run${variant !== 'C' ? ' · s all runs' : ''} · q quit`)
+  let bar = ' ', x = 2
+  for (const [key, name] of VIEWS) {
+    const label = ` ${name} `
+    hits.push({ y: H, x0: x, x1: x + label.length - 1, view: key })
+    bar += (key === variant ? c('1;30;46', label) : c('37;100', label)) + ' '
+    x += label.length + 1
+  }
+  bar += grey(' Tab ▸ next layout')
+  const tag = c('45;30', ' PROTOTYPE ')
+  return [fit(flash ? ' ' + c('1;36', flash) : '', W), fit(help, W), fit(bar + ' '.repeat(Math.max(0, W - vis(bar) - 12)) + tag, W)]
 }
 
-// ---------- variant A: phase tree ----------
-function rowsA() { const r = []; for (const p of PHASES) { const as = agents.filter((a) => a.phase === p); if (as.length) { r.push({ phase: p, as }); as.forEach((a) => r.push({ a })) } } return r }
+// ---------- A: tree ----------
+function rowsA() {
+  const r = []
+  for (const p of PHASES) {
+    const as = agents.filter((a) => a.phase === p)
+    if (!as.length) continue
+    r.push({ phase: p, as })
+    if (!collapsed.has(p)) as.forEach((a) => r.push({ a }))
+  }
+  return r
+}
 function viewA(W, H) {
-  const out = [], rows = rowsA(), sels = rows.filter((r) => r.a)
-  sel = Math.max(0, Math.min(sel, sels.length - 1))
-  const cur = sels[sel].a
+  const out = [], rows = rowsA()
+  sel = clamp(sel, 0, rows.length - 1)
+  const cur = rows[sel]
   out.push(fit(grey('   #   AGENT                    STATE            CONTEXT           TOKENS   ELAPSED'), W))
-  for (const r of rows) {
+  rows.forEach((r, i) => {
+    let line
     if (r.phase) {
       const done = r.as.filter((a) => a.state === 'done').length
-      out.push(fit(` ${bold('▾ ' + r.phase)} ${grey(`${done}/${r.as.length}`)}`, W)); continue
+      const peak = Math.max(...r.as.map((a) => a.ctx))
+      line = ` ${collapsed.has(r.phase) ? '▸' : '▾'} ${bold(r.phase.padEnd(10))} ${grey(`${done}/${r.as.length} done`.padEnd(10))}  ${mix(r.as)}${collapsed.has(r.phase) && peak ? grey('   peak ctx ') + c(band(peak), k(peak)) : ''}`
+    } else {
+      const a = r.a
+      line = `  ${String(a.n).padStart(3)}   ${a.label.padEnd(22)} ${fit(st(a), 16)} ${ctxCell(a)}   ${grey(k(a.cum).padStart(6))}   ${dur(a).padStart(7)}`
     }
-    const a = r.a
-    const line = `  ${String(a.n).padStart(3)}   ${a.label.padEnd(22)} ${fit(st(a), 16)} ${ctxCell(a)}   ${grey(k(a.cum).padStart(6))}   ${dur(a).padStart(7)}`
-    hits.push({ y: out.length + 4, a })
-    out.push(a === cur ? inv(fit(vis(line) ? line.replace(/\x1b\[[0-9;]*m/g, '') : line, W)) : fit(line, W))
-  }
-  const body = H - 3 - 3 - 7
+    hits.push({ y: out.length + 4, row: i })
+    out.push(i === sel ? inv(fit(strip(line), W)) : fit(line, W))
+  })
+  const body = H - 3 - 3 - 6
   while (out.length < body) out.push(fit('', W))
   out.length = Math.min(out.length, body)
   out.push(fit(grey('─'.repeat(W)), W))
-  out.push(...detail(cur, W))
+  if (cur.a) out.push(...detail(cur.a, W).slice(0, 5))
+  else {
+    const as = cur.as
+    out.push(fit(` ${bold(cur.phase)}  ${as.length} agents  ${mix(as)}`, W))
+    as.filter((a) => a.reason || a.blockedBy).forEach((a) => out.push(fit(`   ${c(SCOL[a.state], GLYPH[a.state])} ${a.label}: ${grey(a.reason ?? `blocked by #${a.blockedBy}`)}`, W)))
+    out.push(fit(grey(`   ${collapsed.has(cur.phase) ? '→ / Enter / click to unfold' : '← / Enter / click to fold'}`), W))
+  }
   return out
 }
 function detail(a, W) {
@@ -151,46 +185,70 @@ function detail(a, W) {
   ]
 }
 
-// ---------- variant B: ticket lanes ----------
+// ---------- B: lanes ----------
+const ORDER = { Implement: 0, Gate: 1, Fix: 2, Publish: 3 }
+function stagesOf(t) {
+  const as = agents.filter((a) => a.ticket === t).sort((a, b) => ORDER[a.phase] - ORDER[b.phase] || a.n - b.n)
+  if (!as.some((a) => a.phase === 'Gate')) as.push({ placeholder: true, phase: 'Gate', label: 'gate' })
+  if (!as.some((a) => a.phase === 'Publish')) as.push({ placeholder: true, phase: 'Publish', label: 'publish' })
+  return as
+}
+const short = (a) => a.placeholder ? a.label : a.phase === 'Implement' ? `impl ${a.label.split(':')[2]}` : a.phase === 'Gate' ? `gate ${a.label.split(':')[2]}` : 'publish'
+const CHIP = 23
+function chip(a) {
+  if (a.placeholder) return fit(grey(`○ ${a.label}`), CHIP)
+  const tail = a.state === 'queued' ? grey('waiting') : `${a.ctx ? c(band(a.ctx), k(a.ctx)) : grey('—')} ${grey(dur(a))}`
+  return fit(`${c(SCOL[a.state], GLYPH[a.state])} ${c(SCOL[a.state], short(a).padEnd(8))} ${tail}`, CHIP)
+}
+function ticketState(t) {
+  const as = agents.filter((a) => a.ticket === t)
+  const pub = as.find((a) => a.pr)
+  if (pub) return c('32', `✓ PR #${pub.pr}`)
+  if (as.some((a) => a.state === 'failed')) return c('31', '✗ failed')
+  if ((BLOCKS[t] ?? []).some((b) => !agents.some((a) => a.ticket === b && a.pr))) return c('33', '⧗ blocked')
+  if (as.some((a) => a.state === 'stuck')) return c('33', '◐ stuck')
+  if (as.some(live)) return c('36', '● running')
+  return grey('· queued')
+}
 function viewB(W, H) {
-  const out = [], colW = Math.max(16, Math.floor((W - 2) / TICKETS.length))
-  const runLevel = agents.filter((a) => !a.ticket)
-  out.push(fit(' ' + runLevel.map((a) => `${c(SCOL[a.state], GLYPH[a.state])} ${a.label} ${a.ctx ? c(band(a.ctx), k(a.ctx)) : ''}`).join(grey('  ──▶  ')), W))
+  const out = []
+  const chain = ['discover', 'layer0'].map((l) => agents.find((a) => a.label === l))
+  const integ = agents.find((a) => a.label === 'integration')
+  const doneT = TICKETS.filter((t) => agents.some((a) => a.ticket === t && a.pr)).length
+  out.push(fit(` ${chain.map((a) => `${c(SCOL[a.state], GLYPH[a.state])} ${a.label}`).join(grey(' ─▶ '))}${grey(' ─▶ ')}${bold(`${TICKETS.length} tickets`)} ${grey(`(${doneT} published)`)}${grey(' ─▶ ')}${c(SCOL[integ.state], GLYPH[integ.state])} integration ${grey('(waits on all tickets)')}`, W))
   out.push(fit('', W))
-  laneCol = Math.max(0, Math.min(laneCol, TICKETS.length - 1))
-  const lanes = TICKETS.map((t) => agents.filter((a) => a.ticket === t))
-  laneRow = Math.max(0, Math.min(laneRow, lanes[laneCol].length - 1))
-  const tstate = (as) => as.some((a) => a.state === 'failed') ? c('31', '✗') : as.every((a) => a.state === 'done') ? c('32', '✓') : as.some((a) => a.state === 'stuck') ? c('33', '◐') : as.some(live) ? c('36', '●') : grey('·')
-  out.push(fit(' ' + TICKETS.map((t, i) => fit(`${tstate(lanes[i])} ${i === laneCol ? bold(c('4', '#' + t)) : bold('#' + t)}`, colW)).join(''), W))
-  out.push(fit(' ' + TICKETS.map((t) => fit(BLOCKS[t] ? c('33', `◀ #${BLOCKS[t].join(',#')}`) : grey('—'), colW)).join(''), W))
-  const depth = Math.max(...lanes.map((l) => l.length))
-  for (let r = 0; r < depth; r++) {
-    for (const line of [0, 1, 2]) {
-      let s = ' '
-      lanes.forEach((l, i) => {
-        const a = l[r]
-        if (!a) { s += fit('', colW); return }
-        const short = a.label.split(':').slice(2).join(':') || a.label.split(':')[0]
-        const txt = line === 0 ? `┌ ${a.phase[0]} ${short} ${c(SCOL[a.state], GLYPH[a.state])}`
-          : line === 1 ? `│ ${a.ctx ? c(band(a.ctx), k(a.ctx).padStart(4)) : grey('   —')} ${grey(dur(a))}`
-          : `└${grey('─'.repeat(colW - 3))}`
-        const cell = fit(txt, colW - 1) + ' '
-        if (line === 0) hits.push({ y: out.length + 4, x0: 2 + i * colW, x1: 1 + (i + 1) * colW, a, col: i, row: r })
-        s += i === laneCol && r === laneRow && line < 2 ? inv(cell.replace(/\x1b\[[0-9;]*m/g, '')) : cell
-      })
-      out.push(fit(s, W))
-    }
-  }
-  const body = H - 6 - 5
+  out.push(fit(grey('   TICKET   STATUS        NEEDS      UNBLOCKS    PIPELINE  (implement ─▶ gate ─▶ publish)'), W))
+  laneRow = clamp(laneRow, 0, TICKETS.length - 1)
+  TICKETS.forEach((t, i) => {
+    const stg = stagesOf(t)
+    if (i === laneRow) laneCol = clamp(laneCol, 0, stg.length - 1)
+    const needs = BLOCKS[t] ? BLOCKS[t].map((b) => '#' + b).join(',') : '—'
+    const unblocks = Object.entries(BLOCKS).filter(([, bs]) => bs.includes(t)).map(([x]) => '#' + x).join(',') || '—'
+    const pre = ` ${i === laneRow ? c('1;36', '▶') : ' '} ${bold('#' + t)}  ${fit(ticketState(t), 13)} ${fit(needs === '—' ? grey(needs) : c('33', needs), 10)} ${fit(unblocks === '—' ? grey(unblocks) : c('35', unblocks), 11)} `
+    let line = pre, x = vis(pre) + 1
+    stg.forEach((a, j) => {
+      const ch = chip(a)
+      hits.push({ y: out.length + 4, x0: x, x1: x + CHIP - 1, lane: i, stage: j })
+      line += i === laneRow && j === laneCol ? inv(strip(ch)) : ch
+      x += CHIP
+      if (j < stg.length - 1) { line += grey(' ─▶ '); x += 4 }
+    })
+    out.push(fit(line, W))
+    const failedDep = BLOCKS[t] && agents.some((a) => BLOCKS[t].includes(a.ticket) && a.state === 'failed')
+    const note = stg.find((a) => a.reason) ?? (failedDep ? { reason: `will not start: #${BLOCKS[t].join(', #')} failed`, state: 'queued' } : null)
+    out.push(fit(note ? `${' '.repeat(vis(pre))}${c(SCOL[note.state] ?? '90', '└ ' + note.reason)}` : '', W))
+  })
+  const body = H - 6 - 6
   while (out.length < body) out.push(fit('', W))
   out.length = Math.min(out.length, body)
-  const cur = lanes[laneCol][laneRow]
   out.push(fit(grey('─'.repeat(W)), W))
-  out.push(...detail(cur, W).slice(0, 4))
+  const cur = stagesOf(TICKETS[laneRow])[laneCol]
+  if (cur && !cur.placeholder) out.push(...detail(cur, W).slice(0, 5))
+  else out.push(fit(grey(` #${TICKETS[laneRow]} ${cur?.label ?? ''}: not started yet — runs after the stages before it`), W))
   return out
 }
 
-// ---------- variant C: runs sidebar + timeline ----------
+// ---------- C: timeline ----------
 function viewC(W, H) {
   const out = [], SW = 30, GW = W - SW - 1
   const side = []
@@ -231,7 +289,7 @@ function viewC(W, H) {
   return { out, cur }
 }
 
-// ---------- standalone run list (A/B) ----------
+// ---------- standalone run list (Tree/Lanes) ----------
 function viewRuns(W, H) {
   const out = [fit(bold(' All Orca-runner runs on this machine') + grey('  (standalone mode)'), W), fit('', W)]
   let lastP = null
@@ -247,20 +305,21 @@ function viewRuns(W, H) {
 }
 
 // ---------- render ----------
+function dims() { return [Number.isFinite(term.width) ? term.width : 140, Number.isFinite(term.height) ? term.height : 40] }
 function render() {
-  const W = Number.isFinite(term.width) ? term.width : 140, H = Number.isFinite(term.height) ? term.height : 40
+  const [W, H] = dims()
   hits = []
   let body
   if (standalone && variant !== 'C') body = viewRuns(W, H)
   else if (variant === 'A') body = viewA(W, H)
   else if (variant === 'B') body = viewB(W, H)
   else body = viewC(W, H).out
-  let lines = [...header(W), ...body]
+  const lines = [...header(W), ...body]
   lines.length = Math.min(lines.length, H - 3)
   while (lines.length < H - 3) lines.push(fit('', W))
-  lines.push(...footer(W))
+  lines.push(...footer(W, H))
   if (modal) {
-    const mw = Math.min(W - 8, 78), top = Math.floor(H / 2) - 3, left = Math.floor((W - mw) / 2)
+    const mw = Math.min(W - 8, 84), top = Math.floor(H / 2) - 3, left = Math.floor((W - mw) / 2)
     const box = [c('7', fit(' ' + modal.title, mw)), ...modal.lines.map((l) => c('100', fit(' ' + l, mw))), c('100', fit('', mw))]
     box.forEach((b, i) => { lines[top + i] = fit(' '.repeat(left) + b, W) })
   }
@@ -269,9 +328,9 @@ function render() {
 
 // ---------- actions (stubs) ----------
 function current() {
-  if (variant === 'A') return rowsA().filter((r) => r.a)[sel]?.a
-  if (variant === 'B') return agents.filter((a) => a.ticket === TICKETS[laneCol])[laneRow]
-  return viewC(Number.isFinite(term.width) ? term.width : 140, Number.isFinite(term.height) ? term.height : 40).cur
+  if (variant === 'A') return rowsA()[sel]?.a
+  if (variant === 'B') { const a = stagesOf(TICKETS[laneRow])[laneCol]; return a?.placeholder ? null : a }
+  const [W, H] = dims(); return viewC(W, H).cur
 }
 function focus(a) { if (a) say(`→ orca terminal switch --terminal ${a.handle}   (would focus ${a.worktree}; stub)`) }
 function reclaim(a) {
@@ -279,7 +338,7 @@ function reclaim(a) {
   if (live(a) || a.state === 'stuck') { say(`✗ refuse: ${a.label} is live — stop it first`); return }
   if (a.n === 14) {
     modal = { title: `Reclaim ${a.label}?`, lines: [c('33', 'worktree has 1 unpushed commit (7c756286 on ticket/1087)'), '', '[f] force reclaim — commit is lost     [any other key] cancel'], on: (key) => key === 'f' && say(`→ worker-release · terminal close · worktree rm --force ${a.worktree}   (stub)`) }
-    render(); return
+    return
   }
   say(`→ worker-release ${a.handle} · terminal close · worktree rm ${a.worktree}   (stub)`)
 }
@@ -291,12 +350,13 @@ function endPrompt() {
       `        reclaims: ${agents.filter((a) => a.state === 'done').length} done agents`, '[a] reclaim everything      [n] keep everything      then: open run view · exit'],
     on: (key) => say(key === 'a' ? 'reclaim everything (stub)' : key === 'n' ? 'kept everything (stub)' : `kept ${kept.length}, reclaimed the rest (stub)`),
   }
-  render()
 }
 const resume = () => {
   const r = RUNS[runSel]
-  say(standalone || variant === 'C' ? `→ orca terminal create --command "node runner.mjs … --resume" · run-use ${r.id}   (stub)` : '→ runner is alive; Resume is offered for dead runners (try s / C sidebar)')
+  say(standalone || variant === 'C' ? `→ orca terminal create --command "node runner.mjs … --resume" · run-use ${r.id}   (stub)` : '→ runner is alive; Resume is offered for dead runners (try s, or the Timeline sidebar)')
 }
+const toggle = (p) => { if (collapsed.has(p)) collapsed.delete(p); else collapsed.add(p) }
+const nextView = () => { variant = VIEWS[(VIEWS.findIndex(([key]) => key === variant) + 1) % VIEWS.length][0]; standalone = false }
 
 // ---------- input ----------
 function quit() { term.grabInput(false); term.hideCursor(false); term.fullscreen(false); process.exit(0) }
@@ -306,18 +366,28 @@ term.on('key', (name) => {
   if (name === 'CTRL_C' || (name === 'q' && !modal)) return quit()
   if (modal) { const m = modal; modal = null; flash = ''; m.on(name === 'ENTER' ? 'enter' : name); render(); return }
   flash = ''
-  if (name === '1' || name === '2' || name === '3') { variant = 'ABC'[+name - 1]; standalone = false }
-  else if (name === 'v') { variant = 'ABC'['ABC'.indexOf(variant) === 2 ? 0 : 'ABC'.indexOf(variant) + 1]; standalone = false }
+  const runsPane = standalone || (variant === 'C' && pane === 'runs')
+  if (name === 'TAB') nextView()
   else if (name === 's' && variant !== 'C') standalone = !standalone
-  else if (name === 'TAB' && variant === 'C') pane = pane === 'agents' ? 'runs' : 'agents'
   else if (name === 'UP' || name === 'DOWN') {
     const d = name === 'UP' ? -1 : 1
-    if (standalone || (variant === 'C' && pane === 'runs')) runSel = Math.max(0, Math.min(RUNS.length - 1, runSel + d))
+    if (runsPane) runSel = clamp(runSel + d, 0, RUNS.length - 1)
     else if (variant === 'B') laneRow += d
     else sel += d
-  } else if ((name === 'LEFT' || name === 'RIGHT') && variant === 'B') { laneCol += name === 'LEFT' ? -1 : 1; laneRow = 0 }
-  else if (name === 'ENTER') standalone || (variant === 'C' && pane === 'runs') ? say(`open ${RUNS[runSel].id} (attached view of that run; stub)`) : focus(current())
-  else if (name === 'r') reclaim(current())
+  } else if (name === 'LEFT' || name === 'RIGHT') {
+    const d = name === 'LEFT' ? -1 : 1
+    if (variant === 'B' && !standalone) laneCol += d
+    else if (variant === 'C') pane = d < 0 ? 'runs' : 'agents'
+    else if (variant === 'A' && !standalone) {
+      const rows = rowsA(), r = rows[sel]
+      if (r?.phase) { if (d < 0) collapsed.add(r.phase); else collapsed.delete(r.phase) }
+      else if (r?.a && d < 0) sel = rows.findIndex((x) => x.phase === r.a.phase)
+    }
+  } else if (name === 'ENTER') {
+    if (runsPane) say(`open ${RUNS[runSel].id} (attached view of that run; stub)`)
+    else if (variant === 'A' && rowsA()[sel]?.phase) toggle(rowsA()[sel].phase)
+    else focus(current())
+  } else if (name === 'r') reclaim(current())
   else if (name === 'R') resume()
   else if (name === 'e') endPrompt()
   render()
@@ -326,10 +396,23 @@ term.on('mouse', (name, d) => {
   if (name !== 'MOUSE_LEFT_BUTTON_PRESSED' || modal) return
   const h = hits.find((x) => x.y === d.y && (x.x0 == null || (d.x >= x.x0 && d.x <= x.x1)))
   if (!h) return
-  if (h.run != null) { runSel = h.run; pane = 'runs'; render(); return }
-  if (variant === 'A') sel = rowsA().filter((r) => r.a).findIndex((r) => r.a === h.a)
-  else if (variant === 'B') { laneCol = h.col; laneRow = h.row }
-  else { pane = 'agents'; sel = agents.filter((a) => a.state !== 'queued').concat(agents.filter((a) => a.state === 'queued')).indexOf(h.a) }
-  render(); focus(h.a)
+  flash = ''
+  if (h.view) { variant = h.view; standalone = false }
+  else if (h.run != null) { runSel = h.run; pane = 'runs' }
+  else if (h.row != null) {
+    sel = h.row
+    const r = rowsA()[sel]
+    if (r.phase) toggle(r.phase)
+    else { render(); focus(r.a); return }
+  } else if (h.lane != null) {
+    laneRow = h.lane; laneCol = h.stage
+    const a = stagesOf(TICKETS[laneRow])[laneCol]
+    if (!a.placeholder) { render(); focus(a); return }
+  } else if (h.a) {
+    pane = 'agents'
+    sel = agents.filter((a) => a.state !== 'queued').concat(agents.filter((a) => a.state === 'queued')).indexOf(h.a)
+    render(); focus(h.a); return
+  }
+  render()
 })
 render()
