@@ -42,9 +42,22 @@ Together, the journal and the log say what happened in a run, whether or not the
 | `warning` | something went wrong without failing the call: its worktree's display name or board status could not be set | `key`, `n`, `title`, `reason` |
 | `nudge` | the runner typed a nudge to a worker | `key`, `n`, `title`, `dispatchId`, `reason`, `attempt` (the nudge's number since the session started or was last continued) |
 | `continued` | a stuck or dead session was continued, in its own terminal or in a new one in its worktree | `key`, `n`, `title`, `dispatchId` and `terminal` (the ones it now runs under), `sessionId`, `reason`, `attempt` (1 to the cap), `reopened` (true when its tab was gone) |
-| `reattached` | a resumed runner took up a worker an earlier one started | `key`, `n`, `title`, `dispatchId`, `sessionId`, `terminal`, `worktree` |
+| `reattached` | a resumed runner took up a worker an earlier one started; a `continued` line follows if it had died | `key`, `n`, `title`, `dispatchId`, `sessionId`, `terminal`, `worktree`, and `continuations` if its session was already continued |
+| `run` | the Run is created, or a resume takes it over; a resume also carries the last one forward first | `runId`, `terminal` (the runner's, which the Run is bound to), and on the carried-forward line `lastN`, the highest call number the Run has used |
 
-`reattached` is defined here, and the behaviour that produces it writes it; the other types are written today. A resume reads only `type`, `key`, `result` and `retained`, so a journal from before timestamps and launch fields were added still resumes.
+A resume reads `type`, `key`, `n`, `result` and `retained`, the worker fields of `started`, `reattached` and `continued`, and the last `run`. A `started` line with no dispatch or session, as in a journal from before launch fields were added, is a call with no worker out, so such a journal still resumes.
+
+### Resume from a new terminal
+
+If the runner's tab dies, the run is paused, not lost: run the same command with `--resume` from any terminal, the old tab open or not. Orca refuses `worker-start` from any terminal but the Run's coordinator, so before it starts or continues any worker the resumed runner takes the journaled Run over with `orchestration run-use`, which binds the Run to its own terminal and fences the old one; the registry gains a `runner` line with the new terminal. It creates a Run only when the journal records none. A resume that replays every call touches no Orca at all.
+
+Each call then gets what the last run left it, matched by key and occurrence as replay is:
+- **finished**: replayed from the journal, as before; it starts no worker.
+- **its worker still out**: taken up, never started again. The runner asks Orca how it is (`workerReattach`). One Orca still shows live, or that settled meanwhile, is journaled `reattached` and watched as any worker, and its result is returned when it submits, to the files its prompt named. One whose tab closed, or whose agent exited, while no runner watched is continued in its own session and worktree (the session continuation below), in a new terminal if its tab is gone.
+- **never started**: started now, with the start retry.
+- **failed, changed or not in the journal**: runs live, and ends the replayed prefix.
+
+A call the last run left unsettled gave the script nothing to depend on, so it does not end the prefix. The resumed run numbers its calls on from the last run's, so a live call's `<runId>-<n>` child worktree never takes a name the Run already holds.
 
 ### The run registry
 
@@ -57,7 +70,7 @@ Beyond its state dir, every run is recorded in **`~/.claude/orca-runs.jsonl`**, 
 | `ended` | the script settles | `outcome`: `ok`, `partial` if any `agent()` returned `null`, `failed` if the script threw |
 | `reclaimed` | an agent or the whole run is reclaimed (not written by the runner) | `agent`, the worktree name `<runId>-<n>`; none for the whole run |
 
-`readRegistry()` folds these into each run's current state: `running` until `ended`, then its outcome; where its runner was last seen; and whether the run, or which of its agents, was reclaimed. A torn last line is skipped. A run with no `ended` may still be live or its runner may have died: Orca's terminal list says which. A resume creates a Run of its own, so it is armed as a new run with the same `runDir`; a resume that replays every call creates no Run and records nothing. `runScript` writes the registry only when handed a path, so the offline tests never touch the real one.
+`readRegistry()` folds these into each run's current state: `running` until `ended`, then its outcome; where its runner was last seen; and whether the run, or which of its agents, was reclaimed. A torn last line is skipped. A run with no `ended` may still be live or its runner may have died: Orca's terminal list says which. A resume takes the journaled Run over, so it records a `runner` line with its own terminal, and later `ended`, on that same run, never a second `armed`; a resume that replays every call takes nothing over and records nothing. `runScript` writes the registry only when handed a path, so the offline tests never touch the real one.
 
 The runner assigns each worker's session id. It generates the id and starts the harness with `--session-id`; both `claude` and `pi` accept that flag. Each attempt at a start gets a new one.
 

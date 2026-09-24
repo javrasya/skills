@@ -184,6 +184,23 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
     return path
   }
 
+  async function workerShow({ dispatch }) {
+    const r = await orca(['orchestration', 'worker-show', '--dispatch', dispatch])
+    const handle = r.worker?.agentTerminalHandle ?? null
+    // agentWait: an object is a wait only a human can answer; null means
+    // Orca looked and found none; absent means it never looked.
+    const wait = r.observation?.agentWait ?? r.terminal?.agentWait ?? null
+    return {
+      settled: r.worker?.stage === 'settled' || SETTLED_DISPATCH.has(r.dispatch?.status),
+      outcome: r.projection?.outcome ?? r.worker?.state ?? null,
+      terminal: handle,
+      // A worker never given a terminal is not one whose terminal is gone.
+      gone: Boolean(handle) && (!r.terminal || r.terminal.orphaned === true),
+      exited: r.observation?.status === 'exited',
+      waiting: wait && typeof wait === 'object' ? JSON.stringify(wait).slice(0, 300) : null,
+    }
+  }
+
   return {
     // Run from the runner's own terminal: Orca binds the Run to the caller
     // and refuses a mutation made on another terminal's behalf. `terminal` is
@@ -261,21 +278,23 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       await orca(['worktree', 'set', '--worktree', `path:${worktree}`, '--workspace-status', status])
     },
 
-    async workerShow({ dispatch }) {
-      const r = await orca(['orchestration', 'worker-show', '--dispatch', dispatch])
-      const handle = r.worker?.agentTerminalHandle ?? null
-      // agentWait: an object is a wait only a human can answer; null means
-      // Orca looked and found none; absent means it never looked.
-      const wait = r.observation?.agentWait ?? r.terminal?.agentWait ?? null
-      return {
-        settled: r.worker?.stage === 'settled' || SETTLED_DISPATCH.has(r.dispatch?.status),
-        outcome: r.projection?.outcome ?? r.worker?.state ?? null,
-        terminal: handle,
-        // A worker never given a terminal is not one whose terminal is gone.
-        gone: Boolean(handle) && (!r.terminal || r.terminal.orphaned === true),
-        exited: r.observation?.status === 'exited',
-        waiting: wait && typeof wait === 'object' ? JSON.stringify(wait).slice(0, 300) : null,
-      }
+    // A resume from a new terminal: Orca refuses worker-start from any
+    // terminal but the Run's coordinator, so the runner rebinds the Run to its
+    // own. The old coordinator is fenced from then on. Read, stop and release
+    // are not fenced, and a worker's worker_done from its own pane still
+    // settles a dispatch issued before the takeover (live, Orca 1.4.209).
+    async runUse({ runId }) {
+      const r = await orca(['orchestration', 'run-use', '--id', runId])
+      return { runId: r.run?.id ?? runId, terminal: r.run?.coordinator_handle ?? null }
+    },
+
+    workerShow,
+
+    // A worker an earlier runner started, taken up by this one: how Orca
+    // sees it now, in workerShow's shape. Its tab is left open, like every
+    // agent's, for the operator's end-of-run reclaim (ADR-0012).
+    async workerReattach({ dispatch }) {
+      return workerShow({ dispatch })
     },
 
     // A short `terminal wait --for tui-idle` is a poll: satisfied means idle,

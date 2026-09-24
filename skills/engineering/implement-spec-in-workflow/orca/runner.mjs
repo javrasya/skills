@@ -12,10 +12,13 @@
 // not reach) as failed, with no result. --resume replays the unchanged prefix
 // of agent() calls from that journal without launching anything; the first
 // call not in it or journaled as failed, and every call after it, runs live.
-// The Workflow runner's resumeFromRunId promises the same. When the script
-// settles the runner writes summary.json to the state dir: {runner, ok, result
-// | error}, and on a failure also worktrees_kept, the worktrees it retained.
-// Every line it prints is also appended, timestamped, to runner.log there.
+// The Workflow runner's resumeFromRunId promises the same. A resume, from any
+// terminal, takes the journaled Run over (run-use) before it starts a worker,
+// and takes up each worker the last run left out: watched again if Orca still
+// shows it live, its session continued if it died. When the script settles the
+// runner writes summary.json to the state dir: {runner, ok, result | error},
+// and on a failure also worktrees_kept, the worktrees it retained. Every line
+// it prints is also appended, timestamped, to runner.log there.
 //
 // Nothing is reclaimed during a run (ADR-0012): no worker is released, no tab
 // closed, no worktree removed. Only after summary.json is written does the
@@ -24,8 +27,9 @@
 //
 // The run itself is recorded in the machine-wide run registry (registry.mjs,
 // ~/.claude/orca-runs.jsonl): `armed` and the runner's terminal when the Run
-// is created, `ended` with ok, partial or failed when the script settles, and
-// `reclaimed` for what the operator reclaims at the end.
+// is created, the new runner's terminal when a resume takes it over, `ended`
+// with ok, partial or failed when the script settles, and `reclaimed` for what
+// the operator reclaims at the end.
 //
 // No change to this directory is done until the runner contract test passes
 // under both runners (README.md). The offline tests do not replace it.
@@ -78,9 +82,13 @@ export const journalKey = (prompt, opts = {}) =>
 // a new attempt of a call's start or of its Run's creation, with why the last
 // one failed; warning, something that went wrong without failing the call. A
 // nudge's `attempt` is its number since the session started or was last
-// continued; a continuation's is its number, up to the cap. reattached is
-// written by the behaviour that makes it: a resumed runner taking up a worker
-// an earlier one started.
+// continued; a continuation's is its number, up to the cap. reattached: a
+// resumed runner taking up a worker an earlier one started, which it then
+// watches, or continues first if it died; it also carries `continuations` when
+// that worker's session was already continued. run: the Run every worker is
+// dispatched into and the runner terminal it is bound to, when it is created
+// or taken over; a resume carries the last one forward first, with `lastN`,
+// the highest call number that Run has used.
 export const JOURNAL_ENTRIES = Object.freeze({
   started: ['at', 'key', 'n', 'title', 'run', 'dispatchId', 'harness', 'sessionId', 'worktree', 'terminal'],
   result: ['at', 'key', 'n', 'title', 'result'],
@@ -91,35 +99,61 @@ export const JOURNAL_ENTRIES = Object.freeze({
   nudge: ['at', 'key', 'n', 'title', 'dispatchId', 'reason', 'attempt'],
   continued: ['at', 'key', 'n', 'title', 'dispatchId', 'sessionId', 'terminal', 'reason', 'attempt', 'reopened'],
   reattached: ['at', 'key', 'n', 'title', 'dispatchId', 'sessionId', 'terminal', 'worktree'],
+  run: ['at', 'runId', 'terminal'],
 })
 
-// calls: key -> what was journaled under it, in journal order — { result }
-// for a call that returned a value, { failed: true } for one that returned
-// null. A failed entry holds its call's place but replays nothing, so a resume
-// runs that call live again, as the Workflow runner re-runs an agent it
-// journaled as failed. A `started` line with no settlement is a call the last
-// run was killed during: it replays nothing. A torn last line is one it was
-// killed while writing. retained: every worktree a dead agent left, from its
-// failed entry or from a `retained` line an earlier resume carried forward.
-// Only type, key, result and retained are read, so a journal written before
-// entries carried timestamps and launch fields resumes the same way.
+// calls: key -> what each call made under it, in call order — { result } for
+// a call that returned a value, { failed: true } for one that returned null,
+// { worker } for one whose worker was still out when the last run stopped
+// (its dispatch, session, terminal and worktree as last journaled, its `n`,
+// and how often its session was continued), { unsettled: true } for one that
+// had no worker out and no settlement. A failed entry holds its call's place
+// but replays nothing, so a resume runs that call live again, as the Workflow
+// runner re-runs an agent it journaled as failed. A torn last line is one it
+// was killed while writing. retained: every worktree a dead agent left, from
+// its failed entry or from a `retained` line an earlier resume carried
+// forward. run: the last Run journaled, { runId, terminal }, or null; lastN:
+// the highest call number the journal holds. A journal written before entries
+// carried timestamps and launch fields resumes the same way, its `started`
+// lines without a dispatch or session as calls with no worker out.
 export function readJournal(path) {
   const calls = new Map()
   const retained = []
-  if (!existsSync(path)) return { calls, retained }
-  for (const line of readFileSync(path, 'utf8').split('\n')) {
+  let run = null
+  let lastN = 0
+  if (!existsSync(path)) return { calls, retained, run, lastN }
+  // One per call, by its n: a call's lines share it, and no two calls do.
+  const byCall = new Map()
+  for (const [i, line] of readFileSync(path, 'utf8').split('\n').entries()) {
     let e
     try {
       e = JSON.parse(line)
     } catch {
       continue
     }
-    if (e?.retained?.path && !retained.some((k) => k.path === e.retained.path)) retained.push(e.retained)
-    if (e?.type !== 'result' && e?.type !== 'failed') continue
-    if (!calls.has(e.key)) calls.set(e.key, [])
-    calls.get(e.key).push(e.type === 'failed' ? { failed: true } : { result: e.result })
+    if (!e || typeof e !== 'object') continue
+    if (e.retained?.path && !retained.some((k) => k.path === e.retained.path)) retained.push(e.retained)
+    for (const n of [e.n, e.lastN]) if (Number.isInteger(n)) lastN = Math.max(lastN, n)
+    if (e.type === 'run' && typeof e.runId === 'string') run = { runId: e.runId, terminal: e.terminal ?? null }
+    if (typeof e.key !== 'string') continue
+    const numbered = Number.isInteger(e.n)
+    if (!numbered && e.type !== 'result' && e.type !== 'failed') continue
+    const id = numbered ? e.n : `line ${i}`
+    if (!byCall.has(id)) byCall.set(id, { key: e.key, order: numbered ? e.n : i, worker: null, settled: null })
+    const c = byCall.get(id)
+    if (e.type === 'result') c.settled = { result: e.result }
+    else if (e.type === 'failed') c.settled = { failed: true }
+    else if ((e.type === 'started' || e.type === 'reattached') && e.dispatchId && e.sessionId) {
+      c.worker = { n: e.n, dispatchId: e.dispatchId, sessionId: e.sessionId, terminal: e.terminal ?? null, worktree: e.worktree ?? null, continuations: e.continuations ?? 0 }
+    } else if (e.type === 'continued' && c.worker && e.dispatchId) {
+      c.worker = { ...c.worker, dispatchId: e.dispatchId, terminal: e.terminal ?? c.worker.terminal, continuations: Number.isInteger(e.attempt) ? e.attempt : c.worker.continuations + 1 }
+    }
   }
-  return { calls, retained }
+  for (const c of [...byCall.values()].sort((a, b) => a.order - b.order)) {
+    if (!calls.has(c.key)) calls.set(c.key, [])
+    calls.get(c.key).push(c.settled ?? (c.worker ? { worker: c.worker } : { unsettled: true }))
+  }
+  return { calls, retained, run, lastN }
 }
 
 export const realClock = { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)), timer: realTimer }
@@ -153,11 +187,14 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   const script = loadScript(text)
   const meta = {}
   let currentPhase = null
-  let count = 0
 
   const journalPath = join(stateDir, 'journal.jsonl')
-  const earlier = resume ? readJournal(journalPath) : { calls: new Map(), retained: [] }
+  const earlier = resume ? readJournal(journalPath) : { calls: new Map(), retained: [], run: null, lastN: 0 }
   const journaled = earlier.calls
+  // A resume numbers its calls on from the last run's: the Run it takes over
+  // already holds a `<runId>-<n>` child worktree for each n used, and Orca
+  // answers a create of a taken name with <name>-2.
+  let count = earlier.lastN
   // Rewritten from empty, replayed calls included, so the journal always
   // describes the latest run and a later resume replays from it alone.
   writeFileSync(journalPath, '')
@@ -178,14 +215,17 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
       out(`!! run registry: could not record ${what} for ${entry.runId}: ${e?.message ?? e}`)
     }
   }
-  // Called once, when Orca creates the Run. A resume creates a Run of its own,
-  // so it is armed as its own run.
-  const onRun = ({ runId, terminal }) => {
+  // Called once, when Orca creates the Run, or hands the journaled one over to
+  // a resume: that Run was armed by the runner that created it, and gains
+  // this runner's terminal.
+  const onRun = ({ runId, terminal, takenOver = false }) => {
     armed = runId
-    record('armed', { runId, project, runDir: stateDir, spec: meta.value?.name ?? fallbackObjective })
+    journal({ type: 'run', runId, terminal })
+    if (!takenOver) record('armed', { runId, project, runDir: stateDir, spec: meta.value?.name ?? fallbackObjective })
     record('runner', { runId, terminal })
   }
-  const replays = new Map()
+  // How many calls with each key this run has made.
+  const seen = new Map()
   let replaying = resume
   // A dead agent never names its worktree to the script, so the script can
   // never reclaim it; the runner created it and names it instead. A resume
@@ -197,7 +237,9 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
     return k
   }
   for (const k of earlier.retained) journal({ type: 'retained', retained: keep(k) })
-  const life = agentLifecycle({ orca, clock, limits, out, stateDir, objective: () => objectiveOf(meta.value, fallbackObjective), journal, keep, onRun, transcripts })
+  // So a resume that makes no live call still leaves the Run to the next one.
+  if (earlier.run) journal({ type: 'run', ...earlier.run, lastN: earlier.lastN })
+  const life = agentLifecycle({ orca, clock, limits, out, stateDir, objective: () => objectiveOf(meta.value, fallbackObjective), journal, keep, onRun, takeOver: earlier.run?.runId ?? null, transcripts })
 
   const phase = (title) => {
     currentPhase = title
@@ -225,23 +267,31 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
     const title = `[${phaseName}] ${label}`
     const key = journalKey(prompt, opts)
 
-    // The k-th call with a key replays the k-th entry journaled under it, so
-    // identical calls each get their own; a failed entry keeps its place. One
-    // miss ends the prefix for good: what follows a changed or failed call may
-    // depend on it, however unchanged it reads.
-    const k = replays.get(key) ?? 0
+    // The k-th call with a key is the k-th journaled under it, so identical
+    // calls each get their own; a failed entry keeps its place. One miss ends
+    // the prefix for good: what follows a changed or failed call may depend
+    // on it, however unchanged it reads. A call the last run left unsettled
+    // gave the script nothing to depend on, so it leaves the prefix standing.
+    const k = seen.get(key) ?? 0
+    seen.set(key, k + 1)
     const cached = journaled.get(key)
-    const entry = replaying && cached && k < cached.length ? cached[k] : null
-    if (entry && !entry.failed) {
-      replays.set(key, k + 1)
+    const entry = cached && k < cached.length ? cached[k] : null
+    if (replaying && entry && 'result' in entry) {
       journal({ type: 'result', key, n, title, result: entry.result, replayed: true })
       out(`<< ${title}: replayed from the journal`)
       return entry.result
     }
-    if (replaying) out(`>> ${title}: ${entry ? 'failed in the last run' : 'not in the journal'}; this call and every one after it run live`)
-    replaying = false
+    const unsettled = !!(entry?.worker || entry?.unsettled)
+    if (replaying && !unsettled) {
+      out(`>> ${title}: ${entry ? 'failed in the last run' : 'not in the journal'}; this call and every one after it run live`)
+      replaying = false
+    }
+    if (entry?.unsettled) out(`>> ${title}: its worker never started in the last run; it starts now`)
 
-    return life({ prompt, schema: opts.schema, isolated: opts.isolation === 'worktree', launch, key, n, label, title, phaseName })
+    const call = { prompt, schema: opts.schema, isolated: opts.isolation === 'worktree', launch, key, n, label, title, phaseName }
+    // Its worker is its own whatever came before it: it runs this very call.
+    if (entry?.worker) return life({ ...call, adopt: { ...entry.worker, label: opts.label || `agent-${entry.worker.n}` } })
+    return life(call)
   }
 
   try {

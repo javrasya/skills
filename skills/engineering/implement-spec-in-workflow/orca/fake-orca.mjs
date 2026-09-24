@@ -21,7 +21,15 @@
 // times that step has run, and orca this fake, so a fault can also change
 // what Orca holds, a worktree's `dirty` for one. Steps: runCreate, worktreeStatus, and a start's
 // worktreeCreate, worktreeSet, terminalCreate, waitIdle and workerStart, the
-// order the adapter runs them in.
+// order the adapter runs them in, and runUse.
+//
+// Every call is made from a terminal, as a real runner's is from its own:
+// fakeOrca() answers as `coordinator`, and as(handle) is the same Orca called
+// from another terminal. Like real Orca, a Run is bound to the terminal that
+// created it or last took it over with runUse, and worker-start into it from
+// any other is refused consumer_fenced; read, stop and release are not fenced.
+// A Run this fake did not create (a test's own runCreate) is not fenced.
+// closeTab(handle) closes a runner's tab: Orca still holds its Runs.
 import { OrcaError, launchCommand, resumeCommand, workerStartArgs, withTimeout } from './orca-cli.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 
@@ -36,8 +44,10 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
   const dispatches = new Map()
   const worktrees = new Map([[runWorktree, { parent: null, name: null, displayName: null, removed: false, status: null, dirty: false, commits: 0, unpushed: 0 }]])
   const counts = {}
+  // runId -> { coordinator, generation }
+  const runs = new Map()
+  const closedTabs = new Set()
   let seq = 0
-  let runs = 0
   const record = (c) => calls.push(clock ? { ...c, at: clock.now() } : c)
 
   async function step(name, ctx = {}) {
@@ -63,6 +73,17 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     if (!d) throw new OrcaError('terminal_handle_stale', 'terminal_handle_stale', verb)
     if (d.gone) throw new OrcaError(closed, closed, verb)
     return d
+  }
+
+  // No process runs in a closed tab, so nothing calls Orca from one.
+  function from(caller, verb) {
+    if (closedTabs.has(caller)) throw new Error(`fake orca: ${verb} called from ${caller}, a tab that was closed`)
+  }
+
+  function fence(caller, run, verb) {
+    from(caller, verb)
+    const r = runs.get(run)
+    if (r && r.coordinator !== caller) throw new OrcaError('consumer_fenced', `This coordinator terminal is no longer bound to Run ${run}`, verb)
   }
 
   // As the real adapter decides it: the worktree a retry takes up, by name.
@@ -93,15 +114,33 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
   const preambleIn = (d) => ({ handle: d.handle, capability: d.capability, taskId: d.taskId, dispatchId: d.dispatchId })
   const fresh = () => ({ settled: false, outcome: null, released: false, stopped: false, gone: false, exited: false, idle: false, waiting: null, nudges: [] })
 
-  const orca = {
+  const show = (d) => ({ settled: d.settled, outcome: d.outcome, terminal: d.handle, gone: d.gone, exited: d.exited, waiting: d.waiting })
+  const live = (name) => worktrees.has(name) && !worktrees.get(name).removed
+
+  const as = (caller) => ({
     calls,
     dispatches,
     worktrees,
+    runs,
+    as,
+    closeTab: (handle) => closedTabs.add(handle),
 
     async runCreate({ objective }) {
       await step('runCreate', { objective })
       record({ verb: 'runCreate', objective })
-      return { runId: `${runPrefix}${++runs}`, terminal: coordinator }
+      const runId = `${runPrefix}${runs.size + 1}`
+      runs.set(runId, { coordinator: caller, generation: 1 })
+      return { runId, terminal: caller }
+    },
+
+    async runUse({ runId }) {
+      from(caller, 'orchestration run-use')
+      await step('runUse', { runId })
+      const r = runs.get(runId)
+      if (!r) throw new OrcaError('run_not_found', `Run ${runId} not found or is inspect-only`, 'orchestration run-use')
+      Object.assign(r, { coordinator: caller, generation: r.generation + 1 })
+      record({ verb: 'runUse', runId, terminal: caller })
+      return { runId, terminal: caller }
     },
 
     // Only the custom launch exists: the harness command, carrying the
@@ -119,12 +158,17 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
         made = child.retry ? earlierWorktree(child.name) : null
         if (!made) {
           await step('worktreeCreate', { name: child.name })
-          // Real Orca never refuses a taken name: it makes <name>-2.
+          // Real Orca never refuses a taken name: it makes <name>-2, which
+          // the adapter refuses for good, naming both.
           let name = child.name
-          for (let i = 2; worktrees.has(`C:/fake/worktrees/${name}`); i++) name = `${child.name}-${i}`
+          for (let i = 2; live(`C:/fake/worktrees/${name}`); i++) name = `${child.name}-${i}`
           made = `C:/fake/worktrees/${name}`
           worktrees.set(made, { parent: runWorktree, name, displayName: name, removed: false, status: null, dirty: false, commits: 0, unpushed: 0 })
           record({ verb: 'worktreeCreate', name: child.name, worktree: made })
+          if (name !== child.name) {
+            const earlier = `C:/fake/worktrees/${child.name}`
+            throw Object.assign(new OrcaError('worktree_name_taken', `asked for ${child.name}, Orca made ${name}: a worktree named ${child.name} already exists`, 'worktree create'), { worktree: made, worktrees: [made, earlier], final: true })
+          }
         }
         worktree = made
         try {
@@ -139,6 +183,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
         await step('terminalCreate', { title, worktree: made })
         opened = true
         await step('waitIdle', { title, worktree: made })
+        fence(caller, run, 'orchestration worker-start')
         await step('workerStart', { title, worktree: made })
       } catch (e) {
         if (opened) record({ verb: 'terminalClose', terminal: preamble.handle })
@@ -174,6 +219,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
         record({ verb: 'workerContinue', dispatchId: id, terminal: d.handle, worktree: d.worktree, command, text, reopened: false, interrupted: true })
         Object.assign(d, { gone: false, exited: false, idle: false, waiting: null })
       } else {
+        fence(caller, run, 'orchestration worker-start')
         const preamble = preambleOf(++seq)
         c = { ...d, ...preamble, run, title, command, worktree, ...fresh(), from: id }
         dispatches.set(c.dispatchId, c)
@@ -188,7 +234,14 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     async workerShow({ dispatch: id }) {
       const d = dispatch(id, 'orchestration worker-show')
       record({ verb: 'workerShow', dispatchId: id, settled: d.settled })
-      return { settled: d.settled, outcome: d.outcome, terminal: d.handle, gone: d.gone, exited: d.exited, waiting: d.waiting }
+      return show(d)
+    },
+
+    // Whatever runner started it: Orca's dispatches outlive the runner.
+    async workerReattach({ dispatch: id, terminal }) {
+      const d = dispatch(id, 'orchestration worker-show')
+      record({ verb: 'workerReattach', dispatchId: id, terminal, settled: d.settled })
+      return show(d)
     },
 
     async terminalIdle({ terminal: handle }) {
@@ -268,6 +321,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
 
     // Not Orca: git's answer for a fake worktree, in reclaim's `unpushed` shape.
     unpushedOf: async (path) => worktrees.get(path)?.unpushed ?? 0,
-  }
+  })
+  const orca = as(coordinator)
   return orca
 }

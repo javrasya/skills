@@ -11,7 +11,7 @@ import { join, dirname } from 'path'
 import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { submit } from '../skills/engineering/implement-spec-in-workflow/orca/submit.mjs'
-import { runScript, journalKey, failureSummary, finish, SUBMIT, SETTINGS, realClock, JOURNAL_ENTRIES } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
+import { runScript, journalKey, failureSummary, finish, SUBMIT, SETTINGS, realClock, JOURNAL_ENTRIES, readJournal } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
 import { agentLifecycle } from '../skills/engineering/implement-spec-in-workflow/orca/lifecycle.mjs'
 import { fakeOrca, fakeTranscripts } from '../skills/engineering/implement-spec-in-workflow/orca/fake-orca.mjs'
 import { RUNNER_SETTINGS } from '../skills/engineering/implement-spec-in-workflow/orca/settings.mjs'
@@ -203,13 +203,14 @@ test('agent(): a schema no result can satisfy throws before any worker starts', 
   assert.equal(orca.calls.length, 0)
 })
 
-// Each worker answers with its prompt's first line and which run it served,
-// so a result shows whether it came from this run or from the journal.
+// Each worker answers with its prompt's first line and which run it served
+// (a number, or a function giving the run under way when one Orca serves
+// several), so a result shows whether it came from this run or the journal.
 function answering(run) {
   return fakeOrca({
     worker: async ({ prompt, preamble, orca }) => {
       const argv = submitArgvIn(prompt, preamble)
-      writeFileSync(argv[argv.indexOf('--payload') + 1], `${prompt.split('\n')[0]} @${run}`)
+      writeFileSync(argv[argv.indexOf('--payload') + 1], `${prompt.split('\n')[0]} @${typeof run === 'function' ? run() : run}`)
       assert.equal((await runSubmit(argv, orca)).code, 0)
     },
   })
@@ -222,12 +223,19 @@ const c = await agent('Check it.', { label: 'c', phase: 'Chain' })
 return [a, b, c]`
 
 const started = (orca) => orca.calls.filter((c) => c.verb === 'workerStart').map((c) => c.title)
+// What one runner did, of all an Orca several runners share has seen.
+const since = (orca, from) => ({ calls: orca.calls.slice(from) })
 
 test('resume: the unchanged prefix replays from the journal without launching; the first changed call onward runs live', async () => {
   const stateDir = tmp()
-  const go = (script, run, resume) => {
-    const orca = answering(run)
-    return runScript(script, { orca, stateDir, out: () => {}, settings: FAST, resume }).then((result) => ({ orca, result }))
+  // One Orca throughout, as on a machine: each run's runner in a terminal of its own.
+  let tag = 0
+  const shared = answering(() => tag)
+  const go = async (script, run, resume) => {
+    tag = run
+    const from = shared.calls.length
+    const result = await runScript(script, { orca: shared.as(`term_${run}`), stateDir, out: () => {}, settings: FAST, resume })
+    return { orca: since(shared, from), result }
   }
 
   const first = await go(chain('Build it.'), 1, false)
@@ -249,6 +257,8 @@ test('resume: the unchanged prefix replays from the journal without launching; t
   const edited = await go(chain('Build it twice.'), 3, true)
   assert.deepEqual(edited.result, ['Plan it. @1', 'Build it twice. @3', 'Check it. @3'])
   assert.deepEqual(started(edited.orca), ['[Chain] b', '[Chain] c'], 'c is unchanged but follows a changed call')
+  assert.deepEqual(edited.orca.calls.map((c) => c.verb).slice(0, 2), ['runUse', 'workerStart'], 'it takes the Run over first')
+  assert.deepEqual([edited.orca.calls[0].runId, edited.orca.calls[0].terminal], ['run_fake1', 'term_3'])
 
   const again = await go(chain('Build it twice.'), 4, true)
   assert.deepEqual(again.result, edited.result, 'the journal describes the latest run')
@@ -804,16 +814,14 @@ async function submitValue(prompt, preamble, orca, value) {
 
 
 // impl:b dies; impl:a names its worktree; the reclaimer removes what it is handed.
-const worktreeOrca = () =>
-  fakeOrca({
-    worker: async ({ prompt, preamble, worktree, orca }) => {
-      if (prompt.startsWith('Build b.')) throw new Error('the agent died')
-      if (prompt.startsWith('Build a.')) return submitValue(prompt, preamble, orca, { worktree })
-      const paths = JSON.parse(prompt.split('\n')[0].slice('Reclaim '.length))
-      for (const path of paths) await orca.worktreeRemove({ path })
-      return submitValue(prompt, preamble, orca, { removed: paths.length })
-    },
-  })
+async function worktreeWorker({ prompt, preamble, worktree, orca }) {
+  if (prompt.startsWith('Build b.')) throw new Error('the agent died')
+  if (prompt.startsWith('Build a.')) return submitValue(prompt, preamble, orca, { worktree })
+  const paths = JSON.parse(prompt.split('\n')[0].slice('Reclaim '.length))
+  for (const path of paths) await orca.worktreeRemove({ path })
+  return submitValue(prompt, preamble, orca, { removed: paths.length })
+}
+const worktreeOrca = () => fakeOrca({ worker: worktreeWorker })
 
 const startedAs = (orca, title) => orca.calls.find((c) => c.verb === 'workerStart' && c.title === title)
 
@@ -1178,10 +1186,11 @@ async function submitText(prompt, preamble, orca, text) {
 
 test('resume: an agent that died runs live again on resume, and every call after it', async () => {
   const stateDir = tmp()
+  let run = 1
   const first = fakeOrca({
     worker: async ({ prompt, preamble, orca }) => {
-      if (prompt.startsWith('Build it.')) throw new Error('the agent died')
-      return submitText(prompt, preamble, orca, `${prompt.split('\n')[0]} @1`)
+      if (run === 1 && prompt.startsWith('Build it.')) throw new Error('the agent died')
+      return submitText(prompt, preamble, orca, `${prompt.split('\n')[0]} @${run}`)
     },
   })
   assert.deepEqual(await runScript(chain('Build it.'), { orca: first, stateDir, out: () => {}, settings: FAST }), ['Plan it. @1', null, 'Check it. @1'])
@@ -1190,10 +1199,11 @@ test('resume: an agent that died runs live again on resume, and every call after
   assert.deepEqual(b.map((e) => [e.type, 'result' in e]), [['failed', false]])
 
   const lines = []
-  const second = answering(2)
-  const result = await runScript(chain('Build it.'), { orca: second, stateDir, out: (s) => lines.push(s), settings: FAST, resume: true })
+  run = 2
+  const from = first.calls.length
+  const result = await runScript(chain('Build it.'), { orca: first.as('term_2'), stateDir, out: (s) => lines.push(s), settings: FAST, resume: true })
   assert.deepEqual(result, ['Plan it. @1', 'Build it. @2', 'Check it. @2'])
-  assert.deepEqual(started(second), ['[Chain] b', '[Chain] c'])
+  assert.deepEqual(started(since(first, from)), ['[Chain] b', '[Chain] c'])
   assert.ok(lines.includes('>> [Chain] b: failed in the last run; this call and every one after it run live'), lines.join('\n'))
 })
 
@@ -1203,41 +1213,45 @@ test('resume: a failed call keeps its place among identical calls, so a later on
 const y = await agent('Same.', { label: 's' })
 return [x, y]`
   let n = 0
-  const first = fakeOrca({
+  let run = 1
+  const orca = fakeOrca({
     worker: async ({ prompt, preamble, orca }) => {
       if (++n === 1) throw new Error('the agent died')
-      return submitText(prompt, preamble, orca, 'Same. @1')
+      return submitText(prompt, preamble, orca, `Same. @${run}`)
     },
   })
-  assert.deepEqual(await runScript(script, { orca: first, stateDir, out: () => {}, settings: FAST }), [null, 'Same. @1'])
-  const second = answering(2)
-  assert.deepEqual(await runScript(script, { orca: second, stateDir, out: () => {}, settings: FAST, resume: true }), ['Same. @2', 'Same. @2'])
-  assert.equal(started(second).length, 2)
+  assert.deepEqual(await runScript(script, { orca, stateDir, out: () => {}, settings: FAST }), [null, 'Same. @1'])
+  run = 2
+  const from = orca.calls.length
+  assert.deepEqual(await runScript(script, { orca: orca.as('term_2'), stateDir, out: () => {}, settings: FAST, resume: true }), ['Same. @2', 'Same. @2'])
+  assert.equal(started(since(orca, from)).length, 2)
 })
 
 test('resume: a dead agent\'s worktree from the earlier run stays named in the result, resume after resume', async () => {
   const stateDir = tmp()
-  const one = worktreeOrca()
+  let run = 1
+  const one = fakeOrca({
+    worker: async (w) => (run === 1 ? worktreeWorker(w) : submitValue(w.prompt, w.preamble, w.orca, w.prompt.startsWith('Reclaim') ? { removed: 0 } : { worktree: w.worktree })),
+  })
   const r1 = await runScript(WT_SCRIPT, { orca: one, stateDir, out: () => {}, settings: FAST })
   const deadPath = startedAs(one, '[Implement] impl:b').worktree
   assert.deepEqual(r1.worktrees_kept.map((k) => k.path), [deadPath])
 
-  // impl:b re-runs live in a new worktree and delivers; its old one is still on disk.
-  const two = fakeOrca({
-    worker: async ({ prompt, preamble, worktree, orca }) =>
-      submitValue(prompt, preamble, orca, prompt.startsWith('Reclaim') ? { removed: 0 } : { worktree }),
-  })
-  two.runCreate = async () => ({ runId: 'run_second' })
+  // impl:b re-runs live in a new worktree of the same Run, numbered past the
+  // last run's calls so its name is never the dead one's, and delivers; its
+  // old one is still on disk.
+  run = 2
   const lines = []
-  const r2 = await runScript(WT_SCRIPT, { orca: two, stateDir, out: (s) => lines.push(s), settings: FAST, resume: true })
+  const r2 = await runScript(WT_SCRIPT, { orca: one.as('term_2'), stateDir, out: (s) => lines.push(s), settings: FAST, resume: true })
   assert.notEqual(r2.b.worktree, deadPath)
+  assert.equal(one.worktrees.get(deadPath).removed, false)
   assert.deepEqual(r2.worktrees_kept.map((k) => k.path), [deadPath])
   assert.match(r2.worktrees_kept[0].reason, /impl:b\) died before reporting/)
   assert.ok(lines.some((l) => l.startsWith(`!! kept ${deadPath}:`)), lines.join('\n'))
 
-  const three = fakeOrca()
-  const r3 = await runScript(WT_SCRIPT, { orca: three, stateDir, out: () => {}, settings: FAST, resume: true })
-  assert.deepEqual(three.calls, [], 'everything replays')
+  const from = one.calls.length
+  const r3 = await runScript(WT_SCRIPT, { orca: one.as('term_3'), stateDir, out: () => {}, settings: FAST, resume: true })
+  assert.deepEqual(since(one, from).calls, [], 'everything replays')
   assert.deepEqual(r3.worktrees_kept.map((k) => k.path), [deadPath])
 })
 
@@ -1414,7 +1428,7 @@ test("journal: every entry is timestamped from the runner's clock", async () => 
   const [n1, n2, n3, n4] = r.nudges
   const [c1, c2, c3] = r.continues
   assert.deepEqual(r.journal.map((e) => [e.type, e.at]), [
-    ['started', iso(0)], ['nudge', at(n1)], ['continued', at(c1)], ['nudge', at(n2)], ['continued', at(c2)],
+    ['run', iso(0)], ['started', iso(0)], ['nudge', at(n1)], ['continued', at(c1)], ['nudge', at(n2)], ['continued', at(c2)],
     ['nudge', at(n3)], ['continued', at(c3)], ['nudge', at(n4)], ['failed', r.journal.at(-1).at],
   ])
   within(Date.parse(r.journal.at(-1).at), 160 * MIN, 'failure')
@@ -1498,7 +1512,8 @@ const BACKOFF = RUNNER_SETTINGS.retryBackoffMs
 // The one child worktree runOne's isolated agent asks for: `<runId>-<n>`.
 const CHILD_WT = 'C:/fake/worktrees/run_fake1-1'
 const entries = (r, type) => r.journal.filter((e) => e.type === type)
-const types = (r) => r.journal.map((e) => e.type)
+// The Run's own line aside: these are about one call's entries.
+const types = (r) => r.journal.filter((e) => e.type !== 'run').map((e) => e.type)
 const atMs = (e) => Date.parse(e.at)
 const verbCount = (r, verb) => r.orca.calls.filter((c) => c.verb === verb).length
 
@@ -1755,21 +1770,21 @@ test('registry: a run where an agent came back null ends partial; a run that thr
   assert.deepEqual(readRegistry(registry).map((r) => [r.runId, r.state]), [['run_fake1', 'partial'], ['run_throw1', 'failed']])
 })
 
-test('registry: a resume that launches arms its own Run and records its runner; one that replays everything records nothing', async () => {
+test("registry: a resume that launches takes its Run over and records the new runner's terminal; one that replays everything records nothing", async () => {
   const registry = registryIn()
   const stateDir = tmp()
+  let tag = 0
+  const orca = answering(() => tag)
   const go = (script, n, resume) => {
-    const orca = Object.assign(answering(n), { runCreate: async () => ({ runId: `run_r${n}`, terminal: `term_r${n}` }) })
-    return runScript(script, { orca, stateDir, out: () => {}, settings: FAST, resume, registry, project: 'C:/repo' })
+    tag = n
+    return runScript(script, { orca: orca.as(`term_r${n}`), stateDir, out: () => {}, settings: FAST, resume, registry, project: 'C:/repo' })
   }
   await go(chain('Build it.'), 1, false)
   await go(chain('Build it.'), 2, true)
-  assert.equal(readRegistry(registry).length, 1, 'a fully replayed resume creates no Run')
+  assert.deepEqual(linesOf(registry).map((e) => e.type), ['armed', 'runner', 'ended'], 'a fully replayed resume takes nothing over')
   await go(chain('Build it again.'), 3, true)
-  assert.deepEqual(readRegistry(registry).map((r) => [r.runId, r.runDir, r.runner.terminal, r.state]), [
-    ['run_r1', stateDir, 'term_r1', 'ok'],
-    ['run_r3', stateDir, 'term_r3', 'ok'],
-  ])
+  assert.deepEqual(readRegistry(registry).map((r) => [r.runId, r.runDir, r.runner.terminal, r.state]), [['run_fake1', stateDir, 'term_r3', 'ok']])
+  assert.deepEqual(linesOf(registry).map((e) => [e.type, e.runId]).slice(3), [['runner', 'run_fake1'], ['ended', 'run_fake1']], 'armed once, by the runner that created it')
 })
 
 test('registry: two runs at once in one repo are two entries that never mix', async () => {
@@ -1982,4 +1997,156 @@ test('orca-cli: tab liveness is the terminal list without orphans; a reclaim clo
     ['terminal', 'close', '--terminal', 'term_a', '--tab'],
     ['worktree', 'rm', '--worktree', 'path:C:/wt/run_1-3', '--force'],
   ])
+})
+
+// Resume from a new terminal. The first runner is killed once b's and c's
+// workers are out: like a runner whose tab died, it never wakes from its next
+// wait. Its Orca, dispatches and all, lives on, and the resume runs from
+// another terminal of that Orca.
+const TAKEOVER = `const S = ${JSON.stringify(SCHEMA)}
+phase('P')
+const a = await agent('A', { label: 'a', schema: S })
+const bc = await parallel([
+  () => agent('B', { label: 'b', schema: S, isolation: 'worktree' }),
+  () => agent('C', { label: 'c', schema: S, isolation: 'worktree' }),
+])
+const d = await agent('D', { label: 'd', schema: S })
+return [a, ...bc, d]`
+
+// b submits at 10 minutes, long after the takeover; c dies while no runner
+// watches (its tab closed, or its agent exited) and submits once continued.
+async function takenOver({ oldTab, death }) {
+  const clock = fakeClock()
+  const stateDir = tmp()
+  const registry = registryIn()
+  let killed = false
+  let hung = 0
+  let bothHung
+  const gone = new Promise((r) => { bothHung = r })
+  const mortal = { now: clock.now, timer: clock.timer, sleep: (ms) => (killed ? (++hung === 2 && bothHung(), new Promise(() => {})) : clock.sleep(ms)) }
+  const orca = fakeOrca({
+    clock,
+    coordinator: 'term_old',
+    worker: async (w) => {
+      if (w.prompt.startsWith('B')) return void clock.at(10 * MIN, () => submitGood(w))
+      if (w.prompt.startsWith('C')) {
+        w.state.onContinue = submitGood
+        killed = true
+        return
+      }
+      return submitGood(w)
+    },
+  })
+  const opts = { stateDir, clock, registry, project: 'C:/repo', transcripts: fakeTranscripts(orca) }
+  runScript(TAKEOVER, { ...opts, orca, out: () => {}, clock: mortal }).catch(() => {})
+  await gone
+
+  const first = orca.calls.slice()
+  const startOf = (label) => first.find((c) => c.verb === 'workerStart' && c.title === `[P] ${label}`)
+  const c = orca.dispatches.get(startOf('c').dispatchId)
+  if (death === 'gone') c.gone = true
+  else c.exited = true
+  if (oldTab === 'closed') orca.closeTab('term_old')
+
+  const lines = []
+  const result = await runScript(TAKEOVER, { ...opts, orca: orca.as('term_new'), out: (s) => lines.push(s), resume: true })
+  return { result, orca, first, startOf, calls: orca.calls.slice(first.length), journal: journalOf(stateDir), registry, lines }
+}
+
+for (const [oldTab, death] of [['open', 'gone'], ['closed', 'gone'], ['open', 'exited']]) {
+  test(`takeover (old tab ${oldTab}, c's agent ${death === 'gone' ? 'tab closed' : 'exited'}): a resume from a new terminal takes the Run over before any start, reattaches to the live worker, continues the dead one, replays the finished one, and starts only the one never started`, async () => {
+    const r = await takenOver({ oldTab, death })
+    assert.deepEqual(r.result, [GOOD, GOOD, GOOD, GOOD], r.lines.join('\n'))
+    assertEntries(r.journal)
+    const verbs = r.calls.map((c) => c.verb)
+
+    // run-use on the recorded Run, from the new terminal, before any worker-start.
+    const use = verbs.indexOf('runUse')
+    assert.deepEqual([r.calls[use].runId, r.calls[use].terminal], ['run_fake1', 'term_new'])
+    assert.equal(verbs.includes('runCreate'), false)
+    for (const v of ['workerStart', 'workerContinue']) assert.ok(verbs.indexOf(v) > use, `${v} before run-use: ${verbs.join(' ')}`)
+    assert.deepEqual(ofType(r.journal, 'run').map((e) => [e.runId, e.terminal]), [['run_fake1', 'term_old'], ['run_fake1', 'term_new']])
+
+    // a replays, and only d, never reached before, starts a worker.
+    assert.deepEqual(started({ calls: r.calls }), ['[P] d'])
+    assert.equal(ofType(r.journal, 'result').find((e) => e.title === '[P] a').replayed, true)
+
+    // b: reattached, never started again, its result returned once it submits.
+    const b = r.startOf('b')
+    const bd = r.orca.dispatches.get(b.dispatchId)
+    const reB = ofType(r.journal, 'reattached').find((e) => e.title === '[P] b')
+    assert.deepEqual([reB.dispatchId, reB.sessionId, reB.terminal, reB.worktree], [b.dispatchId, b.sessionId, bd.handle, b.worktree])
+    assert.equal([...r.orca.dispatches.values()].filter((d) => d.title === '[P] b').length, 1)
+    within(r.calls.find((c) => c.verb === 'workerDone' && c.dispatchId === b.dispatchId).at, 10 * MIN, "b's submit")
+    assert.equal(r.calls.filter((c) => c.verb === 'workerRelease' && c.dispatchId === b.dispatchId).length, 0, 'nothing is released during a run')
+
+    // c: continued in its own session and worktree; a new terminal only if its tab was gone.
+    const c = r.startOf('c')
+    const [cont] = r.calls.filter((x) => x.verb === 'workerContinue')
+    assert.equal(cont.worktree, c.worktree)
+    assert.ok(cont.command.startsWith(`claude --resume ${c.sessionId}`), cont.command)
+    assert.equal(cont.reopened, death === 'gone')
+    if (death === 'gone') assert.notEqual(cont.terminal, r.orca.dispatches.get(c.dispatchId).handle)
+    else assert.equal(cont.terminal, r.orca.dispatches.get(c.dispatchId).handle)
+    const [jc] = ofType(r.journal, 'continued')
+    assert.deepEqual([jc.title, jc.sessionId, jc.attempt, jc.reopened], ['[P] c', c.sessionId, 1, death === 'gone'])
+    assert.match(jc.reason, death === 'gone' ? /closed while no runner was watching/ : /exited while no runner was watching/)
+
+    // The registry: armed once, then the resumed runner's terminal.
+    assert.deepEqual(linesOf(r.registry).map((e) => [e.type, e.runId, e.terminal]), [
+      ['armed', 'run_fake1', undefined], ['runner', 'run_fake1', 'term_old'], ['runner', 'run_fake1', 'term_new'], ['ended', 'run_fake1', undefined],
+    ])
+    assert.deepEqual(readRegistry(r.registry).map((x) => [x.runner.terminal, x.state]), [['term_new', 'ok']])
+
+    // The old coordinator, its tab still open, is fenced from the Run.
+    if (oldTab === 'open') await assert.rejects(r.orca.as('term_old').workerStart({ run: 'run_fake1', prompt: 'p', title: 't', sessionId: SID }), /consumer_fenced/)
+  })
+}
+
+test('resume: the journal gives each call left out its worker as last journaled, a call never started its place, and the Run to take over', () => {
+  const path = join(tmp(), 'journal.jsonl')
+  const lines = [
+    { type: 'run', runId: 'run_1', terminal: 'term_a', lastN: 4 },
+    { type: 'result', key: 'ka', n: 5, result: 1, replayed: true },
+    { type: 'reattached', key: 'kb', n: 6, dispatchId: 'ctx_1', sessionId: SID, terminal: 'term_1', worktree: 'C:/wt/run_1-2', continuations: 1 },
+    { type: 'continued', key: 'kb', n: 6, dispatchId: 'ctx_2', sessionId: SID, terminal: 'term_2', attempt: 2, reopened: true },
+    { type: 'retry', key: 'kc', n: 7, attempt: 2, reason: 'x' },
+    { type: 'started', key: 'kc', n: 8, dispatchId: 'ctx_3', sessionId: SID, terminal: 'term_3', worktree: null },
+    { type: 'failed', key: 'kc', n: 8, reason: 'dead', attempts: 1 },
+    { type: 'run', runId: 'run_1', terminal: 'term_b' },
+  ]
+  writeFileSync(path, lines.map((l) => JSON.stringify(l)).join('\n') + '\n')
+  const j = readJournal(path)
+  assert.deepEqual(j.run, { runId: 'run_1', terminal: 'term_b' })
+  assert.equal(j.lastN, 8)
+  assert.deepEqual(j.calls.get('ka'), [{ result: 1 }])
+  assert.deepEqual(j.calls.get('kb'), [{ worker: { n: 6, dispatchId: 'ctx_2', sessionId: SID, terminal: 'term_2', worktree: 'C:/wt/run_1-2', continuations: 2 } }])
+  assert.deepEqual(j.calls.get('kc'), [{ unsettled: true }, { failed: true }])
+})
+
+test('fake orca: a Run takes worker-starts only from the terminal it is bound to, and run-use rebinds it', async () => {
+  const orca = fakeOrca({ coordinator: 'term_a' })
+  const { runId } = await orca.runCreate({ objective: 'o' })
+  const b = orca.as('term_b')
+  const start = (o) => o.workerStart({ run: runId, prompt: 'p', title: 't', sessionId: SID })
+  await assert.rejects(start(b), /consumer_fenced/)
+  await assert.rejects(b.runUse({ runId: 'run_nope' }), /run_not_found/)
+  assert.deepEqual(await b.runUse({ runId }), { runId, terminal: 'term_b' })
+  assert.equal(orca.runs.get(runId).generation, 2)
+  await start(b)
+  await assert.rejects(start(orca), /consumer_fenced/)
+})
+
+test('orca-cli: run-use takes the Run over from this terminal and reports the terminal it is now bound to', async () => {
+  const { orca, argvs } = recordingCli({ 'orchestration run-use': { run: { id: 'run_1', coordinator_handle: 'term_new', consumer_generation: 2 } } })
+  assert.deepEqual(await orca.runUse({ runId: 'run_1' }), { runId: 'run_1', terminal: 'term_new' })
+  assert.deepEqual(argvs, [['orchestration', 'run-use', '--id', 'run_1']])
+})
+
+test('orca-cli: a worker taken up from an earlier runner is shown as Orca sees it, and a release leaves its tab to reclaim', async () => {
+  const { orca, argvs } = recordingCli({ 'orchestration worker-show': { worker: { agentTerminalHandle: 'term_w', stage: 'running' }, terminal: { orphaned: false }, observation: { status: 'live' } } })
+  const s = await orca.workerReattach({ dispatch: 'ctx_9', terminal: 'term_w' })
+  assert.deepEqual([s.settled, s.gone, s.exited, s.terminal], [false, false, false, 'term_w'])
+  await orca.workerRelease({ dispatch: 'ctx_9' })
+  assert.deepEqual(argvs.slice(-1), [['orchestration', 'worker-release', '--dispatch', 'ctx_9']])
 })

@@ -1,5 +1,6 @@
 // One agent's life under the Orca runner: its files, the run's Run, a live
-// slot, its worker's start, the watch until it settles or dies (its session
+// slot, its worker's start (or, on a resume, taking up the worker the last run
+// left out), the watch until it settles or dies (its session
 // nudged and continued on the way), its result, and
 // what the journal, the board and the retained list learn from it. runner.mjs
 // decides which calls reach here (replay does not) and names each one.
@@ -80,11 +81,13 @@ function readResult(resultPath, schema) {
 // starts. objective() is read at the first live agent, once the script has
 // declared its meta. journal(entry) appends one journal line; keep({path,
 // reason}) retains a worktree and returns the entry the list holds for it.
-// onRun({ runId, terminal }) is called once, when Orca creates the Run.
+// takeOver: the id of a Run an earlier runner of this run created, which this
+// one takes over (run-use) instead of creating one. onRun({ runId, terminal,
+// takenOver }) is called once, when Orca creates the Run or hands it over.
 // transcripts.size({ harness, sessionId, worktree }) measures a session's
 // transcript (transcript.mjs). Returns life(call), which resolves to the
 // agent's value or null, and throws only if journal or out does.
-export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, journal, keep, onRun = () => {}, transcripts = sessionTranscripts() }) {
+export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, journal, keep, onRun = () => {}, takeOver = null, transcripts = sessionTranscripts() }) {
   const live = slots(limits.MAX_LIVE)
   // One Run per workflow run: every agent's worker is dispatched into it.
   let run = null
@@ -126,10 +129,13 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   }
 
   // Every agent's worker is dispatched into the one Run. Concurrent calls
-  // share its creation, retries included; once it has failed for good, the
-  // next call asks Orca again.
+  // share its creation, or its takeover, retries included; once it has failed
+  // for good, the next call asks Orca again. A takeover precedes every
+  // worker-start, which Orca refuses from any terminal but the Run's.
   function ensureRun(call) {
-    const creating = (run ??= retrying(call, "Orca could not create this run's Run", () => orca.runCreate({ objective: objective() }).then((r) => (onRun(r), r))))
+    const creating = (run ??= takeOver
+      ? retrying(call, `Orca could not hand this run's Run ${takeOver} over to this runner`, () => orca.runUse({ runId: takeOver }).then((r) => (onRun({ ...r, takenOver: true }), r)))
+      : retrying(call, "Orca could not create this run's Run", () => orca.runCreate({ objective: objective() }).then((r) => (onRun(r), r))))
     return creating.catch((e) => {
       if (run === creating) run = null
       throw e
@@ -258,12 +264,39 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     }
   }
 
-  async function supervise(runId, call) {
-    const { prompt, schema, isolated, launch, key, n, title, phaseName, schemaPath, resultPath, payloadPath } = call
-    if (launch.harness === 'claude' && !launch.permissionMode && !toldNoMode) {
-      toldNoMode = true
-      out("!! no --permission-mode given: Claude workers start in Claude's own default permission mode, not in the orchestrator's.")
+  // How a worker the last run started fared while no runner watched it: null
+  // to watch it again (live, settled, blocked, or one Orca could not show,
+  // which the watch gives up on as on any other), or the death to continue
+  // its session from.
+  async function lookBack(w) {
+    let s
+    try {
+      s = await orca.workerReattach({ dispatch: w.dispatchId, terminal: w.terminal })
+    } catch {
+      return null
     }
+    if (s.settled || s.waiting) return null
+    if (s.gone) return { dead: 'its terminal closed while no runner was watching it', gone: true }
+    if (s.exited) return { dead: 'it exited while no runner was watching it' }
+    return null
+  }
+
+  // A resume takes up the worker the last run started for this call and
+  // never starts a second one: journaled as reattached, then watched, or
+  // continued first if it died meanwhile.
+  async function takeUp({ key, n, title, adopt }) {
+    const w = { dispatchId: adopt.dispatchId, terminal: adopt.terminal, worktree: adopt.worktree }
+    const continued = adopt.continuations
+    journal({ type: 'reattached', key, n, title, dispatchId: w.dispatchId, sessionId: adopt.sessionId, terminal: w.terminal, worktree: w.worktree, ...(continued && { continuations: continued }) })
+    const end = await lookBack(w)
+    out(`>> ${title}: took up its worker from the last run: dispatch ${w.dispatchId}, session ${adopt.sessionId}, in terminal ${w.terminal}${w.worktree ? ` in ${w.worktree}` : ''}${end ? `; ${end.dead}` : ''}`)
+    return { w, sessionId: adopt.sessionId, attempts: 0, continued, end }
+  }
+
+  // Starts the call's worker, retried as the settings table says. Null once
+  // it has failed for good, journaled.
+  async function start(runId, call) {
+    const { prompt, isolated, launch, key, n, title, phaseName, schemaPath, resultPath, payloadPath } = call
     // The child worktrees failed attempts left. Every attempt of a call asks
     // for the same `<runId>-<n>` name, so a retry takes that one up again;
     // one Orca made under a suffixed name leaves both it and that one.
@@ -314,6 +347,19 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     } catch (e) {
       out(`!! ${title}: could not title its tab: ${e.message}`)
     }
+    return { w, sessionId, attempts, continued: 0, end: null }
+  }
+
+  async function supervise(runId, call) {
+    const { schema, isolated, launch, key, n, title, resultPath } = call
+    if (launch.harness === 'claude' && !launch.permissionMode && !toldNoMode) {
+      toldNoMode = true
+      out("!! no --permission-mode given: Claude workers start in Claude's own default permission mode, not in the orchestrator's.")
+    }
+    const got = call.adopt ? await takeUp(call) : await start(runId, call)
+    if (!got) return null
+    const { sessionId, attempts } = got
+    let { w, end, continued } = got
 
     let delivered = false
     let kept = null
@@ -329,10 +375,8 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       }
     }
     try {
-      let end
-      let continued = 0
       for (;;) {
-        end = await watch(w, {
+        end ??= await watch(w, {
           title, harness: launch.harness, sessionId,
           nudged: (reason, attempt) => journal({ type: 'nudge', key, n, title, dispatchId: w.dispatchId, reason, attempt }),
         })
@@ -361,6 +405,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
           await quietly('title its new tab', () => orca.terminalRename({ terminal: next.terminal, title }))
         }
         w = { ...w, dispatchId: next.dispatchId, terminal: next.terminal, worktree: next.worktree ?? w.worktree }
+        end = null
       }
       // Read even for a dead worker: one that died after submit recorded its
       // result still delivered it.
@@ -390,17 +435,22 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     }
   }
 
-  // call: { prompt, schema, isolated, launch, key, n, label, title, phaseName }.
+  // call: { prompt, schema, isolated, launch, key, n, label, title, phaseName },
+  // and on a resume `adopt`, the worker the last run left out for it: { n,
+  // label, dispatchId, sessionId, terminal, worktree, continuations }.
   return async function life(call) {
-    const { schema, key, n, label, title } = call
-    const dir = join(stateDir, 'agents', `${String(n).padStart(3, '0')}-${slug(label)}`)
+    const { schema, key, n, label, title, adopt } = call
+    // A worker taken up submits to the files its prompt named: its own call's,
+    // numbered as the last run numbered it.
+    const dir = join(stateDir, 'agents', `${String(adopt?.n ?? n).padStart(3, '0')}-${slug(adopt?.label ?? label)}`)
     mkdirSync(dir, { recursive: true })
     const schemaPath = schema ? join(dir, 'schema.json') : null
     const resultPath = join(dir, 'result.json')
     const payloadPath = join(dir, schema ? 'payload.json' : 'payload.txt')
     if (schemaPath) writeFileSync(schemaPath, JSON.stringify(schema, null, 2))
-    // A state dir reused across runs must not hand this agent an older result.
-    rmSync(resultPath, { force: true })
+    // A state dir reused across runs must not hand this agent an older
+    // result. One taken up may have submitted while no runner watched it.
+    if (!adopt) rmSync(resultPath, { force: true })
 
     // Like a worker that cannot start, a Run Orca cannot create is this
     // agent's null, never a throw; the next agent() asks Orca again.
