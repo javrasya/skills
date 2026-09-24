@@ -17,6 +17,10 @@
 // failure also worktrees_kept, the worktrees it retained. Every line it prints
 // is also appended, timestamped, to runner.log there.
 //
+// The run itself is recorded in the machine-wide run registry (registry.mjs,
+// ~/.claude/orca-runs.jsonl): `armed` and the runner's terminal when the Run
+// is created, `ended` with ok, partial or failed when the script settles.
+//
 // No change to this directory is done until the runner contract test passes
 // under both runners (README.md). The offline tests do not replace it.
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, appendFileSync } from 'fs'
@@ -27,6 +31,7 @@ import { checkSchema } from './schema.mjs'
 import { orcaCli, launchCommand, HARNESSES } from './orca-cli.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { agentLifecycle } from './lifecycle.mjs'
+import { runRegistry, REGISTRY_PATH } from './registry.mjs'
 
 export { SUBMIT, workerPrompt } from './lifecycle.mjs'
 
@@ -125,7 +130,9 @@ export function runnerLog(stateDir, print, clock = realClock) {
 // permissionMode: the orchestrating session's, which Claude workers start in
 // as Workflow subagents inherit it. Without one, a Claude worker starts in
 // Claude's own default mode.
-export async function runScript(text, { orca = orcaCli(), stateDir, out: print = (s) => console.log(s), settings = {}, clock = realClock, fallbackObjective = 'workflow run', resume = false, permissionMode = null }) {
+// registry: the run registry's path, or null to record nothing there; project:
+// the repo the run works in, recorded beside it.
+export async function runScript(text, { orca = orcaCli(), stateDir, out: print = (s) => console.log(s), settings = {}, clock = realClock, fallbackObjective = 'workflow run', resume = false, permissionMode = null, registry = null, project = process.cwd() }) {
   const limits = { ...SETTINGS, ...settings }
   const out = runnerLog(stateDir, print, clock)
   const script = loadScript(text)
@@ -139,7 +146,30 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   // Rewritten from empty, replayed calls included, so the journal always
   // describes the latest run and a later resume replays from it alone.
   writeFileSync(journalPath, '')
-  const journal = (entry) => appendFileSync(journalPath, JSON.stringify({ type: entry.type, at: iso(clock), ...entry }) + '\n')
+  // An agent() that returned null makes a run that returns partial, not ok.
+  let failures = 0
+  const journal = (entry) => {
+    if (entry.type === 'failed') failures++
+    appendFileSync(journalPath, JSON.stringify({ type: entry.type, at: iso(clock), ...entry }) + '\n')
+  }
+  // The registry is bookkeeping for the operator: a write it refuses is
+  // reported, and the run carries on.
+  const runs = registry ? runRegistry(registry, clock) : null
+  let armed = null
+  const record = (what, entry) => {
+    try {
+      runs?.[what](entry)
+    } catch (e) {
+      out(`!! run registry: could not record ${what} for ${entry.runId}: ${e?.message ?? e}`)
+    }
+  }
+  // Called once, when Orca creates the Run. A resume creates a Run of its own,
+  // so it is armed as its own run.
+  const onRun = ({ runId, terminal }) => {
+    armed = runId
+    record('armed', { runId, project, runDir: stateDir, spec: meta.value?.name ?? fallbackObjective })
+    record('runner', { runId, terminal })
+  }
   const replays = new Map()
   let replaying = resume
   // A dead agent never names its worktree to the script, so the script can
@@ -152,7 +182,7 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
     return k
   }
   for (const k of earlier.retained) journal({ type: 'retained', retained: keep(k) })
-  const life = agentLifecycle({ orca, clock, limits, out, stateDir, objective: () => objectiveOf(meta.value, fallbackObjective), journal, keep })
+  const life = agentLifecycle({ orca, clock, limits, out, stateDir, objective: () => objectiveOf(meta.value, fallbackObjective), journal, keep, onRun })
 
   const phase = (title) => {
     currentPhase = title
@@ -200,8 +230,11 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   }
 
   try {
-    return withRetained(await script(agent, parallel, phase, log, meta), retained)
+    const result = withRetained(await script(agent, parallel, phase, log, meta), retained)
+    if (armed) record('ended', { runId: armed, outcome: failures ? 'partial' : 'ok' })
+    return result
   } catch (e) {
+    if (armed) record('ended', { runId: armed, outcome: 'failed' })
     // A run that throws still names what it kept: summary.json carries it.
     if (!(e instanceof Object)) e = new Error(String(e))
     e.worktrees_kept = [...retained]
@@ -261,6 +294,7 @@ if (isMain) {
       fallbackObjective: `workflow ${basename(path)}`,
       resume,
       permissionMode,
+      registry: REGISTRY_PATH,
     })
     say('== Result')
     say(JSON.stringify(result, null, 2))

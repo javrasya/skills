@@ -9,7 +9,7 @@
 // with the board `status` last set on it.
 import { OrcaError, launchCommand, workerStartArgs } from './orca-cli.mjs'
 
-export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run' } = {}) {
+export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run', runPrefix = 'run_fake', coordinator = 'term_runner' } = {}) {
   const calls = []
   const dispatches = new Map()
   const worktrees = new Map([[runWorktree, { parent: null, name: null, displayName: null, removed: false, status: null }]])
@@ -36,7 +36,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
 
     async runCreate({ objective }) {
       record({ verb: 'runCreate', objective })
-      return { runId: `run_fake${++runs}` }
+      return { runId: `${runPrefix}${++runs}`, terminal: coordinator }
     },
 
     // Only the custom launch exists: the harness command, carrying the

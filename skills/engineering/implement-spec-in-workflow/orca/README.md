@@ -5,6 +5,7 @@ The second runner for `workflow.template.js` (ADR-0011): a Node script, launched
 | file | what it is |
 |---|---|
 | `runner.mjs` | the runner: the four hooks, naming each `agent()` call, replay and the resume journal, `runner.log`, the retained worktrees |
+| `registry.mjs` | the machine-wide run registry: its writer and the fold that reads each run's current state |
 | `lifecycle.mjs` | one live agent's life: the run's Run, the live cap, its worker's start, liveness, its result, its board status |
 | `submit.mjs` | the worker's end of `agent()`: validates the payload, records it, sends `worker_done` |
 | `orca-cli.mjs` | the one place anything talks to Orca |
@@ -37,6 +38,19 @@ Together, the journal and the log say what happened in a run, whether or not the
 | `reattached` | a resumed runner took up a worker an earlier one started | `key`, `n`, `title`, `dispatchId`, `sessionId`, `terminal`, `worktree` |
 
 The first four types are written today. `retry`, `nudge`, `continued` and `reattached` are defined here, and the behaviours that produce them write them. A resume reads only `type`, `key`, `result` and `retained`, so a journal from before timestamps and launch fields were added still resumes.
+
+### The run registry
+
+Beyond its state dir, every run is recorded in **`~/.claude/orca-runs.jsonl`**, one append-only JSON-lines file for the whole machine (ADR-0012). An Orca Run knows no project, run directory, spec or outcome, and cannot be closed, so the registry holds them, keyed by Run id; it is the only list of runs, and runs from before it are not in it. Every entry has `type`, `runId` and `at`:
+
+| type | written when | carries |
+|---|---|---|
+| `armed` | the runner creates the Run, at its first live `agent()` | `project` (the runner's working directory), `runDir` (the state dir), `spec` (the script's `meta.name`) |
+| `runner` | a runner starts on the Run | `terminal`, the runner's own terminal |
+| `ended` | the script settles | `outcome`: `ok`, `partial` if any `agent()` returned `null`, `failed` if the script threw |
+| `reclaimed` | an agent or the whole run is reclaimed (not written by the runner) | `agent`, the worktree name `<runId>-<n>`; none for the whole run |
+
+`readRegistry()` folds these into each run's current state: `running` until `ended`, then its outcome; where its runner was last seen; and whether the run, or which of its agents, was reclaimed. A torn last line is skipped. A run with no `ended` may still be live or its runner may have died: Orca's terminal list says which. A resume creates a Run of its own, so it is armed as a new run with the same `runDir`; a resume that replays every call creates no Run and records nothing. `runScript` writes the registry only when handed a path, so the offline tests never touch the real one.
 
 The runner assigns each worker's session id. It generates the id and starts the harness with `--session-id`; both `claude` and `pi` accept that flag.
 

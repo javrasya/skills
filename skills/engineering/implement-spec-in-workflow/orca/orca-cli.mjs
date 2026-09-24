@@ -107,10 +107,11 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
 
   return {
     // Run from the runner's own terminal: Orca binds the Run to the caller
-    // and refuses a mutation made on another terminal's behalf.
+    // and refuses a mutation made on another terminal's behalf. `terminal` is
+    // that coordinator terminal, the runner's own.
     async runCreate({ objective }) {
       const r = await call(['orchestration', 'run-create', '--objective', objective])
-      return { runId: r.run?.id ?? r.id }
+      return { runId: r.run?.id ?? r.id, terminal: r.run?.coordinator_handle ?? null }
     },
 
     // No `child`: the worker runs in the coordinator's worktree — the runner's,

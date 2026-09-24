@@ -16,6 +16,7 @@ import { agentLifecycle } from '../skills/engineering/implement-spec-in-workflow
 import { fakeOrca } from '../skills/engineering/implement-spec-in-workflow/orca/fake-orca.mjs'
 import { RUNNER_SETTINGS } from '../skills/engineering/implement-spec-in-workflow/orca/settings.mjs'
 import { orcaCli } from '../skills/engineering/implement-spec-in-workflow/orca/orca-cli.mjs'
+import { runRegistry, readRegistry, OUTCOMES } from '../skills/engineering/implement-spec-in-workflow/orca/registry.mjs'
 
 const SCHEMA = {
   type: 'object',
@@ -1138,4 +1139,138 @@ test('resume: a journal written before entries carried timestamps and launch fie
   const journal = journalOf(stateDir)
   assertEntries(journal)
   assert.deepEqual(journal.slice(0, 2).map((e) => [e.type, e.retained?.path ?? e.result, e.replayed]), [['retained', 'C:/old/wt', undefined], ['result', 'Plan it. @old', true]])
+})
+
+// The run registry. Every test writes a registry of its own in a temp dir;
+// runScript records nothing there unless it is handed a path.
+const registryIn = () => join(tmp(), 'orca-runs.jsonl')
+const linesOf = (path) => readFileSync(path, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+const isoAt = (t) => new Date(t).toISOString()
+
+test('registry: the writer appends armed, the runner\'s terminal and ended, each stamped with the clock\'s time', () => {
+  const path = registryIn()
+  const clock = fakeClock()
+  const w = runRegistry(path, clock)
+  w.armed({ runId: 'run_a', project: 'C:/repo', runDir: 'C:/notes/orca-run', spec: 'implement-spec-43' })
+  clock.t = 5 * MIN
+  w.runner({ runId: 'run_a', terminal: 'term_1' })
+  clock.t = 90 * MIN
+  w.ended({ runId: 'run_a', outcome: 'partial' })
+  assert.deepEqual(linesOf(path), [
+    { type: 'armed', runId: 'run_a', at: isoAt(0), project: 'C:/repo', runDir: 'C:/notes/orca-run', spec: 'implement-spec-43' },
+    { type: 'runner', runId: 'run_a', at: isoAt(5 * MIN), terminal: 'term_1' },
+    { type: 'ended', runId: 'run_a', at: isoAt(90 * MIN), outcome: 'partial' },
+  ])
+  assert.throws(() => w.ended({ runId: 'run_a', outcome: 'done' }), /unknown outcome "done"/)
+  assert.equal(linesOf(path).length, 3)
+  assert.deepEqual(OUTCOMES, ['ok', 'partial', 'failed'])
+})
+
+test('registry: the fold gives each run its state, where its runner was last seen, and whether it or its agents are reclaimed', () => {
+  const path = registryIn()
+  const clock = fakeClock()
+  const w = runRegistry(path, clock)
+  w.armed({ runId: 'run_a', project: 'C:/repo', runDir: 'C:/a', spec: 's1' })
+  w.runner({ runId: 'run_a', terminal: 'term_1' })
+  w.armed({ runId: 'run_b', project: 'C:/other', runDir: 'C:/b', spec: 's2' })
+  clock.t = MIN
+  w.runner({ runId: 'run_a', terminal: 'term_2' })
+  clock.t = 2 * MIN
+  w.ended({ runId: 'run_a', outcome: 'failed' })
+  const reclaim = (e) => writeFileSync(path, readFileSync(path, 'utf8') + JSON.stringify({ type: 'reclaimed', ...e }) + '\n')
+  reclaim({ runId: 'run_a', agent: 'run_a-3', at: isoAt(3 * MIN) })
+  reclaim({ runId: 'run_a', at: isoAt(4 * MIN) })
+  reclaim({ runId: 'run_b', agent: 'run_b-1', at: isoAt(5 * MIN) })
+  // Never armed here: a run from before the registry.
+  w.runner({ runId: 'run_old', terminal: 'term_9' })
+  w.ended({ runId: 'run_old', outcome: 'ok' })
+
+  const runs = readRegistry(path)
+  assert.deepEqual(runs.map((r) => r.runId), ['run_a', 'run_b'])
+  assert.deepEqual(runs[0], {
+    runId: 'run_a', project: 'C:/repo', runDir: 'C:/a', spec: 's1', armedAt: isoAt(0),
+    state: 'failed', endedAt: isoAt(2 * MIN), runner: { terminal: 'term_2', at: isoAt(MIN) },
+    reclaimed: true, reclaimedAt: isoAt(4 * MIN), reclaimedAgents: [{ agent: 'run_a-3', at: isoAt(3 * MIN) }],
+  })
+  assert.deepEqual(runs[1], {
+    runId: 'run_b', project: 'C:/other', runDir: 'C:/b', spec: 's2', armedAt: isoAt(0),
+    state: 'running', endedAt: null, runner: null,
+    reclaimed: false, reclaimedAt: null, reclaimedAgents: [{ agent: 'run_b-1', at: isoAt(5 * MIN) }],
+  })
+  assert.deepEqual(readRegistry(join(tmp(), 'none.jsonl')), [], 'no registry yet is no runs')
+})
+
+test('registry: a torn last line is ignored, and the next entry is not welded onto it', () => {
+  const path = registryIn()
+  const w = runRegistry(path, fakeClock())
+  w.armed({ runId: 'run_a', project: 'C:/repo', runDir: 'C:/a', spec: 's' })
+  writeFileSync(path, readFileSync(path, 'utf8') + '{"type":"ended","runId":"run_a","outc')
+  assert.equal(readRegistry(path)[0].state, 'running')
+  w.runner({ runId: 'run_a', terminal: 'term_1' })
+  const [run] = readRegistry(path)
+  assert.equal(run.state, 'running')
+  assert.deepEqual(run.runner, { terminal: 'term_1', at: isoAt(0) })
+})
+
+// A run of SCRIPT on the fake clock, recorded in `registry`.
+async function registered(registry, { worker = submitGood, script = SCRIPT, stateDir = tmp(), clock = fakeClock(), ...fake } = {}) {
+  const orca = fakeOrca({ worker: (w) => worker({ ...w, clock }), clock, ...fake })
+  const result = await runScript(script, { orca, stateDir, out: () => {}, clock, registry, project: 'C:/repo' }).catch((e) => e)
+  return { orca, result, stateDir }
+}
+
+test('registry: the runner arms its Run with project, run directory, spec and time, records its terminal, and ends it ok', async () => {
+  const registry = registryIn()
+  const clock = fakeClock()
+  clock.t = 7 * MIN
+  const { result, stateDir } = await registered(registry, { clock })
+  assert.deepEqual(result, { r: GOOD })
+  const [armed, runner, ended, ...rest] = linesOf(registry)
+  assert.deepEqual(armed, { type: 'armed', runId: 'run_fake1', at: isoAt(7 * MIN), project: 'C:/repo', runDir: stateDir, spec: 'tracer' })
+  assert.deepEqual(runner, { type: 'runner', runId: 'run_fake1', at: isoAt(7 * MIN), terminal: 'term_runner' })
+  assert.deepEqual([ended.type, ended.runId, ended.outcome, ended.at], ['ended', 'run_fake1', 'ok', isoAt(clock.now())])
+  assert.deepEqual(rest, [])
+})
+
+test('registry: a run where an agent came back null ends partial; a run that throws ends failed', async () => {
+  const registry = registryIn()
+  const died = await registered(registry, { worker: async () => { throw new Error('agent died') } })
+  assert.deepEqual(died.result, { r: null })
+  const threw = await registered(registry, { script: SCRIPT.replace(/return \{ r \}$/, "throw new Error('boom')"), runPrefix: 'run_throw' })
+  assert.match(threw.result.message, /boom/)
+  assert.deepEqual(readRegistry(registry).map((r) => [r.runId, r.state]), [['run_fake1', 'partial'], ['run_throw1', 'failed']])
+})
+
+test('registry: a resume that launches arms its own Run and records its runner; one that replays everything records nothing', async () => {
+  const registry = registryIn()
+  const stateDir = tmp()
+  const go = (script, n, resume) => {
+    const orca = Object.assign(answering(n), { runCreate: async () => ({ runId: `run_r${n}`, terminal: `term_r${n}` }) })
+    return runScript(script, { orca, stateDir, out: () => {}, settings: FAST, resume, registry, project: 'C:/repo' })
+  }
+  await go(chain('Build it.'), 1, false)
+  await go(chain('Build it.'), 2, true)
+  assert.equal(readRegistry(registry).length, 1, 'a fully replayed resume creates no Run')
+  await go(chain('Build it again.'), 3, true)
+  assert.deepEqual(readRegistry(registry).map((r) => [r.runId, r.runDir, r.runner.terminal, r.state]), [
+    ['run_r1', stateDir, 'term_r1', 'ok'],
+    ['run_r3', stateDir, 'term_r3', 'ok'],
+  ])
+})
+
+test('registry: two runs at once in one repo are two entries that never mix', async () => {
+  const registry = registryIn()
+  const [a, b] = await Promise.all([
+    registered(registry, { runPrefix: 'run_a', coordinator: 'term_a' }),
+    registered(registry, { runPrefix: 'run_b', coordinator: 'term_b', worker: async () => { throw new Error('agent died') } }),
+  ])
+  const runs = Object.fromEntries(readRegistry(registry).map((r) => [r.runId, r]))
+  assert.deepEqual(Object.keys(runs).sort(), ['run_a1', 'run_b1'])
+  assert.deepEqual([runs.run_a1.project, runs.run_a1.runDir, runs.run_a1.runner.terminal, runs.run_a1.state], ['C:/repo', a.stateDir, 'term_a', 'ok'])
+  assert.deepEqual([runs.run_b1.project, runs.run_b1.runDir, runs.run_b1.runner.terminal, runs.run_b1.state], ['C:/repo', b.stateDir, 'term_b', 'partial'])
+})
+
+test('orca-cli: run-create reports the coordinator terminal the Run bound to', async () => {
+  const { orca } = recordingCli({ 'orchestration run-create': { run: { id: 'run_1', coordinator_handle: 'term_me' } } })
+  assert.deepEqual(await orca.runCreate({ objective: 'o' }), { runId: 'run_1', terminal: 'term_me' })
 })

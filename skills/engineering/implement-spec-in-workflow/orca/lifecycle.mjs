@@ -71,9 +71,10 @@ function readResult(resultPath, schema) {
 // starts. objective() is read at the first live agent, once the script has
 // declared its meta. journal(entry) appends one journal line; keep({path,
 // reason}) retains a worktree and returns the entry the list holds for it.
+// onRun({ runId, terminal }) is called once, when Orca creates the Run.
 // Returns life(call), which resolves to the agent's value or null, and throws
 // only if journal or out does.
-export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, journal, keep }) {
+export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, journal, keep, onRun = () => {} }) {
   const live = slots(limits.MAX_LIVE)
   // One Run per workflow run: every agent's worker is dispatched into it.
   let run = null
@@ -266,7 +267,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
 
     // Like a worker that cannot start, a Run Orca cannot create is this
     // agent's null, never a throw; the next agent() asks Orca again.
-    const creating = (run ??= orca.runCreate({ objective: objective() }))
+    const creating = (run ??= orca.runCreate({ objective: objective() }).then((r) => (onRun(r), r)))
     let runId
     try {
       ;({ runId } = await creating)
