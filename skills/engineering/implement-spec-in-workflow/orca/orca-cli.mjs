@@ -107,6 +107,18 @@ function commandLine(harness, session, { model, effort, permissionMode }) {
   return words.join(' ')
 }
 
+// The line that shows a log file's last lines and then every line added to it,
+// typed into the shell `logTail` starts: PowerShell on Windows, where the path
+// sits in a single-quoted literal (nothing in it expands, a quote doubles)
+// and the log is read as the UTF-8 the runner writes (Windows PowerShell
+// would read it as ANSI), and a POSIX shell elsewhere. A line break would submit the line early.
+export function tailCommand(path, platform = process.platform) {
+  const p = String(path)
+  if (/[\x00-\x1f\x7f]/.test(p)) throw new Error(`refusing to type a path holding a control character into a shell: ${JSON.stringify(p)}`)
+  if (platform === 'win32') return `Get-Content -LiteralPath '${p.replace(/'/g, "''")}' -Encoding UTF8 -Tail 200 -Wait`
+  return `tail -n 200 -F '${p.replace(/'/g, `'\\''`)}'`
+}
+
 // The one worker-start argv: it adopts a terminal the runner made, so it never
 // carries --agent. fake-orca.mjs builds its starts from this too.
 export const workerStartArgs = ({ run, prompt, title, place, terminal }) =>
@@ -128,7 +140,8 @@ const TAB_GONE = new Set(['terminal_not_writable', 'terminal_exited', 'terminal_
 
 // call(args, timeoutMs) and git(cwd, args, timeoutMs) run one Orca or git
 // command; clock.timer bounds every call at callMs, plus any wait it asks for.
-export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(bin), git = execGit, clock = { timer: realTimer }, callMs = RUNNER_SETTINGS.orcaCallMs } = {}) {
+// `platform` is the host's, which picks the shell `logTail` types into.
+export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(bin), git = execGit, clock = { timer: realTimer }, callMs = RUNNER_SETTINGS.orcaCallMs, platform = process.platform } = {}) {
   const orca = (args, waitMs = 0) => withTimeout(clock, callMs + waitMs, call(args, callMs + waitMs), args.slice(0, 2).join(' '))
   const gitIn = (cwd, args) => withTimeout(clock, callMs, git(cwd, args, callMs), `git ${args[0]}`)
 
@@ -385,9 +398,22 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       return { terminal: r?.focus?.handle ?? terminal, worktreeId: r?.focus?.worktreeId ?? null }
     },
 
-    // Opens a file in Orca's editor. A missing one fails runtime_error (ENOENT).
+    // Opens a file in Orca's editor. Orca takes the worktree from the cwd and
+    // opens only a file inside it: a path outside fails runtime_error
+    // invalid_relative_path, and a missing one runtime_error (ENOENT).
     async fileOpen({ path }) {
       await orca(['file', 'open', '--path', path])
+    },
+
+    // A tab of its own, in the caller's worktree and brought to the front,
+    // that shows the log's last lines and follows it as it grows. This is how
+    // a file outside every worktree is shown in Orca, which fileOpen cannot:
+    // the run dir, runner.log's, is outside every checkout. On Windows the tab
+    // runs PowerShell whatever the operator's default shell is.
+    async logTail({ path, title }) {
+      const shell = platform === 'win32' ? ['--shell', 'powershell.exe'] : []
+      const r = await orca(['terminal', 'create', '--worktree', 'current', '--title', title, ...shell, '--command', tailCommand(path, platform), '--focus'])
+      return { terminal: r?.terminal?.handle ?? null }
     },
 
     // Always forced: Orca refuses a dirty worktree otherwise, and uncommitted

@@ -31,7 +31,7 @@
 // A Run this fake did not create (a test's own runCreate) is not fenced.
 // closeTab(handle) closes a runner's tab: Orca still holds its Runs.
 import { existsSync } from 'fs'
-import { OrcaError, launchCommand, resumeCommand, workerStartArgs, withTimeout } from './orca-cli.mjs'
+import { OrcaError, launchCommand, resumeCommand, tailCommand, workerStartArgs, withTimeout } from './orca-cli.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 
 // The runner's transcript reader, over the fake's sessions: a session's size
@@ -44,6 +44,8 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
   const calls = []
   const dispatches = new Map()
   const worktrees = new Map([[runWorktree, { parent: null, name: null, displayName: null, removed: false, status: null, dirty: false, commits: 0, unpushed: 0 }]])
+  // handle -> { path, title, open }: the tabs logTail opened.
+  const logTabs = new Map()
   const counts = {}
   // runId -> { coordinator, generation }
   const runs = new Map()
@@ -300,10 +302,15 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     // neither gone nor closed. No row names a run or a dispatch.
     async terminalList() {
       record({ verb: 'terminalList' })
-      return [coordinator, ...[...dispatches.values()].filter((d) => !d.gone).map((d) => d.handle)]
+      return [coordinator, ...[...logTabs].filter(([, t]) => t.open).map(([h]) => h), ...[...dispatches.values()].filter((d) => !d.gone).map((d) => d.handle)]
     },
 
     async terminalClose({ terminal: handle }) {
+      if (logTabs.get(handle)?.open) {
+        record({ verb: 'terminalClose', terminal: handle })
+        logTabs.get(handle).open = false
+        return
+      }
       const d = [...dispatches.values()].find((x) => x.handle === handle)
       if (!d) throw new OrcaError('terminal_handle_stale', `no terminal ${handle}`, 'terminal close')
       if (d.gone) throw new OrcaError('terminal_exited', `terminal ${handle} has exited`, 'terminal close')
@@ -311,16 +318,31 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       d.gone = true
     },
 
-    // The runner's own tab, or a worker's; a closed one is refused as exited.
+    // The runner's own tab, a log's, or a worker's; a closed one is refused as exited.
     async terminalSwitch({ terminal: handle }) {
-      if (handle !== coordinator) terminal(handle, 'terminal switch', 'terminal_exited')
+      if (logTabs.has(handle)) {
+        if (!logTabs.get(handle).open) throw new OrcaError('terminal_exited', 'terminal_exited', 'terminal switch')
+      } else if (handle !== coordinator) terminal(handle, 'terminal switch', 'terminal_exited')
       record({ verb: 'terminalSwitch', terminal: handle })
       return { terminal: handle, worktreeId: null }
     },
 
-    async fileOpen({ path }) {
+    // As real Orca: only a file inside the worktree, the cwd's unless
+    // `worktree` names one, whatever exists outside it.
+    async fileOpen({ path, worktree = runWorktree }) {
+      const norm = (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+      if (!norm(path).startsWith(norm(worktree) + '/')) throw new OrcaError('runtime_error', 'invalid_relative_path', 'file open')
       if (!existsSync(path)) throw new OrcaError('runtime_error', `ENOENT: no such file or directory, open '${path}'`, 'file open')
       record({ verb: 'fileOpen', path })
+    },
+
+    // A tab in the run's worktree following `path`: `command` is what the
+    // real adapter types into it. Orca reads no path here; the shell does.
+    async logTail({ path, title }) {
+      const handle = `term_log${logTabs.size + 1}`
+      logTabs.set(handle, { path, title, open: true })
+      record({ verb: 'logTail', path, title, command: tailCommand(path), terminal: handle })
+      return { terminal: handle }
     },
 
     // `orca worktree rm --force`: it also kills every terminal in the worktree.

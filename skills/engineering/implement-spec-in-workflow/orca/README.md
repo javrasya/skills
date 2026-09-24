@@ -199,7 +199,7 @@ Anything else is asked again. With no answer possible (stdin closed) every agent
 
 ## The run view in the runner's tab
 
-Launched in a terminal, the runner starts the run view (ADR-0012; the design is `docs/design/orca-run-view-tree.md`) as its child, in its own tab: the run as a tree of phases and agents that updates in place. The view reads the run from the state dir, the run registry and Orca, never from the runner, so what it shows does not depend on the runner. Its keys: ↑↓ move; on a phase, a click, Enter or ←/→ folds it; on an agent, a click or Enter focuses its Orca tab and worktree; `r` reclaims the selected agent by the rules above, and one holding unpushed commits only when `f` confirms; `l` opens `runner.log` in Orca's editor; `q` quits the view, never the run.
+Launched in a terminal, the runner starts the run view (ADR-0012; the design is `docs/design/orca-run-view-tree.md`) as its child, in its own tab: the run as a tree of phases and agents that updates in place. The view reads the run from the state dir, the run registry and Orca, never from the runner, so what it shows does not depend on the runner. Its keys: ↑↓ move; on a phase, a click, Enter or ←/→ folds it; on an agent, a click or Enter focuses its Orca tab and worktree; `r` reclaims the selected agent by the rules above, and one holding unpushed commits only when `f` confirms; `l` opens `runner.log` in an Orca tab of its own that follows it as it grows, or brings that tab back while it is open (Orca's editor opens no file outside a worktree, and the run dir is outside every checkout); `q` quits the view, never the run.
 
 While the view is attached (decision D5 on #43):
 

@@ -167,6 +167,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   let selected = 0
   let message = null
   let latest = null
+  let logTab = null
   const view = { model: null, refresh, key, click, focus, reclaim, openLog }
 
   function layout() {
@@ -287,22 +288,32 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
 
   const activate = (row) => (!row ? {} : row.kind === 'phase' ? toggle(row.phase) : focus(row.agent))
 
-  // Reclaims the selected agent through reclaim.mjs, as the journal names it
-  // for reclaim: refused while it is live, or while its worktree holds
-  // unpushed commits unless `force`. A reclaim is recorded in the registry.
-  async function reclaim({ force = false } = {}) {
-    const row = current()
-    if (row?.kind !== 'agent') return say('select an agent to reclaim')
-    const a = row.agent
+  // Reclaims agent `n`, or with no `n` the selected one, through reclaim.mjs,
+  // as the journal names it for reclaim: refused while it is live, or while
+  // its worktree holds unpushed commits unless `force`. A reclaim is recorded
+  // in the registry. What it answers names the agent as `agent: { n, title }`,
+  // so a forced retry goes to the agent refused, never to whatever row the
+  // selection sits on by then: a refresh that folds its phase moves it.
+  async function reclaim({ n, force = false } = {}) {
+    let a
+    if (n === undefined) {
+      const row = current()
+      if (row?.kind !== 'agent') return say('select an agent to reclaim')
+      a = row.agent
+    } else {
+      a = phases.flatMap((p) => p.agents).find((x) => x.n === n)
+      if (!a) return say(`no agent ${n} in this run to reclaim`)
+    }
+    const target = { n: a.n, title: a.title }
     const agent = agentsOf(journalPath).find((x) => x.n === a.n)
-    if (!agent) return say(`${a.title} has nothing to reclaim: it launched nothing in this run`)
+    if (!agent) return { ...say(`${a.title} has nothing to reclaim: it launched nothing in this run`), agent: target }
     let r
     try {
       r = await reclaimAgent(agent, { orca, unpushed, force })
     } catch (e) {
       r = { reclaimed: false, reason: e?.message ?? String(e) }
     }
-    if (!r.reclaimed) return { ...say(`kept ${a.title}: ${r.reason}`), reclaim: r }
+    if (!r.reclaimed) return { ...say(`kept ${a.title}: ${r.reason}`), reclaim: r, agent: target }
     let note = r.notes.length ? `; ${r.notes.join('; ')}` : ''
     if (registry) {
       try {
@@ -312,14 +323,26 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
       }
     }
     await refresh()
-    return { ...say(`reclaimed ${a.title}${note}`), reclaim: r }
+    return { ...say(`reclaimed ${a.title}${note}`), reclaim: r, agent: target }
   }
 
+  // runner.log in a tab of its own that follows it (orca.logTail): Orca's
+  // editor opens no file outside a worktree, and the run dir is outside every
+  // checkout. While that tab is open, `l` again brings it back.
   async function openLog() {
     const path = join(stateDir, 'runner.log')
+    if (!existsSync(path)) return say(`could not open ${path}: the runner has not written it yet`)
+    if (logTab) {
+      try {
+        await orca.terminalSwitch({ terminal: logTab })
+        return say(`switched to the tab following ${path}`)
+      } catch {
+        logTab = null
+      }
+    }
     try {
-      await orca.fileOpen({ path })
-      return say(`opened ${path}`)
+      logTab = (await orca.logTail({ path, title: 'runner.log' })).terminal
+      return say(`opened ${path} in a tab that follows it`)
     } catch (e) {
       return say(`could not open ${path}: ${e?.message ?? e}`)
     }

@@ -15,7 +15,7 @@ import { runScript, journalKey, failureSummary, finish, SUBMIT, SETTINGS, realCl
 import { agentLifecycle } from '../skills/engineering/implement-spec-in-workflow/orca/lifecycle.mjs'
 import { fakeOrca, fakeTranscripts } from '../skills/engineering/implement-spec-in-workflow/orca/fake-orca.mjs'
 import { RUNNER_SETTINGS } from '../skills/engineering/implement-spec-in-workflow/orca/settings.mjs'
-import { orcaCli, OrcaError } from '../skills/engineering/implement-spec-in-workflow/orca/orca-cli.mjs'
+import { orcaCli, OrcaError, tailCommand } from '../skills/engineering/implement-spec-in-workflow/orca/orca-cli.mjs'
 import { runRegistry, readRegistry, OUTCOMES } from '../skills/engineering/implement-spec-in-workflow/orca/registry.mjs'
 import { transcriptPath, sessionTranscripts, claudeSlug, piDir } from '../skills/engineering/implement-spec-in-workflow/orca/transcript.mjs'
 import { agentsOf, reclaimAgent, gitUnpushed, parseChoice } from '../skills/engineering/implement-spec-in-workflow/orca/reclaim.mjs'
@@ -721,7 +721,7 @@ test('agent(): an unknown harness, or a launch word a shell could misread, throw
 
 // The CLI adapter with Orca's process replaced: every argv it would run is
 // recorded, and each verb answers with the shape real Orca returns.
-function recordingCli(replies = {}, { git, clock } = {}) {
+function recordingCli(replies = {}, { git, clock, platform } = {}) {
   const argvs = []
   const defaults = {
     'terminal create': { terminal: { handle: 'term_own' } },
@@ -734,7 +734,7 @@ function recordingCli(replies = {}, { git, clock } = {}) {
     const reply = verb in replies ? replies[verb] : defaults[verb]
     return typeof reply === 'function' ? reply(args) : reply ?? {}
   }
-  return { argvs, orca: orcaCli({ call, git, clock }) }
+  return { argvs, orca: orcaCli({ call, git, clock, ...(platform ? { platform } : {}) }) }
 }
 const flag = (argv, name) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined)
 const verbsOf = (argvs) => argvs.map((a) => a.slice(0, 2).join(' '))
@@ -2503,24 +2503,95 @@ test('run view: r reclaims through the reclaim rules: a live agent is refused, u
   assert.match((await view.key('r')).message, /has nothing to reclaim/)
 })
 
-test('run view: l opens runner.log in Orca\'s editor, and q quits the view only', async () => {
-  const { view, stateDir, after } = await viewedRun()
-  await view.key('l')
-  assert.deepEqual(after().filter((c) => c.verb === 'fileOpen').map((c) => c.path), [join(stateDir, 'runner.log')])
-  rmSync(join(stateDir, 'runner.log'))
-  assert.match((await view.key('l')).message, /could not open .*runtime_error/)
-  assert.deepEqual(await view.key('q'), { quit: true })
-  assert.deepEqual(after().filter((c) => MUTATING.includes(c.verb)), [])
+test('run view: f forces the reclaim of the agent r was refused for, even once a refresh has folded its phase and moved the selection', async () => {
+  const clock = fakeClock()
+  const orca = fakeOrca({ worker: () => new Promise(() => {}), clock })
+  for (let n = 1; n <= 3; n++) await orca.workerStart({ run: 'run_fake1', prompt: 'p', title: `t${n}`, sessionId: SID, child: { name: `run_fake1-${n}`, displayName: `t${n}` } })
+  const stateDir = tmp()
+  const put = (...entries) => appendFileSync(join(stateDir, 'journal.jsonl'), entries.map((e) => JSON.stringify(e) + '\n').join(''))
+  put(
+    startedJ(1, '[Implement] impl:a', 0, 'claude', 'sid-1'),
+    startedJ(2, '[Implement] impl:b', 1, 'claude', 'sid-2'),
+    startedJ(3, '[Gate] gate:a', 2, 'claude', 'sid-3'),
+    J('result', 2, '[Implement] impl:b', 8, { result: GOOD }),
+    J('result', 3, '[Gate] gate:a', 9, { result: GOOD }),
+  )
+  writeFileSync(join(stateDir, 'runner.pid'), String(process.pid))
+  const registry = registryIn()
+  runRegistry(registry, { now: () => 0 }).armed({ runId: 'run_fake1', project: 'C:/repos/controlayer', runDir: stateDir, spec: 'implement-spec-783' })
+  clock.t = 10 * MIN
+  const view = runView({ stateDir, orca, clock, transcripts: { usage: () => null }, registry, unpushed: orca.unpushedOf })
+  await view.refresh()
+  const rowOf = (key) => view.model.rows.findIndex((r) => r.key === key)
+  // Both settled agents hold commits no remote has, as a done agent's worktree does.
+  for (const n of [2, 3]) orca.dispatches.get(`ctx_fake${n}`).settled = true
+  orca.worktrees.get(wt(2)).unpushed = 3
+  orca.worktrees.get(wt(3)).unpushed = 5
+  await view.click(rowOf('phase:Gate'))
+  assert.deepEqual(view.model.rows.map((r) => r.key), ['phase:Implement', 'agent:1', 'agent:2', 'phase:Gate', 'agent:3'])
+  await view.click(rowOf('agent:2'))
+  const refused = await view.key('r')
+  assert.deepEqual([refused.reclaim.unpushed, refused.agent], [3, { n: 2, title: '[Implement] impl:b' }])
+
+  // impl:a finishes while the force question is open: Implement folds, and
+  // the selection falls on gate:a's row.
+  orca.dispatches.get('ctx_fake1').settled = true
+  put(J('result', 1, '[Implement] impl:a', 11, { result: GOOD }))
+  await view.refresh()
+  assert.deepEqual(view.model.rows.map((r) => r.key), ['phase:Implement', 'phase:Gate', 'agent:3'])
+  assert.equal(view.model.rows[view.model.selected].key, 'agent:3')
+
+  // f, as view.mjs sends it: naming the agent refused.
+  const since = orca.calls.length
+  const forced = await view.reclaim({ n: refused.agent.n, force: true })
+  assert.deepEqual([forced.reclaim, forced.agent], [{ reclaimed: true, notes: [] }, { n: 2, title: '[Implement] impl:b' }])
+  assert.deepEqual(orca.calls.slice(since).filter((c) => c.verb === 'worktreeRemove').map((c) => c.path), [wt(2)])
+  assert.deepEqual([orca.worktrees.get(wt(2)).removed, orca.worktrees.get(wt(3)).removed], [true, false], "gate:a's 5 commits stay")
+  assert.equal(orca.dispatches.get('ctx_fake3').released, false)
+  assert.deepEqual(linesOf(registry).filter((e) => e.type === 'reclaimed').map((e) => e.agent), ['run_fake1-2'])
+  assert.match(view.model.message, /reclaimed \[Implement\] impl:b/)
 })
 
-test('orca-cli: the view switches to a tab by handle and opens a file by path', async () => {
-  const { argvs, orca } = recordingCli({ 'terminal switch': { focus: { handle: 'term_a', tabId: 't', worktreeId: 'repo::C:/wt', navigated: true } } })
+test('run view: l follows runner.log in a tab of its own, as Orca\'s editor opens no file outside a worktree; q quits the view only', async () => {
+  const { view, stateDir, after, orca } = await viewedRun()
+  const log = join(stateDir, 'runner.log')
+  // The run dir is outside every worktree, so `file open` can never show it.
+  await assert.rejects(orca.fileOpen({ path: log }), (e) => e.code === 'runtime_error' && /invalid_relative_path/.test(e.message))
+  assert.match((await view.key('l')).message, /opened .*runner\.log in a tab that follows it/)
+  const tails = () => after().filter((c) => c.verb === 'logTail')
+  assert.deepEqual(tails().map((c) => [c.path, c.title, c.command]), [[log, 'runner.log', tailCommand(log)]])
+  const tab = tails()[0].terminal
+  // Again while that tab is open: it comes back to the front, no second tab.
+  assert.match((await view.key('l')).message, /switched to the tab following/)
+  assert.deepEqual(after().filter((c) => c.verb === 'terminalSwitch').map((c) => c.terminal), [tab])
+  assert.equal(tails().length, 1)
+  assert.deepEqual(after().filter((c) => MUTATING.includes(c.verb)), [])
+  // Closed by the operator: the next l opens a new one.
+  await orca.terminalClose({ terminal: tab })
+  await view.key('l')
+  assert.equal(tails().length, 2)
+  assert.notEqual(tails()[1].terminal, tab)
+  rmSync(log)
+  assert.match((await view.key('l')).message, /could not open .*runner\.log: the runner has not written it yet/)
+  assert.equal(tails().length, 2)
+  assert.deepEqual(await view.key('q'), { quit: true })
+})
+
+test('orca-cli: the view switches to a tab by handle, opens a file by path, and follows a log in a tab of its own', async () => {
+  const { argvs, orca } = recordingCli({ 'terminal switch': { focus: { handle: 'term_a', tabId: 't', worktreeId: 'repo::C:/wt', navigated: true } }, 'terminal create': { terminal: { handle: 'term_log' } } }, { platform: 'win32' })
   assert.deepEqual(await orca.terminalSwitch({ terminal: 'term_a' }), { terminal: 'term_a', worktreeId: 'repo::C:/wt' })
-  await orca.fileOpen({ path: 'C:/notes/orca-run/runner.log' })
+  await orca.fileOpen({ path: 'C:/wt/notes.md' })
+  // PowerShell, whatever the default shell: the path a single-quoted literal.
+  assert.deepEqual(await orca.logTail({ path: "C:\\Users\\o'neil\\.claude\\spec-notes\\s-43\\orca-run\\runner.log", title: 'runner.log' }), { terminal: 'term_log' })
   assert.deepEqual(argvs, [
     ['terminal', 'switch', '--terminal', 'term_a'],
-    ['file', 'open', '--path', 'C:/notes/orca-run/runner.log'],
+    ['file', 'open', '--path', 'C:/wt/notes.md'],
+    ['terminal', 'create', '--worktree', 'current', '--title', 'runner.log', '--shell', 'powershell.exe', '--command', "Get-Content -LiteralPath 'C:\\Users\\o''neil\\.claude\\spec-notes\\s-43\\orca-run\\runner.log' -Encoding UTF8 -Tail 200 -Wait", '--focus'],
   ])
+  const posix = recordingCli({}, { platform: 'linux' })
+  await posix.orca.logTail({ path: "/home/o'neil/runner.log", title: 'runner.log' })
+  assert.deepEqual(posix.argvs, [['terminal', 'create', '--worktree', 'current', '--title', 'runner.log', '--command', "tail -n 200 -F '/home/o'\\''neil/runner.log'", '--focus']])
+  assert.throws(() => tailCommand('C:/notes/runner.log\nRemove-Item C:/'), /control character/)
 })
 
 // --- the run view in the runner's tab (D5 on #43) -----------------------------

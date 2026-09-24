@@ -122,9 +122,12 @@ const said = (r) => {
 const ANSWERS = { ENTER: '', a: 'a', n: 'n' }
 term.on('key', (name) => {
   if (name === 'CTRL_C') return quit()
+  // `f` forces the reclaim of the agent the modal names, the one `r` was
+  // refused for, wherever the selection has moved since.
   if (modal?.force) {
+    const { n } = modal
     modal = null
-    return act(async () => (name === 'f' ? said(await view.reclaim({ force: true })) : (flash = 'reclaim cancelled')))
+    return act(async () => (name === 'f' ? said(await view.reclaim({ n, force: true })) : (flash = 'reclaim cancelled')))
   }
   if (modal) {
     if (!(name in ANSWERS)) return
@@ -137,8 +140,8 @@ term.on('key', (name) => {
     flash = null
     const r = said(await view.key(name))
     if (r?.quit) return quit()
-    if (r?.reclaim?.unpushed > 0) {
-      modal = { force: true, title: `Reclaim ${view.model.pane?.agent?.title ?? 'this agent'}?`, lines: [r.reclaim.reason, '', 'f = force the reclaim, and those commits are lost · any other key cancels'] }
+    if (r?.reclaim?.unpushed > 0 && r.agent) {
+      modal = { force: true, n: r.agent.n, title: `Reclaim ${r.agent.title}?`, lines: [r.reclaim.reason, '', 'f = force the reclaim, and those commits are lost · any other key cancels'] }
     }
   })
 })

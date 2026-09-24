@@ -36,7 +36,7 @@ The reference design for the Orca runner's [run view](../../CONTEXT.md) (spec #4
   - Context size and its bar are coloured by band: green below 200k, yellow from 200k to 350k, red above 350k.
   - States have their own colours. Cumulative tokens are grey. The selected row is shown inverted.
 - **Exact spacing and column widths** are a guide, not a contract.
-- **The key-help line** lists the view's own keys (#51): `l` opens the log; `R` resume, `e` end-of-run and `s` all runs were the prototype's.
+- **The key-help line** lists the view's own keys (#51): `l` opens the log in a tab of its own that follows it; `R` resume, `e` end-of-run and `s` all runs were the prototype's.
 
 ## Last design check
 
@@ -47,6 +47,7 @@ The reference design for the Orca runner's [run view](../../CONTEXT.md) (spec #4
 - **Selected phase**: its failed and stuck agents with their reasons, and the fold hint. Matches.
 - **Selected agent** (the failed `impl:#1087:s2`, as in the image): `[Implement] impl:#1087:s2  ✗ failed  ctx —  total —  8m00s`, then worktree, tab and session (`—`), the reason and the transcript. Matches. A worktree is named, not given as a path, and a tab by its handle's first characters, so that line fits 120 columns.
 - **Clicks**: SGR mouse presses, sent into the tab with `orca terminal send`, on the Discover row (it unfolded) and on a running agent's row (`orca terminal switch` brought its tab forward). Then real pointer clicks, made with `orca computer click` on the Orca window, against a second fixture run (Discover with one done agent, folded; Implement with a running agent whose tab was a real Orca tab, and a queued one), the view in its own tab 157 columns wide. A click on the folded Discover row unfolded it and selected it (`▾`, its agent listed, `← / Enter / click to fold`). A click on the running agent's row selected it (its pane showed `tab term_fde14ad6 (open)`) and brought that agent's tab to the front in Orca, seen on a screenshot. Both worked first time; the view was not changed.
+- **`l`** (2026-09-25, #51): a third fixture run whose run dir, as `<notes-dir>/orca-run`, was outside every checkout, the view in its own Orca 1.4.209 tab, `l` sent with `orca terminal send`. `orca file open` refuses such a file (`invalid_relative_path`), so `l` now opens a tab titled `runner.log`, in PowerShell, that shows the log's last 200 lines and follows it (`Get-Content -Encoding UTF8 -Tail 200 -Wait`). It appeared in `orca terminal list`, and `orca terminal read` showed every line of runner.log with `✓` and `·` intact, then a line appended afterwards. The flash line read `opened … in a tab that follows it`. A second `l` opened no new tab: it switched to that one (`switched to the tab following …`). The first try showed `✓` garbled, because Windows PowerShell read the UTF-8 log as ANSI; `-Encoding UTF8` fixed it. The layout was not changed.
 
 ## Plain-text capture
 
