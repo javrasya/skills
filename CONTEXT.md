@@ -168,6 +168,10 @@ The **integration PR carries no index** — whether it exists at all is unknown 
 
 **Tip derivation is from GitHub, never remembered** — the open PR whose head branch is nobody else's base — and is re-derived every tick, because after a green tick the tip is that tick's own PR. A base frozen at arm time builds a flat fan of PRs all rooted at one commit, each carrying every earlier ticket's diff: silent corruption of the run's whole output, not a pause condition.
 
+### Runner, and the harness
+
+The **runner** is whatever executes a rendered [[implement-spec-in-workflow]] script by supplying its hooks (`agent()`, `parallel()`, `phase()`, `log()`); the script is the same under every runner and never knows which one it is on. The **Workflow runner** is the host's workflow primitive — older text's "harness with a workflow primitive" means this. The **Orca runner** is a Node script launched in its own Orca terminal that starts each agent as a **supervised Orca worker**: a live tab the operator can watch, type into and answer, renamed to the agent's title because the agent titles its own tab otherwise (ADR-0011). The **harness** is the agent CLI one agent runs in — Claude Code or pi — never the runner; the template's role table names each role's harness and model, every role Claude by default, and only the Orca runner reads the harness. Not the Ralph loop's runner from [[ralph-goal]], which is a shell loop around one prompt.
+
 ### Arm and tick
 
 The two-part shape of an unattended loop. **Arming** happens once — fetch, sweep for a previous run's abandoned claim, derive the tip, check the tip's gate, prepare the worktree. A **tick** is one ticket becoming one green PR, and it re-derives everything it needs rather than inheriting shell state, because shell state does not survive between tool calls. The loop is continuous *through tickets*, not through the operator's interventions: **dying is cheap by design**, since a re-armed run derives everything from GitHub and holds no local state.

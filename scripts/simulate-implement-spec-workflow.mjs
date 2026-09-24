@@ -2,10 +2,13 @@
 // it through the paths the dispatcher redesign added.
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
+import { loadScript } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
 
 const TPL = fileURLToPath(new URL('../skills/engineering/implement-spec-in-workflow/workflow.template.js', import.meta.url))
 
-function render() {
+const SIM_CHECK = 'npm t'
+
+function render(runner) {
   let s = readFileSync(TPL, 'utf8')
   s = s
     .replace(/__SPEC__/g, '224')
@@ -14,7 +17,8 @@ function render() {
     .replace(/__NOTES_DIR__/g, '/tmp/n')
     .replace(/__BASE_REF__/g, 'main')
     .replace(/__STACK_MODE__/g, 'native')
-    .replace(/^export const meta/m, 'const meta')
+    .replace(/__RUNNER__/g, runner)
+    .replace(/__VALIDATION__/g, SIM_CHECK)
   return s
 }
 
@@ -32,7 +36,28 @@ function locationsIn(prompt) {
 }
 const issueFor = (loc) => ISSUES.get(loc) || '?'
 
-async function run(overrides = {}) {
+// The harness enforces each call's schema, so a real agent never omits a
+// required field. Stubs state only what a scenario is about; this fills the
+// rest the way a green, well-behaved agent would. A null result (an agent that
+// died) stays null.
+function completeToSchema(result, opts, label) {
+  const schema = opts.schema
+  if (!schema || !result || typeof result !== 'object') return result
+  const filled = { ...result }
+  for (const key of schema.required || []) {
+    if (key in filled) continue
+    if (key === 'checks') filled.checks = [{ command: SIM_CHECK, passed: true, runs: 1, seconds: 1 }]
+    else if (key === 'validated_sha') filled.validated_sha = 'simsha'
+    else if (key === 'worktree') filled.worktree = '/wt/' + label
+    else {
+      const type = (schema.properties[key] || {}).type
+      filled[key] = type === 'array' ? [] : type === 'string' ? '' : type === 'boolean' ? false : type === 'integer' || type === 'number' ? 0 : null
+    }
+  }
+  return filled
+}
+
+async function run(overrides = {}, { runner = 'workflow' } = {}) {
   const calls = []
   const defaults = {
     graph: () => ({
@@ -63,6 +88,8 @@ async function run(overrides = {}) {
     review: () => ({ findings: [] }),
     integration: () => ({ pr_url: 'https://pr/int', pr_number: 999, branch: 'spec/224-integration', worktree: '/wt/int', worktrees_removed: 0, worktrees_kept: [] }),
     finalize: () => 'stack registered, 2 PRs ready, 0 worktrees',
+    reclaim: () => ({ worktrees_removed: 0, worktrees_kept: [] }),
+    retrospective: () => ({ summary: 'sim', report_path: '/tmp/n/retrospective.md', proposals: [] }),
   }
   const h = { ...defaults, ...overrides }
 
@@ -79,21 +106,23 @@ async function run(overrides = {}) {
     if (label.startsWith('publish')) return 'publish'
     if (label.startsWith('review')) return 'review'
     if (label === 'finalize') return 'finalize'
+    if (label === 'reclaim') return 'reclaim'
+    if (label === 'retrospective') return 'retrospective'
     throw new Error('unrouted label: ' + label)
   }
 
   const agent = async (prompt, opts = {}) => {
     const label = opts.label || '?'
     calls.push({ label, effort: opts.effort || '(inherit)', prompt, opts })
-    return h[route(label)](label, prompt, opts)
+    return completeToSchema(await h[route(label)](label, prompt, opts), opts, label)
   }
   const parallel = (fns) => Promise.all(fns.map((f) => f()))
   const logs = []
   const log = (m) => logs.push(m)
   const phase = () => {}
 
-  const fn = new Function('agent', 'parallel', 'phase', 'log', 'return (async () => {' + render() + '\n})()')
-  const result = await fn(agent, parallel, phase, log)
+  // The Orca runner's own loader, so the script is loaded one way everywhere.
+  const result = await loadScript(render(runner))(agent, parallel, phase, log, {})
   EVERY_CALL.push(...calls)
   return { result, calls, logs }
 }
@@ -111,7 +140,7 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   const { result, calls } = await run()
   const seq = calls.map((c) => c.label)
   check('A: dispatcher runs once per ticket', seq.filter((l) => l.startsWith('dispatch')).length === 2, seq.join(' | '))
-  check('A: implementer is told NOT to read the issue', calls.find((c) => c.label === 'impl:#10').prompt.includes('run no `gh issue view`'), '')
+  check('A: implementer reads its ticket, not the spec', calls.find((c) => c.label === 'impl:#10').prompt.includes('`gh issue view 10`') && calls.find((c) => c.label === 'impl:#10').prompt.includes('Read no spec'), '')
   check('A: publish order respects the dependency', seq.indexOf('publish:#10') < seq.indexOf('publish:#11'), '')
   check('A: #11 cut from #10 branch, addressed locally', calls.find((c) => c.label === 'impl:#11').prompt.includes('git switch --detach ticket/10') && !calls.find((c) => c.label === 'impl:#11').prompt.includes('origin/ticket/10'), '')
   check('A: an inherited ref stays origin-addressed', calls.find((c) => c.label === 'impl:#10').prompt.includes('origin/main'), '')
@@ -122,6 +151,7 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('A: no unmet', result.unmet.length === 0, JSON.stringify(result.unmet))
   check('A: explore effort low / dispatch high / publish low', calls.find((c) => c.label.startsWith('explore')).effort === 'low' && calls.find((c) => c.label === 'dispatch:#10').effort === 'high' && calls.find((c) => c.label === 'publish:#10').effort === 'low', '')
   check('A: slice effort taken from dispatcher verdict', calls.find((c) => c.label === 'impl:#10').effort === 'medium', '')
+  check('A: an untouched harness table runs every agent on Claude opus', calls.every((c) => c.opts.harness === 'claude' && c.opts.model === 'opus'), JSON.stringify(calls.filter((c) => c.opts.harness !== 'claude' || c.opts.model !== 'opus').map((c) => c.label)))
 }
 
 // --- scenario B: slice bails, re-dispatch finishes --------------------------
@@ -178,10 +208,10 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
     impl: () => ({ branch: 'ticket/10', summary: 'partial', tests_run: 'npm t', tests_green: true, unmet: ['criterion Z'] }),
   })
   const rounds = calls.filter((c) => c.label.startsWith('impl:#10')).length
-  check('C: exactly MAX_DISPATCH_ROUNDS slice rounds', rounds === 3, String(rounds))
+  check('C: exactly MAX_DISPATCH_ROUNDS slice rounds', rounds === 6, String(rounds))
   check('C: unmet carried to the result', result.unmet.length === 1 && result.unmet[0].criteria.includes('criterion Z'), JSON.stringify(result.unmet))
   check('C: run is partial, spec stays open', result.state.startsWith('partial'), result.state)
-  check('C: gate reviewer told not to re-litigate declared unmet', calls.find((c) => c.label === 'gate:#10:r1').prompt.includes('already declared these criteria unmet'), '')
+  check('C: gate reviewer told not to re-litigate declared unmet', calls.find((c) => c.label === 'gate:#10:r1').prompt.includes('report it without re-litigating and do not block on it: criterion Z'), '')
   check('C: local-only refs are named for recovery', result.local_only_branches === null || Array.isArray(result.local_only_branches.refs), JSON.stringify(result.local_only_branches))
   check('C: finalize told what remains', calls.find((c) => c.label === 'finalize').prompt.includes('unmet criteria: criterion Z'), '')
 }
@@ -228,7 +258,9 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   })
   check('E: the dropped finding is logged, not silently lost', logs.some((l) => l.includes('no verdict')), logs.join(' | '))
   check('E: the next reviewer is told to check it explicitly', calls.find((c) => c.label === 'gate:#10:r2').prompt.includes('never reported back') && calls.find((c) => c.label === 'gate:#10:r2').prompt.includes('b.js:2'), '')
-  check('E: a fixed finding is NOT re-listed as unverified', !calls.find((c) => c.label === 'gate:#10:r2').prompt.includes('a.js:1'), '')
+  // Round 2 lists a.js:1 under "Claimed fixed" — only the unverified block must omit it.
+  const unverifiedBlock = calls.find((c) => c.label === 'gate:#10:r2').prompt.split('never reported back')[1].split('\n\n')[1]
+  check('E: a fixed finding is NOT re-listed as unverified', unverifiedBlock.includes('b.js:2') && !unverifiedBlock.includes('a.js:1'), unverifiedBlock)
   check('E: a clean re-review still closes the gate', gateRound === 2 && result.gate_unfixed.length === 0, '')
 }
 
@@ -402,11 +434,25 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('H5: finalize is told it is the first registration, and why', /first registration/.test(finalize.prompt) && /the last failure: #11/.test(finalize.prompt), finalize.prompt.slice(0, 1500))
 }
 
+// --- scenario R: reclaim wording follows the runner --------------------------
+{
+  const reclaimed = (calls) => calls.find((c) => c.label === 'publish:#10').prompt
+  const onWorkflow = reclaimed((await run()).calls)
+  const { result, calls } = await run({}, { runner: 'orca' })
+  const onOrca = reclaimed(calls)
+  check('R: both runners hand the publisher the same exact paths', /\/wt\/impl:#10 → ticket\/10/.test(onWorkflow) && /\/wt\/impl:#10 → ticket\/10/.test(onOrca), onOrca.slice(0, 1500))
+  check('R: the Workflow runner removes with git', /`git worktree remove --force <path>`/.test(onWorkflow) && /git worktree prune/.test(onWorkflow) && !/orca worktree rm/.test(onWorkflow), '')
+  check('R: the Orca runner removes through Orca, never with git', /`orca worktree rm --worktree path:<path> --force`/.test(onOrca) && !/git worktree remove --force|git worktree prune/.test(onOrca), '')
+  check('R: an Orca agent is told its worktree is a child of the run\'s', /an Orca child worktree of this run's worktree/.test(calls.find((c) => c.label === 'impl:#10').prompt), '')
+  check('R: no Orca prompt guesses strays from harness paths', !calls.some((c) => /not in the ledger/.test(c.prompt)), '')
+  check('R: the Orca-worded run completes', result.state.startsWith('complete'), result.state)
+}
+
 // --- run-wide: every prompt of every scenario ------------------------------
 {
   const offenders = (re) => [...new Set(EVERY_CALL.filter((c) => re.test(c.prompt)).map((c) => c.label))].join(' | ')
   const noForce = /--force(?!` or `--force-with-lease` to any push)/
-  check('ALL: no prompt tells an agent to force-push', !EVERY_CALL.some((c) => noForce.test(c.prompt.replace(/^- Never pass.*$/gm, '').replace(/git worktree remove --force/g, ''))), offenders(/--force-with-lease origin|--force origin/))
+  check('ALL: no prompt tells an agent to force-push', !EVERY_CALL.some((c) => noForce.test(c.prompt.replace(/^- Never pass.*$/gm, '').replace(/git worktree remove --force|orca worktree rm --worktree path:<path> --force/g, ''))), offenders(/--force-with-lease origin|--force origin/))
   check('ALL: no prompt tells an agent to check a branch out', !EVERY_CALL.some((c) => /git checkout -B|git checkout ticket\//.test(c.prompt)), offenders(/git checkout -B/))
   check('ALL: no prompt interpolates a helper instead of a value', !EVERY_CALL.some((c) => /runRefs\.has|\(r\) =>|=> \(\{/.test(c.prompt)), offenders(/runRefs\.has|\(r\) =>/))
   // `--open` readies the PRs, and the drafts are half the "still adding
