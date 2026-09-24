@@ -1,0 +1,8 @@
+{
+  "name": "prototype-run-view",
+  "private": true,
+  "description": "PROTOTYPE, throwaway: three layouts for the Orca runner's run view (#43). Fake data, stub actions.",
+  "type": "module",
+  "scripts": { "start": "node run-view.prototype.mjs" },
+  "dependencies": { "terminal-kit": "^3.1.4" }
+}
