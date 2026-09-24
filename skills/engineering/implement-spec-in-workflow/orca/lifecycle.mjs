@@ -54,6 +54,12 @@ function slots(max) {
 const published = (v) => !!v && typeof v === 'object' && typeof v.pr_url === 'string' && !!v.pr_url && v.published !== false
 
 const slug = (s) => s.replace(/[^\w.-]+/g, '_').slice(0, 60)
+
+// An agent's files, relative to the state dir: named by its call's number and
+// label when its worker starts, and journaled with that worker, so a resume
+// that takes the worker up reads the files its prompt named.
+export const agentDir = (n, label) => `agents/${String(n).padStart(3, '0')}-${slug(label)}`
+
 const mins = (ms) => Math.round(ms / 60_000)
 const wait = (ms) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms / 6_000) / 10} min`)
 
@@ -98,8 +104,10 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   // start than it retried. continuations counts how often a started worker's
   // session was continued; a continuation carries on that attempt's session. `run` is
   // the Run it failed in, once there is one: reclaim names a retained worktree by it.
-  const fail = ({ key, n, title }, reason, retained, attempts = 1, continuations = 0, run = null) =>
-    journal({ type: 'failed', key, n, title, reason, attempts, ...(run && { run }), ...(continuations && { continuations }), ...(retained && { retained }) })
+  // workerOut: its worker is still out, so the call stays unsettled for the
+  // next resume, which takes that worker up again.
+  const fail = ({ key, n, title }, reason, retained, attempts = 1, continuations = 0, run = null, workerOut = false) =>
+    journal({ type: 'failed', key, n, title, reason, attempts, ...(run && { run }), ...(continuations && { continuations }), ...(retained && { retained }), ...(workerOut && { workerOut }) })
 
   // Something that went wrong without failing the agent: logged and
   // journaled, never swallowed.
@@ -282,12 +290,11 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   }
 
   // A resume takes up the worker the last run started for this call and
-  // never starts a second one: journaled as reattached, then watched, or
-  // continued first if it died meanwhile.
-  async function takeUp({ key, n, title, adopt }) {
+  // never starts a second one: watched, or continued first if it died
+  // meanwhile. life() has journaled it as reattached.
+  async function takeUp({ title, adopt }) {
     const w = { dispatchId: adopt.dispatchId, terminal: adopt.terminal, worktree: adopt.worktree }
     const continued = adopt.continuations
-    journal({ type: 'reattached', key, n, title, dispatchId: w.dispatchId, sessionId: adopt.sessionId, terminal: w.terminal, worktree: w.worktree, ...(continued && { continuations: continued }) })
     const end = await lookBack(w)
     out(`>> ${title}: took up its worker from the last run: dispatch ${w.dispatchId}, session ${adopt.sessionId}, in terminal ${w.terminal}${w.worktree ? ` in ${w.worktree}` : ''}${end ? `; ${end.dead}` : ''}`)
     return { w, sessionId: adopt.sessionId, attempts: 0, continued, end }
@@ -296,7 +303,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   // Starts the call's worker, retried as the settings table says. Null once
   // it has failed for good, journaled.
   async function start(runId, call) {
-    const { prompt, isolated, launch, key, n, title, phaseName, schemaPath, resultPath, payloadPath } = call
+    const { prompt, isolated, launch, key, n, title, phaseName, dir, schemaPath, resultPath, payloadPath } = call
     // The child worktrees failed attempts left. Every attempt of a call asks
     // for the same `<runId>-<n>` name, so a retry takes that one up again;
     // one Orca made under a suffixed name leaves both it and that one.
@@ -336,7 +343,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       return null
     }
     for (const why of w.warnings ?? []) warn(call, why)
-    journal({ type: 'started', key, n, title, run: runId, dispatchId: w.dispatchId, harness: launch.harness, sessionId, worktree: w.worktree ?? null, terminal: w.terminal })
+    journal({ type: 'started', key, n, title, run: runId, dispatchId: w.dispatchId, harness: launch.harness, sessionId, worktree: w.worktree ?? null, terminal: w.terminal, dir })
     if (isolated && w.worktree) await setStatus(call, w.worktree, phaseName === 'Gate' ? 'in-review' : 'in-progress')
     const on = [launch.harness, launch.model, launch.effort && `${launch.effort} effort`, launch.permissionMode && `${launch.permissionMode} mode`].filter(Boolean).join(', ')
     out(`>> ${title}: started on ${on} as dispatch ${w.dispatchId}, session ${sessionId}, in terminal ${w.terminal}${w.worktree ? ` in ${w.worktree}` : ''}`)
@@ -436,13 +443,18 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   }
 
   // call: { prompt, schema, isolated, launch, key, n, label, title, phaseName },
-  // and on a resume `adopt`, the worker the last run left out for it: { n,
-  // label, dispatchId, sessionId, terminal, worktree, continuations }.
+  // and on a resume `adopt`, the worker the last run left out for it: { dir,
+  // dispatchId, sessionId, terminal, worktree, continuations }.
   return async function life(call) {
     const { schema, key, n, label, title, adopt } = call
-    // A worker taken up submits to the files its prompt named: its own call's,
-    // numbered as the last run numbered it.
-    const dir = join(stateDir, 'agents', `${String(adopt?.n ?? n).padStart(3, '0')}-${slug(adopt?.label ?? label)}`)
+    // A worker taken up submits to the files its prompt named: the dir
+    // journaled with it, however many resumes ago it started.
+    const rel = adopt?.dir ?? agentDir(n, label)
+    const dir = join(stateDir, rel)
+    // Journaled before any wait on the Run or on a live slot, so a runner
+    // that dies before it watches the worker still leaves it to the next
+    // resume, which takes it up in turn.
+    if (adopt) journal({ type: 'reattached', key, n, title, dispatchId: adopt.dispatchId, sessionId: adopt.sessionId, terminal: adopt.terminal, worktree: adopt.worktree, dir: rel, ...(adopt.continuations && { continuations: adopt.continuations }) })
     mkdirSync(dir, { recursive: true })
     const schemaPath = schema ? join(dir, 'schema.json') : null
     const resultPath = join(dir, 'result.json')
@@ -458,6 +470,14 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     try {
       ;({ runId } = await ensureRun(call))
     } catch (e) {
+      if (adopt) {
+        // Its worker is still out: the call stays unsettled for the next
+        // resume, which takes that worker up, and its worktree is named.
+        out(`!!!!!!!! ${title}: ${e.reason}; agent() returns null, its worker ${adopt.dispatchId} is left out for the next resume to take up, and the next agent() asks again`)
+        const kept = call.isolated && adopt.worktree ? keep({ path: adopt.worktree, reason: `not in the ledger: its agent (${title}) was still at work when this runner could not take its Run over, so it never reported — the next resume takes that agent up again` }) : null
+        fail(call, e.reason, kept, e.attempts, adopt.continuations, adopt.run ?? null, true)
+        return null
+      }
       out(`!!!!!!!! ${title}: ${e.reason}; agent() returns null, and the next agent() asks again`)
       fail(call, e.reason, null, e.attempts)
       return null
@@ -466,7 +486,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     // the run, so its tab stays open, but a settled worker no longer works.
     await live.acquire(() => out(`.. ${title}: queued, ${limits.MAX_LIVE} agents are live`))
     try {
-      return await supervise(runId, { ...call, schemaPath, resultPath, payloadPath })
+      return await supervise(runId, { ...call, dir: rel, schemaPath, resultPath, payloadPath })
     } finally {
       live.release()
     }

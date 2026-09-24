@@ -34,18 +34,19 @@ Together, the journal and the log say what happened in a run, whether or not the
 
 | type | written when | fields besides `type` and `at` |
 |---|---|---|
-| `started` | a worker started | `key`, `n`, `title`, `dispatchId`, `harness`, `sessionId`, `worktree` (the path it runs in), `terminal` (its handle) |
+| `started` | a worker started | `key`, `n`, `title`, `dispatchId`, `harness`, `sessionId`, `worktree` (the path it runs in), `terminal` (its handle), `dir` (its agent's files, relative to the state dir, which its prompt names) |
 | `result` | a call returned a value | `key`, `n`, `title`, `result`, and `replayed: true` if it came from the journal |
-| `failed` | a call returned null: its worker never started, died past the continuation cap, was blocked on a human too long, went over a limit, or left no valid result, or its Run could not be created | `key`, `n`, `title`, `reason` (human-readable; after retries, the last attempt's), `attempts` (starts or Run creations made), `continuations` if its session was continued, and `retained` if it left a worktree |
+| `failed` | a call returned null: its worker never started, died past the continuation cap, was blocked on a human too long, went over a limit, or left no valid result, or its Run could not be created | `key`, `n`, `title`, `reason` (human-readable; after retries, the last attempt's), `attempts` (starts or Run creations made), `continuations` if its session was continued, `retained` if it left a worktree, and `workerOut: true` when a resume could not take its Run over and its worker is still out: the call stays unsettled, and the next resume takes that worker up |
 | `retained` | a resume carries forward a worktree an earlier run kept | `retained` |
 | `retry` | a call starts another attempt at its worker's start, or at creating the Run | `key`, `n`, `title`, `attempt` (the one starting, from 2), `reason` (why the last one failed) |
 | `warning` | something went wrong without failing the call: its worktree's display name or board status could not be set | `key`, `n`, `title`, `reason` |
 | `nudge` | the runner typed a nudge to a worker | `key`, `n`, `title`, `dispatchId`, `reason`, `attempt` (the nudge's number since the session started or was last continued) |
 | `continued` | a stuck or dead session was continued, in its own terminal or in a new one in its worktree | `key`, `n`, `title`, `dispatchId` and `terminal` (the ones it now runs under), `sessionId`, `reason`, `attempt` (1 to the cap), `reopened` (true when its tab was gone) |
-| `reattached` | a resumed runner took up a worker an earlier one started; a `continued` line follows if it had died | `key`, `n`, `title`, `dispatchId`, `sessionId`, `terminal`, `worktree`, and `continuations` if its session was already continued |
+| `reattached` | a resumed runner takes up a worker an earlier one started, as soon as its call is made, before the Run is taken over; a `continued` line follows if it had died | `key`, `n`, `title`, `dispatchId`, `sessionId`, `terminal`, `worktree`, `dir` (the files its prompt named, from the line it was taken up from, however many resumes ago it started), and `continuations` if its session was already continued |
+| `outstanding` | a resume carries forward, before any call, each worker the last run left out, so it stays journaled until a call takes it up | as `reattached`, with the `n` and `title` of the line it was carried from |
 | `run` | the Run is created, or a resume takes it over; a resume also carries the last one forward first | `runId`, `terminal` (the runner's, which the Run is bound to), and on the carried-forward line `lastN`, the highest call number the Run has used |
 
-A resume reads `type`, `key`, `n`, `result` and `retained`, the worker fields of `started`, `reattached` and `continued`, and the last `run`. A `started` line with no dispatch or session, as in a journal from before launch fields were added, is a call with no worker out, so such a journal still resumes.
+A resume reads `type`, `key`, `n`, `result` and `retained`, the worker fields of `started`, `reattached`, `outstanding` and `continued`, `workerOut`, and the last `run`. A `reattached` line replaces the `outstanding` line for the same dispatch, so a call has one worker; an `outstanding` line no call took up follows every call that run made under its key. A `started` line with no dispatch or session, as in a journal from before launch fields were added, is a call with no worker out, so such a journal still resumes; a worker line with no `dir` is read as named by its own `n` and title.
 
 ### Resume from a new terminal
 
@@ -53,8 +54,10 @@ If the runner's tab dies, the run is paused, not lost: run the same command with
 
 Each call then gets what the last run left it, matched by key and occurrence as replay is:
 - **finished**: replayed from the journal, as before; it starts no worker.
-- **its worker still out**: taken up, never started again. The runner asks Orca how it is (`workerReattach`). One Orca still shows live, or that settled meanwhile, is journaled `reattached` and watched as any worker, and its result is returned when it submits, to the files its prompt named. One whose tab closed, or whose agent exited, while no runner watched is continued in its own session and worktree (the session continuation below), in a new terminal if its tab is gone.
+- **its worker still out**: taken up, never started again. The runner asks Orca how it is (`workerReattach`). One Orca still shows live, or that settled meanwhile, is journaled `reattached` and watched as any worker, and its result is returned when it submits, to the files its prompt named, however many resumes it stayed out through. One whose tab closed, or whose agent exited, while no runner watched is continued in its own session and worktree (the session continuation below), in a new terminal if its tab is gone.
 - **never started**: started now, with the start retry.
+
+A worker still out is never dropped from the journal: the resume carries it forward as `outstanding` before any call, and journals `reattached` as soon as its call is made, so a runner that dies during the takeover's backoff, or while the call waits for a live slot, leaves it to the next resume. If the takeover fails for good, that call returns null and the run ends partial, but its `failed` line carries `workerOut: true`, its worktree is named in `worktrees_kept`, and the next resume takes the same worker up instead of starting a second one.
 - **failed, changed or not in the journal**: runs live, and ends the replayed prefix.
 
 A call the last run left unsettled gave the script nothing to depend on, so it does not end the prefix. The resumed run numbers its calls on from the last run's, so a live call's `<runId>-<n>` child worktree never takes a name the Run already holds.

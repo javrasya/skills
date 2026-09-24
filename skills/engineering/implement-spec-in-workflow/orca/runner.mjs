@@ -41,7 +41,7 @@ import { fileURLToPath } from 'url'
 import { checkSchema } from './schema.mjs'
 import { orcaCli, launchCommand, HARNESSES, realTimer } from './orca-cli.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
-import { agentLifecycle } from './lifecycle.mjs'
+import { agentLifecycle, agentDir } from './lifecycle.mjs'
 import { runRegistry, REGISTRY_PATH } from './registry.mjs'
 import { sessionTranscripts } from './transcript.mjs'
 import { agentsOf, endOfRunPrompt, gitUnpushed } from './reclaim.mjs'
@@ -77,20 +77,25 @@ export const journalKey = (prompt, opts = {}) =>
 // Every journal entry type and the fields it always carries, beside `type`.
 // `at` is an ISO timestamp from the runner's clock; `run` is the Orca Run the
 // worker was dispatched into. A failed entry may also carry `retained`, the
-// worktree it left, `run`, once the Run existed, and `continuations`, how often its
-// session was continued; a replayed result carries `replayed: true`. retry is
+// worktree it left, `run`, once the Run existed, `continuations`, how often its
+// session was continued, and `workerOut: true` when its worker is still out
+// for the next resume to take up; a replayed result carries `replayed: true`.
+// A worker's `dir` is its agent's files, relative to the state dir. retry is
 // a new attempt of a call's start or of its Run's creation, with why the last
 // one failed; warning, something that went wrong without failing the call. A
 // nudge's `attempt` is its number since the session started or was last
 // continued; a continuation's is its number, up to the cap. reattached: a
-// resumed runner taking up a worker an earlier one started, which it then
-// watches, or continues first if it died; it also carries `continuations` when
-// that worker's session was already continued. run: the Run every worker is
+// resumed runner taking up a worker an earlier one started, journaled when its
+// call is made, which it then watches, or continues first if it died; it also
+// carries `continuations` when that worker's session was already continued.
+// outstanding: a worker the last run left out, carried forward by a resume
+// before any call, so it stays journaled until a call takes it up; it carries
+// `continuations` as reattached does. run: the Run every worker is
 // dispatched into and the runner terminal it is bound to, when it is created
 // or taken over; a resume carries the last one forward first, with `lastN`,
 // the highest call number that Run has used.
 export const JOURNAL_ENTRIES = Object.freeze({
-  started: ['at', 'key', 'n', 'title', 'run', 'dispatchId', 'harness', 'sessionId', 'worktree', 'terminal'],
+  started: ['at', 'key', 'n', 'title', 'run', 'dispatchId', 'harness', 'sessionId', 'worktree', 'terminal', 'dir'],
   result: ['at', 'key', 'n', 'title', 'result'],
   failed: ['at', 'key', 'n', 'title', 'reason', 'attempts'],
   retained: ['at', 'retained'],
@@ -98,15 +103,17 @@ export const JOURNAL_ENTRIES = Object.freeze({
   warning: ['at', 'key', 'n', 'title', 'reason'],
   nudge: ['at', 'key', 'n', 'title', 'dispatchId', 'reason', 'attempt'],
   continued: ['at', 'key', 'n', 'title', 'dispatchId', 'sessionId', 'terminal', 'reason', 'attempt', 'reopened'],
-  reattached: ['at', 'key', 'n', 'title', 'dispatchId', 'sessionId', 'terminal', 'worktree'],
+  reattached: ['at', 'key', 'n', 'title', 'dispatchId', 'sessionId', 'terminal', 'worktree', 'dir'],
+  outstanding: ['at', 'key', 'n', 'title', 'dispatchId', 'sessionId', 'terminal', 'worktree', 'dir'],
   run: ['at', 'runId', 'terminal'],
 })
 
 // calls: key -> what each call made under it, in call order — { result } for
 // a call that returned a value, { failed: true } for one that returned null,
 // { worker } for one whose worker was still out when the last run stopped
-// (its dispatch, session, terminal and worktree as last journaled, its `n`,
-// and how often its session was continued), { unsettled: true } for one that
+// (its dispatch, session, terminal and worktree as last journaled, how often
+// its session was continued, the `dir` of the files its prompt named, and the
+// `n` and `title` of its latest line), { unsettled: true } for one that
 // had no worker out and no settlement. A failed entry holds its call's place
 // but replays nothing, so a resume runs that call live again, as the Workflow
 // runner re-runs an agent it journaled as failed. A torn last line is one it
@@ -115,7 +122,11 @@ export const JOURNAL_ENTRIES = Object.freeze({
 // forward. run: the last Run journaled, { runId, terminal }, or null; lastN:
 // the highest call number the journal holds. A journal written before entries
 // carried timestamps and launch fields resumes the same way, its `started`
-// lines without a dispatch or session as calls with no worker out.
+// lines without a dispatch or session as calls with no worker out, and a
+// worker line without a `dir` as named by that line's n and title. An
+// `outstanding` line is its call's place until a `reattached` line for its
+// dispatch takes it over; one still standing is a call that run never made,
+// so it follows every call that run made under its key.
 export function readJournal(path) {
   const calls = new Map()
   const retained = []
@@ -124,6 +135,8 @@ export function readJournal(path) {
   if (!existsSync(path)) return { calls, retained, run, lastN }
   // One per call, by its n: a call's lines share it, and no two calls do.
   const byCall = new Map()
+  // The call id of each outstanding line, by its dispatch.
+  const carried = new Map()
   for (const [i, line] of readFileSync(path, 'utf8').split('\n').entries()) {
     let e
     try {
@@ -139,22 +152,34 @@ export function readJournal(path) {
     const numbered = Number.isInteger(e.n)
     if (!numbered && e.type !== 'result' && e.type !== 'failed') continue
     const id = numbered ? e.n : `line ${i}`
-    if (!byCall.has(id)) byCall.set(id, { key: e.key, order: numbered ? e.n : i, worker: null, settled: null })
+    if (!byCall.has(id)) byCall.set(id, { key: e.key, order: numbered ? e.n : i, carried: false, worker: null, settled: null })
     const c = byCall.get(id)
     if (e.type === 'result') c.settled = { result: e.result }
-    else if (e.type === 'failed') c.settled = { failed: true }
-    else if ((e.type === 'started' || e.type === 'reattached') && e.dispatchId && e.sessionId) {
-      c.worker = { n: e.n, dispatchId: e.dispatchId, sessionId: e.sessionId, terminal: e.terminal ?? null, worktree: e.worktree ?? null, continuations: e.continuations ?? 0 }
+    else if (e.type === 'failed') {
+      if (!e.workerOut) c.settled = { failed: true }
+    } else if (WORKER_LINES.includes(e.type) && e.dispatchId && e.sessionId) {
+      const title = typeof e.title === 'string' ? e.title : null
+      const dir = typeof e.dir === 'string' ? e.dir : agentDir(e.n, title?.replace(/^\[[^\]]*\] /, '') || `agent-${e.n}`)
+      c.worker = { n: e.n, title, dir, dispatchId: e.dispatchId, sessionId: e.sessionId, terminal: e.terminal ?? null, worktree: e.worktree ?? null, continuations: e.continuations ?? 0 }
+      if (e.type === 'outstanding') {
+        c.carried = true
+        carried.set(e.dispatchId, id)
+      } else if (e.type === 'reattached' && carried.has(e.dispatchId) && carried.get(e.dispatchId) !== id) {
+        byCall.delete(carried.get(e.dispatchId))
+        carried.delete(e.dispatchId)
+      }
     } else if (e.type === 'continued' && c.worker && e.dispatchId) {
       c.worker = { ...c.worker, dispatchId: e.dispatchId, terminal: e.terminal ?? c.worker.terminal, continuations: Number.isInteger(e.attempt) ? e.attempt : c.worker.continuations + 1 }
     }
   }
-  for (const c of [...byCall.values()].sort((a, b) => a.order - b.order)) {
+  for (const c of [...byCall.values()].sort((a, b) => a.carried - b.carried || a.order - b.order)) {
     if (!calls.has(c.key)) calls.set(c.key, [])
     calls.get(c.key).push(c.settled ?? (c.worker ? { worker: c.worker } : { unsettled: true }))
   }
   return { calls, retained, run, lastN }
 }
+
+const WORKER_LINES = ['started', 'reattached', 'outstanding']
 
 export const realClock = { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)), timer: realTimer }
 
@@ -236,9 +261,27 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
     if (!retained.some((r) => r.path === k.path)) retained.push(k)
     return k
   }
-  for (const k of earlier.retained) journal({ type: 'retained', retained: keep(k) })
+  // A worker the last run left out stays journaled until a call takes it up,
+  // so a resume that stops, or cannot take the Run over, before then never
+  // loses it, and the next resume never starts a second one for its call.
+  const outstanding = [...journaled].flatMap(([key, entries]) => entries.filter((e) => e.worker).map((e) => ({ key, ...e.worker })))
+  // A worktree retained while its worker was still out is named by that
+  // worker until its call takes it up; one no call takes up is named at the end.
+  const held = new Set(outstanding.map((w) => w.worktree).filter(Boolean))
+  const aside = new Map()
+  for (const k of earlier.retained) {
+    if (held.has(k.path)) aside.set(k.path, k)
+    else journal({ type: 'retained', retained: keep(k) })
+  }
+  const unclaimed = () => {
+    for (const k of aside.values()) journal({ type: 'retained', retained: keep(k) })
+    aside.clear()
+  }
   // So a resume that makes no live call still leaves the Run to the next one.
   if (earlier.run) journal({ type: 'run', ...earlier.run, lastN: earlier.lastN })
+  for (const { key, n, title, dispatchId, sessionId, terminal, worktree, dir, continuations } of outstanding) {
+    journal({ type: 'outstanding', key, n, title, dispatchId, sessionId, terminal, worktree, dir, ...(continuations && { continuations }) })
+  }
   const life = agentLifecycle({ orca, clock, limits, out, stateDir, objective: () => objectiveOf(meta.value, fallbackObjective), journal, keep, onRun, takeOver: earlier.run?.runId ?? null, transcripts })
 
   const phase = (title) => {
@@ -290,15 +333,21 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
 
     const call = { prompt, schema: opts.schema, isolated: opts.isolation === 'worktree', launch, key, n, label, title, phaseName }
     // Its worker is its own whatever came before it: it runs this very call.
-    if (entry?.worker) return life({ ...call, adopt: { ...entry.worker, label: opts.label || `agent-${entry.worker.n}` } })
+    if (entry?.worker) {
+      aside.delete(entry.worker.worktree)
+      return life({ ...call, adopt: entry.worker })
+    }
     return life(call)
   }
 
   try {
-    const result = withRetained(await script(agent, parallel, phase, log, meta), retained)
+    const value = await script(agent, parallel, phase, log, meta)
+    unclaimed()
+    const result = withRetained(value, retained)
     if (armed) record('ended', { runId: armed, outcome: failures ? 'partial' : 'ok' })
     return result
   } catch (e) {
+    unclaimed()
     if (armed) record('ended', { runId: armed, outcome: 'failed' })
     // A run that throws still names what it kept: summary.json carries it.
     if (!(e instanceof Object)) e = new Error(String(e))

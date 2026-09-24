@@ -2105,24 +2105,137 @@ for (const [oldTab, death] of [['open', 'gone'], ['closed', 'gone'], ['open', 'e
 
 test('resume: the journal gives each call left out its worker as last journaled, a call never started its place, and the Run to take over', () => {
   const path = join(tmp(), 'journal.jsonl')
+  const out = (key, n, name, dispatchId, extra = {}) => ({ type: 'outstanding', key, n, title: `[P] ${name}`, dispatchId, sessionId: SID, terminal: `term_${n}`, worktree: null, dir: `agents/00${n}-${name}`, ...extra })
   const lines = [
     { type: 'run', runId: 'run_1', terminal: 'term_a', lastN: 4 },
+    // Carried forward from the resume before: b and e are taken up below, d never is.
+    out('kb', 2, 'b', 'ctx_1', { worktree: 'C:/wt/run_1-2', continuations: 1 }),
+    out('kd', 3, 'd', 'ctx_4'),
+    out('ke', 4, 'e', 'ctx_5'),
     { type: 'result', key: 'ka', n: 5, result: 1, replayed: true },
-    { type: 'reattached', key: 'kb', n: 6, dispatchId: 'ctx_1', sessionId: SID, terminal: 'term_1', worktree: 'C:/wt/run_1-2', continuations: 1 },
+    { type: 'reattached', key: 'kb', n: 6, title: '[P] b', dispatchId: 'ctx_1', sessionId: SID, terminal: 'term_1', worktree: 'C:/wt/run_1-2', dir: 'agents/002-b', continuations: 1 },
     { type: 'continued', key: 'kb', n: 6, dispatchId: 'ctx_2', sessionId: SID, terminal: 'term_2', attempt: 2, reopened: true },
     { type: 'retry', key: 'kc', n: 7, attempt: 2, reason: 'x' },
-    { type: 'started', key: 'kc', n: 8, dispatchId: 'ctx_3', sessionId: SID, terminal: 'term_3', worktree: null },
+    { type: 'started', key: 'kc', n: 8, dispatchId: 'ctx_3', sessionId: SID, terminal: 'term_3', worktree: null, dir: 'agents/008-c' },
     { type: 'failed', key: 'kc', n: 8, reason: 'dead', attempts: 1 },
+    { type: 'result', key: 'kd', n: 9, result: 2 },
+    // A reattached line from before workers carried their dir: named by its own n and title.
+    { type: 'reattached', key: 'kf', n: 10, title: '[Q] f', dispatchId: 'ctx_6', sessionId: SID, terminal: 'term_6', worktree: null },
+    // e's Run could not be taken over: its call returned null, its worker still out.
+    { type: 'reattached', key: 'ke', n: 11, title: '[P] e', dispatchId: 'ctx_5', sessionId: SID, terminal: 'term_4', worktree: 'C:/wt/run_1-4', dir: 'agents/004-e' },
+    { type: 'failed', key: 'ke', n: 11, reason: 'run-use refused', attempts: 5, workerOut: true, retained: { path: 'C:/wt/run_1-4', reason: 'still out' } },
     { type: 'run', runId: 'run_1', terminal: 'term_b' },
   ]
   writeFileSync(path, lines.map((l) => JSON.stringify(l)).join('\n') + '\n')
   const j = readJournal(path)
   assert.deepEqual(j.run, { runId: 'run_1', terminal: 'term_b' })
-  assert.equal(j.lastN, 8)
+  assert.equal(j.lastN, 11)
   assert.deepEqual(j.calls.get('ka'), [{ result: 1 }])
-  assert.deepEqual(j.calls.get('kb'), [{ worker: { n: 6, dispatchId: 'ctx_2', sessionId: SID, terminal: 'term_2', worktree: 'C:/wt/run_1-2', continuations: 2 } }])
+  // One worker per call: a reattached line takes over the outstanding one for its dispatch, and keeps its dir.
+  assert.deepEqual(j.calls.get('kb'), [{ worker: { n: 6, title: '[P] b', dir: 'agents/002-b', dispatchId: 'ctx_2', sessionId: SID, terminal: 'term_2', worktree: 'C:/wt/run_1-2', continuations: 2 } }])
   assert.deepEqual(j.calls.get('kc'), [{ unsettled: true }, { failed: true }])
+  // An outstanding line no call took up follows the calls this run made under its key.
+  assert.deepEqual(j.calls.get('kd'), [{ result: 2 }, { worker: { n: 3, title: '[P] d', dir: 'agents/003-d', dispatchId: 'ctx_4', sessionId: SID, terminal: 'term_3', worktree: null, continuations: 0 } }])
+  assert.deepEqual(j.calls.get('ke'), [{ worker: { n: 11, title: '[P] e', dir: 'agents/004-e', dispatchId: 'ctx_5', sessionId: SID, terminal: 'term_4', worktree: 'C:/wt/run_1-4', continuations: 0 } }])
+  assert.equal(j.calls.get('kf')[0].worker.dir, 'agents/010-f')
+  assert.deepEqual(j.retained, [{ path: 'C:/wt/run_1-4', reason: 'still out' }])
 })
+
+// b's worker is still out when its runner dies, and submits only when the
+// test calls submitB.
+const LEFT_OUT = `const S = ${JSON.stringify(SCHEMA)}
+phase('P')
+const a = await agent('A', { label: 'a', schema: S })
+const b = await agent('B', { label: 'b', schema: S, isolation: 'worktree' })
+return { a, b }`
+
+// A runner killed on its clock: once `dead`, its every sleep hangs, as a
+// runner's whose tab died does, and `hung` resolves.
+function mortalOn(clock, dead = false) {
+  let died
+  const hung = new Promise((r) => { died = r })
+  const m = { dead, hung, now: clock.now, timer: clock.timer, sleep: (ms) => (m.dead ? (died(), new Promise(() => {})) : clock.sleep(ms)) }
+  return m
+}
+
+async function leftOut() {
+  const clock = fakeClock()
+  const stateDir = tmp()
+  const faults = {}
+  const first = mortalOn(clock)
+  let bw = null
+  const orca = fakeOrca({
+    clock,
+    coordinator: 'term_1',
+    faults,
+    worker: async (w) => {
+      if (!w.prompt.startsWith('B')) return submitGood(w)
+      bw = w
+      first.dead = true
+    },
+  })
+  const opts = { stateDir, project: 'C:/repo', transcripts: fakeTranscripts(orca), out: () => {} }
+  runScript(LEFT_OUT, { ...opts, orca, clock: first }).catch(() => {})
+  await first.hung
+  // A resume from terminal `from`, to its end, or on a `mortal` clock until it dies.
+  const resume = async (from, mortal = null) => {
+    const run = runScript(LEFT_OUT, { ...opts, orca: orca.as(from), clock: mortal ?? clock, resume: true })
+    if (!mortal) return run
+    run.catch(() => {})
+    await mortal.hung
+    return null
+  }
+  return { clock, stateDir, faults, orca, b: startedAs(orca, '[P] b'), submitB: () => submitGood(bw), resume }
+}
+
+test('takeover: a worker still out through one resume, and submitting during the next, has its result returned from the files its prompt named', async () => {
+  const r = await leftOut()
+  await r.resume('term_2', mortalOn(r.clock, true))
+  const reB = ofType(journalOf(r.stateDir), 'reattached').find((e) => e.title === '[P] b')
+  assert.deepEqual([reB.dispatchId, reB.dir], [r.b.dispatchId, 'agents/002-b'])
+  assert.notEqual(reB.n, 2)
+
+  r.clock.at(r.clock.now() + 2 * MIN, r.submitB)
+  const before = r.orca.calls.length
+  assert.deepEqual(await r.resume('term_3'), { a: GOOD, b: GOOD })
+  assert.deepEqual(started(r.orca), ['[P] a', '[P] b'])
+  assert.deepEqual(r.orca.calls.slice(before).filter((c) => c.verb === 'workerReattach').map((c) => c.dispatchId), [r.b.dispatchId])
+  const journal = journalOf(r.stateDir)
+  assertEntries(journal)
+  assert.deepEqual(ofType(journal, 'failed'), [])
+  assert.deepEqual(ofType(journal, 'result').map((e) => [e.title, e.result, e.replayed]), [['[P] a', GOOD, true], ['[P] b', GOOD, undefined]])
+})
+
+for (const how of ['refused', 'dies']) {
+  test(`takeover: a resume ${how === 'refused' ? 'whose run-use Orca refuses for good' : 'that dies retrying its run-use'} leaves the worker still out to the next resume, which takes that same dispatch up and starts none`, async () => {
+    const r = await leftOut()
+    r.faults.runUse = () => new OrcaError('run_busy', 'not now', 'run-use')
+    if (how === 'refused') {
+      const once = await r.resume('term_2')
+      assert.deepEqual([once.a, once.b], [GOOD, null])
+      assert.deepEqual(once.worktrees_kept.map((k) => k.path), [r.b.worktree])
+      const journal = journalOf(r.stateDir)
+      assertEntries(journal)
+      // A failed line, so the run ends partial, but one that leaves the worker out.
+      assert.deepEqual(ofType(journal, 'failed').map((e) => [e.title, e.workerOut, e.retained?.path]), [['[P] b', true, r.b.worktree]])
+    } else await r.resume('term_2', mortalOn(r.clock, true))
+    // Either way the journal still holds b's worker, and only it.
+    const out = [...readJournal(join(r.stateDir, 'journal.jsonl')).calls.values()].flat().filter((e) => e.worker)
+    assert.deepEqual(out.map((e) => [e.worker.dispatchId, e.worker.dir]), [[r.b.dispatchId, 'agents/002-b']])
+    delete r.faults.runUse
+
+    r.clock.at(r.clock.now() + 2 * MIN, r.submitB)
+    const before = r.orca.calls.length
+    const result = await r.resume('term_3')
+    assert.deepEqual(result, { a: GOOD, b: GOOD })
+    const calls = r.orca.calls.slice(before)
+    assert.deepEqual(calls.filter((c) => c.verb === 'workerStart'), [])
+    assert.deepEqual(calls.filter((c) => c.verb === 'workerReattach').map((c) => c.dispatchId), [r.b.dispatchId])
+    const journal = journalOf(r.stateDir)
+    assertEntries(journal)
+    assert.deepEqual(ofType(journal, 'retained'), [])
+  })
+}
 
 test('fake orca: a Run takes worker-starts only from the terminal it is bound to, and run-use rebinds it', async () => {
   const orca = fakeOrca({ coordinator: 'term_a' })
