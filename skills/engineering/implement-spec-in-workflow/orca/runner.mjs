@@ -327,7 +327,13 @@ if (isMain) {
   const dir = stateDir ? resolve(stateDir) : join(dirname(path), 'orca-run')
   // The arming session reads the run's outcome from summary.json (SKILL.md
   // step 4); a stale one from an earlier run must never pass for this run's.
+  // The session clears it before launch too; this is defence in depth.
   rmSync(join(dir, 'summary.json'), { force: true })
+  // runner.pid lets the arming session tell a runner that died before writing
+  // summary.json (killed, OOM) from one still running: the tab outlives the
+  // runner, so the tab cannot say. Written before anything else can fail.
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'runner.pid'), String(process.pid))
   const say = runnerLog(dir, (s) => console.log(s))
   const sayError = runnerLog(dir, (s) => console.error(s))
   const orca = orcaCli()

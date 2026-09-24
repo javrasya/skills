@@ -888,6 +888,22 @@ test('entry point: a summary left by an earlier run never passes for this one', 
   assert.equal(existsSync(r.summaryPath), false)
 })
 
+// SKILL.md step 4 waits on summary.json OR a dead runner.pid; the tab outlives
+// the runner, so the pid is the only death signal. The liveness probe is the
+// one the skill runs, and it must see Windows pids.
+test('entry point: runner.pid names this run\'s runner, and the skill\'s probe sees it dead once it exits', () => {
+  const r = runEntry(`return process.pid`)
+  const pidPath = join(dirname(r.summaryPath), 'runner.pid')
+  const pid = readFileSync(pidPath, 'utf8')
+  assert.equal(Number(pid), r.summary().result)
+  const probe = (p) => spawnSync(process.execPath, ['-e', 'process.kill(+process.argv[1],0)', p]).status
+  assert.notEqual(probe(pid), 0)
+  assert.equal(probe(String(process.pid)), 0)
+  writeFileSync(pidPath, '1')
+  assert.equal(spawnSync(process.execPath, [RUNNER, r.script]).status, 0)
+  assert.notEqual(readFileSync(pidPath, 'utf8'), '1', 'a stale runner.pid is replaced')
+})
+
 // --- seams between the runner's pieces ---------------------------------------
 
 // A custom launch (a permission mode, or pi) into a child worktree: the child

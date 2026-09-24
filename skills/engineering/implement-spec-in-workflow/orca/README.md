@@ -19,7 +19,11 @@ The second runner for `workflow.template.js` (ADR-0011): a Node script, launched
 node runner.mjs <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]
 ```
 
-The state dir defaults to `orca-run/` beside the rendered script, which is `<notes-dir>/orca-run` for a run the skill armed. When the runner exits it writes `summary.json` there — `{"runner": "orca", "ok": true, "result": …}`, or `"ok": false` with the `error` and `worktrees_kept`, every worktree the runner retained (below) — and that file, not the terminal's log, is what the arming session reads and reports. It is removed at start, so a file left by an earlier run never passes for this one's. The runner writes it before the end-of-run prompt (below), so the arming session waits for the file to appear, not for the tab to exit: the tab stays open once the runner is done.
+The state dir defaults to `orca-run/` beside the rendered script, which is `<notes-dir>/orca-run` for a run the skill armed. When the runner exits it writes `summary.json` there — `{"runner": "orca", "ok": true, "result": …}`, or `"ok": false` with the `error` and `worktrees_kept`, every worktree the runner retained (below) — and that file, not the terminal's log, is what the arming session reads and reports. The runner writes it before the end-of-run prompt (below), so the arming session waits for the file to appear, not for the tab to exit: the tab stays open once the runner is done.
+
+As it starts, the runner also writes **`runner.pid`**, its own process id. The tab outlives the runner, so an open tab says nothing about whether the runner is alive; a `runner.pid` naming a process that is gone, with no `summary.json`, means the runner died before writing one (killed, out of memory, crashed). The arming session checks it with `node -e "process.kill(+process.argv[1],0)" <pid>`, which sees Windows process ids.
+
+The notes dir outlives a run, so a resume or a re-arm launches over the last run's `summary.json` and `runner.pid`. The runner removes the old `summary.json` and overwrites `runner.pid`, but only once node has loaded, after the arming session's wait has begun; so the arming session deletes both itself before launching (SKILL.md step 4), and the runner's removal is defence in depth.
 
 ## What a run leaves on disk
 

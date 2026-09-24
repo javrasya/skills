@@ -43,7 +43,13 @@ Your context is the scarce resource here. The spec body, the ticket bodies, the 
 4. Launch it against the rendered path, on the runner step 1 settled. Do not do any of its work yourself while it runs.
 
    - **Workflow runner.** It runs in the background and notifies you when it returns; do not poll it.
-   - **Orca runner.** Start the runner as its own Orca terminal, titled after the spec, so its log is watchable and the run survives this session:
+   - **Orca runner.** First clear the previous run's end signals, since the notes dir outlives a run — every `--resume` and every re-arm of the same spec launches over the last run's files, and the new runner replaces them only once node has loaded, well after your wait has begun:
+
+     ```
+     rm -f "<notes-dir>/orca-run/summary.json" "<notes-dir>/orca-run/runner.pid"
+     ```
+
+     Then start the runner as its own Orca terminal, titled after the spec, so its log is watchable and the run survives this session:
 
      ```
      orca terminal create --title "implement-spec #<spec>: <spec title>" --command "node \"<skill-dir>/orca/runner.mjs\" \"<notes-dir>/workflow.js\" [--permission-mode <mode>]" --json
@@ -51,13 +57,19 @@ Your context is the scarce resource here. The spec body, the ticket bodies, the 
 
      `<skill-dir>` is the directory holding this file. Append no `; exit`: the runner's tab stays open after the runner ends, because the runner asks the operator there what to reclaim, and the tab holds what it printed. Keep `result.terminal.handle`; if `result.terminal.surface` is not `visible`, tell the operator the run has no visible tab.
 
-     Then wait for `<notes-dir>/orca-run/summary.json` to appear — never for the terminal to exit, which it no longer does. The runner removes any earlier `summary.json` at start and writes this run's before it prompts, so its appearing is the run's end. Wait with one command that returns when the file exists, bounded to an hour — `timeout 3600 sh -c 'until [ -f "<notes-dir>/orca-run/summary.json" ]; do sleep 15; done'` — as a background command where your harness has one. When the hour passes with no file, check the runner's tab is still in `orca terminal list --json`; if it is, issue the same wait again. Do not read the terminal's log while it runs.
+     Then wait for `<notes-dir>/orca-run/summary.json` to appear, or for the runner to die — never for the terminal to exit, which it no longer does, and never on whether its tab is open, since the tab outlives the runner. The runner writes its process id to `runner.pid` in the state dir as it starts, and `summary.json` before it prompts, so `summary.json` appearing is the run's end and a `runner.pid` naming a gone process is the runner's death. Wait with one command, bounded to an hour, as a background command where your harness has one:
 
-     Once it exists, read it: `ok: true` carries the workflow's return value in `result`, `ok: false` carries the runner's `error` and the worktrees it kept. The runner is now asking the operator, in its tab, what to reclaim: tell them so, and that the default keeps the failed and dead agents and reclaims the rest (see `orca/README.md`). A tab that is gone with no `summary.json` means the runner died before it could write one — say so, and point the operator at `<notes-dir>/orca-run/runner.log`, which holds every line the runner printed, and at `journal.jsonl` beside it, which records each agent's start, result or failure with its reason.
+     ```
+     timeout 3600 sh -c 'd="<notes-dir>/orca-run"; until [ -f "$d/summary.json" ]; do [ -f "$d/runner.pid" ] && ! node -e "process.kill(+process.argv[1],0)" "$(cat "$d/runner.pid")" 2>/dev/null && break; sleep 15; done'
+     ```
+
+     The `node` probe is the liveness check because it sees Windows process ids, which Git Bash's `kill -0` may not. When the wait returns, look in this order. `summary.json` exists: the run ended (the runner may have exited between the two checks, so this comes first). Else `runner.pid` exists and the same probe fails: the runner died. Else the hour passed: if `runner.pid` is still missing, the runner never started — say so and point the operator at its tab; if the probe still succeeds, issue the same wait again. Do not read the terminal's log while it runs.
+
+     Once `summary.json` exists, read it: `ok: true` carries the workflow's return value in `result`, `ok: false` carries the runner's `error` and the worktrees it kept. The runner is now asking the operator, in its tab, what to reclaim: tell them so, and that the default keeps the failed and dead agents and reclaims the rest (see `orca/README.md`). A dead runner with no `summary.json` died before it could write one — killed, out of memory, or crashed — so no prompt is waiting; say so, and point the operator at `<notes-dir>/orca-run/runner.log`, which holds every line the runner printed, and at `journal.jsonl` beside it, which records each agent's start, result or failure with its reason.
 
 5. Report what it returned, and **name the runner the run used** — the Workflow runner, or the Orca runner with its terminal's title: the stack bottom-to-top with each PR's url and state, the merge instructions for the mode the run ended in, tickets that failed, tickets deferred to a human and why, the worktrees the run kept and why, the notes directory, and the **retrospective** — its summary sentences, the path of `validation-report.md`, and its proposals as a list. Say plainly that nothing applies the proposals: the next run reads `validation.md` exactly as it stands, and a human, or a session the human points at the report, edits the list. The workflow's return value is already a summary — pass it on rather than re-deriving it from the PRs.
 
-To iterate after a failure, edit `<notes-dir>/workflow.js` and relaunch it with the runner's resume handle — `resumeFromRunId` on the Workflow runner, `--resume` on the Orca runner (the same launch as step 4 with `--resume` added, waited on the same way, for a fresh `summary.json`), which replays from the journal in `<notes-dir>/orca-run/journal.jsonl`: the unchanged prefix of `agent()` calls returns from cache and only the edited call onward re-runs.
+To iterate after a failure, edit `<notes-dir>/workflow.js` and relaunch it with the runner's resume handle — `resumeFromRunId` on the Workflow runner, `--resume` on the Orca runner (the same launch as step 4 with `--resume` added — clearing `summary.json` and `runner.pid` first, since the failed run's are still there — and waited on the same way, for a fresh `summary.json`), which replays from the journal in `<notes-dir>/orca-run/journal.jsonl`: the unchanged prefix of `agent()` calls returns from cache and only the edited call onward re-runs.
 
 ## What the workflow does
 
