@@ -6,6 +6,7 @@ The second runner for `workflow.template.js` (ADR-0011): a Node script, launched
 |---|---|
 | `runner.mjs` | the runner: the four hooks, naming each `agent()` call, replay and the resume journal, `runner.log`, the retained worktrees |
 | `registry.mjs` | the machine-wide run registry: its writer and the fold that reads each run's current state |
+| `reclaim.mjs` | reclaiming an agent or a whole run, and the end-of-run prompt; the run view reuses it |
 | `lifecycle.mjs` | one live agent's life: the run's Run, the live cap, its worker's start, liveness, nudges and session continuation, its result, its board status |
 | `transcript.mjs` | where a Claude or pi session writes its transcript, found from its session id, and how big it is |
 | `submit.mjs` | the worker's end of `agent()`: validates the payload, records it, sends `worker_done` |
@@ -18,7 +19,7 @@ The second runner for `workflow.template.js` (ADR-0011): a Node script, launched
 node runner.mjs <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]
 ```
 
-The state dir defaults to `orca-run/` beside the rendered script, which is `<notes-dir>/orca-run` for a run the skill armed. When the runner exits it writes `summary.json` there — `{"runner": "orca", "ok": true, "result": …}`, or `"ok": false` with the `error` and `worktrees_kept`, every worktree the runner retained (below) — and that file, not the terminal's log, is what the arming session reads and reports. It is removed at start, so a file left by an earlier run never passes for this one's.
+The state dir defaults to `orca-run/` beside the rendered script, which is `<notes-dir>/orca-run` for a run the skill armed. When the runner exits it writes `summary.json` there — `{"runner": "orca", "ok": true, "result": …}`, or `"ok": false` with the `error` and `worktrees_kept`, every worktree the runner retained (below) — and that file, not the terminal's log, is what the arming session reads and reports. It is removed at start, so a file left by an earlier run never passes for this one's. The runner writes it before the end-of-run prompt (below), so the arming session waits for the file to appear, not for the tab to exit: the tab stays open once the runner is done.
 
 ## What a run leaves on disk
 
@@ -82,7 +83,7 @@ A worker is watched through two signals (ADR-0013): its session transcript growi
 - **Gone**, its tab closed: continued at once, in a new terminal.
 - **Blocked on a human**: logged loudly; after 30 minutes it fails and is kept, never continued, since continuing does not answer the question it waits on.
 
-A **continuation** carries the same session on (decision D3 on #43). With the tab alive, the runner interrupts the stalled process, types `claude --resume <id>` (pi: `pi --session-id <id>`) with the worker's launch flags into the same terminal, and then a prompt telling the agent it was interrupted and must finish and submit; its dispatch is unchanged. With the tab gone, the resume runs in a new terminal in the same worktree, and `worker-start --terminal` adopts it with that prompt as its spec: Orca settles a dispatch only from its own pane, so the new pane gets a new dispatch, and the old one is stopped and released. Either way the worker is watched again, and a continued agent that submits returns its result.
+A **continuation** carries the same session on (decision D3 on #43). With the tab alive, the runner interrupts the stalled process, types `claude --resume <id>` (pi: `pi --session-id <id>`) with the worker's launch flags into the same terminal, and then a prompt telling the agent it was interrupted and must finish and submit; its dispatch is unchanged. With the tab gone, the resume runs in a new terminal in the same worktree, and `worker-start --terminal` adopts it with that prompt as its spec: Orca settles a dispatch only from its own pane, so the new pane gets a new dispatch, and the old one is stopped (never released during the run: a reclaim releases the dispatch of its last continuation). Either way the worker is watched again, and a continued agent that submits returns its result.
 
 At most 3 continuations per agent. The next death fails it with a reason naming the cap, and it is **kept**: its process is not stopped, its tab stays open, and its worktree is retained. An agent that never started has no session to continue.
 
@@ -159,4 +160,16 @@ An `agent()` with `isolation: 'worktree'` runs in a new Orca child worktree of t
 
 The runner sets each child worktree's board status with `orca worktree set --workspace-status`: `in-progress` when its worker starts (`in-review` for an agent in the `Gate` phase), and `completed` when its agent reports a PR it published (a result with a `pr_url` and `published` not false). A reclaimed worktree leaves the board with its removal. A status or display name Orca refuses is logged and journaled as a `warning`, and the agent carries on. The run's own worktree is never touched.
 
-The runner never removes a worktree. One whose agent died, or whose worker never started, is retained and named in the run's `worktrees_kept` with its reason, and in the log. It is journaled with the failed call, so a resume, which runs that call again in a new worktree, still names the old one. When the script throws, `summary.json` carries the same list beside the `error`.
+## What is kept, and the end-of-run prompt
+
+Nothing is reclaimed while a run runs (ADR-0012). No worker is released when it returns, no tab is closed, and no worktree is removed — not by the runner, and not by the script: under the Orca runner the template's reclaim steps hand no agent a path to remove. A worktree whose agent died, or whose worker never started, is also named in the run's `worktrees_kept` with its reason, and in the log. It is journaled with the failed call, so a resume, which runs that call again in a new worktree, still names the old one. When the script throws, `summary.json` carries the same list beside the `error`.
+
+Once `summary.json` is written, the runner prints the result and asks, in its tab, what to reclaim of the agents this run's journal names:
+
+| answer | reclaims | keeps |
+|---|---|---|
+| Enter (the default) | every agent that returned a value | each failed or dead agent, and any that never settled, named with why |
+| `a` | every agent | none |
+| `n` | none | every agent |
+
+Anything else is asked again. With no answer possible (stdin closed) every agent is kept. Reclaiming an agent releases its worker, closes its tab if Orca's terminal list still shows it, and removes its worktree through Orca. Even then an agent is kept, and named with the reason, when it is still live, when its worktree holds commits no remote-tracking ref contains (only a forced reclaim, from the run view, removes that), or when Orca refuses. A worktree not named `<runId>-<n>` is the operator's own and never touched. Each reclaim is appended to the run registry, and once no agent of a run is left, so is the run. The runner exits once the prompt is answered; the tab stays, holding what it printed.

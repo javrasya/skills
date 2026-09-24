@@ -786,7 +786,7 @@ test('orca-cli: an agent whose TUI never goes idle is not dispatched, and its te
 
 // Worktrees: the template's ledger and reclaim in miniature. Each isolated
 // agent names its worktree; a non-isolated reclaimer removes exactly the named
-// ones through Orca, as the Orca-runner reclaim wording tells it to.
+// ones through Orca.
 const WT_SCHEMA = { type: 'object', required: ['worktree'], properties: { worktree: { type: 'string' } } }
 const RECLAIM_SCHEMA = { type: 'object', required: ['removed'], properties: { removed: { type: 'integer' } } }
 const WT_SCRIPT = `const WT = ${JSON.stringify(WT_SCHEMA)}

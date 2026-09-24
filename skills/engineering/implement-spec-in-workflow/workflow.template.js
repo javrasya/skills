@@ -103,13 +103,14 @@ const mirror = (branches) => `\`git fetch origin\`, then mirror origin into the 
 // same commit and is indistinguishable by git state alone.
 //
 // On the Orca runner that worktree is an Orca child of the run's worktree, and
-// Orca must be the one to remove it: a plain `git worktree remove` leaves
-// Orca listing a worktree that is gone.
+// the script reclaims nothing: every agent is kept for the whole run, and the
+// runner asks the operator what to reclaim once summary.json is written
+// (ADR-0012). The reclaim steps below therefore hand an Orca run no path, and
+// the rendered script stays the same under both runners but for RUNNER.
 const ON_ORCA = RUNNER === 'orca'
-const WORKTREE = `Your worktree is ${ON_ORCA ? "an Orca child worktree of this run's worktree, " : ''}throwaway and per agent. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. This run reclaims it${ON_ORCA ? ' through Orca' : ''} — uncommitted leftovers included — once the work it holds is published.`
-const REMOVER = ON_ORCA
-  ? { tool: 'Orca', gone: 'count it removed', remove: `\`orca worktree rm --worktree path:<path> --force\` — never \`git worktree remove\`, which leaves Orca listing a worktree that is gone. Force on purpose`, finish: '' }
-  : { tool: 'git', gone: 'count it removed — the harness already cleaned it', remove: `\`git worktree remove --force <path>\` — force on purpose`, finish: ' Finish with `git worktree prune`.' }
+const WORKTREE = ON_ORCA
+  ? `Your worktree is an Orca child worktree of this run's worktree, per agent. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. Never remove it: the operator decides at the end of the run whether it is reclaimed.`
+  : `Your worktree is throwaway and per agent. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. This run reclaims it — uncommitted leftovers included — once the work it holds is published.`
 
 // --- the worktree ledger ---------------------------------------------------
 // Every path an isolated agent reports, keyed by what it worked on, beside the
@@ -119,8 +120,7 @@ const REMOVER = ON_ORCA
 // meant to keep and the rest is build output — in a repo whose build rewrites
 // tracked generated files every worktree is dirty, and a rule that spared
 // them would reclaim nothing. A dead agent never reports a path, so its
-// worktree is never in here and never removed: finalize names it instead, or
-// on the Orca runner the runner does, having created it.
+// worktree is never in here and never removed: finalize names it instead.
 const worktreesOf = new Map() // key → { branch, paths: [] }
 function noteWorktree(key, branch, r) {
   if (!r || !r.worktree) return
@@ -133,10 +133,11 @@ const worktreesKept = []
 // The publisher cannot remove its own worktree (its cwd), so it is handed to
 // the next publisher down the lane, and the last one to finalize.
 let prevPublishWorktree = null // { path, branch }
-const prevPublisher = () => (prevPublishWorktree ? [prevPublishWorktree] : [])
+const prevPublisher = () => (prevPublishWorktree && !ON_ORCA ? [prevPublishWorktree] : [])
 // Entries not yet handed to any reclaimer. Marked reclaimed only once the reclaimer
 // returned: a reclaimer that died leaves them for the next one, or finalize.
 function pendingWorktrees(keys) {
+  if (ON_ORCA) return []
   const out = []
   for (const k of keys) {
     const e = worktreesOf.get(k)
@@ -151,13 +152,14 @@ function markReclaimed(entries, r) {
 const reclaimStep = (entries) => entries.length
   ? `Reclaim these worktrees — exact paths, nothing else. Each belonged to an agent of this run that has finished, and the branch beside it holds that agent's work:
 ${entries.map((e) => `   - ${e.path} → ${ref(e.branch)}`).join('\n')}
-   For each path: if it no longer exists, ${REMOVER.gone}. Otherwise \`git -C <path> merge-base --is-ancestor HEAD <branch>\` must succeed; if it fails the worktree holds a commit its branch does not, so keep it and report why. Then ${REMOVER.remove}: the agent that used it returned and committed what it meant to keep, so whatever is uncommitted there is build output, and the ancestor check above is the real guard. If ${REMOVER.tool} still refuses (a file lock, say), keep the worktree and report \`{path, reason}\`. Never remove your own worktree, ${REPO_DIR}, or any path not in this list.${REMOVER.finish} Return how many you removed and every one you kept.`
-  : `No worktrees to reclaim this time: report 0 removed and none kept.`
+   For each path: if it no longer exists, count it removed — the harness already cleaned it. Otherwise \`git -C <path> merge-base --is-ancestor HEAD <branch>\` must succeed; if it fails the worktree holds a commit its branch does not, so keep it and report why. Then \`git worktree remove --force <path>\` — force on purpose: the agent that used it returned and committed what it meant to keep, so whatever is uncommitted there is build output, and the ancestor check above is the real guard. If git still refuses (a file lock, say), keep the worktree and report \`{path, reason}\`. Never remove your own worktree, ${REPO_DIR}, or any path not in this list. Finish with \`git worktree prune\`. Return how many you removed and every one you kept.`
+  : ON_ORCA
+    ? `Remove no worktree — not yours, not any other: on this runner every agent's worktree is kept until the run ends, and the operator decides then what is reclaimed. Report 0 removed and none kept.`
+    : `No worktrees to reclaim this time: report 0 removed and none kept.`
 // A dead agent never reported a path, so its worktree is not in the ledger.
 // The harness names a run's worktrees `wf_<run>-<n>`; the prefix is read off
 // any reported path so a reclaimer can NAME the strays without touching them.
-// The Orca runner needs no such guess: it created every child worktree, and
-// names a dead agent's in the run's result itself.
+// The Orca runner reclaims nothing in-script, so there is nothing to guess.
 const strayPrefix = () => {
   for (const e of worktreesOf.values()) for (const p of e.paths) { const m = /^(.*[\\/]wf_[^\\/]+-)\d+$/.exec(p); if (m) return m[1] }
   return null
@@ -355,7 +357,7 @@ const RECLAIM_FIELDS = {
       type: 'object',
       additionalProperties: false,
       required: ['path', 'reason'],
-      properties: { path: { type: 'string' }, reason: { type: 'string', description: `why it was kept: dirty, HEAD not on its branch, or the refusal ${REMOVER.tool} gave` } },
+      properties: { path: { type: 'string' }, reason: { type: 'string', description: `why it was kept: dirty, HEAD not on its branch, or the refusal git gave` } },
     },
   },
 }
@@ -1227,6 +1229,7 @@ if (!stacked.length && !hasLayer0) {
   // same dead weight as after a full run; the same rule applies, and a dirty
   // one is a dead agent's only copy — kept and named.
   const leftovers = pendingWorktrees([...worktreesOf.keys()])
+  // On the Orca runner leftovers is empty: the operator reclaims at the end.
   const reclaim = leftovers.length
     ? await agent(
       `Nothing of spec #${SPEC} was published; the run is stopping. ${reclaimStep(leftovers)}
@@ -1412,8 +1415,8 @@ ${complete
     ? `3. Append the line \`Closes #${SPEC}\` to the TOP PR's body (\`gh pr edit\` — keep the existing body, add the line). Merging the whole stack from the top then closes every ticket and the spec at once.`
     : `3. Add NO \`Closes #${SPEC}\` anywhere — the spec is not complete. Comment on the TOP PR and on issue #${SPEC}: the stack in merge order (the PR list above), and what remains for a human: ${remains.join('; ')}. A later run stacks the remainder on top.`}
 4. ${reclaimStep(finalReclaim)}
-   The lane already reclaimed each published ticket's worktrees; these are the rest. ${strayStep()}
-   Touch no other worktree — the user's own checkout in particular — and delete no branches and close no PRs.
+${ON_ORCA ? '' : `   The lane already reclaimed each published ticket's worktrees; these are the rest. ${strayStep()}
+`}   Touch no other worktree — the user's own checkout in particular — and delete no branches and close no PRs.
 
 Do not merge anything — merging is the operator's.
 
@@ -1492,7 +1495,7 @@ return {
     const unpublished = auto.filter((t) => !stacked.some((x) => x.number === t.number)).map((t) => `ticket/${t.number}`)
     if (integration === null && findings.length) unpublished.push(`spec/${SPEC}-integration`)
     return unpublished.length
-      ? { note: `Never pushed. Any work these carry is on the branch in ${REPO_DIR}'s clone only — the worktrees that built it were removed where clean and on the branch, kept otherwise; see worktrees_kept.`, refs: unpublished }
+      ? { note: `Never pushed. Any work these carry is on the branch in ${REPO_DIR}'s clone only — ${ON_ORCA ? 'the worktrees that built it are kept until the operator reclaims them at the end of the run' : 'the worktrees that built it were removed where clean and on the branch, kept otherwise; see worktrees_kept'}.`, refs: unpublished }
       : null
   })(),
   // Every worktree a reclaim refused to remove, with git's reason. Each is a
