@@ -171,7 +171,7 @@ const runLine = (r) =>
 
 function runPane(r) {
   const tab = r.terminal ? `${cyan(shortHandle(r.terminal))}${r.alive === true ? grey(' (open)') : r.alive === false ? grey(' (closed)') : ''}` : grey('—')
-  const does = ['Enter opens its tree', r.reclaimed ? null : 'r reclaims every agent', r.resumable ? 'R resumes it: its runner is dead' : null].filter(Boolean).join(' · ')
+  const does = ['Enter opens its tree', r.reclaimed ? null : r.closable ? 'r reclaims every agent and closes the run' : 'r reclaims every agent it may; the run stays open', r.resumable ? 'R resumes it: its runner is dead' : null].filter(Boolean).join(' · ')
   return [
     ` ${bold(r.name ?? r.runId)}  ${grey(r.runId)}${r.spec ? `  spec ${r.spec}` : ''}  ${outcomeOf(r)}  ${r.kept} kept${r.reclaimed ? grey('  reclaimed') : ''}`,
     ` runner tab ${tab}   project ${grey(r.project ?? '—')}`,

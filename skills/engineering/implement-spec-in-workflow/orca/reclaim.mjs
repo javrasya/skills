@@ -136,9 +136,11 @@ export async function reclaimAgent(agent, { orca, unpushed = gitUnpushed, force 
 // Reclaims a run's agents, one at a time, except those `keep(agent)` names a
 // reason to keep. Each reclaim is appended to the run registry (`registry`, a
 // runRegistry writer, or null); once no agent of a run is left, so is the whole
-// run. A registry write that fails is reported through `out`, never thrown.
+// run, unless `closeRun` is false: a run that may still start agents must stay
+// open, since no registry entry undoes a whole-run reclaim. A registry write
+// that fails is reported through `out`, never thrown.
 // Returns { reclaimed: [agent], kept: [{ agent, reason }] }.
-export async function reclaimRun(agents, { orca, unpushed = gitUnpushed, force = false, keep = () => null, registry = null, out = () => {} }) {
+export async function reclaimRun(agents, { orca, unpushed = gitUnpushed, force = false, keep = () => null, registry = null, closeRun = true, out = () => {} }) {
   const record = (entry) => {
     try {
       registry?.reclaimed(entry)
@@ -171,7 +173,7 @@ export async function reclaimRun(agents, { orca, unpushed = gitUnpushed, force =
     reclaimed.push(agent)
     record({ runId: agent.runId, agent: agent.name })
   }
-  for (const runId of new Set(agents.map((a) => a.runId))) {
+  if (closeRun) for (const runId of new Set(agents.map((a) => a.runId))) {
     if (!kept.some((k) => k.agent.runId === runId)) record({ runId })
   }
   return { reclaimed, kept }

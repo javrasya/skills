@@ -409,12 +409,15 @@ const pathKey = (p) => (process.platform === 'win32' ? resolve(p).toLowerCase() 
 //   message   the latest action's outcome, or null
 //   opened    { runId, view }: the run Enter opened, as a runView, or null
 // A run is { runId, name, spec, project, runDir, script, permissionMode,
-// terminal, outcome, alive, kept, reclaimed, armedAt, ageMs, resumable }.
-// outcome is ok, partial or failed, or null while no `ended` is recorded.
-// alive is whether its runner's terminal, the registry's or the one R opened,
-// is in Orca's terminal list, and null when the list could not be read. kept
-// counts the agents its journal names that are not reclaimed. R resumes a
-// run only when it is resumable, alive being false.
+// terminal, outcome, alive, kept, reclaimed, closable, armedAt, ageMs,
+// resumable }. outcome is ok, partial or failed, or null while no `ended` is
+// recorded. alive is whether its runner's terminal, the registry's or the one
+// R opened, is in Orca's terminal list, and null when the list could not be
+// read. kept counts the agents its journal names that are not reclaimed.
+// closable is whether r may record the whole run reclaimed: only once it has
+// ended and its runner is known dead, since nothing undoes that record and a
+// live run may start more agents. R resumes a run only when it is resumable:
+// alive being false, and the run not reclaimed.
 //
 // Only the registry's runs are listed, so a worktree no run made never is.
 // Read, stop and release are not fenced to a Run's coordinator, so a reclaim
@@ -471,7 +474,8 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
         script: r.script, permissionMode: r.permissionMode, terminal: launched.get(r.runId) ?? r.runner?.terminal ?? null,
         outcome: r.state === 'running' ? null : r.state, alive: live, reclaimed: r.reclaimed,
         kept: r.reclaimed ? 0 : agents.filter((a) => !done.has(a.name)).length,
-        armedAt: Number.isFinite(armedAt) ? armedAt : null, ageMs: Number.isFinite(armedAt) ? Math.max(0, now - armedAt) : null, resumable: live === false,
+        closable: !r.reclaimed && r.state !== 'running' && live === false,
+        armedAt: Number.isFinite(armedAt) ? armedAt : null, ageMs: Number.isFinite(armedAt) ? Math.max(0, now - armedAt) : null, resumable: live === false && !r.reclaimed,
       }
       const key = r.project ? pathKey(r.project) : ''
       if (!byProject.has(key)) byProject.set(key, { key, name: r.project ? basename(r.project) : '(no project)', path: r.project, folded: false, runs: [] })
@@ -518,14 +522,22 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
     return { folded: project.key }
   }
 
+  // Why the run stays open after a whole-run r, or null when it is closable.
+  const openBecause = (run) => (run.outcome === null ? 'it has not ended' : run.alive === true ? 'its runner is alive' : run.alive === null ? 'Orca cannot say whether its runner is alive' : null)
+
   // Every agent of the run the registry does not already record reclaimed,
-  // by the reclaim rules, as the end-of-run prompt's `a` does; the run is
-  // recorded reclaimed once none of its agents is left.
+  // by the reclaim rules, as the end-of-run prompt's `a` does. The run is
+  // recorded reclaimed once none of its agents is left, but only when it is
+  // closable: a run still going, or one whose runner may be, stays open, so
+  // the agents it starts later are kept and listed (ADR-0012). The registry
+  // and Orca are read again first, so a runner resumed since is seen.
   async function reclaim(runId = current()?.run?.runId) {
+    if (runId) await refresh()
     const run = runOf(runId)
     if (!run) return say('select a run to reclaim')
     const label = labelOf(run)
     if (run.reclaimed) return say(`${label} is already reclaimed`)
+    const stays = openBecause(run)
     const notes = []
     let r
     let left
@@ -533,25 +545,30 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
       const done = new Set(readRegistry(registry).find((e) => e.runId === runId)?.reclaimedAgents.map((a) => a.agent) ?? [])
       left = run.runDir ? agentsOf(join(run.runDir, 'journal.jsonl')).filter((a) => a.runId === runId && !done.has(a.name)) : []
       const writer = runRegistry(registry, clock)
-      r = await reclaimRun(left, { orca, unpushed, registry: writer, out: (s) => notes.push(s.replace(/^!! /, '')) })
-      if (!left.length) writer.reclaimed({ runId })
+      r = await reclaimRun(left, { orca, unpushed, registry: writer, closeRun: !stays, out: (s) => notes.push(s.replace(/^!! /, '')) })
+      if (!left.length && !stays) writer.reclaimed({ runId })
     } catch (e) {
       return say(`could not reclaim ${label}: ${e?.message ?? e}`)
     }
     await refresh()
+    const agents = (n) => `${n} agent${n === 1 ? '' : 's'}`
     const text = r.kept.length
       ? `reclaimed ${r.reclaimed.length} of ${left.length} agents of ${label}; ${r.kept.map(({ agent, reason }) => `kept ${agent.title}: ${reason}`).join('; ')}`
-      : `reclaimed ${label}${left.length ? `: ${left.length} agent${left.length === 1 ? '' : 's'}` : ''}`
+      : stays
+        ? `${left.length ? `reclaimed ${agents(left.length)} of ${label}` : `${label} has no agent left to reclaim`}; the run stays open: ${stays}`
+        : `reclaimed ${label}${left.length ? `: ${agents(left.length)}` : ''}`
     return { ...say(notes.length ? `${text}; ${notes.join('; ')}` : text), reclaimed: r.reclaimed, kept: r.kept }
   }
 
   // A new tab in the run's worktree running the runner with --resume, which
-  // takes the Run over. Refused while its runner's tab is open, or while Orca
-  // cannot say whether it is.
+  // takes the Run over. Refused for a run recorded reclaimed, whose agents are
+  // gone and whose record nothing undoes; while its runner's tab is open; or
+  // while Orca cannot say whether it is.
   async function resume(runId = opened?.runId ?? current()?.run?.runId) {
     const run = runOf(runId)
     if (!run) return say('select a run to resume')
     const label = labelOf(run)
+    if (run.reclaimed) return say(`${label} is reclaimed: its agents are gone and the registry closed it, so there is nothing to resume`)
     if (run.alive === true) return say(`${label}'s runner is alive, in tab ${run.terminal}: nothing to resume`)
     if (run.alive === null) return say(`could not tell whether ${label}'s runner is alive: Orca's terminal list did not answer`)
     if (!run.project || !run.runDir) return say(`${label} has no ${run.project ? 'run directory' : 'worktree'} recorded to resume in`)

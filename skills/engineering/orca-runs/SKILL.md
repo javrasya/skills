@@ -24,7 +24,7 @@ The view is code of `implement-spec-in-workflow`, not of this skill: one copy, b
 
    - The list holds each run with its spec, its outcome, whether its runner is alive (its tab is in Orca's terminal list), how many agents it still keeps, and its age. Runs are grouped by project.
    - **Enter** or a click opens a run into the same tree the runner's tab shows. **q** or Escape goes back to the list, and **q** on the list closes the view.
-   - **r** on a run reclaims every agent it keeps, under the reclaim rules: an agent still live is kept, and so is one whose worktree holds commits no remote has. Inside a run, **r** reclaims one agent, and **f** forces one holding unpushed commits.
-   - **R** resumes a run whose runner is dead. It opens a new tab in the run's worktree, running the runner with `--resume`, which takes the run over. It is not offered while the runner is alive.
+   - **r** on a run reclaims every agent it keeps, under the reclaim rules: an agent still live is kept, and so is one whose worktree holds commits no remote has. The run itself is marked reclaimed only once it has ended and its runner is dead; a run still going stays open, so the agents it starts later are kept. Inside a run, **r** reclaims one agent, and **f** forces one holding unpushed commits.
+   - **R** resumes a run whose runner is dead. It opens a new tab in the run's worktree, running the runner with `--resume`, which takes the run over. It is not offered while the runner is alive, nor on a run already reclaimed.
 
 The view touches only worktrees a run made, named `<runId>-<n>`; any other worktree is never shown or touched. Reading, stopping and releasing a run's workers needs no takeover, so reclaiming works on any run. Details are in `implement-spec-in-workflow/orca/README.md`, *The run view standalone*.

@@ -3030,6 +3030,58 @@ test('standalone: r reclaims a whole run, each agent by the reclaim rules, and r
   assert.match((await runs.key('r')).message, /implement-spec-783 run_a1 is already reclaimed/)
 })
 
+test('standalone: r on a run still going reclaims its settled agents but never records the run reclaimed, so an agent it starts later is kept', async () => {
+  const { runs, run, select, orca, registry, dir, a2 } = await standaloneRuns()
+  const pane = () => screenOf(runs.model).slice(-6, -2).join('\n')
+  const reclaimedLines = (runId) => readFileSync(registry, 'utf8').split('\n').flatMap((l) => {
+    try {
+      const e = JSON.parse(l)
+      return e.type === 'reclaimed' && e.runId === runId ? [e.agent ?? 'the run'] : []
+    } catch {
+      return [] // the fixture's torn last line
+    }
+  })
+
+  // run_a2's runner is alive, and its one agent has settled with nothing
+  // unpushed: the run is between phases.
+  orca.dispatches.get(a2[0].dispatchId).settled = true
+  await runs.refresh()
+  assert.deepEqual([run('run_a2').alive, run('run_a2').outcome, run('run_a2').closable], [true, null, false])
+  assert.match(pane(), /r reclaims every agent it may; the run stays open/)
+  const r = await runs.key('r')
+  assert.deepEqual([r.reclaimed.map((a) => a.n), r.kept], [[1], []])
+  assert.equal(r.message, 'reclaimed 1 agent of implement-spec-790 run_a2; the run stays open: it has not ended')
+  assert.deepEqual(reclaimedLines('run_a2'), ['run_a2-1'], 'the agent, never the run')
+  assert.deepEqual([run('run_a2').reclaimed, run('run_a2').kept], [false, 0])
+  assert.equal((await runs.key('r')).message, 'implement-spec-790 run_a2 has no agent left to reclaim; the run stays open: it has not ended')
+  assert.deepEqual(reclaimedLines('run_a2'), ['run_a2-1'])
+
+  // The runner starts its next agent: listed, kept, and live in the tree.
+  const s = await orca.workerStart({ run: 'run_a2', prompt: 'p', title: 't', sessionId: SID, child: { name: 'run_a2-2', displayName: 't' } })
+  appendFileSync(join(dir, 'controlayer-790', 'orca-run', 'journal.jsonl'), JSON.stringify(J('started', 2, '[Implement] impl:b', 40, { run: 'run_a2', dispatchId: s.dispatchId, harness: 'claude', sessionId: 'sid-2', worktree: s.worktree, terminal: s.terminal })) + '\n')
+  await runs.refresh()
+  assert.deepEqual([run('run_a2').reclaimed, run('run_a2').kept], [false, 1])
+  assert.match((await runs.key('r')).message, /^reclaimed 0 of 1 agents of implement-spec-790 run_a2; kept \[Implement\] impl:b: it is still live/)
+  assert.deepEqual(reclaimedLines('run_a2'), ['run_a2-1'])
+  await runs.key('ENTER')
+  assert.deepEqual(runs.opened().model.phases.flatMap((p) => p.agents).map((a) => [a.n, a.reclaimed]), [[1, true], [2, false]])
+  await runs.key('q')
+
+  // run_a1 has ended, but while Orca cannot say whether its runner lives it is
+  // not taken for dead: its agents may go, the run stays open.
+  await select('run:run_a1')
+  assert.equal(run('run_a1').closable, true)
+  assert.match(pane(), /r reclaims every agent and closes the run/)
+  orca.terminalList = async () => {
+    throw new OrcaError('call_timeout', 'no answer within 60s', 'terminal list')
+  }
+  await runs.refresh()
+  assert.deepEqual([run('run_a1').alive, run('run_a1').closable], [null, false])
+  await runs.key('r')
+  assert.ok(!reclaimedLines('run_a1').includes('the run'))
+  assert.equal(run('run_a1').reclaimed, false)
+})
+
 test("standalone: R on a run whose runner is dead opens one terminal in the run's worktree running the runner with --resume; never while its runner lives", async () => {
   const { runs, run, select, orca, dir } = await standaloneRuns()
   const resumes = () => orca.calls.filter((c) => c.verb === 'resumeRunner')
@@ -3057,13 +3109,26 @@ test("standalone: R on a run whose runner is dead opens one terminal in the run'
   assert.match((await runs.key('R')).message, /runner is alive/)
   assert.equal(resumes().length, 1)
 
-  // From inside a run's tree too. run_b1 was armed before the registry named
-  // its script: the skill's layout gives it.
+  // run_b1 is recorded reclaimed: its agents are gone, so R is neither offered
+  // nor carried out, from the list or from inside its tree, and the flash says why.
   await select('run:run_b1')
+  assert.deepEqual([run('run_b1').alive, run('run_b1').resumable], [false, false])
+  assert.ok(!/R resumes/.test(pane()))
+  assert.match((await runs.key('R')).message, /^implement-spec-43 run_b1 is reclaimed: .*nothing to resume$/)
+  await runs.key('ENTER')
+  assert.match((await runs.key('R')).message, /run_b1 is reclaimed/)
+  assert.equal(resumes().length, 1)
+  await runs.key('q')
+
+  // From inside a run's tree too. run_a2 was armed before the registry named
+  // its script: the skill's layout gives it.
+  orca.closeTab('term_runA2')
+  await runs.refresh()
+  await select('run:run_a2')
   await runs.key('ENTER')
   await runs.key('R')
   assert.deepEqual(resumes().slice(1).map((c) => [c.worktree, c.command]), [
-    ['C:/repos/skills', resumeRunnerCommand({ runner: RUNNER_PATH, script: join(dir, 'skills-43', 'workflow.js'), stateDir: `${dir}/skills-43/orca-run` })],
+    [PROJECT, resumeRunnerCommand({ runner: RUNNER_PATH, script: join(dir, 'controlayer-790', 'workflow.js'), stateDir: `${dir}/controlayer-790/orca-run` })],
   ])
 
   // A worktree Orca no longer knows: nothing opens, and the flash says why.
