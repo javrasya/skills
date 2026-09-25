@@ -587,6 +587,7 @@ log(`${all.length} tickets. Automating ${auto.map((t) => '#' + t.number).join(',
 if (deferred.length) {
   log(`Deferred to a human: ${deferred.map((t) => '#' + t.number + (t.needs_human ? '' : ' (downstream)')).join(', ')}`)
 }
+if (!all.length) throw new Error(`spec #${SPEC} has no implementation tickets — break it into ticket sub-issues first, then arm again`)
 if (!auto.length) return { spec: SPEC, error: 'every ticket needs a human', deferred: deferred.map((t) => t.number) }
 
 // --- step 2: exploration subagents, notes saved outside the repo ----------

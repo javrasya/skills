@@ -130,11 +130,17 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
   lines.push(fit(flash ? ' ' + c('1;36', flash) : alert ? ' ' + c(COLOUR.blocked, alert) : '', W))
   lines.push(fit(grey(help), W))
 
+  // The modal's terminal rows, so rowAt can keep the rows it does not cover
+  // clickable while the end prompt is up.
+  let modalTop = 0
+  let modalBottom = 0
   if (modal) {
     const mw = Math.min(W - 4, 100)
     const left = Math.max(0, Math.floor((W - mw) / 2))
     const box = [c('7', fit(' ' + modal.title, mw)), ...modal.lines.map((l) => c('100', fit(' ' + l, mw))), c('100', fit('', mw))]
     const at = Math.max(0, Math.floor((H - box.length) / 2))
+    modalTop = at
+    modalBottom = at + box.length
     box.forEach((b, i) => {
       if (at + i < lines.length) lines[at + i] = fit(' '.repeat(left) + b, W)
     })
@@ -143,7 +149,12 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
     lines: lines.slice(0, H),
     rowAt: (y) => {
       const i = top + (y - TOP - 1)
-      return y > TOP && y <= TOP + body && i < rows.length && !modal ? i : null
+      if (!(y > TOP && y <= TOP + body && i < rows.length)) return null
+      // A confirmation takes every click; the end prompt only hides the rows
+      // its box covers — the rest of the tree stays clickable.
+      if (modal?.confirm) return null
+      if (y >= modalTop && y < modalBottom) return null
+      return i
     },
   }
 }

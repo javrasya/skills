@@ -227,6 +227,7 @@ export async function endOfRunPrompt({ agents, ask, out, ...rest }) {
   } else {
     show('   None failed or died.')
   }
+  show('   The tree stays live while you decide: Enter, a or n answers — typed here, or pressed in the run view.')
   const question = `   Enter = keep those and reclaim the other ${agents.length - keptByDefault.length}, a = reclaim all, n = keep all: `
   let choice = null
   let answer

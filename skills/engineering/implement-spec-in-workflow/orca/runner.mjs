@@ -36,7 +36,7 @@
 //
 // No change to this directory is done until the runner contract test passes
 // under both runners (README.md). The offline tests do not replace it.
-import { mkdirSync, writeFileSync, readFileSync, rmSync, appendFileSync } from 'fs'
+import { mkdirSync, writeFileSync, readFileSync, rmSync, appendFileSync, realpathSync } from 'fs'
 import { createInterface } from 'readline'
 import { spawn } from 'child_process'
 import { createHash } from 'crypto'
@@ -64,6 +64,7 @@ export const SETTINGS = RUNNER_SETTINGS
 // declared, so the Run's objective can name the spec the script is for.
 export function loadScript(text) {
   const body = text.replace(/^export const meta\s*=/m, 'const meta = __meta.value =')
+  // pi-lens-ignore: no-global-eval-js
   return new Function('agent', 'parallel', 'phase', 'log', '__meta', 'return (async () => {' + body + '\n})()')
 }
 
@@ -483,7 +484,9 @@ function stdinAsker() {
   }
 }
 
-const isMain = process.argv[1] && resolve(process.argv[1]).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase()
+// realpathSync: a symlinked install (e.g. pi's ~/.pi/agent/skills entries) is
+// still this file's main — resolve() would not dereference the link.
+const isMain = process.argv[1] && realpathSync(process.argv[1]).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase()
 if (isMain) {
   const args = process.argv.slice(2)
   let bad = false
