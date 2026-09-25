@@ -3050,10 +3050,10 @@ test('standalone: r on a run still going reclaims its settled agents but never r
   assert.match(pane(), /r reclaims every agent it may; the run stays open/)
   const r = await runs.key('r')
   assert.deepEqual([r.reclaimed.map((a) => a.n), r.kept], [[1], []])
-  assert.equal(r.message, 'reclaimed 1 agent of implement-spec-790 run_a2; the run stays open: it has not ended')
+  assert.equal(r.message, 'reclaimed 1 agent of implement-spec-790 run_a2; the run stays open: its runner is alive')
   assert.deepEqual(reclaimedLines('run_a2'), ['run_a2-1'], 'the agent, never the run')
   assert.deepEqual([run('run_a2').reclaimed, run('run_a2').kept], [false, 0])
-  assert.equal((await runs.key('r')).message, 'implement-spec-790 run_a2 has no agent left to reclaim; the run stays open: it has not ended')
+  assert.equal((await runs.key('r')).message, 'implement-spec-790 run_a2 has no agent left to reclaim; the run stays open: its runner is alive')
   assert.deepEqual(reclaimedLines('run_a2'), ['run_a2-1'])
 
   // The runner starts its next agent: listed, kept, and live in the tree.
@@ -3080,6 +3080,43 @@ test('standalone: r on a run still going reclaims its settled agents but never r
   await runs.key('r')
   assert.ok(!reclaimedLines('run_a1').includes('the run'))
   assert.equal(run('run_a1').reclaimed, false)
+})
+
+test('standalone: r on a run whose runner was killed before it recorded `ended` reclaims its agents and records the run reclaimed, and R then refuses it', async () => {
+  const { runs, run, orca, registry, a2 } = await standaloneRuns()
+  const resumes = () => orca.calls.filter((c) => c.verb === 'resumeRunner')
+  const pane = () => screenOf(runs.model).slice(-6, -2).join('\n')
+  const reclaimedLines = (runId) => readFileSync(registry, 'utf8').split('\n').flatMap((l) => {
+    try {
+      const e = JSON.parse(l)
+      return e.type === 'reclaimed' && e.runId === runId ? [e.agent ?? 'the run'] : []
+    } catch {
+      return [] // the fixture's torn last line
+    }
+  })
+
+  // run_a2's runner is killed: its tab is gone, no `ended` is recorded, and
+  // its one agent has settled with nothing unpushed.
+  orca.closeTab('term_runA2')
+  orca.dispatches.get(a2[0].dispatchId).settled = true
+  await runs.refresh()
+  assert.equal(runs.model.rows[runs.model.selected].key, 'run:run_a2')
+  assert.deepEqual(['alive', 'outcome', 'closable', 'resumable'].map((k) => run('run_a2')[k]), [false, null, true, true])
+  assert.match(pane(), /r reclaims every agent and closes the run/)
+
+  const r = await runs.key('r')
+  assert.deepEqual([r.reclaimed.map((a) => a.n), r.kept], [[1], []])
+  assert.equal(r.message, 'reclaimed implement-spec-790 run_a2: 1 agent')
+  assert.deepEqual(reclaimedLines('run_a2'), ['run_a2-1', 'the run'], 'the agent, then the whole run')
+  assert.equal(readRegistry(registry).find((e) => e.runId === 'run_a2').reclaimed, true)
+  assert.deepEqual(['reclaimed', 'kept', 'resumable', 'closable'].map((k) => run('run_a2')[k]), [true, 0, false, false])
+
+  // Reclaimed: R is neither offered nor carried out, and r has nothing left.
+  assert.ok(!/R resumes/.test(pane()))
+  assert.match((await runs.key('R')).message, /^implement-spec-790 run_a2 is reclaimed: .*nothing to resume$/)
+  assert.deepEqual(resumes(), [])
+  assert.match((await runs.key('r')).message, /implement-spec-790 run_a2 is already reclaimed/)
+  assert.deepEqual(reclaimedLines('run_a2'), ['run_a2-1', 'the run'])
 })
 
 test("standalone: R on a run whose runner is dead opens one terminal in the run's worktree running the runner with --resume; never while its runner lives", async () => {

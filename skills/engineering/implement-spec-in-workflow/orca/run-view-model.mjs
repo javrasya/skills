@@ -414,10 +414,11 @@ const pathKey = (p) => (process.platform === 'win32' ? resolve(p).toLowerCase() 
 // recorded. alive is whether its runner's terminal, the registry's or the one
 // R opened, is in Orca's terminal list, and null when the list could not be
 // read. kept counts the agents its journal names that are not reclaimed.
-// closable is whether r may record the whole run reclaimed: only once it has
-// ended and its runner is known dead, since nothing undoes that record and a
-// live run may start more agents. R resumes a run only when it is resumable:
-// alive being false, and the run not reclaimed.
+// closable is whether r may record the whole run reclaimed: only once its
+// runner is known dead, ended or not, since nothing undoes that record and a
+// live runner may start more agents; a dead one starts none, and R refuses a
+// reclaimed run. R resumes a run only when it is resumable: alive being
+// false, and the run not reclaimed.
 //
 // Only the registry's runs are listed, so a worktree no run made never is.
 // Read, stop and release are not fenced to a Run's coordinator, so a reclaim
@@ -474,7 +475,7 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
         script: r.script, permissionMode: r.permissionMode, terminal: launched.get(r.runId) ?? r.runner?.terminal ?? null,
         outcome: r.state === 'running' ? null : r.state, alive: live, reclaimed: r.reclaimed,
         kept: r.reclaimed ? 0 : agents.filter((a) => !done.has(a.name)).length,
-        closable: !r.reclaimed && r.state !== 'running' && live === false,
+        closable: !r.reclaimed && live === false,
         armedAt: Number.isFinite(armedAt) ? armedAt : null, ageMs: Number.isFinite(armedAt) ? Math.max(0, now - armedAt) : null, resumable: live === false && !r.reclaimed,
       }
       const key = r.project ? pathKey(r.project) : ''
@@ -523,13 +524,14 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
   }
 
   // Why the run stays open after a whole-run r, or null when it is closable.
-  const openBecause = (run) => (run.outcome === null ? 'it has not ended' : run.alive === true ? 'its runner is alive' : run.alive === null ? 'Orca cannot say whether its runner is alive' : null)
+  const openBecause = (run) => (run.alive === true ? 'its runner is alive' : run.alive === null ? 'Orca cannot say whether its runner is alive' : null)
 
   // Every agent of the run the registry does not already record reclaimed,
   // by the reclaim rules, as the end-of-run prompt's `a` does. The run is
   // recorded reclaimed once none of its agents is left, but only when it is
-  // closable: a run still going, or one whose runner may be, stays open, so
-  // the agents it starts later are kept and listed (ADR-0012). The registry
+  // closable: a run whose runner is alive, or may be, stays open, so the
+  // agents it starts later are kept and listed (ADR-0012); one whose runner
+  // is known dead closes, ended or not. The registry
   // and Orca are read again first, so a runner resumed since is seen.
   async function reclaim(runId = current()?.run?.runId) {
     if (runId) await refresh()
