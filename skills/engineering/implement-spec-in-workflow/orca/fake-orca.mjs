@@ -261,13 +261,6 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       return s
     },
 
-    // Whatever runner started it: Orca's dispatches outlive the runner.
-    async workerReattach({ dispatch: id, terminal }) {
-      const s = show(dispatch(id, 'orchestration worker-show'))
-      record({ verb: 'workerReattach', dispatchId: id, terminal, settled: s.settled })
-      return s
-    },
-
     async terminalIdle({ terminal: handle }) {
       return terminal(handle, 'terminal wait').idle
     },

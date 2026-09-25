@@ -1315,7 +1315,7 @@ function lifecycleOn(orca, settings = FAST) {
   const lines = []
   const life = agentLifecycle({
     orca, clock: fakeClock(), limits: { ...SETTINGS, ...settings }, out: (s) => lines.push(s), stateDir: tmp(),
-    objective: () => 'the objective', journal: (e) => journal.push(e), keep: (k) => (kept.push(k), k), transcripts: fakeTranscripts(orca),
+    objective: () => 'the objective', journal: (e) => journal.push(e), retainWorktree: (k) => (kept.push(k), k), transcripts: fakeTranscripts(orca),
   })
   let n = 0
   const call = (label, more = {}) => {
@@ -2146,11 +2146,13 @@ test('resume: the journal gives each call left out its worker as last journaled,
   assert.equal(j.lastN, 11)
   assert.deepEqual(j.calls.get('ka'), [{ result: 1 }])
   // One worker per call: a reattached line takes over the outstanding one for its dispatch, and keeps its dir.
-  assert.deepEqual(j.calls.get('kb'), [{ worker: { n: 6, title: '[P] b', dir: 'agents/002-b', dispatchId: 'ctx_2', sessionId: SID, terminal: 'term_2', worktree: 'C:/wt/run_1-2', continuations: 2 } }])
+  // A worker line with no Run or origin of its own, as journaled before they
+  // carried them, is in the journal's Run, and is the agent its dispatch names.
+  assert.deepEqual(j.calls.get('kb'), [{ worker: { n: 6, title: '[P] b', dir: 'agents/002-b', run: 'run_1', dispatchId: 'ctx_2', harness: null, sessionId: SID, terminal: 'term_2', worktree: 'C:/wt/run_1-2', continuations: 2, origin: 2 } }])
   assert.deepEqual(j.calls.get('kc'), [{ unsettled: true }, { failed: true }])
   // An outstanding line no call took up follows the calls this run made under its key.
-  assert.deepEqual(j.calls.get('kd'), [{ result: 2 }, { worker: { n: 3, title: '[P] d', dir: 'agents/003-d', dispatchId: 'ctx_4', sessionId: SID, terminal: 'term_3', worktree: null, continuations: 0 } }])
-  assert.deepEqual(j.calls.get('ke'), [{ worker: { n: 11, title: '[P] e', dir: 'agents/004-e', dispatchId: 'ctx_5', sessionId: SID, terminal: 'term_4', worktree: 'C:/wt/run_1-4', continuations: 0 } }])
+  assert.deepEqual(j.calls.get('kd'), [{ result: 2 }, { worker: { n: 3, title: '[P] d', dir: 'agents/003-d', run: 'run_1', dispatchId: 'ctx_4', harness: null, sessionId: SID, terminal: 'term_3', worktree: null, continuations: 0, origin: 3 } }])
+  assert.deepEqual(j.calls.get('ke'), [{ worker: { n: 11, title: '[P] e', dir: 'agents/004-e', run: 'run_1', dispatchId: 'ctx_5', harness: null, sessionId: SID, terminal: 'term_4', worktree: 'C:/wt/run_1-4', continuations: 0, origin: 4 } }])
   assert.equal(j.calls.get('kf')[0].worker.dir, 'agents/010-f')
   assert.deepEqual(j.retained, [{ path: 'C:/wt/run_1-4', reason: 'still out' }])
 })
@@ -2172,7 +2174,7 @@ function mortalOn(clock, dead = false) {
   return m
 }
 
-async function leftOut() {
+async function leftOut({ registry = null } = {}) {
   const clock = fakeClock()
   const stateDir = tmp()
   const faults = {}
@@ -2188,7 +2190,7 @@ async function leftOut() {
       first.dead = true
     },
   })
-  const opts = { stateDir, project: 'C:/repo', transcripts: fakeTranscripts(orca), out: () => {} }
+  const opts = { stateDir, project: 'C:/repo', transcripts: fakeTranscripts(orca), out: () => {}, registry }
   runScript(LEFT_OUT, { ...opts, orca, clock: first }).catch(() => {})
   await first.hung
   // A resume from terminal `from`, to its end, or on a `mortal` clock until it dies.
@@ -2213,7 +2215,7 @@ test('takeover: a worker still out through one resume, and submitting during the
   const before = r.orca.calls.length
   assert.deepEqual(await r.resume('term_3'), { a: GOOD, b: GOOD })
   assert.deepEqual(started(r.orca), ['[P] a', '[P] b'])
-  assert.deepEqual(r.orca.calls.slice(before).filter((c) => c.verb === 'workerReattach').map((c) => c.dispatchId), [r.b.dispatchId])
+  assert.deepEqual([...new Set(r.orca.calls.slice(before).filter((c) => c.verb === 'workerShow').map((c) => c.dispatchId))], [r.b.dispatchId])
   const journal = journalOf(r.stateDir)
   assertEntries(journal)
   assert.deepEqual(ofType(journal, 'failed'), [])
@@ -2244,12 +2246,89 @@ for (const how of ['refused', 'dies']) {
     assert.deepEqual(result, { a: GOOD, b: GOOD })
     const calls = r.orca.calls.slice(before)
     assert.deepEqual(calls.filter((c) => c.verb === 'workerStart'), [])
-    assert.deepEqual(calls.filter((c) => c.verb === 'workerReattach').map((c) => c.dispatchId), [r.b.dispatchId])
+    assert.deepEqual([...new Set(calls.filter((c) => c.verb === 'workerShow').map((c) => c.dispatchId))], [r.b.dispatchId])
     const journal = journalOf(r.stateDir)
     assertEntries(journal)
     assert.deepEqual(ofType(journal, 'retained'), [])
   })
 }
+
+test('reclaim: a worker a resume took up, then kept blocked on a human with its process left running, is refused as live', async () => {
+  const r = await leftOut()
+  r.orca.dispatches.get(r.b.dispatchId).waiting = JSON.stringify({ question: 'Which branch?' })
+  const result = await r.resume('term_2')
+  assert.deepEqual([result.a, result.b], [GOOD, null])
+  const journal = journalOf(r.stateDir)
+  assertEntries(journal)
+  const runId = ofType(journal, 'run')[0].runId
+  // Taken up with every field `started` gives a worker, and the call that started it.
+  const reB = ofType(journal, 'reattached').find((e) => e.title === '[P] b')
+  assert.deepEqual([reB.run, reB.harness, reB.origin], [runId, 'claude', 2])
+  const b = agentsOf(join(r.stateDir, 'journal.jsonl')).find((a) => a.title === '[P] b')
+  assert.deepEqual([b.name, b.dispatchId, b.state, b.launched], [`${runId}-2`, r.b.dispatchId, 'failed', true])
+  const before = r.orca.calls.length
+  assert.deepEqual(await reclaimAgent(b, { orca: r.orca, unpushed: r.orca.unpushedOf, force: true }), { reclaimed: false, reason: 'it is still live' })
+  // A worker started for it, but no dispatch named: never proof it is not live.
+  assert.match((await reclaimAgent({ ...b, dispatchId: null }, { orca: r.orca, unpushed: r.orca.unpushedOf, force: true })).reason, /could not tell whether it is live/)
+  assert.deepEqual(r.orca.calls.slice(before).filter((c) => MUTATING.includes(c.verb)), [])
+
+  // The same from a journal written before `reattached` carried its Run: the
+  // agent is still the worker that line names.
+  const path = join(tmp(), 'journal.jsonl')
+  writeFileSync(path, [
+    { type: 'run', runId: 'run_1', terminal: 'term_a', lastN: 8 },
+    { type: 'reattached', key: 'kb', n: 9, title: '[P] b', dispatchId: 'ctx_1', sessionId: SID, terminal: 'term_1', worktree: 'C:/wt/run_1-2', dir: 'agents/002-b' },
+    { type: 'failed', key: 'kb', n: 9, title: '[P] b', reason: 'blocked on a human', attempts: 0, run: 'run_1', retained: { path: 'C:/wt/run_1-2', reason: 'kept' } },
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n')
+  const [old] = agentsOf(path)
+  assert.deepEqual([old.name, old.dispatchId, old.terminal, old.state], ['run_1-2', 'ctx_1', 'term_1', 'failed'])
+  const asked = []
+  const waiting = { workerShow: async ({ dispatch }) => (asked.push(dispatch), { settled: false, gone: false, exited: false, waiting: 'Which branch?' }) }
+  assert.deepEqual(await reclaimAgent(old, { orca: waiting, unpushed: async () => 0 }), { reclaimed: false, reason: 'it is still live' })
+  assert.deepEqual(asked, ['ctx_1'])
+})
+
+test('resume: every agent of the Run is named across resumes, once each in the run view, in the end-of-run prompt and to a standalone r, under its worktree\'s name', async () => {
+  const registry = registryIn()
+  const r = await leftOut({ registry })
+  const a = startedAs(r.orca, '[P] a')
+  // A resume that dies once it has taken b up: its journal holds b both as
+  // carried forward (outstanding) and as taken up (reattached).
+  await r.resume('term_2', mortalOn(r.clock, true))
+  const runId = ofType(journalOf(r.stateDir), 'run')[0].runId
+  const view = runView({ stateDir: r.stateDir, orca: r.orca, clock: r.clock, transcripts: { usage: () => null }, registry, alive: () => false })
+  await view.refresh()
+  assert.deepEqual(view.model.phases.flatMap((p) => p.agents).map((x) => [x.title, x.state, x.dispatchId]), [['[P] a', 'done', a.dispatchId], ['[P] b', 'running', r.b.dispatchId]])
+  assert.equal(view.model.header.runId, runId)
+  assert.equal(view.model.header.counts.queued, 0)
+
+  r.clock.at(r.clock.now() + 2 * MIN, r.submitB)
+  const result = await r.resume('term_3')
+  assert.deepEqual(result, { a: GOOD, b: GOOD })
+  assertEntries(journalOf(r.stateDir))
+  const names = [`${runId}-1`, `${runId}-2`]
+  // a, replayed twice, is still the agent the fresh run started; b the worker two resumes took up.
+  assert.deepEqual(agentsOf(join(r.stateDir, 'journal.jsonl')).map((x) => [x.title, x.name, x.dispatchId, x.state]), [['[P] a', names[0], a.dispatchId, 'ok'], ['[P] b', names[1], r.b.dispatchId, 'ok']])
+
+  const asked = []
+  const outcome = await finish({
+    stateDir: r.stateDir, summary: { runner: 'orca', ok: true, result }, orca: r.orca, out: () => {},
+    registry: runRegistry(registry, r.clock), unpushed: r.orca.unpushedOf, ask: async (q) => (asked.push(q), 'n'),
+  })
+  assert.match(asked[0], /reclaim the other 2/)
+  assert.deepEqual(outcome.kept.map((k) => k.agent.name), names)
+
+  const runs = runsView({ orca: r.orca, clock: r.clock, registry, transcripts: { usage: () => null }, unpushed: r.orca.unpushedOf })
+  await runs.refresh()
+  const run = () => runs.model.projects.flatMap((p) => p.runs).find((x) => x.runId === runId)
+  assert.equal(run().kept, 2)
+  const reclaimed = await runs.reclaim(runId)
+  assert.deepEqual(reclaimed.reclaimed.map((x) => x.name), names)
+  const entry = readRegistry(registry).find((x) => x.runId === runId)
+  assert.deepEqual(entry.reclaimedAgents.map((x) => x.agent), names)
+  assert.equal(entry.reclaimed, true)
+  assert.equal(run().kept, 0)
+})
 
 test('fake orca: a Run takes worker-starts only from the terminal it is bound to, and run-use rebinds it', async () => {
   const orca = fakeOrca({ coordinator: 'term_a' })
@@ -2270,9 +2349,9 @@ test('orca-cli: run-use takes the Run over from this terminal and reports the te
   assert.deepEqual(argvs, [['orchestration', 'run-use', '--id', 'run_1']])
 })
 
-test('orca-cli: a worker taken up from an earlier runner is shown as Orca sees it, and a release leaves its tab to reclaim', async () => {
+test('orca-cli: a worker taken up from an earlier runner is shown as Orca sees it, by worker-show, and a release leaves its tab to reclaim', async () => {
   const { orca, argvs } = recordingCli({ 'orchestration worker-show': { worker: { agentTerminalHandle: 'term_w', stage: 'running' }, terminal: { orphaned: false }, observation: { status: 'live' } } })
-  const s = await orca.workerReattach({ dispatch: 'ctx_9', terminal: 'term_w' })
+  const s = await orca.workerShow({ dispatch: 'ctx_9' })
   assert.deepEqual([s.settled, s.gone, s.exited, s.terminal], [false, false, false, 'term_w'])
   await orca.workerRelease({ dispatch: 'ctx_9' })
   assert.deepEqual(argvs.slice(-1), [['orchestration', 'worker-release', '--dispatch', 'ctx_9']])
@@ -2825,7 +2904,7 @@ viewTest('run view: the screen is the design\'s tree, a click lands on the row d
 test('orca-cli: a dispatch Orca failed because its tab closed is a gone worker, not a settled one; one that completed before its tab closed is settled', async () => {
   // As worker-show answers about 5 s after `terminal close` (live, Orca 1.4.209, #53).
   const closed = (status, stage) => ({ worker: { agentTerminalHandle: 'term_w', stage, state: status === 'completed' ? 'succeeded' : 'failed' }, dispatch: { status }, projection: { outcome: status === 'completed' ? 'succeeded' : 'failed' }, terminal: { orphaned: true }, observation: { status: 'live', agentWait: null } })
-  for (const verb of ['workerShow', 'workerReattach']) {
+  for (const verb of ['workerShow']) {
     const failed = await recordingCli({ 'orchestration worker-show': closed('failed', 'process_exited') }).orca[verb]({ dispatch: 'ctx_9', terminal: 'term_w' })
     assert.deepEqual([failed.settled, failed.gone], [false, true], verb)
     const done = await recordingCli({ 'orchestration worker-show': closed('completed', 'settled') }).orca[verb]({ dispatch: 'ctx_9', terminal: 'term_w' })

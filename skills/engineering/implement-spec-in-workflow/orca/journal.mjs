@@ -1,0 +1,243 @@
+// The run's journal, journal.jsonl in its state dir: the entry types it holds
+// (JOURNAL_ENTRIES), and the one fold of it that every reader shares — the
+// runner's resume (runner.mjs), reclaim (reclaim.mjs) and the run view
+// (run-view-model.mjs). One fold, so they never disagree about which lines
+// carry a worker, or about which agents the Run holds.
+import { existsSync, readFileSync } from 'fs'
+import { agentDir } from './lifecycle.mjs'
+
+// Every journal entry type and the fields it always carries, beside `type`.
+// `at` is an ISO timestamp from the runner's clock; `run` is the Orca Run the
+// worker was dispatched into. A failed entry may also carry `retained`, the
+// worktree it left, `run`, once the Run existed, `continuations`, how often its
+// session was continued, and `workerOut: true` when its worker is still out
+// for the next resume to take up; a replayed result carries `replayed: true`,
+// and `origin` when the call it replays launched a worker. A worker's `dir` is
+// its agent's files, relative to the state dir. retry is a new attempt of a
+// call's start or of its Run's creation, with why the last one failed;
+// warning, something that went wrong without failing the call. A nudge's
+// `attempt` is its number since the session started or was last continued; a
+// continuation's is its number, up to the cap. `origin` names an agent across
+// resumes: the n of the call that started its worker, which its `<runId>-<n>`
+// worktree is named by — a resume numbers its calls on, but never renames an
+// agent. reattached: a resumed runner taking up a worker an earlier one
+// started, journaled when its call is made, which it then watches, or
+// continues first if it died; it also carries `continuations` when that
+// worker's session was already continued. outstanding: a worker the last run
+// left out, carried forward by a resume before any call, so it stays journaled
+// until a call takes it up; it carries `continuations` as reattached does.
+// earlier: an agent of the Run that an earlier runner of it made and that
+// settled (or never started a worker, but left a worktree), carried forward
+// by a resume before any call, so reclaim and the run view still name it;
+// `state` and `reason` are as the fold left them, and it carries
+// `continuations` as reattached does. It has no key: it is no call, and a
+// resume replays nothing from it. run: the Run every worker is dispatched into
+// and the runner terminal it is bound to, when it is created or taken over; a
+// resume carries the last one forward first, with `lastN`, the highest call
+// number that Run has used. queued: a call waiting for a live slot.
+export const JOURNAL_ENTRIES = Object.freeze({
+  queued: ['at', 'key', 'n', 'title'],
+  started: ['at', 'key', 'n', 'title', 'run', 'dispatchId', 'harness', 'sessionId', 'worktree', 'terminal', 'dir'],
+  result: ['at', 'key', 'n', 'title', 'result'],
+  failed: ['at', 'key', 'n', 'title', 'reason', 'attempts'],
+  retained: ['at', 'retained'],
+  retry: ['at', 'key', 'n', 'title', 'attempt', 'reason'],
+  warning: ['at', 'key', 'n', 'title', 'reason'],
+  nudge: ['at', 'key', 'n', 'title', 'dispatchId', 'reason', 'attempt'],
+  continued: ['at', 'key', 'n', 'title', 'dispatchId', 'sessionId', 'terminal', 'reason', 'attempt', 'reopened'],
+  reattached: ['at', 'key', 'n', 'title', 'run', 'dispatchId', 'harness', 'sessionId', 'terminal', 'worktree', 'dir', 'origin'],
+  outstanding: ['at', 'key', 'n', 'title', 'run', 'dispatchId', 'harness', 'sessionId', 'terminal', 'worktree', 'dir', 'origin'],
+  earlier: ['at', 'n', 'title', 'run', 'dispatchId', 'harness', 'sessionId', 'terminal', 'worktree', 'origin', 'state', 'reason'],
+  run: ['at', 'runId', 'terminal'],
+})
+
+// The lines that name a call's worker.
+const WORKER_LINES = ['started', 'reattached', 'outstanding']
+
+// Every entry of a journal, in order. A line that does not parse is skipped:
+// a torn last line is one the runner was killed while writing.
+export function journalLines(path) {
+  if (!existsSync(path)) return []
+  const entries = []
+  for (const line of readFileSync(path, 'utf8').split('\n')) {
+    try {
+      const e = JSON.parse(line)
+      if (e && typeof e === 'object') entries.push(e)
+    } catch {}
+  }
+  return entries
+}
+
+export const timeOf = (e) => {
+  const t = Date.parse(e?.at)
+  return Number.isFinite(t) ? t : null
+}
+
+// Whether the Run made the agent: it started a worker, or Orca made it a
+// worktree before its start failed. Only such an agent has anything to reclaim.
+export const madeByRun = (a) => !!a.runId && (a.launched || !!a.worktree)
+
+export const readJournal = (path) => foldJournal(journalLines(path))
+
+// The fold of a journal's entries: { calls, retained, run, lastN, agents }.
+//
+// calls, what a resume replays and takes up: key -> what each call made under
+// it, in call order — { result } for a call that returned a value (with
+// `origin` when it launched a worker, or replayed one that did), { failed:
+// true } for one that returned null, { worker } for one whose worker was still
+// out when the last run stopped (its Run, dispatch, harness, session, terminal
+// and worktree as last journaled, how often its session was continued, the
+// `dir` of the files its prompt named, its `origin`, and the `n` and `title`
+// of its latest line), { unsettled: true } for one that had no worker out and
+// no settlement. A failed entry holds its call's place but replays nothing,
+// so a resume runs that call live again, as the Workflow runner re-runs an
+// agent it journaled as failed. retained: every worktree a dead agent left,
+// from its failed entry or from a `retained` line an earlier resume carried
+// forward. run: the last Run journaled, { runId, terminal }, or null; lastN:
+// the highest call number the journal holds. A journal written before entries
+// carried timestamps and launch fields resumes the same way, its `started`
+// lines without a dispatch or session as calls with no worker out, and a
+// worker line without a `dir` as named by that line's n and title. An
+// `outstanding` line is its call's place until a `reattached` line for its
+// dispatch takes it over; one still standing is a call that run never made,
+// so it follows every call that run made under its key.
+//
+// agents, every agent the journal names, one per `origin`, by the n of its
+// latest line: { origin, n, title, state, reason, continuations, replayed,
+// launched, runId, dispatchId, harness, sessionId, worktree, terminal, from,
+// to }. The journal of a resumed run holds every agent of its Run, the ones
+// earlier runners made included: a resume carries each forward (`earlier`,
+// `outstanding`), and a line of the call that takes one up again
+// (`reattached`, or a replayed `result` with its `origin`) is that same agent,
+// never another. A line with no origin is its call's agent, or, for a worker
+// line, the agent whose dispatch it names. state is its latest lifecycle
+// entry's: queued, running once started, carried or taken up (or retrying its
+// start), stuck once nudged, continued after a continuation, done or failed
+// once settled. A nudge journals no answer, so an agent stays stuck until its
+// next continuation or settlement. launched: a worker was started for it,
+// whatever its dispatch now reads. from and to are when it began and settled
+// here, or null: a replayed result or a carried agent launched nothing here.
+export function foldJournal(entries) {
+  const calls = new Map()
+  const retained = []
+  let run = null
+  let lastN = 0
+  // One per call, by its n: a call's lines share it, and no two calls do.
+  const byCall = new Map()
+  // The call id of each outstanding line, by its dispatch.
+  const carried = new Map()
+  // One per agent, by its origin; a call's n -> its agent's origin; a
+  // dispatch -> the origin of the agent it runs.
+  const agents = new Map()
+  const agentOfCall = new Map()
+  const byDispatch = new Map()
+
+  // Folds one line into its agent's record, and returns that agent's origin.
+  function agent(e) {
+    const worker = WORKER_LINES.includes(e.type) || e.type === 'earlier'
+    const id = Number.isInteger(e.origin) ? e.origin
+      : worker && e.dispatchId && byDispatch.has(e.dispatchId) ? byDispatch.get(e.dispatchId)
+      : worker ? e.n : agentOfCall.get(e.n) ?? e.n
+    agentOfCall.set(e.n, id)
+    if (e.dispatchId) byDispatch.set(e.dispatchId, id)
+    let a = agents.get(id)
+    if (!a) {
+      a = {
+        origin: id, n: e.n, title: null, state: 'queued', continuations: 0, reason: null, replayed: false, launched: false,
+        runId: null, dispatchId: null, harness: null, sessionId: null, worktree: null, terminal: null, from: null, to: null,
+      }
+      agents.set(id, a)
+    }
+    a.n = e.n
+    if (typeof e.title === 'string') a.title = e.title
+    const at = timeOf(e)
+    switch (e.type) {
+      case 'retry':
+        a.from ??= at
+        a.state = 'running'
+        break
+      case 'started':
+      case 'reattached':
+      case 'outstanding': {
+        if (e.type !== 'outstanding') a.from ??= at
+        const continuations = e.continuations ?? a.continuations
+        Object.assign(a, {
+          state: continuations ? 'continued' : 'running', continuations, launched: true, runId: e.run ?? a.runId, dispatchId: e.dispatchId ?? a.dispatchId,
+          harness: e.harness ?? a.harness, sessionId: e.sessionId ?? a.sessionId, worktree: e.worktree ?? a.worktree, terminal: e.terminal ?? a.terminal,
+        })
+        break
+      }
+      case 'earlier':
+        Object.assign(a, {
+          state: typeof e.state === 'string' ? e.state : a.state, reason: e.reason ?? null, continuations: e.continuations ?? a.continuations,
+          launched: a.launched || !!e.dispatchId, runId: e.run ?? a.runId, dispatchId: e.dispatchId ?? a.dispatchId, harness: e.harness ?? a.harness,
+          sessionId: e.sessionId ?? a.sessionId, worktree: e.worktree ?? a.worktree, terminal: e.terminal ?? a.terminal,
+        })
+        break
+      case 'nudge':
+        if (a.state === 'running' || a.state === 'continued' || a.state === 'stuck') Object.assign(a, { state: 'stuck', reason: e.reason ?? null })
+        break
+      case 'continued':
+        // A continued session may run under a new dispatch in a new tab: that
+        // is the worker a reclaim releases and the tab it closes.
+        Object.assign(a, {
+          state: 'continued', reason: null, continuations: e.attempt ?? a.continuations + 1,
+          dispatchId: e.dispatchId ?? a.dispatchId, terminal: e.terminal ?? a.terminal, sessionId: e.sessionId ?? a.sessionId,
+        })
+        break
+      case 'result':
+        Object.assign(a, { state: 'done', reason: null, to: at, replayed: e.replayed === true })
+        break
+      case 'failed':
+        a.from ??= at
+        Object.assign(a, {
+          state: 'failed', reason: e.reason ?? null, to: at, runId: a.runId ?? e.run ?? null, worktree: a.worktree ?? e.retained?.path ?? null,
+          continuations: e.continuations ?? a.continuations,
+        })
+        break
+    }
+    return id
+  }
+
+  for (const [i, e] of entries.entries()) {
+    if (e.retained?.path && !retained.some((k) => k.path === e.retained.path)) retained.push(e.retained)
+    for (const n of [e.n, e.lastN]) if (Number.isInteger(n)) lastN = Math.max(lastN, n)
+    if (e.type === 'run' && typeof e.runId === 'string') run = { runId: e.runId, terminal: e.terminal ?? null }
+    const numbered = Number.isInteger(e.n)
+    const id = numbered && JOURNAL_ENTRIES[e.type] && e.type !== 'run' && e.type !== 'retained' ? agent(e) : null
+    if (typeof e.key !== 'string') continue
+    if (!numbered && e.type !== 'result' && e.type !== 'failed') continue
+    const callId = numbered ? e.n : `line ${i}`
+    if (!byCall.has(callId)) byCall.set(callId, { key: e.key, order: numbered ? e.n : i, carried: false, worker: null, settled: null, origin: null })
+    const c = byCall.get(callId)
+    if (e.type === 'result') {
+      c.settled = { result: e.result }
+      if (Number.isInteger(e.origin)) c.origin = e.origin
+    } else if (e.type === 'failed') {
+      if (!e.workerOut) c.settled = { failed: true }
+    } else if (WORKER_LINES.includes(e.type) && e.dispatchId && e.sessionId) {
+      const title = typeof e.title === 'string' ? e.title : null
+      const dir = typeof e.dir === 'string' ? e.dir : agentDir(e.n, title?.replace(/^\[[^\]]*\] /, '') || `agent-${e.n}`)
+      c.origin = id
+      c.worker = {
+        n: e.n, title, dir, run: e.run ?? run?.runId ?? null, dispatchId: e.dispatchId, harness: e.harness ?? null, sessionId: e.sessionId,
+        terminal: e.terminal ?? null, worktree: e.worktree ?? null, continuations: e.continuations ?? 0, origin: id,
+      }
+      if (e.type === 'outstanding') {
+        c.carried = true
+        carried.set(e.dispatchId, callId)
+      } else if (e.type === 'reattached' && carried.has(e.dispatchId) && carried.get(e.dispatchId) !== callId) {
+        byCall.delete(carried.get(e.dispatchId))
+        carried.delete(e.dispatchId)
+      }
+    } else if (e.type === 'continued' && c.worker && e.dispatchId) {
+      c.worker = { ...c.worker, dispatchId: e.dispatchId, terminal: e.terminal ?? c.worker.terminal, continuations: Number.isInteger(e.attempt) ? e.attempt : c.worker.continuations + 1 }
+    }
+  }
+  for (const c of [...byCall.values()].sort((a, b) => a.carried - b.carried || a.order - b.order)) {
+    if (!calls.has(c.key)) calls.set(c.key, [])
+    const settled = c.settled && 'result' in c.settled && c.origin !== null ? { ...c.settled, origin: c.origin } : c.settled
+    calls.get(c.key).push(settled ?? (c.worker ? { worker: c.worker } : { unsettled: true }))
+  }
+  return { calls, retained, run, lastN, agents: [...agents.values()].sort((x, y) => x.n - y.n) }
+}

@@ -324,14 +324,10 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       return { runId: r.run?.id ?? runId, terminal: r.run?.coordinator_handle ?? null }
     },
 
+    // Also how a resume looks at a worker an earlier runner started: Orca's
+    // dispatches outlive the runner, and read is not fenced to the Run's
+    // coordinator.
     workerShow,
-
-    // A worker an earlier runner started, taken up by this one: how Orca
-    // sees it now, in workerShow's shape. Its tab is left open, like every
-    // agent's, for the operator's end-of-run reclaim (ADR-0012).
-    async workerReattach({ dispatch }) {
-      return workerShow({ dispatch })
-    },
 
     // A short `terminal wait --for tui-idle` is a poll: satisfied means idle,
     // Orca's `timeout` error means busy.

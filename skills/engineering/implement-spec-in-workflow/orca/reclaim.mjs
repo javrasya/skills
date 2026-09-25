@@ -9,8 +9,9 @@
 //   - reclaiming releases the worker, closes its tab if Orca's terminal list
 //     still shows it, and removes its worktree.
 import { execFile } from 'child_process'
-import { existsSync, readFileSync } from 'fs'
+import { existsSync } from 'fs'
 import { basename } from 'path'
+import { madeByRun, readJournal } from './journal.mjs'
 
 // Commits reachable from the worktree's HEAD that no remote-tracking ref
 // contains (D6 on #43). Uncommitted files do not count. A worktree already gone
@@ -25,53 +26,34 @@ export function gitUnpushed(path) {
   })
 }
 
-// The agents a run's journal names, in call order:
-//   { runId, n, name, title, dispatchId, terminal, worktree, state, reason }
-// name is `<runId>-<n>`, what the run registry records a reclaim under. state
-// is 'ok' for a call that returned a value, 'failed' for one that returned null
-// (dead, or settled with no valid result), 'running' for one with no
-// settlement journaled. A call whose worker never started is an agent only if
-// Orca made it a worktree, and then has no dispatch or tab. Replayed calls
-// launched nothing in this run, and worktrees carried forward from an earlier
-// run belong to that run's Run: neither is here.
+// The agents a run's journal names, by the fold every reader of it shares
+// (journal.mjs), in call order:
+//   { runId, n, origin, name, title, launched, dispatchId, terminal, worktree,
+//     harness, state, reason }
+// Every agent its Run holds: a resumed run's journal carries forward the ones
+// earlier runners of that Run made, finished, failed or still out, so a
+// resume renames none and drops none. name is its worktree's name, the
+// `<runId>-<n>` Orca made it, where n is its origin, the call that started its
+// worker; one with no worktree of its own is named as it would have been. It is
+// what the run registry records a reclaim under. launched: a worker was started
+// for it. state is 'ok' for a call that returned a value, 'failed' for one
+// that returned null (dead, or settled with no valid result), 'running' for
+// one with no settlement journaled. A call whose worker never started is an
+// agent only if Orca made it a worktree, and then has no dispatch or tab. A
+// call replayed from the journal is the agent that first returned its value.
 export function agentsOf(journalPath) {
-  const agents = new Map()
-  if (!existsSync(journalPath)) return []
-  for (const line of readFileSync(journalPath, 'utf8').split('\n')) {
-    let e
-    try {
-      e = JSON.parse(line)
-    } catch {
-      continue
-    }
-    if (e?.type === 'started' && e.run) {
-      agents.set(e.n, {
-        runId: e.run, n: e.n, name: `${e.run}-${e.n}`, title: e.title, dispatchId: e.dispatchId ?? null,
-        terminal: e.terminal ?? null, worktree: e.worktree ?? null, state: 'running', reason: null,
-      })
-    } else if (e?.type === 'continued' && agents.has(e.n)) {
-      // A continued session may run under a new dispatch in a new tab: that
-      // is the worker a reclaim releases and the tab it closes.
-      Object.assign(agents.get(e.n), { dispatchId: e.dispatchId ?? agents.get(e.n).dispatchId, terminal: e.terminal ?? agents.get(e.n).terminal })
-    } else if (e?.type === 'result' && agents.has(e.n)) {
-      agents.get(e.n).state = 'ok'
-    } else if (e?.type === 'failed') {
-      const a = agents.get(e.n)
-      if (a) Object.assign(a, { state: 'failed', reason: e.reason ?? null })
-      else if (e.run && e.retained?.path) {
-        agents.set(e.n, {
-          runId: e.run, n: e.n, name: `${e.run}-${e.n}`, title: e.title, dispatchId: null,
-          terminal: null, worktree: e.retained.path, state: 'failed', reason: e.reason ?? null,
-        })
-      }
-    }
-  }
-  return [...agents.values()].sort((a, b) => a.n - b.n)
+  return readJournal(journalPath).agents.filter(madeByRun).map((a) => ({
+    runId: a.runId, n: a.n, origin: a.origin, name: agentName(a), title: a.title, launched: a.launched, dispatchId: a.dispatchId,
+    terminal: a.terminal, worktree: a.worktree, harness: a.harness, state: a.state === 'done' ? 'ok' : a.state === 'failed' ? 'failed' : 'running', reason: a.reason,
+  }))
 }
 
 // The worktree reclaim may remove, and the run view may show: one the run
 // created, by its name.
 export const ownWorktree = (a) => (a.worktree && basename(a.worktree).startsWith(`${a.runId}-`) ? a.worktree : null)
+
+// The name the run registry records an agent's reclaim under.
+export const agentName = (a) => (ownWorktree(a) ? basename(ownWorktree(a)) : `${a.runId}-${a.origin ?? a.n}`)
 
 // Reclaims one agent: { reclaimed: true, notes } or { reclaimed: false, reason }.
 // Every check runs before anything is changed, so a refused agent is left
@@ -79,6 +61,10 @@ export const ownWorktree = (a) => (a.worktree && basename(a.worktree).startsWith
 // already read it for a batch.
 export async function reclaimAgent(agent, { orca, unpushed = gitUnpushed, force = false, open = null }) {
   const refuse = (reason) => ({ reclaimed: false, reason })
+  // A missing dispatch is never proof its worker is not live: only an agent
+  // the journal shows no worker ever started for skips the check. A failed
+  // agent kept with its process left running is exactly the one to refuse.
+  if (!agent.dispatchId && agent.launched !== false) return refuse('could not tell whether it is live: the journal names no dispatch for its worker')
   if (agent.dispatchId) {
     let s
     try {

@@ -85,28 +85,30 @@ function readResult(resultPath, schema) {
 
 // Built once per run: the Run and the live cap are shared by every agent it
 // starts. objective() is read at the first live agent, once the script has
-// declared its meta. journal(entry) appends one journal line; keep({path,
-// reason}) retains a worktree and returns the entry the list holds for it.
+// declared its meta. journal(entry) appends one journal line;
+// retainWorktree({path, reason}) retains a worktree and returns the entry the
+// list holds for it.
 // takeOver: the id of a Run an earlier runner of this run created, which this
 // one takes over (run-use) instead of creating one. onRun({ runId, terminal,
 // takenOver }) is called once, when Orca creates the Run or hands it over.
 // transcripts.size({ harness, sessionId, worktree }) measures a session's
 // transcript (transcript.mjs). Returns life(call), which resolves to the
 // agent's value or null, and throws only if journal or out does.
-export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, journal, keep, onRun = () => {}, takeOver = null, transcripts = sessionTranscripts() }) {
+export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, journal, retainWorktree, onRun = () => {}, takeOver = null, transcripts = sessionTranscripts() }) {
   const live = slots(limits.MAX_LIVE)
   // One Run per workflow run: every agent's worker is dispatched into it.
   let run = null
   let toldNoMode = false
 
-  // Every way a call ends in null journals one of these. attempts counts the
-  // starts, or Run creations, it made; one that started a worker made one more
-  // start than it retried. continuations counts how often a started worker's
-  // session was continued; a continuation carries on that attempt's session. `run` is
-  // the Run it failed in, once there is one: reclaim names a retained worktree by it.
-  // workerOut: its worker is still out, so the call stays unsettled for the
-  // next resume, which takes that worker up again.
-  const fail = ({ key, n, title }, reason, retained, attempts = 1, continuations = 0, run = null, workerOut = false) =>
+  // Every way a call ends in null journals one of these. retained: the
+  // worktree it left, or null. attempts counts the starts, or Run creations,
+  // it made; one that started a worker made one more start than it retried.
+  // continuations counts how often a started worker's session was continued; a
+  // continuation carries on that attempt's session. `run` is the Run it failed
+  // in, once there is one: reclaim names a retained worktree by it. workerOut:
+  // its worker is still out, so the call stays unsettled for the next resume,
+  // which takes that worker up again.
+  const fail = ({ key, n, title }, { reason, retained = null, attempts = 1, continuations = 0, run = null, workerOut = false }) =>
     journal({ type: 'failed', key, n, title, reason, attempts, ...(run && { run }), ...(continuations && { continuations }), ...(retained && { retained }), ...(workerOut && { workerOut }) })
 
   // Something that went wrong without failing the agent: logged and
@@ -279,7 +281,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   async function lookBack(w) {
     let s
     try {
-      s = await orca.workerReattach({ dispatch: w.dispatchId, terminal: w.terminal })
+      s = await orca.workerShow({ dispatch: w.dispatchId })
     } catch {
       return null
     }
@@ -337,8 +339,8 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       // A worktree Orca made before the start failed is named like a dead
       // agent's: the runner never removes one. The failed line carries the
       // first; a `retained` line names each other one.
-      const [kept, ...more] = isolated ? [...made].map((path) => keep({ path, reason: `not in the ledger: created for ${title}, whose worker never started, so no agent ever reported it` })) : []
-      fail(call, e.reason, kept ?? null, e.attempts, 0, runId)
+      const [kept, ...more] = isolated ? [...made].map((path) => retainWorktree({ path, reason: `not in the ledger: created for ${title}, whose worker never started, so no agent ever reported it` })) : []
+      fail(call, { reason: e.reason, retained: kept ?? null, attempts: e.attempts, run: runId })
       for (const retained of more) journal({ type: 'retained', retained })
       return null
     }
@@ -371,7 +373,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     let delivered = false
     let kept = null
     const retain = () => {
-      if (isolated && w.worktree && !kept) kept = keep({ path: w.worktree, reason: `not in the ledger: its agent (${title}) died before reporting, so it was never removed — it may hold the only copy of that agent's work` })
+      if (isolated && w.worktree && !kept) kept = retainWorktree({ path: w.worktree, reason: `not in the ledger: its agent (${title}) died before reporting, so it was never removed — it may hold the only copy of that agent's work` })
       return kept
     }
     const quietly = async (what, fn) => {
@@ -428,7 +430,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       if (result.error) {
         const reason = end.dead ? `${end.dead}, with no result` : `${result.error} (outcome ${end.outcome})`
         if (kept) out(`!! ${title}: its tab ${w.terminal} is kept open`)
-        fail({ key, n, title }, reason, retain(), attempts, continued, runId)
+        fail({ key, n, title }, { reason, retained: retain(), attempts, continuations: continued, run: runId })
         out(`!! ${title}: ${reason}; agent() returns null`)
         return null
       }
@@ -443,8 +445,9 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   }
 
   // call: { prompt, schema, isolated, launch, key, n, label, title, phaseName },
-  // and on a resume `adopt`, the worker the last run left out for it: { dir,
-  // dispatchId, sessionId, terminal, worktree, continuations }.
+  // and on a resume `adopt`, the worker the last run left out for it, as the
+  // journal's fold names it: { dir, run, dispatchId, harness, sessionId,
+  // terminal, worktree, continuations, origin }.
   return async function life(call) {
     const { schema, key, n, label, title, adopt } = call
     // A worker taken up submits to the files its prompt named: the dir
@@ -453,8 +456,15 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     const dir = join(stateDir, rel)
     // Journaled before any wait on the Run or on a live slot, so a runner
     // that dies before it watches the worker still leaves it to the next
-    // resume, which takes it up in turn.
-    if (adopt) journal({ type: 'reattached', key, n, title, dispatchId: adopt.dispatchId, sessionId: adopt.sessionId, terminal: adopt.terminal, worktree: adopt.worktree, dir: rel, ...(adopt.continuations && { continuations: adopt.continuations }) })
+    // resume, which takes it up in turn. With every field `started` gives a
+    // worker, and its origin, so reclaim and the run view read it as the
+    // agent it is, never as a new one with no worker.
+    if (adopt) {
+      journal({
+        type: 'reattached', key, n, title, run: adopt.run ?? takeOver, dispatchId: adopt.dispatchId, harness: adopt.harness ?? call.launch?.harness ?? null,
+        sessionId: adopt.sessionId, terminal: adopt.terminal, worktree: adopt.worktree, dir: rel, origin: adopt.origin ?? n, ...(adopt.continuations && { continuations: adopt.continuations }),
+      })
+    }
     mkdirSync(dir, { recursive: true })
     const schemaPath = schema ? join(dir, 'schema.json') : null
     const resultPath = join(dir, 'result.json')
@@ -474,12 +484,12 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
         // Its worker is still out: the call stays unsettled for the next
         // resume, which takes that worker up, and its worktree is named.
         out(`!!!!!!!! ${title}: ${e.reason}; agent() returns null, its worker ${adopt.dispatchId} is left out for the next resume to take up, and the next agent() asks again`)
-        const kept = call.isolated && adopt.worktree ? keep({ path: adopt.worktree, reason: `not in the ledger: its agent (${title}) was still at work when this runner could not take its Run over, so it never reported — the next resume takes that agent up again` }) : null
-        fail(call, e.reason, kept, e.attempts, adopt.continuations, adopt.run ?? null, true)
+        const kept = call.isolated && adopt.worktree ? retainWorktree({ path: adopt.worktree, reason: `not in the ledger: its agent (${title}) was still at work when this runner could not take its Run over, so it never reported — the next resume takes that agent up again` }) : null
+        fail(call, { reason: e.reason, retained: kept, attempts: e.attempts, continuations: adopt.continuations, run: adopt.run ?? takeOver, workerOut: true })
         return null
       }
       out(`!!!!!!!! ${title}: ${e.reason}; agent() returns null, and the next agent() asks again`)
-      fail(call, e.reason, null, e.attempts)
+      fail(call, { reason: e.reason, attempts: e.attempts })
       return null
     }
     // Held until the worker settles or is stopped. It is never released during

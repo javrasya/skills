@@ -10,7 +10,8 @@ import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } fr
 import { basename, dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { sessionTranscripts } from './transcript.mjs'
-import { agentsOf, gitUnpushed, ownWorktree, reclaimAgent, reclaimRun } from './reclaim.mjs'
+import { agentName, agentsOf, gitUnpushed, ownWorktree, reclaimAgent, reclaimRun } from './reclaim.mjs'
+import { foldJournal, journalLines, timeOf } from './journal.mjs'
 import { REGISTRY_PATH, readRegistry, runRegistry } from './registry.mjs'
 
 export const RUNNER_PATH = fileURLToPath(new URL('./runner.mjs', import.meta.url))
@@ -23,80 +24,14 @@ export const bandOf = (context) => (context == null ? null : context < 200_000 ?
 
 const TITLE = /^\[([^\]]*)\] ([\s\S]*)$/
 
-function journalEntries(path) {
-  if (!existsSync(path)) return []
-  const entries = []
-  for (const line of readFileSync(path, 'utf8').split('\n')) {
-    try {
-      const e = JSON.parse(line)
-      if (e && typeof e === 'object') entries.push(e)
-    } catch {}
-  }
-  return entries
-}
-
-const timeOf = (e) => {
-  const t = Date.parse(e?.at)
-  return Number.isFinite(t) ? t : null
-}
-
-// Every agent() call the journal names, by n. Its state is its latest
-// lifecycle entry's: queued, running once started (or retrying its start),
-// stuck once nudged, continued after a continuation, done or failed once
-// settled. A nudge journals no answer, so an agent stays stuck until its next
-// continuation or settlement. A replayed result launched nothing this run.
-function agentsIn(entries) {
-  const byN = new Map()
-  for (const e of entries) {
-    if (!Number.isInteger(e.n)) continue
-    let a = byN.get(e.n)
-    if (!a) {
-      const [, phase, label] = TITLE.exec(e.title ?? '') ?? [null, 'Run', e.title ?? `agent-${e.n}`]
-      a = {
-        n: e.n, title: e.title ?? null, phase, label, state: 'queued', continuations: 0, reason: null, replayed: false,
-        runId: null, dispatchId: null, harness: null, sessionId: null, worktree: null, terminal: null, from: null, to: null,
-      }
-      byN.set(e.n, a)
-    }
-    const at = timeOf(e)
-    switch (e.type) {
-      case 'queued':
-        break
-      case 'retry':
-        a.from ??= at
-        a.state = 'running'
-        break
-      case 'started':
-      case 'reattached':
-        a.from ??= at
-        Object.assign(a, {
-          state: a.continuations ? 'continued' : 'running', runId: e.run ?? a.runId, dispatchId: e.dispatchId ?? a.dispatchId, harness: e.harness ?? a.harness,
-          sessionId: e.sessionId ?? a.sessionId, worktree: e.worktree ?? a.worktree, terminal: e.terminal ?? a.terminal,
-        })
-        break
-      case 'nudge':
-        if (a.state === 'running' || a.state === 'continued' || a.state === 'stuck') Object.assign(a, { state: 'stuck', reason: e.reason ?? null })
-        break
-      case 'continued':
-        Object.assign(a, {
-          state: 'continued', reason: null, continuations: e.attempt ?? a.continuations + 1,
-          dispatchId: e.dispatchId ?? a.dispatchId, terminal: e.terminal ?? a.terminal, sessionId: e.sessionId ?? a.sessionId,
-        })
-        break
-      case 'result':
-        Object.assign(a, { state: 'done', reason: null, to: at, replayed: e.replayed === true })
-        break
-      case 'failed':
-        a.from ??= at
-        Object.assign(a, {
-          state: 'failed', reason: e.reason ?? null, to: at, runId: a.runId ?? e.run ?? null, worktree: a.worktree ?? e.retained?.path ?? null,
-          continuations: e.continuations ?? a.continuations,
-        })
-        break
-    }
-  }
-  return [...byN.values()].sort((x, y) => x.n - y.n)
-}
+// Every agent the journal names, by the fold reclaim and the runner's resume
+// share (journal.mjs): one row per agent, its state its latest lifecycle
+// entry's. An agent a resume carried forward or took up again is the one row,
+// never a second one under the resumed run's call number.
+const agentsIn = (fold) => fold.agents.map((a) => {
+  const [, phase, label] = TITLE.exec(a.title ?? '') ?? [null, 'Run', a.title ?? `agent-${a.n}`]
+  return { ...a, phase, label }
+})
 
 // Whether the process runner.pid names is alive. The runner's tab outlives
 // it, so the tab cannot say.
@@ -149,8 +84,8 @@ const samePath = (a, b) => !!a && !!b && (process.platform === 'win32' ? resolve
 //           a phase's problems being its failed and stuck agents
 //   message the latest action's outcome, for the flash line, or null
 //   latest  the last line of runner.log, the run's latest event, or null
-// An agent is { n, label, title, phase, state, continuations, reason,
-// replayed, runId, dispatchId, harness, sessionId, worktree, terminal,
+// An agent is { n, origin, label, title, phase, state, continuations, reason,
+// replayed, launched, runId, dispatchId, harness, sessionId, worktree, terminal,
 // tabOpen, reclaimed, context, band, tokens, elapsedMs, transcript }. worktree
 // is only ever one named `<runId>-<n>`: any other, the run's own checkout
 // included, is the operator's and never shown. tabOpen
@@ -196,9 +131,10 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   }
 
   async function refresh() {
-    const entries = journalEntries(journalPath)
+    const entries = journalLines(journalPath)
     latest = latestEvent(join(stateDir, 'runner.log'))
-    const agents = agentsIn(entries)
+    const fold = foldJournal(entries)
+    const agents = agentsIn(fold)
     const now = clock.now()
     let open = null
     if (agents.some((a) => a.terminal)) {
@@ -206,7 +142,8 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
         open = new Set(await orca.terminalList())
       } catch {}
     }
-    const runId = [...agents].reverse().find((a) => a.runId)?.runId ?? null
+    // A resume journals the Run it takes over before any agent.
+    const runId = fold.run?.runId ?? [...agents].reverse().find((a) => a.runId)?.runId ?? null
     let run = null
     if (registry) {
       try {
@@ -220,7 +157,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
       Object.assign(a, {
         worktree: ownWorktree(a),
         tabOpen: a.terminal && open ? open.has(a.terminal) : null,
-        reclaimed: !!a.runId && (run?.reclaimed === true || reclaimedNames.has(`${a.runId}-${a.n}`)),
+        reclaimed: !!a.runId && (run?.reclaimed === true || reclaimedNames.has(agentName(a))),
         context: usage?.context ?? null,
         band: bandOf(usage?.context),
         tokens: usage?.tokens ?? null,
@@ -313,7 +250,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
       if (!a) return say(`no agent ${n} in this run to reclaim`)
     }
     const target = { n: a.n, title: a.title }
-    const agent = agentsOf(journalPath).find((x) => x.n === a.n)
+    const agent = agentsOf(journalPath).find((x) => x.origin === a.origin)
     if (!agent) return { ...say(`${a.title} has nothing to reclaim: it launched nothing in this run`), agent: target }
     let r
     try {

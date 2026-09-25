@@ -11,8 +11,11 @@
 //   runner     terminal: a runner started on the run — at creation, and again
 //              whenever one takes it up on a resume
 //   ended      outcome: ok, partial or failed
-//   reclaimed  agent: the reclaimed agent's worktree name, `<runId>-<n>`; with
-//              no agent, the whole run was reclaimed
+//   reclaimed  agent: the reclaimed agent's worktree name, `<runId>-<n>`, n
+//              being the call that started its worker (its origin: a resume
+//              numbers its calls on, never its agents); for an agent with no
+//              worktree of its own, the name it would have had. With no agent,
+//              the whole run was reclaimed
 import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync } from 'fs'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
