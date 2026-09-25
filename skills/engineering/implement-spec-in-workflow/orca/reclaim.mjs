@@ -10,23 +10,11 @@
 //     the operator's own, and never touched;
 //   - reclaiming releases the worker, closes its tab if Orca's terminal list
 //     still shows it, and removes its worktree.
-import { execFile } from 'child_process'
-import { existsSync } from 'fs'
-import { basename } from 'path'
 import { madeByRun, readJournal } from './journal.mjs'
+import { worktreeName, worktreeUnpushed } from './orca-cli.mjs'
 
-// Commits reachable from the worktree's HEAD that no remote-tracking ref
-// contains (D6 on #43). Uncommitted files do not count. A worktree already gone
-// from disk holds none.
-export function gitUnpushed(path) {
-  if (!existsSync(path)) return Promise.resolve(0)
-  return new Promise((resolve, reject) => {
-    execFile('git', ['-C', path, 'rev-list', '--count', 'HEAD', '--not', '--remotes'], { windowsHide: true }, (err, stdout, stderr) => {
-      if (err) return reject(new Error(`git rev-list in ${path}: ${String(stderr || err.message).trim()}`))
-      resolve(Number(String(stdout).trim()))
-    })
-  })
-}
+// `unpushed(path)` below defaults to orca-cli.mjs's worktreeUnpushed: commits
+// no remote-tracking ref holds (D6 on #43), counted by the one bounded git helper.
 
 // The agents a run's journal names, by the fold every reader of it shares
 // (journal.mjs), in call order:
@@ -54,10 +42,10 @@ export function agentsOf(journalPath) {
 
 // The worktree reclaim may remove, and the run view may show: one the run
 // created, by its name.
-export const ownWorktree = (a) => (a.worktree && basename(a.worktree).startsWith(`${a.runId}-`) ? a.worktree : null)
+export const ownWorktree = (a) => (a.worktree && worktreeName(a.worktree).startsWith(`${a.runId}-`) ? a.worktree : null)
 
 // The name the run registry records an agent's reclaim under.
-export const agentName = (a) => (ownWorktree(a) ? basename(ownWorktree(a)) : `${a.runId}-${a.origin ?? a.n}`)
+export const agentName = (a) => (ownWorktree(a) ? worktreeName(ownWorktree(a)) : `${a.runId}-${a.origin ?? a.n}`)
 
 // Whether an agent failed and was kept with its worker's process left
 // running: Orca still shows that worker live, so only `stop` reclaims it.
@@ -70,7 +58,7 @@ export const keptRunning = (agent) => agent.state === 'failed' && agent.workerLe
 // anything is changed, so a refused agent is left exactly as it was; `stop`
 // then stops that worker before anything else. `open`: the terminal list's
 // handles, when the caller has already read it for a batch.
-export async function reclaimAgent(agent, { orca, unpushed = gitUnpushed, force = false, stop = false, open = null }) {
+export async function reclaimAgent(agent, { orca, unpushed = worktreeUnpushed, force = false, stop = false, open = null }) {
   const refuse = (reason) => ({ reclaimed: false, reason })
   let stopFirst = false
   // A missing dispatch is never proof its worker is not live: only an agent
@@ -154,7 +142,7 @@ export async function reclaimAgent(agent, { orca, unpushed = gitUnpushed, force 
 // open, since no registry entry undoes a whole-run reclaim. A registry write
 // that fails is reported through `out`, never thrown.
 // Returns { reclaimed: [agent], kept: [{ agent, reason }] }.
-export async function reclaimRun(agents, { orca, unpushed = gitUnpushed, force = false, keep = () => null, registry = null, closeRun = true, out = () => {} }) {
+export async function reclaimRun(agents, { orca, unpushed = worktreeUnpushed, force = false, keep = () => null, registry = null, closeRun = true, out = () => {} }) {
   const record = (entry) => {
     try {
       registry?.reclaimed(entry)

@@ -53,4 +53,8 @@ export const RUNNER_SETTINGS = Object.freeze({
   // stops restarting it and prints its log in the tab instead.
   viewRestartMs: 1_000,
   viewCrashes: 3,
+  // One Orca or git call from the run view, beyond any wait it asks for: far
+  // shorter than orcaCallMs, since the view's keys wait on it. A call that
+  // runs out fails that refresh or action, and the view carries on.
+  viewCallMs: 10_000,
 })

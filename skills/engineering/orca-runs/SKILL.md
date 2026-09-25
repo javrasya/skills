@@ -4,7 +4,7 @@ description: "Open the Orca run view in standalone mode: every Orca-runner run o
 disable-model-invocation: true
 ---
 
-The **run view** is the operator's terminal screen for runs of [`implement-spec-in-workflow`](../implement-spec-in-workflow/SKILL.md) on the Orca runner (ADR-0012). The runner shows it attached, in its own tab, on its own run. This skill opens it **standalone**: every run in the run registry (`~/.claude/orca-runs.jsonl`), finished, paused or dead, with no runner needed.
+The **run view** is the operator's terminal screen for runs of [`implement-spec-in-workflow`](../implement-spec-in-workflow/SKILL.md) on the Orca runner (ADR-0012). The runner shows it attached, in its own tab, on its own run. This skill opens it **standalone**: every run in the run registry (`~/.claude/orca-runs.jsonl`, or `$CLAUDE_CONFIG_DIR/orca-runs.jsonl` when that is set), finished, paused or dead, with no runner needed.
 
 The view is code of `implement-spec-in-workflow`, not of this skill: one copy, beside the runner that also starts it. Both skills are installed side by side, so it is reached from this skill's directory.
 
@@ -22,7 +22,7 @@ The view is code of `implement-spec-in-workflow`, not of this skill: one copy, b
 
 2. **Hand it over.** The operator works the view themselves; do not read its tab. Tell them its keys:
 
-   - The list holds each run with its spec, its outcome, whether its runner is alive (its tab is in Orca's terminal list), how many agents it still keeps, and its age. Runs are grouped by project.
+   - The list holds each run with its spec, its outcome, whether its runner is alive (the process its `runner.pid` names is alive; its tab outlives it, so an open tab says nothing), how many agents it still keeps, and its age. Runs are grouped by project.
    - **Enter** or a click opens a run into the same tree the runner's tab shows. **q** or Escape goes back to the list, and **q** on the list closes the view.
    - **r** on a run reclaims every agent it keeps, under the reclaim rules: an agent still live is kept, and so is one whose worktree holds commits no remote has. The run itself is marked reclaimed once its runner is known dead, ended or not; a run whose runner is alive, or may be, stays open, so the agents it starts later are kept. Inside a run, **r** reclaims one agent, and **f** forces one holding unpushed commits.
    - **R** resumes a run whose runner is dead. It opens a new tab in the run's worktree, running the runner with `--resume`, which takes the run over. It is not offered while the runner is alive, nor on a run already reclaimed.

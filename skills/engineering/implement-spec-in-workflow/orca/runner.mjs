@@ -29,7 +29,7 @@
 // writes what was reclaimed and what kept to reclaim.json beside it, and exits.
 //
 // The run itself is recorded in the machine-wide run registry (registry.mjs,
-// ~/.claude/orca-runs.jsonl): `armed` and the runner's terminal when the Run
+// orca-runs.jsonl in the Claude directory): `armed` and the runner's terminal when the Run
 // is created, the new runner's terminal when a resume takes it over, `ended`
 // with ok, partial or failed when the script settles, and `reclaimed` for what
 // the operator reclaims at the end.
@@ -43,13 +43,13 @@ import { createHash } from 'crypto'
 import { basename, dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { checkSchema } from './schema.mjs'
-import { orcaCli, launchCommand, HARNESSES, realTimer } from './orca-cli.mjs'
+import { orcaCli, launchCommand, HARNESSES, realTimer, worktreeUnpushed } from './orca-cli.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { agentLifecycle } from './lifecycle.mjs'
 import { JOURNAL_ENTRIES, readJournal, madeByRun } from './journal.mjs'
 import { runRegistry, readRegistry, REGISTRY_PATH } from './registry.mjs'
 import { sessionTranscripts } from './transcript.mjs'
-import { agentsOf, endOfRunPrompt, gitUnpushed } from './reclaim.mjs'
+import { agentsOf, endOfRunPrompt } from './reclaim.mjs'
 import { VIEW_EXIT } from './run-view/exit-codes.mjs'
 
 export { SUBMIT, workerPrompt } from './lifecycle.mjs'
@@ -302,7 +302,7 @@ function withRetained(result, retained) {
 // with choice null and both lists empty when no agent was left to ask about,
 // and each agent as { name, title, worktree, terminal }. It is the prompt's
 // answer only: a later reclaim from the run view is the registry's.
-export async function finish({ stateDir, summary, orca, ask, out, registry = null, unpushed = gitUnpushed }) {
+export async function finish({ stateDir, summary, orca, ask, out, registry = null, unpushed = worktreeUnpushed }) {
   mkdirSync(stateDir, { recursive: true })
   writeFileSync(join(stateDir, 'summary.json'), JSON.stringify(summary, null, 2))
   if (summary.ok) {

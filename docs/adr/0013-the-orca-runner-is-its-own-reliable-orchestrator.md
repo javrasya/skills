@@ -36,7 +36,7 @@ Orca also constrains where the orchestrator may live. It identifies the caller b
 ## Consequences
 
 - **A transient start failure costs a retry, not a ticket**, and when a failure does stick, its reason is on disk.
-- **Everything reliable is our code.** The retry policy, heartbeat thresholds and continuation cap live in `settings.mjs`, and the runner contract test (orca/README.md) must cover a start failure, a stalled session and a resume through `run-use` on the fake Orca.
+- **Everything reliable is our code.** The retry policy, heartbeat thresholds and continuation cap live in `settings.mjs`, and they are checked twice. The runner contract test (orca/README.md) runs on real Orca, and covers a start failure, a killed worker continued in a new terminal, and a resume through `run-use`. The offline suite (`scripts/test-orca-runner.mjs`) runs on the fake Orca, and also covers a stalled session. Continuing a stalled session in its own tab (interrupt, `claude --resume`, same dispatch) and interrupting a pi worker are not yet confirmed against live Orca; the pass record lists them as a known risk.
 - **The runner cannot outlive its tab as coordinator.** A dead tab pauses the run rather than ending it. Workers keep running unsupervised until Resume run reattaches, and that is by design in Orca.
 - **Continuation trusts the session.** A session that dies from its own context comes back with that context. The cap of 3 bounds the cost, and the context-size colour in the run view shows it coming.
 - **Revisit an engine** if runs need to span machines, or if Orca gains a native durable workflow. Today neither is true.

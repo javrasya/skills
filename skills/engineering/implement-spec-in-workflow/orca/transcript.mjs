@@ -10,7 +10,12 @@ import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from
 import { homedir } from 'os'
 import { join, resolve } from 'path'
 
-export const claudeSlug = (cwd) => resolve(cwd).replace(/[^A-Za-z0-9]/g, '-')
+// The user's Claude directory: CLAUDE_CONFIG_DIR when set, else ~/.claude.
+// The one place it is resolved: Claude transcripts and the run registry
+// (registry.mjs) both live under it.
+export const claudeDir = ({ home = homedir(), env = process.env } = {}) => env.CLAUDE_CONFIG_DIR || join(home, '.claude')
+
+export const claudeSlug =(cwd) => resolve(cwd).replace(/[^A-Za-z0-9]/g, '-')
 export const piDir = (cwd) => `--${resolve(cwd).replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`
 
 const dirsIn = (root) => {
@@ -48,7 +53,7 @@ export function transcriptPath({ harness, sessionId, worktree, scan = true, home
     }
     return null
   }
-  const root = join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'projects')
+  const root = join(claudeDir({ home, env }), 'projects')
   const name = `${sessionId}.jsonl`
   if (worktree && existsSync(join(root, claudeSlug(worktree), name))) return join(root, claudeSlug(worktree), name)
   if (!scan) return null

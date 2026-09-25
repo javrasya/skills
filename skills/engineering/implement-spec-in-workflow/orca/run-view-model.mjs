@@ -10,9 +10,10 @@ import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } fr
 import { basename, dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { sessionTranscripts } from './transcript.mjs'
-import { agentName, agentsOf, gitUnpushed, ownWorktree, reclaimAgent, reclaimRun } from './reclaim.mjs'
+import { agentName, agentsOf, ownWorktree, reclaimAgent, reclaimRun } from './reclaim.mjs'
 import { foldJournal, journalLines, timeOf } from './journal.mjs'
 import { REGISTRY_PATH, readRegistry, runRegistry } from './registry.mjs'
+import { worktreeUnpushed } from './orca-cli.mjs'
 
 export const RUNNER_PATH = fileURLToPath(new URL('./runner.mjs', import.meta.url))
 
@@ -38,23 +39,54 @@ const agentsIn = (fold) => fold.agents.map((a) => {
   return { ...a, phase, label }
 })
 
-// Whether the process runner.pid names is alive. The runner's tab outlives
-// it, so the tab cannot say.
-export function runnerAlive(stateDir) {
-  let pid
+// The pid a run dir's runner.pid names; null with no such file, undefined when
+// it could not be read.
+export function runnerPid(stateDir) {
   try {
-    pid = Number(readFileSync(join(stateDir, 'runner.pid'), 'utf8').trim())
-  } catch {
-    return false
+    const pid = Number(readFileSync(join(stateDir, 'runner.pid'), 'utf8').trim())
+    return Number.isInteger(pid) && pid > 0 ? pid : null
+  } catch (e) {
+    return e?.code === 'ENOENT' ? null : undefined
   }
-  if (!Number.isInteger(pid) || pid <= 0) return false
+}
+
+// The one rule for whether a run's runner is alive, in both modes: the attached
+// header, and the standalone row, its r and its R, all read this. It is whether
+// the process <runDir>/runner.pid names is alive. The runner's tab outlives it
+// (no `; exit`), so an open tab says nothing. false with no runner.pid, or one
+// naming a gone process; null when it cannot be told (no run dir, a runner.pid
+// that could not be read, or a probe that fails some other way).
+export function runnerAlive(stateDir) {
+  if (!stateDir) return null
+  const pid = runnerPid(stateDir)
+  if (pid === undefined) return null
+  if (pid === null) return false
   try {
     process.kill(pid, 0)
     return true
   } catch (e) {
-    return e?.code === 'EPERM'
+    return e?.code === 'EPERM' ? true : e?.code === 'ESRCH' ? false : null
   }
 }
+
+// What an injected liveness answered, as true, false or null (does not know).
+const livenessOf = (alive, stateDir) => {
+  try {
+    const v = alive(stateDir)
+    return v === true || v === false ? v : null
+  } catch {
+    return null
+  }
+}
+
+// One key for a path, so two spellings of it compare equal: resolved, and
+// case-folded on Windows.
+export const pathKey = (p) => (process.platform === 'win32' ? resolve(p).toLowerCase() : resolve(p))
+export const samePath = (a, b) => !!a && !!b && pathKey(a) === pathKey(b)
+
+// The spec number in a run's name, which for the template is
+// implement-spec-<number>, or null.
+export const specNumber = (name) => /spec-(\d+)/.exec(name ?? '')?.[1] ?? null
 
 // The last line of runner.log, its timestamp dropped: the run's latest event,
 // for the flash line while the runner writes to its log alone (D5 on #43).
@@ -74,8 +106,6 @@ function latestEvent(path) {
     if (fd !== undefined) closeSync(fd)
   }
 }
-
-const samePath = (a, b) => !!a && !!b && (process.platform === 'win32' ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b))
 
 // view = runView({ stateDir, orca, … }); await view.refresh() reads the run
 // again, and view.model is then:
@@ -108,8 +138,9 @@ const samePath = (a, b) => !!a && !!b && (process.platform === 'win32' ? resolve
 // clock.now() is the time elapsed is measured to; transcripts reads session
 // transcripts (transcript.mjs); registry is the run registry's path, or null;
 // unpushed(path) counts a worktree's unpushed commits; alive(stateDir) says
-// whether the runner lives.
-export function runView({ stateDir, orca, clock = { now: () => Date.now() }, transcripts = sessionTranscripts(), registry = REGISTRY_PATH, unpushed = gitUnpushed, alive = runnerAlive }) {
+// whether the runner lives (runnerAlive), header.alive being null when it
+// cannot say.
+export function runView({ stateDir, orca, clock = { now: () => Date.now() }, transcripts = sessionTranscripts(), registry = REGISTRY_PATH, unpushed = worktreeUnpushed, alive = runnerAlive }) {
   const journalPath = join(stateDir, 'journal.jsonl')
   // name -> folded, only for phases the operator folded or unfolded.
   const folds = new Map()
@@ -195,22 +226,15 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
       return { name, folded: false, done: list.filter((a) => a.state === 'done').length, total: list.length, mix: countOf(list), peakContext: contexts.length ? Math.max(...contexts) : null, agents: list }
     })
 
-    const isAlive = (() => {
-      try {
-        return !!alive(stateDir)
-      } catch {
-        return false
-      }
-    })()
+    const isAlive = livenessOf(alive, stateDir)
     const times = entries.map(timeOf).filter((t) => t !== null)
     const armedAt = run?.armedAt ? Date.parse(run.armedAt) : NaN
     const start = Number.isFinite(armedAt) ? armedAt : times.length ? Math.min(...times) : null
     const endedAt = run?.endedAt ? Date.parse(run.endedAt) : NaN
     const end = isAlive ? now : Number.isFinite(endedAt) ? endedAt : times.length ? Math.max(...times) : now
-    // The registry's `spec` is the name the script's meta declared, which for
-    // the template is implement-spec-<number>.
+    // The registry's `spec` is the name the script's meta declared.
     const name = run?.spec ?? null
-    const number = /spec-(\d+)/.exec(name ?? '')?.[1]
+    const number = specNumber(name)
     header = {
       name,
       project: run?.project ? basename(run.project) : null,
@@ -356,8 +380,6 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   return view
 }
 
-const pathKey = (p) => (process.platform === 'win32' ? resolve(p).toLowerCase() : resolve(p))
-
 // runs = runsView({ orca, … }); await runs.refresh() reads the registry again,
 // and runs.model is then:
 //   projects  [{ key, name, path, folded, runs }], the project of the latest
@@ -369,9 +391,12 @@ const pathKey = (p) => (process.platform === 'win32' ? resolve(p).toLowerCase() 
 // A run is { runId, name, spec, project, runDir, script, permissionMode,
 // terminal, outcome, alive, kept, reclaimed, closable, armedAt, ageMs,
 // resumable }. outcome is ok, partial or failed, or null while no `ended` is
-// recorded. alive is whether its runner's terminal, the registry's or the one
-// R opened, is in Orca's terminal list, and null when the list could not be
-// read. kept counts the agents its journal names that are not reclaimed.
+// recorded. alive is runnerAlive's answer for its run dir, the rule attached
+// mode's header reads too: whether the process its runner.pid names is alive,
+// never whether its tab is open, since the tab outlives the runner. Just after
+// R, until the new runner has written its own runner.pid, the tab R opened
+// counts as the runner while Orca's terminal list shows it. null when it
+// cannot be told. kept counts the agents its journal names that are not reclaimed.
 // closable is whether r may record the whole run reclaimed: only once its
 // runner is known dead, ended or not, since nothing undoes that record and a
 // live runner may start more agents; a dead one starts none, and R refuses a
@@ -382,10 +407,23 @@ const pathKey = (p) => (process.platform === 'win32' ? resolve(p).toLowerCase() 
 // Read, stop and release are not fenced to a Run's coordinator, so a reclaim
 // needs no takeover. runner is the runner.mjs a resume runs; the rest is as
 // runView's.
-export function runsView({ orca, clock = { now: () => Date.now() }, registry = REGISTRY_PATH, transcripts = sessionTranscripts(), unpushed = gitUnpushed, alive = runnerAlive, runner = RUNNER_PATH }) {
+export function runsView({ orca, clock = { now: () => Date.now() }, registry = REGISTRY_PATH, transcripts = sessionTranscripts(), unpushed = worktreeUnpushed, alive = runnerAlive, runner = RUNNER_PATH }) {
   const folds = new Map()
-  // runId -> the tab R opened: alive before its runner reaches the registry.
+  // runId -> { terminal, pid, starting }: the tab R opened, and the runner.pid
+  // its run dir held then. While that file is unchanged the new runner has not
+  // written its own, so the tab stands for it; once it has, the pid decides.
   const launched = new Map()
+  // The registry's runs and Orca's terminal list, as the last refresh read them.
+  let recorded = new Map()
+  let lastOpen = null
+  const liveOf = (r, open) => {
+    const l = launched.get(r.runId)
+    if (l?.starting && r.runDir) {
+      if (runnerPid(r.runDir) === l.pid) return open === null ? null : open.has(l.terminal) ? true : livenessOf(alive, r.runDir)
+      l.starting = false
+    }
+    return r.runDir ? livenessOf(alive, r.runDir) : null
+  }
   let projects = []
   let selectedKey = null
   let selected = 0
@@ -415,22 +453,27 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
     } catch (e) {
       message = `could not read the run registry ${registry}: ${e?.message ?? e}`
     }
+    // Orca's terminal list is read only for a tab R opened whose runner has
+    // not written its runner.pid yet.
     let open = null
-    try {
-      open = new Set(await orca.terminalList())
-    } catch {}
+    if ([...launched.values()].some((l) => l.starting)) {
+      try {
+        open = new Set(await orca.terminalList())
+      } catch {}
+    }
+    lastOpen = open
+    recorded = new Map(entries.map((r) => [r.runId, r]))
     const now = clock.now()
     const byProject = new Map()
     for (const r of entries) {
       const done = new Set(r.reclaimedAgents.map((a) => a.agent))
       const agents = r.runDir ? agentsOf(join(r.runDir, 'journal.jsonl')).filter((a) => a.runId === r.runId) : []
-      const handles = [r.runner?.terminal, launched.get(r.runId)].filter(Boolean)
-      const live = open ? handles.some((h) => open.has(h)) : null
+      const live = liveOf(r, open)
       const armedAt = Date.parse(r.armedAt)
-      const number = /spec-(\d+)/.exec(r.spec ?? '')?.[1]
+      const number = specNumber(r.spec)
       const run = {
         runId: r.runId, name: r.spec, spec: number ? `#${number}` : null, project: r.project, runDir: r.runDir,
-        script: r.script, permissionMode: r.permissionMode, terminal: launched.get(r.runId) ?? r.runner?.terminal ?? null,
+        script: r.script, permissionMode: r.permissionMode, terminal: launched.get(r.runId)?.terminal ?? r.runner?.terminal ?? null,
         outcome: r.state === 'running' ? null : r.state, alive: live, reclaimed: r.reclaimed,
         kept: r.reclaimed ? 0 : agents.filter((a) => !done.has(a.name)).length,
         closable: !r.reclaimed && live === false,
@@ -461,7 +504,8 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
     const run = runOf(runId)
     if (!run) return say(`no run ${runId} in the run registry`)
     if (!run.runDir) return say(`${labelOf(run)} has no run directory recorded`)
-    opened = { runId, view: runView({ stateDir: run.runDir, orca, clock, transcripts, registry, unpushed, alive }) }
+    // The tree's header asks what the run's row asks, by the same rule.
+    opened = { runId, view: runView({ stateDir: run.runDir, orca, clock, transcripts, registry, unpushed, alive: () => (recorded.has(runId) ? liveOf(recorded.get(runId), lastOpen) : null) }) }
     await opened.view.refresh()
     message = null
     layout()
@@ -482,7 +526,7 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
   }
 
   // Why the run stays open after a whole-run r, or null when it is closable.
-  const openBecause = (run) => (run.alive === true ? 'its runner is alive' : run.alive === null ? 'Orca cannot say whether its runner is alive' : null)
+  const openBecause = (run) => (run.alive === true ? 'its runner is alive' : run.alive === null ? 'whether its runner is alive cannot be told' : null)
 
   // Every agent of the run the registry does not already record reclaimed,
   // by the reclaim rules, as the end-of-run prompt's `a` does. The run is
@@ -522,15 +566,15 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
 
   // A new tab in the run's worktree running the runner with --resume, which
   // takes the Run over. Refused for a run recorded reclaimed, whose agents are
-  // gone and whose record nothing undoes; while its runner's tab is open; or
-  // while Orca cannot say whether it is.
+  // gone and whose record nothing undoes; while its runner is alive; or while
+  // that cannot be told.
   async function resume(runId = opened?.runId ?? current()?.run?.runId) {
     const run = runOf(runId)
     if (!run) return say('select a run to resume')
     const label = labelOf(run)
     if (run.reclaimed) return say(`${label} is reclaimed: its agents are gone and the registry closed it, so there is nothing to resume`)
     if (run.alive === true) return say(`${label}'s runner is alive, in tab ${run.terminal}: nothing to resume`)
-    if (run.alive === null) return say(`could not tell whether ${label}'s runner is alive: Orca's terminal list did not answer`)
+    if (run.alive === null) return say(`could not tell whether ${label}'s runner is alive: its runner.pid, or Orca's list of the tab R opened, did not answer`)
     if (!run.project || !run.runDir) return say(`${label} has no ${run.project ? 'run directory' : 'worktree'} recorded to resume in`)
     // A run armed before the registry named its script was launched by the
     // skill, whose state dir is orca-run/ beside the rendered workflow.js.
@@ -541,7 +585,7 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
     } catch (e) {
       return say(`could not resume ${label}: ${e?.message ?? e}`)
     }
-    if (t.terminal) launched.set(runId, t.terminal)
+    if (t.terminal) launched.set(runId, { terminal: t.terminal, pid: runnerPid(run.runDir), starting: true })
     await refresh()
     return { ...say(`resumed ${label} in tab ${t.terminal}`), resumed: t.terminal }
   }

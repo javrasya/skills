@@ -9,7 +9,9 @@
 //   armed      project, runDir, spec: the runner created the Run; script and
 //              permissionMode, when it had them: what a resume relaunches it with
 //   runner     terminal: a runner started on the run — at creation, and again
-//              whenever one takes it up on a resume
+//              whenever one takes it up on a resume. One after `ended`, or
+//              after a whole-run `reclaimed`, is a resume: the run is going
+//              again, so it is running and no longer reclaimed
 //   ended      outcome: ok, partial or failed
 //   reclaimed  agent: the reclaimed agent's worktree name, `<runId>-<n>`, n
 //              being the call that started its worker (its origin: a resume
@@ -17,10 +19,11 @@
 //              worktree of its own, the name it would have had. With no agent,
 //              the whole run was reclaimed
 import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync } from 'fs'
-import { homedir } from 'os'
 import { dirname, join } from 'path'
+import { claudeDir } from './transcript.mjs'
 
-export const REGISTRY_PATH = join(homedir(), '.claude', 'orca-runs.jsonl')
+// In the user's Claude directory, resolved where transcripts resolve it.
+export const REGISTRY_PATH = join(claudeDir(), 'orca-runs.jsonl')
 
 export const OUTCOMES = Object.freeze(['ok', 'partial', 'failed'])
 
@@ -67,9 +70,12 @@ export function runRegistry(path = REGISTRY_PATH, clock = { now: () => Date.now(
 //     runner: { terminal, at } | null   — where a runner was last seen on it,
 //     reclaimed: boolean, reclaimedAt,  — the whole run
 //     reclaimedAgents: [{ agent, at }] }
-// 'running' only means no `ended` was written: a runner that was killed never
-// writes one, so whether it is still alive is Orca's to say, by its terminal.
-// A line that does not parse (a torn last line) is skipped, and so is an entry
+// 'running' only means no `ended` was written since a runner last started on
+// it: a runner that was killed never writes one, so whether it is still alive
+// is its runner.pid's to say (run-view-model.mjs's runnerAlive). A resume's
+// `runner` entry reopens a run that ended, or was reclaimed as a whole: state
+// is running again and reclaimed false, while reclaimedAgents keeps the agents
+// already reclaimed, since their worktrees are gone. A line that does not parse (a torn last line) is skipped, and so is an entry
 // for a Run never armed here.
 export function readRegistry(path = REGISTRY_PATH) {
   const runs = new Map()
@@ -94,7 +100,7 @@ export function readRegistry(path = REGISTRY_PATH) {
     }
     const run = runs.get(e.runId)
     if (!run) continue
-    if (e.type === 'runner') run.runner = { terminal: e.terminal ?? null, at: e.at ?? null }
+    if (e.type === 'runner') Object.assign(run, { runner: { terminal: e.terminal ?? null, at: e.at ?? null }, state: 'running', endedAt: null, reclaimed: false, reclaimedAt: null })
     else if (e.type === 'ended' && OUTCOMES.includes(e.outcome)) Object.assign(run, { state: e.outcome, endedAt: e.at ?? null })
     else if (e.type === 'reclaimed') {
       if (e.agent) run.reclaimedAgents.push({ agent: e.agent, at: e.at ?? null })

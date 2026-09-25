@@ -24,7 +24,8 @@ import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { runView, runsView } from '../run-view-model.mjs'
 import { REGISTRY_PATH } from '../registry.mjs'
-import { orcaCli } from '../orca-cli.mjs'
+import { orcaCli, worktreeUnpushed } from '../orca-cli.mjs'
+import { RUNNER_SETTINGS } from '../settings.mjs'
 import { TREE_HELP, draw, drawRuns } from './draw.mjs'
 import { VIEW_EXIT } from './exit-codes.mjs'
 
@@ -99,11 +100,15 @@ process.on('uncaughtException', crash)
 process.on('unhandledRejection', crash)
 process.on('exit', restore)
 
-const orca = orcaCli()
+// Every Orca and git call the view makes is bounded at viewCallMs, so a slow
+// Orca holds a key for seconds, never for the runner's two minutes.
+const bound = { ms: RUNNER_SETTINGS.viewCallMs }
+const orca = orcaCli({ callMs: bound.ms })
+const unpushed = (path) => worktreeUnpushed(path, bound)
 // Standalone, `runs` takes every key and click, and hands them to the run it
 // opened; `tree()` is the run tree on screen, or null on the list.
-const runs = standalone ? runsView({ orca, registry }) : null
-const view = standalone ? null : runView({ stateDir: runDir, orca, registry })
+const runs = standalone ? runsView({ orca, registry, unpushed }) : null
+const view = standalone ? null : runView({ stateDir: runDir, orca, registry, unpushed })
 const top = runs ?? view
 const tree = () => (runs ? runs.opened() : view)
 let modal = null
@@ -129,11 +134,27 @@ function quit() {
   else done()
 }
 
-// Actions run one at a time, so a key never lands on a model another is changing.
+// Actions run one at a time, so a key never lands on a model another is
+// changing. One that throws (an Orca call that timed out, a journal read
+// mid-rewrite) is an error on the flash line, never a crash: the model stays
+// as the last refresh left it, and the next refresh tries again.
 let busy = Promise.resolve()
 const act = (fn) => {
-  busy = busy.then(fn).then(render).catch(crash)
+  busy = busy.then(fn).catch((e) => {
+    logLine(`!! run view: ${e?.stack ?? e}`)
+    flash = `error: ${e?.message ?? e}`
+  }).then(render).catch(crash)
   return busy
+}
+// A refresh is queued only once the last one has finished, so a slow Orca
+// never piles them up behind the keys.
+let refreshing = false
+const refresh = () => {
+  if (refreshing) return busy
+  refreshing = true
+  return act(() => top.refresh()).finally(() => {
+    refreshing = false
+  })
 }
 const said = (r) => {
   flash = r?.message ?? null
@@ -211,5 +232,5 @@ if (!standalone) {
 term.fullscreen(true)
 term.hideCursor(true)
 term.grabInput({ mouse: 'button' })
-await act(() => top.refresh())
-setInterval(() => act(() => top.refresh()), REFRESH_MS)
+await refresh()
+setInterval(refresh, REFRESH_MS)

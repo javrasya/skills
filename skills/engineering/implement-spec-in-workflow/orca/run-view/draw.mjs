@@ -3,6 +3,7 @@
 // (docs/design/orca-run-view-tree.md). No terminal here: view.mjs writes the
 // lines and hands a click's row back through rowAt.
 import { STATES, bandOf } from '../run-view-model.mjs'
+import { worktreeName } from '../orca-cli.mjs'
 
 const E = '\x1b['
 const c = (code, s) => `${E}${code}m${s}${E}0m`
@@ -61,7 +62,7 @@ function headerLines(h, W) {
   const dot = grey(' · ')
   const run = [
     h.name && bold(h.name), h.project, h.runId && grey(h.runId), h.spec && `spec ${h.spec}`,
-    `runner ${h.alive ? c('32', '● alive') : c('31', '○ gone')}`, duration(h.elapsedMs),
+    `runner ${h.alive === true ? c('32', '● alive') : h.alive === false ? c('31', '○ gone') : grey('? unknown')}`, duration(h.elapsedMs),
   ].filter(Boolean).join(dot)
   const counts = COUNTED.filter((s) => h.counts?.[s]).map((s) => c(COLOUR[s], `${GLYPH[s]} ${h.counts[s]} ${s}`)).join('  ')
   return [fit(' ' + run, W), fit(' ' + counts, W)]
@@ -79,14 +80,13 @@ const PANE = 4
 
 // A worktree by its `<runId>-<n>` name and a tab by its handle's first
 // characters, as the design draws them, so the line holds the session too.
-const nameOf = (path) => path.split(/[/\\]/).at(-1)
 const shortHandle = (h) => h.replace(/^(term_[0-9a-f]{8})-[-0-9a-f]+$/, '$1')
 
 function agentPane(a) {
   const tab = a.terminal ? `${cyan(shortHandle(a.terminal))}${a.tabOpen === true ? grey(' (open)') : a.tabOpen === false ? grey(' (closed)') : ''}` : grey('—')
   return [
     ` ${bold(a.title ?? `[${a.phase}] ${a.label}`)}  ${stateOf(a)}  ctx ${a.context == null ? '—' : banded(a, size(a.context))}  total ${grey(size(a.tokens))}  ${duration(a.elapsedMs)}`,
-    ` worktree ${a.worktree ? cyan(nameOf(a.worktree)) : grey('—')}   tab ${tab}   session ${grey(a.sessionId ?? '—')}`,
+    ` worktree ${a.worktree ? cyan(worktreeName(a.worktree)) : grey('—')}   tab ${tab}   session ${grey(a.sessionId ?? '—')}`,
     a.reason ? ` ${c(a.state === 'failed' || a.state === 'blocked' ? '31' : '33', 'reason')} ${a.reason}${a.state === 'starting' && a.nextAt ? grey(`; next attempt at ${a.nextAt.slice(11, 19)}`) : ''}` : '',
     grey(` transcript ${a.transcript ?? '—'}`),
   ]
@@ -172,7 +172,8 @@ const runLine = (r) =>
   `   ${r.runId.padEnd(20)} ${(r.spec ?? r.name ?? '—').padEnd(8)} ${fit(outcomeOf(r), 11)} ${fit(runnerOf(r), 10)} ${String(r.kept).padStart(4)}   ${age(r.ageMs).padStart(7)}${r.reclaimed ? grey('   reclaimed') : ''}`
 
 function runPane(r) {
-  const tab = r.terminal ? `${cyan(shortHandle(r.terminal))}${r.alive === true ? grey(' (open)') : r.alive === false ? grey(' (closed)') : ''}` : grey('—')
+  // The tab outlives its runner, so whether it is open says nothing of the runner.
+  const tab = r.terminal ? cyan(shortHandle(r.terminal)) : grey('—')
   const does = ['Enter opens its tree', r.reclaimed ? null : r.closable ? 'r reclaims every agent and closes the run' : 'r reclaims every agent it may; the run stays open', r.resumable ? 'R resumes it: its runner is dead' : null].filter(Boolean).join(' · ')
   return [
     ` ${bold(r.name ?? r.runId)}  ${grey(r.runId)}${r.spec ? `  spec ${r.spec}` : ''}  ${outcomeOf(r)}  ${r.kept} kept${r.reclaimed ? grey('  reclaimed') : ''}`,

@@ -16,11 +16,11 @@ import { agentLifecycle } from '../skills/engineering/implement-spec-in-workflow
 import { foldJournal } from '../skills/engineering/implement-spec-in-workflow/orca/journal.mjs'
 import { fakeOrca, fakeTranscripts } from '../skills/engineering/implement-spec-in-workflow/orca/fake-orca.mjs'
 import { RUNNER_SETTINGS } from '../skills/engineering/implement-spec-in-workflow/orca/settings.mjs'
-import { orcaCli, OrcaError, tailCommand, resumeRunnerCommand } from '../skills/engineering/implement-spec-in-workflow/orca/orca-cli.mjs'
+import { orcaCli, OrcaError, tailCommand, resumeRunnerCommand, worktreeUnpushed } from '../skills/engineering/implement-spec-in-workflow/orca/orca-cli.mjs'
 import { runRegistry, readRegistry, OUTCOMES } from '../skills/engineering/implement-spec-in-workflow/orca/registry.mjs'
 import { transcriptPath, sessionTranscripts, claudeSlug, piDir } from '../skills/engineering/implement-spec-in-workflow/orca/transcript.mjs'
-import { agentsOf, reclaimAgent, gitUnpushed, parseChoice } from '../skills/engineering/implement-spec-in-workflow/orca/reclaim.mjs'
-import { runView, runsView, bandOf, RUNNER_PATH } from '../skills/engineering/implement-spec-in-workflow/orca/run-view-model.mjs'
+import { agentsOf, reclaimAgent, parseChoice } from '../skills/engineering/implement-spec-in-workflow/orca/reclaim.mjs'
+import { runView, runsView, bandOf, RUNNER_PATH, runnerAlive } from '../skills/engineering/implement-spec-in-workflow/orca/run-view-model.mjs'
 import { draw, drawRuns, strip, TREE_HELP } from '../skills/engineering/implement-spec-in-workflow/orca/run-view/draw.mjs'
 import { EventEmitter } from 'events'
 
@@ -1764,6 +1764,46 @@ test('registry: a torn last line is ignored, and the next entry is not welded on
   assert.deepEqual(run.runner, { terminal: 'term_1', at: isoAt(0) })
 })
 
+test('runner liveness: one rule, by runner.pid, never by the tab; null when it cannot be told', () => {
+  const dir = tmp()
+  assert.equal(runnerAlive(dir), false, 'no runner.pid: never started, or gone before writing it')
+  writeFileSync(join(dir, 'runner.pid'), String(process.pid))
+  assert.equal(runnerAlive(dir), true)
+  writeFileSync(join(dir, 'runner.pid'), 'garbage')
+  assert.equal(runnerAlive(dir), false)
+  assert.equal(runnerAlive(null), null, 'no run dir recorded: nobody can say')
+})
+
+test('registry: a resume after `ended` reopens the run, and one after a whole-run `reclaimed` takes the reclaim back, keeping the agents already reclaimed', () => {
+  const path = registryIn()
+  const clock = fakeClock()
+  const w = runRegistry(path, clock)
+  w.armed({ runId: 'run_a', project: 'C:/repo', runDir: 'C:/a', spec: 's' })
+  w.runner({ runId: 'run_a', terminal: 'term_1' })
+  clock.t = MIN
+  w.ended({ runId: 'run_a', outcome: 'failed' })
+  clock.t = 2 * MIN
+  w.runner({ runId: 'run_a', terminal: 'term_2' })
+  const fact = () => {
+    const [r] = readRegistry(path)
+    return [r.state, r.endedAt, r.runner.terminal, r.reclaimed, r.reclaimedAt, r.reclaimedAgents.map((a) => a.agent)]
+  }
+  assert.deepEqual(fact(), ['running', null, 'term_2', false, null, []], 'resumed after it ended: running, with no outcome')
+
+  // The iterate-after-failure flow: the end-of-run `a` reclaims it all, then --resume.
+  clock.t = 3 * MIN
+  w.ended({ runId: 'run_a', outcome: 'partial' })
+  w.reclaimed({ runId: 'run_a', agent: 'run_a-1' })
+  w.reclaimed({ runId: 'run_a' })
+  assert.deepEqual(fact(), ['partial', isoAt(3 * MIN), 'term_2', true, isoAt(3 * MIN), ['run_a-1']])
+  clock.t = 4 * MIN
+  w.runner({ runId: 'run_a', terminal: 'term_3' })
+  assert.deepEqual(fact(), ['running', null, 'term_3', false, null, ['run_a-1']], 'resumed after a whole-run reclaim: open again')
+  // A resumed runner's torn `runner` line changes nothing.
+  writeFileSync(path, readFileSync(path, 'utf8') + JSON.stringify({ type: 'ended', runId: 'run_a', at: isoAt(5 * MIN), outcome: 'ok' }) + '\n{"type":"runner","runId":"run_a","term')
+  assert.deepEqual(fact().slice(0, 3), ['ok', isoAt(5 * MIN), 'term_3'])
+})
+
 // A run of SCRIPT on the fake clock, recorded in `registry`.
 async function registered(registry, { worker = submitGood, script = SCRIPT, stateDir = tmp(), clock = fakeClock(), ...fake } = {}) {
   const orca = fakeOrca({ worker: (w) => worker({ ...w, clock }), clock, ...fake })
@@ -2017,13 +2057,13 @@ test('reclaim: unpushed counts commits no remote-tracking ref contains; uncommit
   }
   git('init', '-q')
   git('commit', '-q', '--allow-empty', '-m', 'one')
-  assert.equal(await gitUnpushed(dir), 1)
+  assert.equal(await worktreeUnpushed(dir), 1)
   git('update-ref', 'refs/remotes/origin/main', 'HEAD')
   writeFileSync(join(dir, 'dirty.txt'), 'x')
-  assert.equal(await gitUnpushed(dir), 0)
+  assert.equal(await worktreeUnpushed(dir), 0)
   git('commit', '-q', '--allow-empty', '-m', 'two')
-  assert.equal(await gitUnpushed(dir), 1)
-  assert.equal(await gitUnpushed(join(dir, 'gone')), 0, 'a worktree already gone holds none')
+  assert.equal(await worktreeUnpushed(dir), 1)
+  assert.equal(await worktreeUnpushed(join(dir, 'gone')), 0, 'a worktree already gone holds none')
 })
 
 test('orca-cli: tab liveness is the terminal list without orphans; a reclaim closes the whole tab and force-removes the worktree by path', async () => {
@@ -3040,7 +3080,7 @@ const blankWorktree = () => ({ parent: null, name: null, displayName: null, remo
 async function standaloneRuns() {
   const clock = fakeClock()
   clock.t = RUNS_AT
-  const orca = fakeOrca({ worker: () => new Promise(() => {}), clock, runWorktree: PROJECT, tabs: ['term_runA2', 'term_mine'] })
+  const orca = fakeOrca({ worker: () => new Promise(() => {}), clock, runWorktree: PROJECT, tabs: ['term_runA2', 'term_runA1', 'term_mine'] })
   orca.worktrees.set('C:/repos/skills', blankWorktree())
   orca.worktrees.set(HAND_MADE, blankWorktree())
   const start = (run, n, child = true) => orca.workerStart({ run, prompt: 'p', title: 't', sessionId: SID, ...(child && { child: { name: `${run}-${n}`, displayName: 't' } }) })
@@ -3071,18 +3111,23 @@ async function standaloneRuns() {
   const registry = registryIn()
   writeFileSync(registry, readFileSync(fixture('orca-runs.jsonl'), 'utf8').replaceAll('@RUNS@', dir))
 
-  const runs = runsView({ orca, clock, registry, transcripts: { usage: () => null }, unpushed: orca.unpushedOf })
+  // Whose runner.pid names a live process, by run dir: run_a2's alone. Every
+  // runner's tab stays open after it dies (no `; exit`), so a runner is killed
+  // here by its pid, never by closing its tab. `unknown`: the probe cannot tell.
+  const runners = { live: new Set(['controlayer-790']), unknown: false }
+  const alive = (runDir) => (runners.unknown ? null : runners.live.has(runDir.split(/[\\/]/).at(-2)))
+  const runs = runsView({ orca, clock, registry, transcripts: { usage: () => null }, unpushed: orca.unpushedOf, alive })
   await runs.refresh()
   const run = (id) => runs.model.projects.flatMap((p) => p.runs).find((r) => r.runId === id)
   const select = async (key) => {
     while (runs.model.rows[runs.model.selected].key !== key) await runs.key(runs.model.rows.findIndex((r) => r.key === key) > runs.model.selected ? 'DOWN' : 'UP')
   }
-  return { orca, clock, dir, registry, runs, run, select, a1, a2, b1 }
+  return { orca, clock, dir, registry, runs, run, select, runners, a1, a2, b1 }
 }
 const screenOf = (model) => drawRuns(model, { width: 140, height: 30 }).lines.map(strip)
 
 test('standalone: runs from a registry fixture are listed by project, with outcome, runner alive or dead, kept count and age', async () => {
-  const { runs, run, clock, orca } = await standaloneRuns()
+  const { runs, run, clock, orca, runners } = await standaloneRuns()
   assert.deepEqual(runs.model.projects.map((p) => [p.name, p.path, p.runs.map((r) => r.runId)]), [['controlayer', PROJECT, ['run_a2', 'run_a1']], ['skills', 'C:/repos/skills', ['run_b1']]])
   const facts = () => ['run_a2', 'run_a1', 'run_b1'].map((id) => [run(id).spec, run(id).outcome, run(id).alive, run(id).kept, run(id).ageMs, run(id).reclaimed])
   assert.deepEqual(facts(), [
@@ -3107,16 +3152,27 @@ test('standalone: runs from a registry fixture are listed by project, with outco
   assert.deepEqual(['run_a2', 'run_a1', 'run_b1'].map((id) => run(id).ageMs), [25.5 * 60 * MIN, 27 * 60 * MIN, 28 * 60 * MIN])
   assert.match(screenOf(runs.model)[5], / 1d01h/)
 
-  // A runner's tab closed: dead. A terminal list Orca does not answer: nobody
-  // can say, so nothing is resumable.
-  orca.closeTab('term_runA2')
+  // run_a1's runner is dead though its tab is still open: the tab outlives it.
+  assert.ok((await orca.terminalList()).includes('term_runA1'))
+  // run_a2's runner is killed, its tab left open: dead, and the tree opened
+  // from its row says the same. A terminal list Orca does not answer changes
+  // nothing; a runner.pid nobody can read: nobody can say, so nothing is resumable.
+  runners.live.clear()
   await runs.refresh()
-  assert.deepEqual([run('run_a2').alive, run('run_a2').resumable], [false, true])
+  assert.deepEqual([run('run_a2').alive, run('run_a2').resumable, run('run_a2').closable], [false, true, true])
+  assert.ok((await orca.terminalList()).includes('term_runA2'))
+  await runs.key('ENTER')
+  assert.equal(runs.opened().model.header.alive, false)
+  await runs.key('q')
   orca.terminalList = async () => {
     throw new OrcaError('call_timeout', 'no answer within 60s', 'terminal list')
   }
   await runs.refresh()
+  assert.deepEqual([run('run_a2').alive, run('run_a2').resumable], [false, true])
+  runners.unknown = true
+  await runs.refresh()
   assert.deepEqual(['run_a2', 'run_a1'].map((id) => [run(id).alive, run(id).resumable]), [[null, false], [null, false]])
+  assert.match(screenOf(runs.model)[5], /\? unknown/)
 })
 
 test('standalone: two concurrent runs in one repo are separate rows, and a hand-made worktree with no run prefix never appears', async () => {
@@ -3208,7 +3264,7 @@ test('standalone: r reclaims a whole run, each agent by the reclaim rules, and r
 })
 
 test('standalone: r on a run still going reclaims its settled agents but never records the run reclaimed, so an agent it starts later is kept', async () => {
-  const { runs, run, select, orca, registry, dir, a2 } = await standaloneRuns()
+  const { runs, run, select, orca, registry, dir, a2, runners } = await standaloneRuns()
   const pane = () => screenOf(runs.model).slice(-6, -2).join('\n')
   const reclaimedLines = (runId) => readFileSync(registry, 'utf8').split('\n').flatMap((l) => {
     try {
@@ -3244,14 +3300,12 @@ test('standalone: r on a run still going reclaims its settled agents but never r
   assert.deepEqual(runs.opened().model.phases.flatMap((p) => p.agents).map((a) => [a.n, a.reclaimed]), [[1, true], [2, false]])
   await runs.key('q')
 
-  // run_a1 has ended, but while Orca cannot say whether its runner lives it is
+  // run_a1 has ended, but while nobody can say whether its runner lives it is
   // not taken for dead: its agents may go, the run stays open.
   await select('run:run_a1')
   assert.equal(run('run_a1').closable, true)
   assert.match(pane(), /r reclaims every agent and closes the run/)
-  orca.terminalList = async () => {
-    throw new OrcaError('call_timeout', 'no answer within 60s', 'terminal list')
-  }
+  runners.unknown = true
   await runs.refresh()
   assert.deepEqual([run('run_a1').alive, run('run_a1').closable], [null, false])
   await runs.key('r')
@@ -3260,7 +3314,7 @@ test('standalone: r on a run still going reclaims its settled agents but never r
 })
 
 test('standalone: r on a run whose runner was killed before it recorded `ended` reclaims its agents and records the run reclaimed, and R then refuses it', async () => {
-  const { runs, run, orca, registry, a2 } = await standaloneRuns()
+  const { runs, run, orca, registry, a2, runners } = await standaloneRuns()
   const resumes = () => orca.calls.filter((c) => c.verb === 'resumeRunner')
   const pane = () => screenOf(runs.model).slice(-6, -2).join('\n')
   const reclaimedLines = (runId) => readFileSync(registry, 'utf8').split('\n').flatMap((l) => {
@@ -3272,9 +3326,9 @@ test('standalone: r on a run whose runner was killed before it recorded `ended` 
     }
   })
 
-  // run_a2's runner is killed: its tab is gone, no `ended` is recorded, and
-  // its one agent has settled with nothing unpushed.
-  orca.closeTab('term_runA2')
+  // run_a2's runner is killed (out of memory, say): its tab stays open, no
+  // `ended` is recorded, and its one agent has settled with nothing unpushed.
+  runners.live.delete('controlayer-790')
   orca.dispatches.get(a2[0].dispatchId).settled = true
   await runs.refresh()
   assert.equal(runs.model.rows[runs.model.selected].key, 'run:run_a2')
@@ -3297,7 +3351,7 @@ test('standalone: r on a run whose runner was killed before it recorded `ended` 
 })
 
 test("standalone: R on a run whose runner is dead opens one terminal in the run's worktree running the runner with --resume; never while its runner lives", async () => {
-  const { runs, run, select, orca, dir } = await standaloneRuns()
+  const { runs, run, select, orca, dir, runners } = await standaloneRuns()
   const resumes = () => orca.calls.filter((c) => c.verb === 'resumeRunner')
   const pane = () => screenOf(runs.model).slice(-6, -2).join('\n')
 
@@ -3322,6 +3376,16 @@ test("standalone: R on a run whose runner is dead opens one terminal in the run'
   assert.deepEqual([run('run_a1').alive, run('run_a1').resumable], [true, false])
   assert.match((await runs.key('R')).message, /runner is alive/)
   assert.equal(resumes().length, 1)
+  // Once the new runner has written its runner.pid, that pid decides, whatever
+  // the tab: here it names a process that is gone, the tab still open.
+  runners.live.add('controlayer-783')
+  writeFileSync(join(stateDir, 'runner.pid'), '4242')
+  await runs.refresh()
+  assert.equal(run('run_a1').alive, true)
+  runners.live.delete('controlayer-783')
+  await runs.refresh()
+  assert.ok((await orca.terminalList()).includes(resumes()[0].terminal))
+  assert.deepEqual([run('run_a1').alive, run('run_a1').resumable], [false, true])
 
   // run_b1 is recorded reclaimed: its agents are gone, so R is neither offered
   // nor carried out, from the list or from inside its tree, and the flash says why.
@@ -3335,8 +3399,8 @@ test("standalone: R on a run whose runner is dead opens one terminal in the run'
   await runs.key('q')
 
   // From inside a run's tree too. run_a2 was armed before the registry named
-  // its script: the skill's layout gives it.
-  orca.closeTab('term_runA2')
+  // its script: the skill's layout gives it. Its runner dies, its tab left open.
+  runners.live.delete('controlayer-790')
   await runs.refresh()
   await select('run:run_a2')
   await runs.key('ENTER')
