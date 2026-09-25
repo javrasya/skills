@@ -3033,10 +3033,15 @@ viewTest('run view: the screen is the design\'s tree, a click lands on the row d
   assert.match(lines.at(-4), /reason no movement in its transcript or terminal for 20 minutes/)
   assert.match(lines.at(-3), /transcript —/)
 
-  // The end-of-run modal is drawn over the tree, and takes the clicks.
+  // The end-of-run modal is drawn over the tree and only hides the rows its
+  // box covers — the rest stay clickable while it waits.
   const modal = draw(view.model, { width: 140, height: 30, modal: { title: 'The run ended. Reclaim what?', lines: ['a', 'Enter = keep those'] } })
   assert.ok(modal.lines.map(strip).some((l) => l.includes('The run ended. Reclaim what?')))
-  assert.equal(modal.rowAt(5), null)
+  assert.equal(modal.rowAt(5), 0)
+  assert.equal(modal.rowAt(14), null)
+  // A confirmation modal still takes every click.
+  const confirm = draw(view.model, { width: 140, height: 30, modal: { title: 'Reclaim it?', lines: ['f = force the reclaim'], confirm: { force: true } } })
+  assert.equal(confirm.rowAt(5), null)
 })
 
 test('orca-cli: a dispatch Orca failed because its tab closed is a gone worker, not a settled one; one that completed before its tab closed is settled', async () => {

@@ -3,8 +3,7 @@
 // on its result: it validates the payload against the agent's schema and
 // exits 1 with every error, so the agent repairs its payload inside its own
 // turn. Only a valid payload is recorded, and only then is worker_done sent.
-import { readFileSync, writeFileSync, renameSync } from 'fs'
-import { resolve } from 'path'
+import { readFileSync, writeFileSync, renameSync, realpathSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { validate } from './schema.mjs'
 import { orcaCli } from './orca-cli.mjs'
@@ -112,5 +111,7 @@ export async function submit(argv, { orca, stdout = (s) => process.stdout.write(
   return 0
 }
 
-const isMain = process.argv[1] && resolve(process.argv[1]).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase()
+// realpathSync: a symlinked install (e.g. pi's ~/.pi/agent/skills entries) is
+// still this file's main — resolve() would not dereference the link.
+const isMain = process.argv[1] && realpathSync(process.argv[1]).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase()
 if (isMain) process.exitCode = await submit(process.argv.slice(2))

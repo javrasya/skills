@@ -195,11 +195,15 @@ term.on('key', (name) => {
     })
   }
   if (modal) {
-    if (!(name in ANSWERS)) return
-    process.send?.({ type: 'endChoice', answer: ANSWERS[name] })
-    modal = null
-    flash = null
-    return render()
+    // The end prompt keeps the tree alive: Enter, a and n answer it, every
+    // other key still drives the tree, and `r` waits until it is answered.
+    if (name in ANSWERS) {
+      process.send?.({ type: 'endChoice', answer: ANSWERS[name] })
+      modal = null
+      flash = null
+      return render()
+    }
+    if (name === 'r') return (flash = 'answer the reclaim prompt first')
   }
   act(async () => {
     flash = null
@@ -210,7 +214,7 @@ term.on('key', (name) => {
   })
 })
 term.on('mouse', (name, d) => {
-  if (name !== 'MOUSE_LEFT_BUTTON_PRESSED' || modal) return
+  if (name !== 'MOUSE_LEFT_BUTTON_PRESSED' || modal?.confirm) return
   const i = rowAt(d.y)
   if (i === null) return
   act(async () => {
