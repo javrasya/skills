@@ -44,7 +44,9 @@ export const RUNNER_SETTINGS = Object.freeze({
   // answered by then is killed and counts as failed.
   orcaCallMs: 2 * MIN,
   // A worker start, or the Run's creation, that fails is tried again after
-  // each of these waits in turn; once they are spent, agent() is null.
+  // each of these waits in turn; once they are spent, agent() is null. So it
+  // is attempted at most four times: the first attempt, then one after each
+  // of the three waits.
   retryBackoffMs: Object.freeze([30_000, 2 * MIN, 5 * MIN]),
   // The run view in the runner's tab (D5 on #43): a view that crashes is
   // started again after this wait; at this many crashes in one run the runner

@@ -16,8 +16,13 @@ import { REGISTRY_PATH, readRegistry, runRegistry } from './registry.mjs'
 
 export const RUNNER_PATH = fileURLToPath(new URL('./runner.mjs', import.meta.url))
 
-// In the order a phase row lists its mix.
-export const STATES = Object.freeze(['running', 'continued', 'stuck', 'failed', 'queued', 'done'])
+// In the order a phase row lists its mix. An agent's state is the journal
+// fold's (journal.mjs), except reclaimed: one the registry records reclaimed.
+export const STATES = Object.freeze(['blocked', 'starting', 'running', 'continued', 'stuck', 'failed', 'queued', 'done', 'reclaimed'])
+
+// The problems a phase's pane lists, in row order: blocked first, since a
+// human can answer it, then failed and stuck.
+const problemsOf = (agents) => [...agents.filter((a) => a.state === 'blocked'), ...agents.filter((a) => a.state === 'failed' || a.state === 'stuck')]
 
 // Context size bands: green below 200k, yellow from 200k to 350k, red above.
 export const bandOf = (context) => (context == null ? null : context < 200_000 ? 'green' : context <= 350_000 ? 'yellow' : 'red')
@@ -81,12 +86,17 @@ const samePath = (a, b) => !!a && !!b && (process.platform === 'win32' ? resolve
 //           followed by its agents
 //   selected  the index of the selected row
 //   pane    { kind: 'agent', agent } | { kind: 'phase', phase, problems: [{ agent, reason }] },
-//           a phase's problems being its failed and stuck agents
+//           a phase's problems being its blocked, failed and stuck agents
 //   message the latest action's outcome, for the flash line, or null
 //   latest  the last line of runner.log, the run's latest event, or null
+//   alert   while any agent is blocked on a human, the line naming each one,
+//           its tab and what it waits on, which the flash line keeps over
+//           `latest` until it is answered; else null
 // An agent is { n, origin, label, title, phase, state, continuations, reason,
 // replayed, launched, runId, dispatchId, harness, sessionId, worktree, terminal,
-// tabOpen, reclaimed, context, band, tokens, elapsedMs, transcript }. worktree
+// waiting, nextAt, workerLeft, tabOpen, reclaimed, context, band, tokens,
+// elapsedMs, transcript }. state is one of STATES: reclaimed once the registry
+// records it so, whatever it was before. worktree
 // is only ever one named `<runId>-<n>`: any other, the run's own checkout
 // included, is the operator's and never shown. tabOpen
 // is whether Orca's terminal list shows its tab, never what its worker's
@@ -109,13 +119,14 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   let selected = 0
   let message = null
   let latest = null
+  let alert = null
   let logTab = null
   const view = { model: null, refresh, key, click, focus, reclaim, openLog }
 
   function layout() {
     const rows = []
     for (const phase of phases) {
-      phase.folded = folds.get(phase.name) ?? (phase.total > 0 && phase.done === phase.total)
+      phase.folded = folds.get(phase.name) ?? (phase.total > 0 && phase.agents.every((a) => a.state === 'done' || a.state === 'reclaimed'))
       rows.push({ kind: 'phase', key: `phase:${phase.name}`, phase })
       if (!phase.folded) for (const agent of phase.agents) rows.push({ kind: 'agent', key: `agent:${agent.n}`, agent, phase })
     }
@@ -125,8 +136,8 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     selectedKey = row?.key ?? null
     const pane = !row ? null
       : row.kind === 'agent' ? { kind: 'agent', agent: row.agent }
-      : { kind: 'phase', phase: row.phase, problems: row.phase.agents.filter((a) => a.state === 'failed' || a.state === 'stuck').map((agent) => ({ agent, reason: agent.reason })) }
-    view.model = { header, phases, rows, selected, pane, message, latest }
+      : { kind: 'phase', phase: row.phase, problems: problemsOf(row.phase.agents).map((agent) => ({ agent, reason: agent.reason })) }
+    view.model = { header, phases, rows, selected, pane, message, latest, alert }
     return view.model
   }
 
@@ -154,10 +165,12 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     const reclaimedNames = new Set(run?.reclaimedAgents?.map((r) => r.agent) ?? [])
     for (const a of agents) {
       const usage = a.sessionId ? transcripts.usage({ harness: a.harness, sessionId: a.sessionId, worktree: a.worktree }) : null
+      const reclaimed = !!a.runId && (run?.reclaimed === true || reclaimedNames.has(agentName(a)))
       Object.assign(a, {
+        ...(reclaimed && { state: 'reclaimed' }),
         worktree: ownWorktree(a),
         tabOpen: a.terminal && open ? open.has(a.terminal) : null,
-        reclaimed: !!a.runId && (run?.reclaimed === true || reclaimedNames.has(agentName(a))),
+        reclaimed,
         context: usage?.context ?? null,
         band: bandOf(usage?.context),
         tokens: usage?.tokens ?? null,
@@ -165,6 +178,11 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
         elapsedMs: a.from === null ? null : Math.max(0, (a.to ?? now) - a.from),
       })
     }
+
+    const blocked = agents.filter((a) => a.state === 'blocked')
+    alert = blocked.length
+      ? `BLOCKED ON A HUMAN: ${blocked.map((a) => `${a.title} in tab ${a.terminal ?? '—'} waits on ${a.waiting ?? 'an answer'}`).join(' · ')}`
+      : null
 
     const byPhase = new Map()
     for (const a of agents) {
@@ -235,11 +253,14 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
 
   // Reclaims agent `n`, or with no `n` the selected one, through reclaim.mjs,
   // as the journal names it for reclaim: refused while it is live, or while
-  // its worktree holds unpushed commits unless `force`. A reclaim is recorded
+  // its worktree holds unpushed commits unless `force`. One that failed and
+  // was kept with its worker running is refused as `stoppable` unless `stop`,
+  // which stops that worker first: both are the operator's confirmed `f`
+  // (view.mjs), never the plain `r`. A reclaim is recorded
   // in the registry. What it answers names the agent as `agent: { n, title }`,
   // so a forced retry goes to the agent refused, never to whatever row the
   // selection sits on by then: a refresh that folds its phase moves it.
-  async function reclaim({ n, force = false } = {}) {
+  async function reclaim({ n, force = false, stop = false } = {}) {
     let a
     if (n === undefined) {
       const row = current()
@@ -254,7 +275,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     if (!agent) return { ...say(`${a.title} has nothing to reclaim: it launched nothing in this run`), agent: target }
     let r
     try {
-      r = await reclaimAgent(agent, { orca, unpushed, force })
+      r = await reclaimAgent(agent, { orca, unpushed, force, stop })
     } catch (e) {
       r = { reclaimed: false, reason: e?.message ?? String(e) }
     }

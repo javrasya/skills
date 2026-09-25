@@ -13,6 +13,7 @@ import { fileURLToPath } from 'url'
 import { submit } from '../skills/engineering/implement-spec-in-workflow/orca/submit.mjs'
 import { runScript, journalKey, failureSummary, finish, SUBMIT, SETTINGS, realClock, JOURNAL_ENTRIES, readJournal, attachView, runnerLog } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
 import { agentLifecycle } from '../skills/engineering/implement-spec-in-workflow/orca/lifecycle.mjs'
+import { foldJournal } from '../skills/engineering/implement-spec-in-workflow/orca/journal.mjs'
 import { fakeOrca, fakeTranscripts } from '../skills/engineering/implement-spec-in-workflow/orca/fake-orca.mjs'
 import { RUNNER_SETTINGS } from '../skills/engineering/implement-spec-in-workflow/orca/settings.mjs'
 import { orcaCli, OrcaError, tailCommand, resumeRunnerCommand } from '../skills/engineering/implement-spec-in-workflow/orca/orca-cli.mjs'
@@ -651,18 +652,30 @@ test('liveness: a worker blocked on a human is logged loudly once, never nudged,
   assert.equal(loud.length, 1, r.lines.join('\n'))
   assert.ok(loud[0].includes('[P] one') && loud[0].includes('term_fake1'), loud[0])
   assert.ok(r.lines.some((l) => l.includes('Allow this command?')), r.lines.join('\n'))
+  // Every line of the banner names the agent, the last one included.
+  assert.ok(r.lines.some((l) => l.startsWith('!!!!!!!! [P] one: if nobody answers within 30 minutes')), r.lines.join('\n'))
+  // Journaled too, with what it waits on, so the run view shows it while it lasts.
+  assertEntries(r.journal)
+  assert.deepEqual(ofType(r.journal, 'blocked').map((e) => [e.title, e.dispatchId, e.terminal, e.waiting]), [['[P] one', 'ctx_fake1', 'term_fake1', '{"evidence":"prompt-text","text":"Allow this command?"}']])
+  assert.deepEqual(ofType(r.journal, 'unblocked'), [])
+  // Its process is left running: the failed line says so, for reclaim.
+  assert.equal(ofType(r.journal, 'failed')[0].workerLeft, true)
+  const [agent] = foldJournal(r.journal).agents
+  assert.deepEqual([agent.state, agent.workerLeft, agent.waiting], ['failed', true, null])
 })
 
-test('liveness: a blocked worker the operator answers in time returns its result', async () => {
+test('liveness: a blocked worker the operator answers in time is journaled unblocked, and returns its result', async () => {
   const r = await runOne(async (w) => {
     w.state.waiting = '{"evidence":"hook"}'
-    w.clock.at(29 * MIN, async () => {
-      w.state.waiting = null
-      await submitGood(w)
-    })
+    w.clock.at(29 * MIN, () => { w.state.waiting = null })
+    w.clock.at(35 * MIN, () => submitGood(w))
   })
   assert.deepEqual(r.result, GOOD)
   assert.equal(r.nudges.length, 0)
+  assertEntries(r.journal)
+  assert.deepEqual(r.journal.filter((e) => e.type !== 'run').map((e) => e.type), ['starting', 'started', 'blocked', 'unblocked', 'result'])
+  const unblocked = ofType(r.journal, 'unblocked')[0]
+  assert.ok(Date.parse(unblocked.at) >= 29 * MIN, unblocked.at)
 })
 
 test('liveness: a worker Orca cannot start, or cannot be watched, is null', async () => {
@@ -861,7 +874,7 @@ test('worktrees: a dead agent\'s worktree is retained and named in the run\'s re
 
   assert.equal(result.worktrees_kept.length, 1)
   assert.equal(result.worktrees_kept[0].path, bPath)
-  assert.match(result.worktrees_kept[0].reason, /impl:b\) died before reporting, so it was never removed/)
+  assert.match(result.worktrees_kept[0].reason, /^retained because its agent \(\[Implement\] impl:b\) died before reporting its path/)
   assert.ok(lines.some((l) => l.startsWith(`!! kept ${bPath}:`)), lines.join('\n'))
 })
 
@@ -1198,7 +1211,7 @@ test('resume: an agent that died runs live again on resume, and every call after
   })
   assert.deepEqual(await runScript(chain('Build it.'), { orca: first, stateDir, out: () => {}, settings: FAST }), ['Plan it. @1', null, 'Check it. @1'])
   const journal = readFileSync(join(stateDir, 'journal.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
-  const b = journal.filter((e) => e.key === journalKey('Build it.', { label: 'b', phase: 'Chain' }) && e.type !== 'started')
+  const b = journal.filter((e) => e.key === journalKey('Build it.', { label: 'b', phase: 'Chain' }) && e.type !== 'started' && e.type !== 'starting')
   assert.deepEqual(b.map((e) => [e.type, 'result' in e]), [['failed', false]])
 
   const lines = []
@@ -1329,12 +1342,12 @@ test('lifecycle: a call journals started then its result, and returns the value 
   const orca = fakeOrca({ worker: submitting() })
   const { life, call, journal } = lifecycleOn(orca)
   assert.deepEqual(await life(call('a')), GOOD)
-  assert.deepEqual(journal.map((e) => [e.type, e.title]), [['started', '[P] a'], ['result', '[P] a']])
-  assert.deepEqual(journal[1].result, GOOD)
+  assert.deepEqual(journal.map((e) => [e.type, e.title]), [['starting', '[P] a'], ['started', '[P] a'], ['result', '[P] a']])
+  assert.deepEqual(journal[2].result, GOOD)
   const verbs = orca.calls.map((c) => c.verb)
   assert.deepEqual([verbs[0], verbs[1], verbs.at(-1)], ['runCreate', 'workerStart', 'workerShow'])
   assert.equal(verbs.includes('workerRelease'), false)
-  assert.equal(journal[0].run, 'run_fake1')
+  assert.deepEqual([journal[0].run, journal[1].run], ['run_fake1', 'run_fake1'])
   assert.equal(orca.calls[0].objective, 'the objective')
 })
 
@@ -1349,7 +1362,7 @@ test('lifecycle: a Run Orca cannot create journals its retries and failed with n
   const { life, call, journal } = lifecycleOn(orca)
   assert.equal(await life(call('a')), null)
   assert.deepEqual(await life(call('b')), GOOD)
-  assert.deepEqual(journal.map((e) => [e.type, e.title]), [['retry', '[P] a'], ['retry', '[P] a'], ['retry', '[P] a'], ['failed', '[P] a'], ['started', '[P] b'], ['result', '[P] b']])
+  assert.deepEqual(journal.map((e) => [e.type, e.title]), [['retry', '[P] a'], ['retry', '[P] a'], ['retry', '[P] a'], ['failed', '[P] a'], ['starting', '[P] b'], ['started', '[P] b'], ['result', '[P] b']])
   assert.equal(journal[3].attempts, 4)
 })
 
@@ -1368,7 +1381,7 @@ test('lifecycle: calls share one Run and the live cap, and a queued call starts 
   assert.equal(orca.calls.filter((c) => c.verb === 'runCreate').length, 1)
   assert.equal(liveHighWater(orca.calls), 1)
   assert.deepEqual(lines.filter((l) => l.endsWith('queued, 1 agents are live')), ['.. [P] b: queued, 1 agents are live'])
-  assert.deepEqual(journal.filter((e) => e.title === '[P] b').map((e) => e.type), ['queued', 'started', 'result'])
+  assert.deepEqual(journal.filter((e) => e.title === '[P] b').map((e) => e.type), ['queued', 'starting', 'started', 'result'])
   assert.equal(journal.some((e) => e.title === '[P] a' && e.type === 'queued'), false)
 })
 
@@ -1378,9 +1391,9 @@ test('lifecycle: an isolated worker that never started leaves its worktree retai
   const { life, call, journal, kept } = lifecycleOn(orca)
   assert.equal(await life(call('impl', { isolated: true })), null)
   assert.deepEqual(kept.map((k) => k.path), ['C:/fake/worktrees/orphan'])
-  assert.deepEqual(journal.map((e) => e.type), ['retry', 'retry', 'retry', 'failed'], 'a worker that never started has no started line')
-  assert.equal(journal[3].retained, kept[0])
-  assert.equal(journal[3].reason, 'its worker did not start: agent_not_ready')
+  assert.deepEqual(journal.map((e) => e.type), ['starting', 'retry', 'retry', 'retry', 'failed'], 'a worker that never started has no started line')
+  assert.equal(journal[4].retained, kept[0])
+  assert.equal(journal[4].reason, 'its worker did not start: agent_not_ready')
 })
 
 // The CLI adapter's own workerStart, whose create names each worktree as asked.
@@ -1391,11 +1404,11 @@ test('lifecycle: a retry whose worktree list is truncated journals retry, then f
   orca.workerStart = cliStart({ 'terminal wait': { wait: { satisfied: false } }, 'worktree list': { worktrees: [], truncated: true } })
   const { life, call, journal, kept } = lifecycleOn(orca)
   assert.equal(await life(call('impl', { isolated: true })), null)
-  assert.deepEqual(journal.map((e) => e.type), ['retry', 'retry', 'retry', 'failed'])
-  assert.match(journal[1].reason, /worktree_list_truncated/)
-  assert.match(journal[3].reason, /worktree_list_truncated/)
+  assert.deepEqual(journal.map((e) => e.type), ['starting', 'retry', 'retry', 'retry', 'failed'])
+  assert.match(journal[2].reason, /worktree_list_truncated/)
+  assert.match(journal[4].reason, /worktree_list_truncated/)
   assert.equal(kept.length, 1)
-  assert.equal(journal[3].retained, kept[0])
+  assert.equal(journal[4].retained, kept[0])
 })
 
 test('lifecycle: a create Orca answers under a suffixed name fails at once, retaining both worktrees', async () => {
@@ -1403,11 +1416,11 @@ test('lifecycle: a create Orca answers under a suffixed name fails at once, reta
   orca.workerStart = cliStart({ 'worktree create': (args) => ({ worktree: { path: `C:/wt/${flag(args, '--name')}-2` } }) })
   const { life, call, journal, kept } = lifecycleOn(orca)
   assert.equal(await life(call('impl', { isolated: true })), null)
-  assert.deepEqual(journal.map((e) => e.type), ['failed', 'retained'], 'final: never retried into a -3')
-  assert.match(journal[0].reason, /worktree_name_taken/)
-  const name = journal[0].reason.match(/asked for (\S+),/)[1]
+  assert.deepEqual(journal.map((e) => e.type), ['starting', 'failed', 'retained'], 'final: never retried into a -3')
+  assert.match(journal[1].reason, /worktree_name_taken/)
+  const name = journal[1].reason.match(/asked for (\S+),/)[1]
   assert.deepEqual(kept.map((k) => k.path), [`C:/wt/${name}-2`, `C:/wt/${name}`])
-  assert.deepEqual([journal[0].retained, journal[1].retained], kept)
+  assert.deepEqual([journal[1].retained, journal[2].retained], kept)
 })
 
 // --- the journal and the log say what happened --------------------------------
@@ -1433,7 +1446,7 @@ test("journal: every entry is timestamped from the runner's clock", async () => 
   const [n1, n2, n3, n4] = r.nudges
   const [c1, c2, c3] = r.continues
   assert.deepEqual(r.journal.map((e) => [e.type, e.at]), [
-    ['run', iso(0)], ['started', iso(0)], ['nudge', at(n1)], ['continued', at(c1)], ['nudge', at(n2)], ['continued', at(c2)],
+    ['run', iso(0)], ['starting', iso(0)], ['started', iso(0)], ['nudge', at(n1)], ['continued', at(c1)], ['nudge', at(n2)], ['continued', at(c2)],
     ['nudge', at(n3)], ['continued', at(c3)], ['nudge', at(n4)], ['failed', r.journal.at(-1).at],
   ])
   within(Date.parse(r.journal.at(-1).at), 160 * MIN, 'failure')
@@ -1531,11 +1544,13 @@ test('settings: a failed start or Run creation is retried after 30s, 2 and 5 min
 test('retry: a start whose Orca call never answers counts as failed once it times out, and is retried', async () => {
   const r = await runOne(submitGood, { faults: { workerStart: ({ count }) => (count === 1 ? 'hang' : null) } })
   assert.deepEqual(r.result, GOOD)
-  assert.deepEqual(types(r), ['retry', 'started', 'result'])
+  assert.deepEqual(types(r), ['starting', 'retry', 'started', 'result'])
   const [retry] = entries(r, 'retry')
   assert.equal(retry.reason, 'its worker did not start: orca workerStart: call_timeout: no answer within 120s')
   assert.equal(retry.attempt, 2)
-  assert.equal(atMs(retry), RUNNER_SETTINGS.orcaCallMs + BACKOFF[0])
+  // Journaled as the attempt fails, before the wait, with when the next begins.
+  assert.equal(atMs(retry), RUNNER_SETTINGS.orcaCallMs)
+  assert.equal(Date.parse(retry.nextAt), RUNNER_SETTINGS.orcaCallMs + BACKOFF[0])
   assert.equal(verbCount(r, 'terminalClose'), 1, 'the timed-out attempt\'s terminal is closed')
   assert.ok(r.lines.some((l) => l.endsWith('call_timeout: no answer within 120s; trying again in 30s (attempt 2 of 4)')), r.lines.join('\n'))
 })
@@ -1543,7 +1558,7 @@ test('retry: a start whose Orca call never answers counts as failed once it time
 test('retry: a start that fails after its worktree was made takes that clean worktree up again and succeeds, making no second one', async () => {
   const r = await runOne(submitGood, { script: ISOLATED, faults: { waitIdle: ({ count }) => count === 1 && new OrcaError('agent_not_ready', 'never idle', 'terminal wait') } })
   assert.deepEqual(r.result, GOOD, 'nothing retained')
-  assert.deepEqual(types(r), ['retry', 'started', 'result'])
+  assert.deepEqual(types(r), ['starting', 'retry', 'started', 'result'])
   assert.equal(verbCount(r, 'worktreeCreate'), 1)
   assert.deepEqual([...r.orca.worktrees.keys()], ['C:/fake/run', CHILD_WT])
   assert.deepEqual(r.orca.calls.filter((c) => c.verb === 'worktreeReuse').map((c) => c.worktree), [CHILD_WT])
@@ -1567,7 +1582,7 @@ for (const [what, spoil, reason] of [
       },
     })
     assert.equal(r.result, null)
-    assert.deepEqual(types(r), ['retry', 'failed'], 'no further attempt: a retry cannot mend it')
+    assert.deepEqual(types(r), ['starting', 'retry', 'failed'], 'no further attempt: a retry cannot mend it')
     const [failed] = entries(r, 'failed')
     assert.equal(failed.reason, reason)
     assert.equal(failed.attempts, 2)
@@ -1583,11 +1598,14 @@ test('retry: a start that fails every time is null after its retries, each journ
   const r = await runOne(submitGood, { script: ISOLATED, faults: { terminalCreate: ({ count }) => new OrcaError('runtime_unavailable', `try ${count}`, 'terminal create') } })
   assert.equal(r.result, null)
   assertEntries(r.journal)
-  assert.deepEqual(types(r), ['retry', 'retry', 'retry', 'failed'])
+  assert.deepEqual(types(r), ['starting', 'retry', 'retry', 'retry', 'failed'])
   const retries = entries(r, 'retry')
   assert.deepEqual(retries.map((e) => e.attempt), [2, 3, 4])
   assert.deepEqual(retries.map((e) => e.reason), [1, 2, 3].map((i) => `its worker did not start: orca terminal create: runtime_unavailable: try ${i}`))
-  assert.deepEqual(retries.map(atMs), [BACKOFF[0], BACKOFF[0] + BACKOFF[1], BACKOFF[0] + BACKOFF[1] + BACKOFF[2]])
+  // Each journaled as its attempt fails, so a runner that dies in the wait
+  // still leaves why; nextAt is when the next attempt begins.
+  assert.deepEqual(retries.map(atMs), [0, BACKOFF[0], BACKOFF[0] + BACKOFF[1]])
+  assert.deepEqual(retries.map((e) => Date.parse(e.nextAt)), [BACKOFF[0], BACKOFF[0] + BACKOFF[1], BACKOFF[0] + BACKOFF[1] + BACKOFF[2]])
   const [failed] = entries(r, 'failed')
   assert.equal(failed.reason, 'its worker did not start: orca terminal create: runtime_unavailable: try 4')
   assert.equal(failed.attempts, 4)
@@ -1598,7 +1616,7 @@ test('retry: a start that fails every time is null after its retries, each journ
 test('retry: the backoff is whatever the settings table says', async () => {
   const r = await runOne(submitGood, { settings: { retryBackoffMs: [1_000, 7_000] }, faults: { terminalCreate: () => new OrcaError('runtime_unavailable', '', 'terminal create') } })
   assert.equal(r.result, null)
-  assert.deepEqual(entries(r, 'retry').map(atMs), [1_000, 8_000])
+  assert.deepEqual(entries(r, 'retry').map((e) => [atMs(e), Date.parse(e.nextAt)]), [[0, 1_000], [1_000, 8_000]])
   assert.equal(entries(r, 'failed')[0].attempts, 3)
 })
 
@@ -1606,11 +1624,11 @@ test('retry: a Run Orca fails to create, or never answers for, is retried under 
   const faults = { runCreate: ({ count }) => (count === 1 ? 'hang' : count === 2 && new OrcaError('runtime_unavailable', 'try 2', 'orchestration run-create')) }
   const r = await runOne(submitGood, { faults })
   assert.deepEqual(r.result, GOOD)
-  assert.deepEqual(types(r), ['retry', 'retry', 'started', 'result'])
+  assert.deepEqual(types(r), ['retry', 'retry', 'starting', 'started', 'result'])
   const call = RUNNER_SETTINGS.orcaCallMs
-  assert.deepEqual(entries(r, 'retry').map((e) => [e.attempt, atMs(e), e.reason]), [
-    [2, call + BACKOFF[0], "Orca could not create this run's Run: orca runCreate: call_timeout: no answer within 120s"],
-    [3, call + BACKOFF[0] + BACKOFF[1], "Orca could not create this run's Run: orca orchestration run-create: runtime_unavailable: try 2"],
+  assert.deepEqual(entries(r, 'retry').map((e) => [e.attempt, atMs(e), Date.parse(e.nextAt), e.reason]), [
+    [2, call, call + BACKOFF[0], "Orca could not create this run's Run: orca runCreate: call_timeout: no answer within 120s"],
+    [3, call + BACKOFF[0], call + BACKOFF[0] + BACKOFF[1], "Orca could not create this run's Run: orca orchestration run-create: runtime_unavailable: try 2"],
   ])
   assert.equal(verbCount(r, 'runCreate'), 1)
 })
@@ -1620,7 +1638,7 @@ test('warnings: a display name or board status Orca refuses is logged and journa
   const r = await runOne(submitGood, { script: ISOLATED, faults: { worktreeSet: refused, worktreeStatus: refused } })
   assert.deepEqual(r.result, GOOD)
   assertEntries(r.journal)
-  assert.deepEqual(types(r), ['warning', 'started', 'warning', 'result'])
+  assert.deepEqual(types(r), ['starting', 'warning', 'started', 'warning', 'result'])
   const reasons = entries(r, 'warning').map((e) => e.reason)
   assert.deepEqual(reasons, [
     "could not set its worktree's display name: orca worktree set: selector_not_found: no such worktree",
@@ -1857,7 +1875,7 @@ async function finished(run, answers) {
     stateDir: run.stateDir, summary: { runner: 'orca', ok: true, result: run.result }, orca: run.orca, out: (s) => lines.push(s),
     registry: runRegistry(run.registry, run.clock), unpushed: run.orca.unpushedOf,
     ask: async (question) => {
-      asked.push({ question, summaryWritten: existsSync(join(run.stateDir, 'summary.json')), shown: lines.length })
+      asked.push({ question, summaryWritten: existsSync(join(run.stateDir, 'summary.json')), reclaimWritten: existsSync(join(run.stateDir, 'reclaim.json')), shown: lines.length })
       return answers.length ? answers.shift() : null
     },
   })
@@ -1894,6 +1912,13 @@ test('end of run: summary.json is written before the prompt, which names what th
   assert.equal(r.outcome.choice, 'default')
   assert.deepEqual(r.outcome.reclaimed.map((a) => a.title), ['[P] a', '[P] c'])
   assert.deepEqual(r.outcome.kept.map((k) => k.agent.title), ['[P] b'])
+  // The answer is recorded beside summary.json once given, never before.
+  assert.equal(r.asked[0].reclaimWritten, false)
+  const record = JSON.parse(readFileSync(join(run.stateDir, 'reclaim.json'), 'utf8'))
+  assert.deepEqual([record.choice, record.answered], ['default', true])
+  assert.deepEqual(record.reclaimed.map((a) => a.title), ['[P] a', '[P] c'])
+  assert.deepEqual(record.kept.map((k) => [k.title, k.name, k.worktree]), [['[P] b', 'run_fake1-2', B_WT]])
+  assert.match(record.kept[0].reason, /^it failed: /)
   assert.deepEqual(r.of('workerRelease').map((c) => c.dispatchId), ['ctx_fake1', 'ctx_fake6'])
   assert.deepEqual(r.of('terminalClose').map((c) => c.terminal), ['term_fake1', 'term_fake6'])
   assert.deepEqual(r.of('worktreeRemove').map((c) => c.path), [A_WT], "c's worktree is the run's own, never removed")
@@ -2253,7 +2278,7 @@ for (const how of ['refused', 'dies']) {
   })
 }
 
-test('reclaim: a worker a resume took up, then kept blocked on a human with its process left running, is refused as live', async () => {
+test('reclaim: a worker a resume took up, then kept blocked on a human with its process left running, is refused unless a confirmed reclaim stops it first', async () => {
   const r = await leftOut()
   r.orca.dispatches.get(r.b.dispatchId).waiting = JSON.stringify({ question: 'Which branch?' })
   const result = await r.resume('term_2')
@@ -2265,12 +2290,21 @@ test('reclaim: a worker a resume took up, then kept blocked on a human with its 
   const reB = ofType(journal, 'reattached').find((e) => e.title === '[P] b')
   assert.deepEqual([reB.run, reB.harness, reB.origin], [runId, 'claude', 2])
   const b = agentsOf(join(r.stateDir, 'journal.jsonl')).find((a) => a.title === '[P] b')
-  assert.deepEqual([b.name, b.dispatchId, b.state, b.launched], [`${runId}-2`, r.b.dispatchId, 'failed', true])
+  assert.deepEqual([b.name, b.dispatchId, b.state, b.launched, b.workerLeft], [`${runId}-2`, r.b.dispatchId, 'failed', true, true])
+  assert.equal(ofType(journal, 'failed').find((e) => e.title === '[P] b').workerLeft, true)
   const before = r.orca.calls.length
-  assert.deepEqual(await reclaimAgent(b, { orca: r.orca, unpushed: r.orca.unpushedOf, force: true }), { reclaimed: false, reason: 'it is still live' })
+  // Forcing past unpushed commits is not stopping it: refused, and told how.
+  const refused = await reclaimAgent(b, { orca: r.orca, unpushed: r.orca.unpushedOf, force: true })
+  assert.equal(refused.stoppable, true)
+  assert.match(refused.reason, /^it failed and was kept with its worker still running, so Orca shows it live: only a reclaim that stops that worker first removes it \(r, then f, in the run view\), or close its tab \S+ in Orca and reclaim it again$/)
   // A worker started for it, but no dispatch named: never proof it is not live.
-  assert.match((await reclaimAgent({ ...b, dispatchId: null }, { orca: r.orca, unpushed: r.orca.unpushedOf, force: true })).reason, /could not tell whether it is live/)
-  assert.deepEqual(r.orca.calls.slice(before).filter((c) => MUTATING.includes(c.verb)), [])
+  assert.match((await reclaimAgent({ ...b, dispatchId: null }, { orca: r.orca, unpushed: r.orca.unpushedOf, force: true, stop: true })).reason, /could not tell whether it is live/)
+  assert.deepEqual(r.orca.calls.slice(before).filter((c) => MUTATING.includes(c.verb) || c.verb === 'workerStop'), [])
+  // Confirmed: its worker is stopped before anything is removed.
+  assert.deepEqual(await reclaimAgent(b, { orca: r.orca, unpushed: r.orca.unpushedOf, stop: true }), { reclaimed: true, notes: [] })
+  const done = r.orca.calls.slice(before).filter((c) => MUTATING.includes(c.verb) || c.verb === 'workerStop').map((c) => c.verb)
+  assert.equal(done[0], 'workerStop')
+  assert.ok(done.includes('workerRelease'), done.join(' '))
 
   // The same from a journal written before `reattached` carried its Run: the
   // agent is still the worker that line names.
@@ -2285,7 +2319,9 @@ test('reclaim: a worker a resume took up, then kept blocked on a human with its 
   const asked = []
   const waiting = { workerShow: async ({ dispatch }) => (asked.push(dispatch), { settled: false, gone: false, exited: false, waiting: 'Which branch?' }) }
   assert.deepEqual(await reclaimAgent(old, { orca: waiting, unpushed: async () => 0 }), { reclaimed: false, reason: 'it is still live' })
-  assert.deepEqual(asked, ['ctx_1'])
+  // Its failed line never said its worker was left running: no stop is offered.
+  assert.deepEqual(await reclaimAgent(old, { orca: waiting, unpushed: async () => 0, stop: true }), { reclaimed: false, reason: 'it is still live' })
+  assert.deepEqual(asked, ['ctx_1', 'ctx_1'])
 })
 
 test('resume: every agent of the Run is named across resumes, once each in the run view, in the end-of-run prompt and to a standalone r, under its worktree\'s name', async () => {
@@ -2468,7 +2504,7 @@ async function viewedRun(mode = 'attached') {
 viewTest('run view: the journal gives each agent its row, its state and its phase, phases in the order the run reached them', async (mode) => {
   const { view, agent } = await viewedRun(mode)
   const m = view.model
-  assert.deepEqual(m.header, { name: 'implement-spec-783', project: 'controlayer', runId: 'run_fake1', spec: '#783', alive: true, elapsedMs: 30 * MIN, counts: { running: 1, continued: 1, stuck: 1, failed: 1, queued: 1, done: 2 } })
+  assert.deepEqual(m.header, { name: 'implement-spec-783', project: 'controlayer', runId: 'run_fake1', spec: '#783', alive: true, elapsedMs: 30 * MIN, counts: { blocked: 0, starting: 0, running: 1, continued: 1, stuck: 1, failed: 1, queued: 1, done: 2, reclaimed: 0 } })
   assert.deepEqual(m.phases.map((p) => [p.name, p.agents.map((a) => a.n)]), [['Discover', [1]], ['Implement', [2, 3, 4, 5, 6]], ['Gate', [7]]])
   assert.deepEqual([1, 2, 3, 4, 5, 6, 7].map((n) => [agent(n).label, agent(n).state]), [
     ['discover', 'done'], ['impl:a', 'running'], ['impl:b', 'stuck'], ['impl:c', 'continued'], ['impl:d', 'queued'], ['impl:e', 'failed'], ['gate:a', 'done'],
@@ -2490,9 +2526,9 @@ viewTest('run view: a folded phase sums its agents up: done of total, its mix of
   const { view } = await viewedRun(mode)
   const [discover, implement, gate] = view.model.phases
   assert.deepEqual([discover.folded, discover.done, discover.total, discover.peakContext], [true, 1, 1, 210005])
-  assert.deepEqual(discover.mix, { running: 0, continued: 0, stuck: 0, failed: 0, queued: 0, done: 1 })
+  assert.deepEqual(discover.mix, { blocked: 0, starting: 0, running: 0, continued: 0, stuck: 0, failed: 0, queued: 0, done: 1, reclaimed: 0 })
   assert.deepEqual([implement.folded, implement.done, implement.total, implement.peakContext], [false, 0, 5, 363000])
-  assert.deepEqual(implement.mix, { running: 1, continued: 1, stuck: 1, failed: 1, queued: 1, done: 0 })
+  assert.deepEqual(implement.mix, { blocked: 0, starting: 0, running: 1, continued: 1, stuck: 1, failed: 1, queued: 1, done: 0, reclaimed: 0 })
   assert.deepEqual([gate.folded, gate.done, gate.total, gate.peakContext], [true, 1, 1, null], 'a replayed agent ran no session here')
   // A selected phase's pane names its failed and stuck agents, each with its reason.
   await view.key('DOWN')
@@ -2500,6 +2536,68 @@ viewTest('run view: a folded phase sums its agents up: done of total, its mix of
     [3, 'no movement in its transcript or terminal for 20 minutes'],
     [6, 'its worker did not start: orca worktree create: call_timeout'],
   ])
+})
+
+// An agent blocked on a human, one starting, one whose start is being
+// retried, one answered in time, and one reclaimed, as the journal and the
+// registry tell them.
+viewTest('run view: blocked, starting and reclaimed are row states; a blocked agent is counted, listed first in its phase and held on the flash line until answered', async (mode) => {
+  const clock = fakeClock()
+  const orca = fakeOrca({ worker: () => new Promise(() => {}), clock })
+  for (let n = 1; n <= 5; n++) await orca.workerStart({ run: 'run_fake1', prompt: 'p', title: `t${n}`, sessionId: SID, child: { name: `run_fake1-${n}`, displayName: `t${n}` } })
+  const stateDir = tmp()
+  const journalPath = join(stateDir, 'journal.jsonl')
+  const put = (...entries) => appendFileSync(journalPath, entries.map((e) => JSON.stringify(e) + '\n').join(''))
+  put(
+    { type: 'run', at: at(0), runId: 'run_fake1', terminal: 'term_runner' },
+    startedJ(1, '[Implement] impl:a', 0, 'claude', 'sid-1'),
+    J('starting', 2, '[Implement] impl:b', 1, { run: 'run_fake1' }),
+    J('starting', 3, '[Implement] impl:c', 1, { run: 'run_fake1' }),
+    J('retry', 3, '[Implement] impl:c', 2, { attempt: 2, reason: 'its worker did not start: orca terminal create: runtime_unavailable', nextAt: at(2.5) }),
+    startedJ(4, '[Implement] impl:d', 1, 'claude', 'sid-4'),
+    J('blocked', 4, '[Implement] impl:d', 3, { dispatchId: 'ctx_fake4', terminal: 'term_fake4', waiting: 'Allow this command?' }),
+    J('unblocked', 4, '[Implement] impl:d', 4, { dispatchId: 'ctx_fake4' }),
+    startedJ(5, '[Implement] impl:e', 1, 'claude', 'sid-5'),
+    J('result', 5, '[Implement] impl:e', 5, { result: GOOD }),
+    J('failed', 6, '[Implement] impl:f', 6, { reason: 'its worker did not start: x', attempts: 4, run: 'run_fake1' }),
+    J('blocked', 1, '[Implement] impl:a', 6, { dispatchId: 'ctx_fake1', terminal: 'term_fake1', waiting: 'Which branch?' }),
+  )
+  writeFileSync(join(stateDir, 'runner.pid'), String(process.pid))
+  writeFileSync(join(stateDir, 'runner.log'), `${at(6)} >> [Implement] impl:e: result received\n`)
+  const registry = registryIn()
+  const writer = runRegistry(registry, { now: () => 0 })
+  writer.armed({ runId: 'run_fake1', project: 'C:/repos/controlayer', runDir: stateDir, spec: 'implement-spec-783' })
+  writer.reclaimed({ runId: 'run_fake1', agent: 'run_fake1-5' })
+  clock.t = 7 * MIN
+  const view = await treeIn(mode, { stateDir, orca, clock, transcripts: sessionTranscripts({ home: tmp(), env: {} }), registry, unpushed: orca.unpushedOf })
+  const agent = (n) => view.model.phases.flatMap((p) => p.agents).find((a) => a.n === n)
+  assert.deepEqual([1, 2, 3, 4, 5, 6].map((n) => agent(n).state), ['blocked', 'starting', 'starting', 'running', 'reclaimed', 'failed'])
+  assert.deepEqual([agent(1).waiting, agent(1).reason], ['Which branch?', 'blocked on a human: Which branch?'])
+  assert.deepEqual([agent(3).reason, agent(3).nextAt], ['its worker did not start: orca terminal create: runtime_unavailable', at(2.5)])
+  assert.deepEqual([agent(4).waiting, agent(4).reason], [null, null], 'answered: no longer blocked')
+  assert.equal(agent(5).reclaimed, true)
+  assert.deepEqual(view.model.header.counts, { blocked: 1, starting: 2, running: 1, continued: 0, stuck: 0, failed: 1, queued: 0, done: 0, reclaimed: 1 })
+  const [implement] = view.model.phases
+  assert.equal(implement.folded, false)
+  assert.equal(view.model.pane.kind, 'phase')
+  assert.deepEqual(view.model.pane.problems.map((p) => [p.agent.n, p.reason]), [[1, 'blocked on a human: Which branch?'], [6, 'its worker did not start: x']])
+  assert.equal(view.model.alert, 'BLOCKED ON A HUMAN: [Implement] impl:a in tab term_fake1 waits on Which branch?')
+
+  // Drawn: its glyph and word, counted in the header, and on the flash line
+  // over the log's latest event.
+  const lines = draw(view.model, { width: 140, height: 30, flash: null, alert: view.model.alert }).lines.map(strip)
+  assert.match(lines[1], /^ ! 1 blocked {2}◌ 2 starting {2}● 1 running {2}✓? ?.*✗ 1 failed {2}○ 1 reclaimed/)
+  assert.match(lines.at(-2), /BLOCKED ON A HUMAN: \[Implement\] impl:a in tab term_fake1 waits on Which branch\?/)
+  assert.match(lines[4], /!1 ◌2 ●1 ✗1 ○1/)
+  const rows = draw(view.model, { width: 140, height: 30 }).lines.map(strip)
+  assert.ok(rows.some((l) => /^ +1 +impl:a +! blocked /.test(l)), rows.join('\n'))
+  assert.ok(rows.some((l) => /^ +2 +impl:b +◌ starting /.test(l)), rows.join('\n'))
+  assert.ok(rows.some((l) => /^ +5 +impl:e +○ reclaimed /.test(l)), rows.join('\n'))
+
+  // Answered: the alert goes, and the log's latest event is back.
+  put(J('unblocked', 1, '[Implement] impl:a', 7, { dispatchId: 'ctx_fake1' }))
+  await view.refresh()
+  assert.deepEqual([agent(1).state, view.model.alert, view.model.latest], ['running', null, '>> [Implement] impl:e: result received'])
 })
 
 viewTest('run view: context size, its band and tokens come from each agent\'s Claude or pi transcript', async (mode) => {

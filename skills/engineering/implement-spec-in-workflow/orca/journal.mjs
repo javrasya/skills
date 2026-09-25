@@ -11,11 +11,18 @@ import { agentDir } from './lifecycle.mjs'
 // worker was dispatched into. A failed entry may also carry `retained`, the
 // worktree it left, `run`, once the Run existed, `continuations`, how often its
 // session was continued, and `workerOut: true` when its worker is still out
-// for the next resume to take up; a replayed result carries `replayed: true`,
+// for the next resume to take up, and `workerLeft: true` when its worker's
+// process was left running (blocked on a human, or stalled past the
+// continuation cap), which only a reclaim that stops it first removes; a
+// replayed result carries `replayed: true`,
 // and `origin` when the call it replays launched a worker. A worker's `dir` is
-// its agent's files, relative to the state dir. retry is a new attempt of a
-// call's start or of its Run's creation, with why the last one failed;
-// warning, something that went wrong without failing the call. A nudge's
+// its agent's files, relative to the state dir. starting: a call has its live
+// slot and its worker is being started. retry: a call's start, or its Run's
+// creation, failed and is tried again: journaled before the backoff's wait,
+// with why the last attempt failed and `nextAt`, when the next one begins.
+// blocked: its worker waits on a human, with what it waits on (`waiting`);
+// unblocked: it no longer does. warning: something that went wrong without
+// failing the call. A nudge's
 // `attempt` is its number since the session started or was last continued; a
 // continuation's is its number, up to the cap. `origin` names an agent across
 // resumes: the n of the call that started its worker, which its `<runId>-<n>`
@@ -37,13 +44,16 @@ import { agentDir } from './lifecycle.mjs'
 // number that Run has used. queued: a call waiting for a live slot.
 export const JOURNAL_ENTRIES = Object.freeze({
   queued: ['at', 'key', 'n', 'title'],
+  starting: ['at', 'key', 'n', 'title', 'run'],
   started: ['at', 'key', 'n', 'title', 'run', 'dispatchId', 'harness', 'sessionId', 'worktree', 'terminal', 'dir'],
   result: ['at', 'key', 'n', 'title', 'result'],
   failed: ['at', 'key', 'n', 'title', 'reason', 'attempts'],
   retained: ['at', 'retained'],
-  retry: ['at', 'key', 'n', 'title', 'attempt', 'reason'],
+  retry: ['at', 'key', 'n', 'title', 'attempt', 'reason', 'nextAt'],
   warning: ['at', 'key', 'n', 'title', 'reason'],
   nudge: ['at', 'key', 'n', 'title', 'dispatchId', 'reason', 'attempt'],
+  blocked: ['at', 'key', 'n', 'title', 'dispatchId', 'terminal', 'waiting'],
+  unblocked: ['at', 'key', 'n', 'title', 'dispatchId'],
   continued: ['at', 'key', 'n', 'title', 'dispatchId', 'sessionId', 'terminal', 'reason', 'attempt', 'reopened'],
   reattached: ['at', 'key', 'n', 'title', 'run', 'dispatchId', 'harness', 'sessionId', 'terminal', 'worktree', 'dir', 'origin'],
   outstanding: ['at', 'key', 'n', 'title', 'run', 'dispatchId', 'harness', 'sessionId', 'terminal', 'worktree', 'dir', 'origin'],
@@ -105,16 +115,19 @@ export const readJournal = (path) => foldJournal(journalLines(path))
 // agents, every agent the journal names, one per `origin`, by the n of its
 // latest line: { origin, n, title, state, reason, continuations, replayed,
 // launched, runId, dispatchId, harness, sessionId, worktree, terminal, from,
-// to }. The journal of a resumed run holds every agent of its Run, the ones
+// to, waiting, nextAt, workerLeft }. The journal of a resumed run holds every agent of its Run, the ones
 // earlier runners made included: a resume carries each forward (`earlier`,
 // `outstanding`), and a line of the call that takes one up again
 // (`reattached`, or a replayed `result` with its `origin`) is that same agent,
 // never another. A line with no origin is its call's agent, or, for a worker
 // line, the agent whose dispatch it names. state is its latest lifecycle
-// entry's: queued, running once started, carried or taken up (or retrying its
-// start), stuck once nudged, continued after a continuation, done or failed
-// once settled. A nudge journals no answer, so an agent stays stuck until its
-// next continuation or settlement. launched: a worker was started for it,
+// entry's: queued, starting once it has its slot or while its start is
+// retried (reason: why the last attempt failed; nextAt: when the next begins),
+// running once started, carried or taken up, blocked while it waits on a human
+// (waiting: on what), stuck once nudged, continued after a continuation, done
+// or failed once settled. A nudge journals no answer, so an agent stays stuck
+// until its next continuation or settlement; blocked lasts until unblocked or
+// settled. workerLeft: it failed with its worker's process left running. launched: a worker was started for it,
 // whatever its dispatch now reads. from and to are when it began and settled
 // here, or null: a replayed result or a carried agent launched nothing here.
 export function foldJournal(entries) {
@@ -145,6 +158,7 @@ export function foldJournal(entries) {
       a = {
         origin: id, n: e.n, title: null, state: 'queued', continuations: 0, reason: null, replayed: false, launched: false,
         runId: null, dispatchId: null, harness: null, sessionId: null, worktree: null, terminal: null, from: null, to: null,
+        waiting: null, nextAt: null, workerLeft: false,
       }
       agents.set(id, a)
     }
@@ -152,9 +166,13 @@ export function foldJournal(entries) {
     if (typeof e.title === 'string') a.title = e.title
     const at = timeOf(e)
     switch (e.type) {
+      case 'starting':
+        a.from ??= at
+        Object.assign(a, { state: 'starting', runId: e.run ?? a.runId })
+        break
       case 'retry':
         a.from ??= at
-        a.state = 'running'
+        Object.assign(a, { state: 'starting', reason: e.reason ?? null, nextAt: e.nextAt ?? null })
         break
       case 'started':
       case 'reattached':
@@ -162,14 +180,14 @@ export function foldJournal(entries) {
         if (e.type !== 'outstanding') a.from ??= at
         const continuations = e.continuations ?? a.continuations
         Object.assign(a, {
-          state: continuations ? 'continued' : 'running', continuations, launched: true, runId: e.run ?? a.runId, dispatchId: e.dispatchId ?? a.dispatchId,
+          state: continuations ? 'continued' : 'running', continuations, launched: true, reason: null, waiting: null, nextAt: null, runId: e.run ?? a.runId, dispatchId: e.dispatchId ?? a.dispatchId,
           harness: e.harness ?? a.harness, sessionId: e.sessionId ?? a.sessionId, worktree: e.worktree ?? a.worktree, terminal: e.terminal ?? a.terminal,
         })
         break
       }
       case 'earlier':
         Object.assign(a, {
-          state: typeof e.state === 'string' ? e.state : a.state, reason: e.reason ?? null, continuations: e.continuations ?? a.continuations,
+          state: typeof e.state === 'string' ? e.state : a.state, reason: e.reason ?? null, continuations: e.continuations ?? a.continuations, workerLeft: e.workerLeft === true || a.workerLeft,
           launched: a.launched || !!e.dispatchId, runId: e.run ?? a.runId, dispatchId: e.dispatchId ?? a.dispatchId, harness: e.harness ?? a.harness,
           sessionId: e.sessionId ?? a.sessionId, worktree: e.worktree ?? a.worktree, terminal: e.terminal ?? a.terminal,
         })
@@ -177,21 +195,29 @@ export function foldJournal(entries) {
       case 'nudge':
         if (a.state === 'running' || a.state === 'continued' || a.state === 'stuck') Object.assign(a, { state: 'stuck', reason: e.reason ?? null })
         break
+      case 'blocked':
+        if (a.state === 'running' || a.state === 'continued' || a.state === 'stuck') {
+          Object.assign(a, { state: 'blocked', waiting: e.waiting ?? null, reason: `blocked on a human: ${e.waiting ?? 'no question given'}`, terminal: e.terminal ?? a.terminal })
+        }
+        break
+      case 'unblocked':
+        if (a.state === 'blocked') Object.assign(a, { state: a.continuations ? 'continued' : 'running', waiting: null, reason: null })
+        break
       case 'continued':
         // A continued session may run under a new dispatch in a new tab: that
         // is the worker a reclaim releases and the tab it closes.
         Object.assign(a, {
-          state: 'continued', reason: null, continuations: e.attempt ?? a.continuations + 1,
+          state: 'continued', reason: null, waiting: null, continuations: e.attempt ?? a.continuations + 1,
           dispatchId: e.dispatchId ?? a.dispatchId, terminal: e.terminal ?? a.terminal, sessionId: e.sessionId ?? a.sessionId,
         })
         break
       case 'result':
-        Object.assign(a, { state: 'done', reason: null, to: at, replayed: e.replayed === true })
+        Object.assign(a, { state: 'done', reason: null, waiting: null, to: at, replayed: e.replayed === true })
         break
       case 'failed':
         a.from ??= at
         Object.assign(a, {
-          state: 'failed', reason: e.reason ?? null, to: at, runId: a.runId ?? e.run ?? null, worktree: a.worktree ?? e.retained?.path ?? null,
+          state: 'failed', reason: e.reason ?? null, waiting: null, workerLeft: e.workerLeft === true, to: at, runId: a.runId ?? e.run ?? null, worktree: a.worktree ?? e.retained?.path ?? null,
           continuations: e.continuations ?? a.continuations,
         })
         break

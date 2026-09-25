@@ -17,15 +17,16 @@
 // and takes up each worker the last run left out: watched again if Orca still
 // shows it live, its session continued if it died. When the script settles the
 // runner writes summary.json to the state dir: {runner, ok, result | error},
-// and on a failure also worktrees_kept, the worktrees it retained. Every line
+// and on a failure also worktrees_kept, the worktrees it retained because
+// their agent died or never started. Every line
 // it prints is also appended, timestamped, to runner.log there.
 // Launched in a terminal, it gives its tab to the run view (run-view/view.mjs)
 // and writes to runner.log alone while the view lives (attachView).
 //
 // Nothing is reclaimed during a run (ADR-0012): no worker is released, no tab
 // closed, no worktree removed. Only after summary.json is written does the
-// runner ask the operator what to reclaim (reclaim.mjs); it exits once
-// answered.
+// runner ask the operator what to reclaim (reclaim.mjs); once answered it
+// writes what was reclaimed and what kept to reclaim.json beside it, and exits.
 //
 // The run itself is recorded in the machine-wide run registry (registry.mjs,
 // ~/.claude/orca-runs.jsonl): `armed` and the runner's terminal when the Run
@@ -189,8 +190,8 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   const stillOut = new Set(outstanding.map((w) => w.origin))
   for (const a of earlier.agents) {
     if (!madeByRun(a) || stillOut.has(a.origin)) continue
-    const { n, title, runId: run, dispatchId, harness, sessionId, terminal, worktree, origin, state, reason, continuations } = a
-    journal({ type: 'earlier', n, title, run, dispatchId, harness, sessionId, terminal, worktree, origin, state, reason, ...(continuations && { continuations }) })
+    const { n, title, runId: run, dispatchId, harness, sessionId, terminal, worktree, origin, state, reason, continuations, workerLeft } = a
+    journal({ type: 'earlier', n, title, run, dispatchId, harness, sessionId, terminal, worktree, origin, state, reason, ...(continuations && { continuations }), ...(workerLeft && { workerLeft }) })
   }
   for (const { key, n, title, run, dispatchId, harness, sessionId, terminal, worktree, dir, origin, continuations } of outstanding) {
     journal({ type: 'outstanding', key, n, title, run, dispatchId, harness, sessionId, terminal, worktree, dir, origin, ...(continuations && { continuations }) })
@@ -273,11 +274,14 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
 }
 
 // summary.json for a run that threw: the error, and every worktree the runner
-// retained, since the arming session reads this file and not the log.
+// retained because its agent died or never started, since the arming session
+// reads this file and not the log. What the operator then keeps of every
+// agent is reclaim.json's (finish).
 export const failureSummary = (e) => ({ runner: 'orca', ok: false, error: e?.stack ?? String(e), worktrees_kept: Array.isArray(e?.worktrees_kept) ? e.worktrees_kept : [] })
 
-// The run's result names each retained worktree beside the ones a reclaimer
-// kept, in the same {path, reason} shape. A result that is not an object has
+// The run's result names each worktree retained because its agent died or
+// never started beside the ones a reclaimer kept, in the same {path, reason}
+// shape. A result that is not an object has
 // nowhere to hold them; the log still names them.
 function withRetained(result, retained) {
   if (!retained.length || !result || typeof result !== 'object' || Array.isArray(result)) return result
@@ -292,7 +296,12 @@ function withRetained(result, retained) {
 // runners of it made included, except those the registry already records
 // reclaimed. `ask(question)` resolves to the operator's answer, or null once
 // none can come; `registry` is a runRegistry writer, or null; `unpushed(path)`
-// counts a worktree's unpushed commits.
+// counts a worktree's unpushed commits. Once the prompt is answered (or there
+// was none to ask), reclaim.json beside summary.json records the outcome:
+//   { choice, answered, reclaimed: [agent], kept: [agent + reason] }
+// with choice null and both lists empty when no agent was left to ask about,
+// and each agent as { name, title, worktree, terminal }. It is the prompt's
+// answer only: a later reclaim from the run view is the registry's.
 export async function finish({ stateDir, summary, orca, ask, out, registry = null, unpushed = gitUnpushed }) {
   mkdirSync(stateDir, { recursive: true })
   writeFileSync(join(stateDir, 'summary.json'), JSON.stringify(summary, null, 2))
@@ -311,7 +320,20 @@ export async function finish({ stateDir, summary, orca, ask, out, registry = nul
       out(`!! run registry: could not read what is already reclaimed: ${e?.message ?? e}`)
     }
   }
-  return endOfRunPrompt({ agents, ask, out, orca, unpushed, registry })
+  const outcome = await endOfRunPrompt({ agents, ask, out, orca, unpushed, registry })
+  const named = ({ name, title, worktree, terminal }) => ({ name, title, worktree: worktree ?? null, terminal: terminal ?? null })
+  const record = {
+    choice: outcome?.choice ?? null,
+    answered: outcome?.answered ?? false,
+    reclaimed: (outcome?.reclaimed ?? []).map(named),
+    kept: (outcome?.kept ?? []).map(({ agent, reason }) => ({ ...named(agent), reason })),
+  }
+  try {
+    writeFileSync(join(stateDir, 'reclaim.json'), JSON.stringify(record, null, 2))
+  } catch (e) {
+    out(`!! could not write reclaim.json: ${e?.message ?? e}`)
+  }
+  return outcome
 }
 
 // The run view attached to the runner's tab (D5 on #43): a child process that
@@ -487,6 +509,7 @@ if (isMain) {
   // step 4); a stale one from an earlier run must never pass for this run's.
   // The session clears it before launch too; this is defence in depth.
   rmSync(join(dir, 'summary.json'), { force: true })
+  rmSync(join(dir, 'reclaim.json'), { force: true })
   // runner.pid lets the arming session tell a runner that died before writing
   // summary.json (killed, OOM) from one still running: the tab outlives the
   // runner, so the tab cannot say. Written before anything else can fail.

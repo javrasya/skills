@@ -2,7 +2,9 @@
 // worktree, for one agent or a whole run. Nothing is reclaimed while a run
 // runs; the runner's end-of-run prompt and the run view both reclaim through
 // here, so both keep the same rules:
-//   - an agent still live is refused;
+//   - an agent still live is refused, except one that failed and was kept
+//     with its worker left running: that one only with `stop`, a reclaim the
+//     operator confirms, which stops its worker first;
 //   - a worktree holding unpushed commits is removed only when forced;
 //   - a worktree is the run's only by its `<runId>-<n>` name — any other is
 //     the operator's own, and never touched;
@@ -29,7 +31,7 @@ export function gitUnpushed(path) {
 // The agents a run's journal names, by the fold every reader of it shares
 // (journal.mjs), in call order:
 //   { runId, n, origin, name, title, launched, dispatchId, terminal, worktree,
-//     harness, state, reason }
+//     harness, state, reason, workerLeft }
 // Every agent its Run holds: a resumed run's journal carries forward the ones
 // earlier runners of that Run made, finished, failed or still out, so a
 // resume renames none and drops none. name is its worktree's name, the
@@ -38,13 +40,15 @@ export function gitUnpushed(path) {
 // what the run registry records a reclaim under. launched: a worker was started
 // for it. state is 'ok' for a call that returned a value, 'failed' for one
 // that returned null (dead, or settled with no valid result), 'running' for
-// one with no settlement journaled. A call whose worker never started is an
+// one with no settlement journaled. workerLeft: it failed with its worker's
+// process left running (lifecycle.mjs). A call whose worker never started is an
 // agent only if Orca made it a worktree, and then has no dispatch or tab. A
 // call replayed from the journal is the agent that first returned its value.
 export function agentsOf(journalPath) {
   return readJournal(journalPath).agents.filter(madeByRun).map((a) => ({
     runId: a.runId, n: a.n, origin: a.origin, name: agentName(a), title: a.title, launched: a.launched, dispatchId: a.dispatchId,
     terminal: a.terminal, worktree: a.worktree, harness: a.harness, state: a.state === 'done' ? 'ok' : a.state === 'failed' ? 'failed' : 'running', reason: a.reason,
+    workerLeft: a.workerLeft === true,
   }))
 }
 
@@ -55,12 +59,20 @@ export const ownWorktree = (a) => (a.worktree && basename(a.worktree).startsWith
 // The name the run registry records an agent's reclaim under.
 export const agentName = (a) => (ownWorktree(a) ? basename(ownWorktree(a)) : `${a.runId}-${a.origin ?? a.n}`)
 
-// Reclaims one agent: { reclaimed: true, notes } or { reclaimed: false, reason }.
-// Every check runs before anything is changed, so a refused agent is left
-// exactly as it was. `open`: the terminal list's handles, when the caller has
-// already read it for a batch.
-export async function reclaimAgent(agent, { orca, unpushed = gitUnpushed, force = false, open = null }) {
+// Whether an agent failed and was kept with its worker's process left
+// running: Orca still shows that worker live, so only `stop` reclaims it.
+export const keptRunning = (agent) => agent.state === 'failed' && agent.workerLeft === true
+
+// Reclaims one agent: { reclaimed: true, notes } or { reclaimed: false, reason },
+// with `stoppable: true` when the agent failed and was kept with its worker
+// still running, so a reclaim with `stop` would take it, and `unpushed` when
+// its worktree holds commits only `force` removes. Every check runs before
+// anything is changed, so a refused agent is left exactly as it was; `stop`
+// then stops that worker before anything else. `open`: the terminal list's
+// handles, when the caller has already read it for a batch.
+export async function reclaimAgent(agent, { orca, unpushed = gitUnpushed, force = false, stop = false, open = null }) {
   const refuse = (reason) => ({ reclaimed: false, reason })
+  let stopFirst = false
   // A missing dispatch is never proof its worker is not live: only an agent
   // the journal shows no worker ever started for skips the check. A failed
   // agent kept with its process left running is exactly the one to refuse.
@@ -72,7 +84,16 @@ export async function reclaimAgent(agent, { orca, unpushed = gitUnpushed, force 
     } catch (e) {
       return refuse(`could not tell whether it is live: ${e?.message ?? e}`)
     }
-    if (!s.settled && !s.gone && !s.exited) return refuse('it is still live')
+    if (!s.settled && !s.gone && !s.exited) {
+      // Never offered for a worker still at work: only for one the journal
+      // records failed and kept running.
+      if (!keptRunning(agent)) return refuse('it is still live')
+      if (!stop) {
+        const tab = agent.terminal ? `close its tab ${agent.terminal} in Orca` : 'close its tab in Orca'
+        return { ...refuse(`it failed and was kept with its worker still running, so Orca shows it live: only a reclaim that stops that worker first removes it (r, then f, in the run view), or ${tab} and reclaim it again`), stoppable: true }
+      }
+      stopFirst = true
+    }
   }
   const worktree = ownWorktree(agent)
   if (worktree && !force) {
@@ -93,6 +114,13 @@ export async function reclaimAgent(agent, { orca, unpushed = gitUnpushed, force 
     }
   }
 
+  if (stopFirst) {
+    try {
+      await orca.workerStop({ dispatch: agent.dispatchId })
+    } catch (e) {
+      return refuse(`its worker could not be stopped: ${e?.message ?? e}`)
+    }
+  }
   const notes = []
   if (agent.dispatchId) {
     try {
@@ -192,7 +220,8 @@ export function parseChoice(answer) {
 // can be none), reclaims, and names every agent kept and why. title and lines
 // are what was printed before the question, for a caller that shows the
 // prompt somewhere else than the log: the run view draws them as its modal.
-// No agents, no prompt.
+// Returns { choice, answered, reclaimed, kept }; answered is false when no
+// answer could come. No agents, no prompt: null.
 export async function endOfRunPrompt({ agents, ask, out, ...rest }) {
   if (!agents.length) return null
   const byDefault = keepFor('default')
@@ -220,6 +249,7 @@ export async function endOfRunPrompt({ agents, ask, out, ...rest }) {
   }
   out(`   ${answer === null ? 'no answer: keeping every agent' : `chosen: ${choice}`}`)
   const outcome = await reclaimRun(agents, { ...rest, out, keep: keepFor(choice) })
+  outcome.answered = answer !== null
   for (const a of outcome.reclaimed) out(`<< reclaimed ${a.title}`)
   for (const { agent, reason } of outcome.kept) out(`!! kept ${agent.title}${agent.worktree ? ` in ${agent.worktree}` : ''}${agent.terminal ? `, tab ${agent.terminal}` : ''}: ${reason}`)
   return { choice, ...outcome }

@@ -30,10 +30,11 @@ function fit(s, w) {
   return out + ' '.repeat(Math.max(0, w - n)) + `${E}0m`
 }
 
-const GLYPH = { queued: '·', running: '●', stuck: '◐', continued: '↻', done: '✓', failed: '✗' }
-const COLOUR = { queued: '90', running: '36', stuck: '33', continued: '35', done: '32', failed: '31' }
-// The design's order for the header counts; a phase row lists its mix in STATES order.
-const COUNTED = ['running', 'continued', 'stuck', 'queued', 'done', 'failed']
+const GLYPH = { queued: '·', starting: '◌', running: '●', blocked: '!', stuck: '◐', continued: '↻', done: '✓', failed: '✗', reclaimed: '○' }
+const COLOUR = { queued: '90', starting: '34', running: '36', blocked: '1;91', stuck: '33', continued: '35', done: '32', failed: '31', reclaimed: '2' }
+// The design's order for the header counts, blocked first; a phase row lists
+// its mix in STATES order.
+const COUNTED = ['blocked', 'starting', 'running', 'continued', 'stuck', 'queued', 'done', 'failed', 'reclaimed']
 const BAND = { green: '32', yellow: '33', red: '31' }
 const BAR = 10
 const BAR_FULL = 500_000
@@ -84,9 +85,9 @@ const shortHandle = (h) => h.replace(/^(term_[0-9a-f]{8})-[-0-9a-f]+$/, '$1')
 function agentPane(a) {
   const tab = a.terminal ? `${cyan(shortHandle(a.terminal))}${a.tabOpen === true ? grey(' (open)') : a.tabOpen === false ? grey(' (closed)') : ''}` : grey('—')
   return [
-    ` ${bold(a.title ?? `[${a.phase}] ${a.label}`)}  ${stateOf(a)}  ctx ${a.context == null ? '—' : banded(a, size(a.context))}  total ${grey(size(a.tokens))}  ${duration(a.elapsedMs)}${a.reclaimed ? grey('  reclaimed') : ''}`,
+    ` ${bold(a.title ?? `[${a.phase}] ${a.label}`)}  ${stateOf(a)}  ctx ${a.context == null ? '—' : banded(a, size(a.context))}  total ${grey(size(a.tokens))}  ${duration(a.elapsedMs)}`,
     ` worktree ${a.worktree ? cyan(nameOf(a.worktree)) : grey('—')}   tab ${tab}   session ${grey(a.sessionId ?? '—')}`,
-    a.reason ? ` ${c(a.state === 'failed' ? '31' : '33', 'reason')} ${a.reason}` : '',
+    a.reason ? ` ${c(a.state === 'failed' || a.state === 'blocked' ? '31' : '33', 'reason')} ${a.reason}${a.state === 'starting' && a.nextAt ? grey(`; next attempt at ${a.nextAt.slice(11, 19)}`) : ''}` : '',
     grey(` transcript ${a.transcript ?? '—'}`),
   ]
 }
@@ -105,11 +106,12 @@ const HELP = ' ↑↓ move · ←→ / click a phase to fold · ⏎/click focus 
 const TOP = 4
 
 // model: runView's model. flash: the flash line's text (an action's outcome,
-// or the latest event). modal: { title, lines } drawn over the middle. help:
+// or the latest event); alert: a blocked agent's line, drawn loud in its place
+// when there is no flash. modal: { title, lines } drawn over the middle. help:
 // the key line, for a tree the standalone view opened.
 // Returns the screen's lines, height of them, and rowAt(y), the index in
 // model.rows of the row drawn on terminal line y (1-based), or null.
-export function draw(model, { width: W = 140, height: H = 40, flash = null, modal = null, help = HELP } = {}) {
+export function draw(model, { width: W = 140, height: H = 40, flash = null, alert = null, modal = null, help = HELP } = {}) {
   const rows = model?.rows ?? []
   const selected = model?.selected ?? 0
   const body = Math.max(1, H - TOP - 1 - PANE - 2)
@@ -125,7 +127,7 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, moda
   const pane = model?.pane
   const paneLines = !pane ? [grey(' no agent has started yet')] : pane.kind === 'agent' ? agentPane(pane.agent) : phasePane(pane.phase, pane.problems)
   for (let i = 0; i < PANE; i++) lines.push(fit(paneLines[i] ?? '', W))
-  lines.push(fit(flash ? ' ' + c('1;36', flash) : '', W))
+  lines.push(fit(flash ? ' ' + c('1;36', flash) : alert ? ' ' + c(COLOUR.blocked, alert) : '', W))
   lines.push(fit(grey(help), W))
 
   if (modal) {

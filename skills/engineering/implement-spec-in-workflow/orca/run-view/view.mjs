@@ -113,7 +113,9 @@ let rowAt = () => null
 function render() {
   const t = tree()
   const size = { width: term.width, height: term.height }
-  const screen = t ? draw(t.model, { ...size, flash: flash ?? t.model?.latest, modal, ...(runs && { help: TREE_HELP }) }) : drawRuns(runs.model, { ...size, flash: flash ?? runs.model?.message })
+  // A blocked agent's alert stays on the flash line until it is answered: only
+  // an action's own outcome, until the next key, goes over it.
+  const screen = t ? draw(t.model, { ...size, flash: flash ?? (t.model?.alert ? null : t.model?.latest), alert: t.model?.alert, modal, ...(runs && { help: TREE_HELP }) }) : drawRuns(runs.model, { ...size, flash: flash ?? runs.model?.message })
   rowAt = screen.rowAt
   process.stdout.write('\x1b[H' + screen.lines.join('\r\n'))
 }
@@ -141,15 +143,35 @@ const said = (r) => {
 // Enter, a and n are the prompt's answers, as parseChoice reads them; every
 // other key leaves it open.
 const ANSWERS = { ENTER: '', a: 'a', n: 'n' }
+
+// The confirmation a refused reclaim asks for, or null: `f` stops the worker
+// of an agent kept running when it failed (stop), or removes a worktree that
+// holds unpushed commits (force). `confirmed` is what `f` already confirmed
+// for this agent, so a stopped agent whose worktree is then refused for its
+// commits asks again, for that.
+function confirmation(r, t, confirmed = {}) {
+  if (!r?.agent || !t || !r.reclaim) return null
+  const about = { n: r.agent.n, in: t, title: `Reclaim ${r.agent.title}?` }
+  if (r.reclaim.stoppable && !confirmed.stop) {
+    return { ...about, confirm: { ...confirmed, stop: true }, lines: [r.reclaim.reason, '', 'f = stop its worker, then reclaim it · any other key cancels'] }
+  }
+  if (r.reclaim.unpushed > 0 && !confirmed.force) {
+    return { ...about, confirm: { ...confirmed, force: true }, lines: [r.reclaim.reason, '', 'f = force the reclaim, and those commits are lost · any other key cancels'] }
+  }
+  return null
+}
 term.on('key', (name) => {
   if (name === 'CTRL_C') return quit()
-  // `f` forces the reclaim of the agent the modal names, the one `r` was
+  // `f` confirms the reclaim of the agent the modal names, the one `r` was
   // refused for, wherever the selection has moved since, in the tree it was
   // refused in.
-  if (modal?.force) {
-    const { n, in: t } = modal
+  if (modal?.confirm) {
+    const { n, in: t, confirm } = modal
     modal = null
-    return act(async () => (name === 'f' ? said(await t.reclaim({ n, force: true })) : (flash = 'reclaim cancelled')))
+    return act(async () => {
+      if (name !== 'f') return (flash = 'reclaim cancelled')
+      modal = confirmation(said(await t.reclaim({ n, ...confirm })), t, confirm) ?? modal
+    })
   }
   if (modal) {
     if (!(name in ANSWERS)) return
@@ -163,9 +185,7 @@ term.on('key', (name) => {
     const t = tree()
     const r = said(await top.key(name))
     if (r?.quit) return quit()
-    if (r?.reclaim?.unpushed > 0 && r.agent && t) {
-      modal = { force: true, n: r.agent.n, in: t, title: `Reclaim ${r.agent.title}?`, lines: [r.reclaim.reason, '', 'f = force the reclaim, and those commits are lost · any other key cancels'] }
-    }
+    modal = confirmation(r, t) ?? modal
   })
 })
 term.on('mouse', (name, d) => {

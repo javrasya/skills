@@ -47,7 +47,7 @@ const REPO_DIR = String.raw`__REPO_DIR__`          // main checkout
 const NOTES_DIR = String.raw`__NOTES_DIR__`        // research notes, outside the repo
 const BASE_REF = '__BASE_REF__'                    // branch the stack merges into
 const STACK_MODE = '__STACK_MODE__'                // 'native' (gh-stack + stacks API) or 'chain' (plain --base chain)
-const RUNNER = '__RUNNER__'                        // 'orca' on the Orca runner; anything else is the Workflow runner
+const RUNNER = '__RUNNER__'                        // 'orca' on the Orca runner; anything else is the Workflow runner. The one line the two renderings differ in
 // The project's mechanical checks — format, lint, test — one command per line,
 // confirmed by the user before launch and saved in <notes-dir>/validation.md.
 // Empty is honest: readiness then reduces to "the tests you ran are green".
