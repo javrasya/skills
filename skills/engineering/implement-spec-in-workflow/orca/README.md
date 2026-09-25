@@ -182,7 +182,7 @@ The script must reach the Workflow tool with LF line endings. The tool refuses a
 
 **For spec #43 the pass ran once, in #53, rather than per ticket** (decision D1 on #43). Its other tickets relied on the offline tests alone, and #53 ran the pass once the reliability work (#46, #47, #49, #50) had landed. Every other change still gates on its own pass.
 
-Last pass: 2026-09-25 (#53), Orca 1.4.209 and Claude Code 2.1.282 on Windows 11, with the runner as of #53. **The Orca runner holds; the Workflow runner is still to run.**
+Last pass: 2026-09-25 (#53), Orca 1.4.209 and Claude Code 2.1.282 on Windows 11, with the runner as of #53. **The contract holds under both runners, fresh and resumed.**
 
 - **Orca runner, fresh and resumed from a new terminal:** each returned the Orca object above exactly, with `failures: []` (Run `run_65b013436b27`: one fresh run and two resumes, each from its own new terminal):
   - `contract:continue` was killed once in its wait; the runner logged `its terminal is gone; continuing session … in a new terminal`, and the continued agent returned `{done: true}` without waiting again. `contract:kill` was killed four times, each continued session only once it had started the wait again, and failed at `the cap of 3`.
@@ -190,7 +190,10 @@ Last pass: 2026-09-25 (#53), Orca 1.4.209 and Claude Code 2.1.282 on Windows 11,
   - Each resume took the Run over from its new terminal (a further `run` line with the same Run id and the new terminal), replayed the six `parallel` agents and `contract:continue`, and ran `contract:kill` live.
 - **The first pass, and its fix:** an earlier pass that day, with the runner as of #50, returned `continued: null`. About 5 seconds after a worker's tab closes, Orca fails its dispatch itself (`dispatch.status: failed`, `stage: process_exited`, the terminal `orphaned`), and the runner read that as settled without a result, so it never continued the session, and `contract:kill` died at its first kill. `orca-cli.mjs` now reads a failed dispatch on an orphaned terminal as gone, and the fake Orca fails a closed tab's dispatch as real Orca does. A fresh run on that fix (Run `run_638e401fe2d7`) returned the Orca object exactly too; its resume killed `contract:kill` too late and got `{done: true}`, so it was run again as above.
 - **Release and retain:** nothing was released during any run. After the fresh run and both resumes, each prompt answered `n`, all 20 dispatches of the Run were `terminalState: retained` with `releaseState: not_requested`: 7 `completed`, and 13 `failed`, one for each tab closed, which Orca failed on its own. Both child worktrees were still there. Each resume's prompt named only `contract:kill`, the one agent it ran live.
-- **Workflow runner, fresh and resumed:** not run in #53. The pass was driven by an agent, and Claude Code asks the user to confirm the prompt, which the agent does not answer on the user's behalf. Both Workflow runs are still to do, by hand.
+- **Workflow runner, fresh and resumed:** each returned the Workflow object above exactly, with `failures: []` (run `wf_d37077df-c47`, Claude Code 2.1.282, the prompt above passed as `claude "<prompt>"`'s argument in an Orca terminal, which started it without asking for confirmation):
+  - On the fresh run the six `parallel` agents returned in under 10 seconds. `contract:continue` and then `contract:kill` were each stopped with `x` in `/workflows` once in their wait, showed as `skipped`, and were journaled `failed`, so `continued` and `killed` came back `null`.
+  - The resume kept the same runId and appended to the same journal: the six `parallel` agents logged no new `started` and were replayed (no tokens or time in `/workflows`), and `contract:continue` and `contract:kill` each started live again and were stopped the same way. The run record at `workflows/wf_d37077df-c47.json` holds the resume's result, which overwrote the fresh one; both equalled the object.
+  - Neither run left a child worktree: the Workflow runner removed the unchanged worktrees of `contract:isolated` and `contract:retry` itself.
 
 ## A dead agent on resume
 
