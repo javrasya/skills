@@ -1,0 +1,13 @@
+{"type":"armed","runId":"run_b1","at":"2026-09-20T09:00:00.000Z","project":"C:/repos/skills","runDir":"@RUNS@/skills-43/orca-run","spec":"implement-spec-43"}
+{"type":"runner","runId":"run_b1","at":"2026-09-20T09:00:00.000Z","terminal":"term_runB1"}
+{"type":"armed","runId":"run_a1","at":"2026-09-20T10:00:00.000Z","project":"C:/repos/controlayer","runDir":"@RUNS@/controlayer-783/orca-run","spec":"implement-spec-783","script":"@RUNS@/controlayer-783/workflow.js","permissionMode":"auto"}
+{"type":"runner","runId":"run_a1","at":"2026-09-20T10:00:00.000Z","terminal":"term_runA1"}
+{"type":"ended","runId":"run_b1","at":"2026-09-20T09:40:00.000Z","outcome":"ok"}
+{"type":"reclaimed","runId":"run_b1","at":"2026-09-20T09:45:00.000Z","agent":"run_b1-1"}
+{"type":"reclaimed","runId":"run_b1","at":"2026-09-20T09:45:00.000Z"}
+{"type":"armed","runId":"run_a2","at":"2026-09-20T11:30:00.000Z","project":"C:/repos/controlayer","runDir":"@RUNS@/controlayer-790/orca-run","spec":"implement-spec-790"}
+{"type":"runner","runId":"run_a2","at":"2026-09-20T11:30:00.000Z","terminal":"term_runA2"}
+{"type":"ended","runId":"run_a1","at":"2026-09-20T11:00:00.000Z","outcome":"partial"}
+{"type":"reclaimed","runId":"run_a1","at":"2026-09-20T11:05:00.000Z","agent":"run_a1-1"}
+{"type":"ended","runId":"run_old","at":"2026-09-19T08:00:00.000Z","outcome":"ok"}
+{"type":"runner","runId":"run_a2","at":"2026-09-20T11:5

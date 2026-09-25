@@ -1,0 +1,9 @@
+{
+  "name": "orca-run-view",
+  "private": true,
+  "description": "The Orca runner's run view (ADR-0012). Its one third-party dependency is installed beside view.mjs on first use.",
+  "type": "module",
+  "dependencies": {
+    "terminal-kit": "3.1.4"
+  }
+}

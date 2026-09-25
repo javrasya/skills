@@ -434,18 +434,31 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('H5: finalize is told it is the first registration, and why', /first registration/.test(finalize.prompt) && /the last failure: #11/.test(finalize.prompt), finalize.prompt.slice(0, 1500))
 }
 
-// --- scenario R: reclaim wording follows the runner --------------------------
+// --- scenario R: the Workflow runner reclaims, the Orca runner never does ---
 {
-  const reclaimed = (calls) => calls.find((c) => c.label === 'publish:#10').prompt
-  const onWorkflow = reclaimed((await run()).calls)
-  const { result, calls } = await run({}, { runner: 'orca' })
-  const onOrca = reclaimed(calls)
-  check('R: both runners hand the publisher the same exact paths', /\/wt\/impl:#10 → ticket\/10/.test(onWorkflow) && /\/wt\/impl:#10 → ticket\/10/.test(onOrca), onOrca.slice(0, 1500))
-  check('R: the Workflow runner removes with git', /`git worktree remove --force <path>`/.test(onWorkflow) && /git worktree prune/.test(onWorkflow) && !/orca worktree rm/.test(onWorkflow), '')
-  check('R: the Orca runner removes through Orca, never with git', /`orca worktree rm --worktree path:<path> --force`/.test(onOrca) && !/git worktree remove --force|git worktree prune/.test(onOrca), '')
-  check('R: an Orca agent is told its worktree is a child of the run\'s', /an Orca child worktree of this run's worktree/.test(calls.find((c) => c.label === 'impl:#10').prompt), '')
-  check('R: no Orca prompt guesses strays from harness paths', !calls.some((c) => /not in the ledger/.test(c.prompt)), '')
-  check('R: the Orca-worded run completes', result.state.startsWith('complete'), result.state)
+  const onRunner = async (runner, overrides = {}) => (await run(overrides, { runner }))
+  const publish10 = (calls) => calls.find((c) => c.label === 'publish:#10').prompt
+  const onWorkflow = await onRunner('workflow')
+  const onOrca = await onRunner('orca')
+  const wf = publish10(onWorkflow.calls)
+  const orca = publish10(onOrca.calls)
+  const reclaimCmd = /git worktree remove|git worktree prune|orca worktree rm/
+  check('R: the Workflow publisher reclaims the ticket\'s exact paths with git', /\/wt\/impl:#10 → ticket\/10/.test(wf) && /`git worktree remove --force <path>`/.test(wf) && /git worktree prune/.test(wf) && !/orca worktree rm/.test(wf), wf.slice(0, 1500))
+  check('R: the Workflow finalize reclaims what the lane did not', /\/wt\/publish-11 → ticket\/11/.test(onWorkflow.calls.find((c) => c.label === 'finalize').prompt), '')
+  check('R: no Orca prompt names a worktree to reclaim or a way to remove one', !onOrca.calls.some((c) => reclaimCmd.test(c.prompt) || / → ticket\/\d+\n/.test(c.prompt)), [...new Set(onOrca.calls.filter((c) => reclaimCmd.test(c.prompt)).map((c) => c.label))].join(' | '))
+  check('R: the Orca publisher is told to remove no worktree', /Remove no worktree/.test(orca) && /Never remove it: the operator decides at the end of the run/.test(orca), orca.slice(0, 1500))
+  check('R: an Orca agent is told its worktree is a child of the run\'s', /an Orca child worktree of this run's worktree/.test(onOrca.calls.find((c) => c.label === 'impl:#10').prompt), '')
+  check('R: no Orca prompt guesses strays from harness paths', !onOrca.calls.some((c) => /not in the ledger/.test(c.prompt)), '')
+  check('R: the Orca run completes', onOrca.result.state.startsWith('complete'), onOrca.result.state)
+  // Nothing published: the Workflow runner spends a reclaim agent, the Orca runner none.
+  const unpublished = { publish: () => ({ published: false, note: 'push rejected', worktree: '/wt/publish-10', worktrees_removed: 0, worktrees_kept: [] }) }
+  const wfNone = await onRunner('workflow', unpublished)
+  const orcaNone = await onRunner('orca', unpublished)
+  check('R: with nothing published the Workflow runner still reclaims', wfNone.calls.some((c) => c.label === 'reclaim' && /\/wt\/impl:#10 → ticket\/10/.test(c.prompt)), wfNone.calls.map((c) => c.label).join(' | '))
+  check('R: with nothing published the Orca runner starts no reclaim agent', !orcaNone.calls.some((c) => c.label === 'reclaim') && orcaNone.result.error === 'no ticket was published', orcaNone.calls.map((c) => c.label).join(' | '))
+  // One template, one rendering: the runner value is the only difference.
+  const diff = render('workflow').split('\n').filter((l, i) => l !== render('orca').split('\n')[i])
+  check('R: the rendered script differs between runners only in RUNNER', diff.length === 1 && /^const RUNNER = 'workflow'/.test(diff[0]), diff.join(' | '))
 }
 
 // --- run-wide: every prompt of every scenario ------------------------------

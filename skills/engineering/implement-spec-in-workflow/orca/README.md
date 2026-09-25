@@ -4,7 +4,14 @@ The second runner for `workflow.template.js` (ADR-0011): a Node script, launched
 
 | file | what it is |
 |---|---|
-| `runner.mjs` | the runner: the four hooks, the live cap, liveness, the resume journal |
+| `runner.mjs` | the runner: the four hooks, naming each `agent()` call, replay and the resume journal, `runner.log`, the retained worktrees |
+| `journal.mjs` | the run's journal: its entry types, and the one fold of it that the resume, reclaim and the run view all read |
+| `registry.mjs` | the machine-wide run registry: its writer and the fold that reads each run's current state |
+| `reclaim.mjs` | reclaiming an agent or a whole run, and the end-of-run prompt; the run view reuses it |
+| `lifecycle.mjs` | one live agent's life: the run's Run, the live cap, its worker's start, liveness, nudges and session continuation, its result, its board status |
+| `run-view-model.mjs` | the run view's model, with no terminal: one run's tree (header, phase and agent rows, the bottom pane), every run in the registry for standalone mode, and what each key and click does |
+| `run-view/` | the run view's terminal: `view.mjs`, the entry the runner starts in its tab and the `orca-runs` skill opens standalone, `draw.mjs`, the screen drawn from the model, and `package.json` for terminal-kit (below) |
+| `transcript.mjs` | where a Claude or pi session writes its transcript, found from its session id, how big it is, and its context size and tokens |
 | `submit.mjs` | the worker's end of `agent()`: validates the payload, records it, sends `worker_done` |
 | `orca-cli.mjs` | the one place anything talks to Orca |
 | `fake-orca.mjs` | an in-memory Orca behind the same methods, for the offline tests |
@@ -15,12 +22,107 @@ The second runner for `workflow.template.js` (ADR-0011): a Node script, launched
 node runner.mjs <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]
 ```
 
-The state dir defaults to `orca-run/` beside the rendered script, which is `<notes-dir>/orca-run` for a run the skill armed. When the runner exits it writes `summary.json` there — `{"runner": "orca", "ok": true, "result": …}`, or `"ok": false` with the `error` and `worktrees_kept`, every worktree the runner retained (below) — and that file, not the terminal's log, is what the arming session reads and reports. It is removed at start, so a file left by an earlier run never passes for this one's.
+The state dir defaults to `orca-run/` beside the rendered script, which is `<notes-dir>/orca-run` for a run the skill armed. When the runner exits it writes `summary.json` there — `{"runner": "orca", "ok": true, "result": …}`, or `"ok": false` with the `error` and `worktrees_kept`, the worktrees retained because their agent died or never started (below) — and that file, not the terminal's log, is what the arming session reads and reports. The runner writes it before the end-of-run prompt (below), so the arming session waits for the file to appear, not for the tab to exit: the tab stays open once the runner is done. Once the operator answers the prompt, the runner writes **`reclaim.json`** beside it: `{"choice", "answered", "reclaimed": [...], "kept": [...]}`, each agent as its `name` (`<runId>-<n>`), `title`, `worktree` and `terminal`, and each kept one with its `reason`. `choice` is `default`, `all` or `none`, `answered` is false when no answer could come (every agent kept), and with no agent to ask about `choice` is null and both lists are empty. It records the prompt's answer only; what the operator reclaims later, from the run view, is in the run registry.
+
+As it starts, the runner also writes **`runner.pid`**, its own process id. The tab outlives the runner, so an open tab says nothing about whether the runner is alive; a `runner.pid` naming a process that is gone, with no `summary.json`, means the runner died before writing one (killed, out of memory, crashed). The arming session checks it with `node -e "process.kill(+process.argv[1],0)" <pid>`, which sees Windows process ids.
+
+The notes dir outlives a run, so a resume or a re-arm launches over the last run's `summary.json` and `runner.pid`. The runner removes the old `summary.json` and overwrites `runner.pid`, but only once node has loaded, after the arming session's wait has begun; so the arming session deletes both itself before launching (SKILL.md step 4), and the runner's removal is defence in depth.
+
+## What a run leaves on disk
+
+Together, the journal and the log say what happened in a run, whether or not the runner's tab is still open.
+
+- **`runner.log`** holds every line the runner printed, each prefixed with an ISO timestamp, including the result or the error it ended with. Each run appends to the log, so a resumed run follows the earlier one.
+- **`journal.jsonl`** holds one JSON entry per line. Every entry has a `type` and `at`, an ISO timestamp. `JOURNAL_ENTRIES` in `journal.mjs` lists the fields each type always carries:
+
+| type | written when | fields besides `type` and `at` |
+|---|---|---|
+| `queued` | a call waits for a live slot, `MAX_LIVE` agents being live | `key`, `n`, `title` |
+| `starting` | a call has its live slot, and its worker's start begins | `key`, `n`, `title`, `run` |
+| `started` | a worker started | `key`, `n`, `title`, `dispatchId`, `harness`, `sessionId`, `worktree` (the path it runs in), `terminal` (its handle), `dir` (its agent's files, relative to the state dir, which its prompt names) |
+| `result` | a call returned a value | `key`, `n`, `title`, `result`, and `replayed: true` if it came from the journal, with `origin` when the call it replays launched a worker |
+| `failed` | a call returned null: its worker never started, died past the continuation cap, was blocked on a human too long, went over a limit, or left no valid result, or its Run could not be created | `key`, `n`, `title`, `reason` (human-readable; after retries, the last attempt's), `attempts` (starts or Run creations made), `continuations` if its session was continued, `retained` if it left a worktree, `workerOut: true` when a resume could not take its Run over and its worker is still out: the call stays unsettled, and the next resume takes that worker up, and `workerLeft: true` when its worker's process was left running (blocked on a human, or stalled past the continuation cap): only a reclaim that stops it first removes it |
+| `retained` | a resume carries forward a worktree an earlier run kept | `retained` |
+| `retry` | an attempt at a call's worker start, or at creating the Run, failed and another follows: journaled as it fails, before the backoff's wait, so the reason is on the journal through the wait | `key`, `n`, `title`, `attempt` (the next one, from 2), `reason` (why the last one failed), `nextAt` (when the next attempt begins) |
+| `warning` | something went wrong without failing the call: its worktree's display name or board status could not be set | `key`, `n`, `title`, `reason` |
+| `nudge` | the runner typed a nudge to a worker | `key`, `n`, `title`, `dispatchId`, `reason`, `attempt` (the nudge's number since the session started or was last continued) |
+| `blocked` | a worker is blocked on a human | `key`, `n`, `title`, `dispatchId`, `terminal` (the tab to answer it in), `waiting` (what Orca says it waits on) |
+| `unblocked` | a blocked worker no longer waits, before it settles | `key`, `n`, `title`, `dispatchId` |
+| `continued` | a stuck or dead session was continued, in its own terminal or in a new one in its worktree | `key`, `n`, `title`, `dispatchId` and `terminal` (the ones it now runs under), `sessionId`, `reason`, `attempt` (1 to the cap), `reopened` (true when its tab was gone) |
+| `reattached` | a resumed runner takes up a worker an earlier one started, as soon as its call is made, before the Run is taken over; a `continued` line follows if it had died | `key`, `n`, `title`, `run`, `dispatchId`, `harness`, `sessionId`, `terminal`, `worktree`, `dir` (the files its prompt named, from the line it was taken up from, however many resumes ago it started), `origin` (the `n` of the call that started its worker, which names its `<runId>-<n>` worktree), and `continuations` if its session was already continued |
+| `outstanding` | a resume carries forward, before any call, each worker the last run left out, so it stays journaled until a call takes it up | as `reattached`, with the `n` and `title` of the line it was carried from |
+| `earlier` | a resume carries forward, before any call, every other agent of the Run an earlier runner made: one that settled, or whose worker never started but left a worktree. It is no call, and replays nothing; it keeps the agent named for reclaim and the run view | `n`, `title`, `run`, `dispatchId`, `harness`, `sessionId`, `terminal`, `worktree`, `origin`, `state` and `reason` (as the journal last had them), and `continuations` if its session was continued |
+| `run` | the Run is created, or a resume takes it over; a resume also carries the last one forward first | `runId`, `terminal` (the runner's, which the Run is bound to), and on the carried-forward line `lastN`, the highest call number the Run has used |
+
+The resume, reclaim and the run view all read the journal through one fold, `foldJournal` in `journal.mjs`. A resume reads `type`, `key`, `n`, `result` and `retained`, the worker fields of `started`, `reattached`, `outstanding` and `continued`, `workerOut`, and the last `run`. A `reattached` line replaces the `outstanding` line for the same dispatch, so a call has one worker; an `outstanding` line no call took up follows every call that run made under its key. A `started` line with no dispatch or session, as in a journal from before launch fields were added, is a call with no worker out, so such a journal still resumes; a worker line with no `dir` is read as named by its own `n` and title.
+
+Reclaim and the run view read the same fold as one agent per `origin`: every agent of the Run, across every resume. A resume rewrites the journal from empty and numbers its calls on, so it carries each agent an earlier runner made forward (`earlier`, `outstanding`), and a line of the call that takes one up again (`reattached`, or a replayed `result` with its `origin`) is that same agent, shown once and reclaimed under its worktree's name, never as a new one. A worker line with no `origin`, as journaled before it carried one, is the agent whose dispatch it names.
+
+### Resume from a new terminal
+
+If the runner's tab dies, the run is paused, not lost: run the same command with `--resume` from any terminal, the old tab open or not. Orca refuses `worker-start` from any terminal but the Run's coordinator, so before it starts or continues any worker the resumed runner takes the journaled Run over with `orchestration run-use`, which binds the Run to its own terminal and fences the old one; the registry gains a `runner` line with the new terminal. It creates a Run only when the journal records none. A resume that replays every call touches no Orca at all.
+
+Each call then gets what the last run left it, matched by key and occurrence as replay is:
+- **finished**: replayed from the journal, as before; it starts no worker.
+- **its worker still out**: taken up, never started again. The runner asks Orca how it is (`workerShow`). One Orca still shows live, or that settled meanwhile, is journaled `reattached` and watched as any worker, and its result is returned when it submits, to the files its prompt named, however many resumes it stayed out through. One whose tab closed, or whose agent exited, while no runner watched is continued in its own session and worktree (the session continuation below), in a new terminal if its tab is gone.
+- **never started**: started now, with the start retry.
+
+A worker still out is never dropped from the journal: the resume carries it forward as `outstanding` before any call, and journals `reattached` as soon as its call is made, so a runner that dies during the takeover's backoff, or while the call waits for a live slot, leaves it to the next resume. If the takeover fails for good, that call returns null and the run ends partial, but its `failed` line carries `workerOut: true`, its worktree is named in `worktrees_kept`, and the next resume takes the same worker up instead of starting a second one.
+- **failed, changed or not in the journal**: runs live, and ends the replayed prefix.
+
+A call the last run left unsettled gave the script nothing to depend on, so it does not end the prefix. The resumed run numbers its calls on from the last run's, so a live call's `<runId>-<n>` child worktree never takes a name the Run already holds.
+
+### The run registry
+
+Beyond its state dir, every run is recorded in **`~/.claude/orca-runs.jsonl`** (under `CLAUDE_CONFIG_DIR` instead of `~/.claude` when that is set, as Claude's transcripts are: `claudeDir` in `transcript.mjs` resolves both), one append-only JSON-lines file for the whole machine (ADR-0012). An Orca Run knows no project, run directory, spec or outcome, and cannot be closed, so the registry holds them, keyed by Run id; it is the only list of runs, and runs from before it are not in it. Every entry has `type`, `runId` and `at`:
+
+| type | written when | carries |
+|---|---|---|
+| `armed` | the runner creates the Run, at its first live `agent()` | `project` (the runner's working directory), `runDir` (the state dir), `spec` (the script's `meta.name`), and `script` (the rendered script's path) and `permissionMode` when it has them, which a resume from the standalone view relaunches it with |
+| `runner` | a runner starts on the Run | `terminal`, the runner's own terminal |
+| `ended` | the script settles | `outcome`: `ok`, `partial` if any `agent()` returned `null`, `failed` if the script threw |
+| `reclaimed` | an agent or the whole run is reclaimed (not written by the runner) | `agent`, the worktree name `<runId>-<n>`; none for the whole run |
+
+`readRegistry()` folds these into each run's current state: `running` until `ended`, then its outcome; where its runner was last seen; and whether the run, or which of its agents, was reclaimed. A torn last line is skipped. A run with no `ended` may still be live or its runner may have died: Orca's terminal list says which. A resume takes the journaled Run over, so it records a `runner` line with its own terminal, and later `ended`, on that same run, never a second `armed`; a resume that replays every call takes nothing over and records nothing. `runScript` writes the registry only when handed a path, so the offline tests never touch the real one.
+
+The runner assigns each worker's session id. It generates the id and starts the harness with `--session-id`; both `claude` and `pi` accept that flag. Each attempt at a start gets a new one.
+
+## Timeouts and retries
+
+Every Orca call is bounded by `orcaCallMs` in `settings.mjs`, plus any wait the call asks Orca for (a `terminal wait --timeout-ms`). A call that has not answered by then is killed and fails as `call_timeout`, which is not Orca's own `timeout`: a tui-idle wait uses that one to mean busy.
+
+A worker's start that fails, timed out or otherwise, is retried after each wait in `retryBackoffMs` (30s, 2 min, 5 min), so a call gets four attempts before `agent()` returns null. Each failed attempt that another follows is journaled as `retry` before the wait, with its reason and `nextAt`, when the next attempt begins, and the null as `failed` with the last attempt's reason. Creating the Run follows the same policy; calls that are waiting on it share one creation and its retries.
+
+A start is safe to repeat. An isolated agent's child worktree is always named `<runId>-<n>`. Orca answers a second `worktree create --name` with a new `<name>-2` rather than an error, so a retry first looks its name up in `worktree list --limit 10000`. Orca pages that list at 200 rows across every repo on the machine by default, and the runner keeps every worktree until the operator reclaims it, so it asks for as many rows as Orca's own UI does:
+
+- If the list still comes back `truncated`, the name cannot be ruled out, so that attempt fails and is retried. It is never read as "not found".
+- If no worktree has that name, the retry creates it.
+- If the worktree is clean and no agent runs in it, the retry takes it up.
+- If an agent still runs in it (`terminal list`), only that attempt fails.
+- If it has uncommitted changes (`git status --porcelain`), or commits no other branch holds, the start fails for good with that reason. The worktree is retained, like a dead agent's.
+
+Every `worktree create`, first attempt or retry, is checked against the name it asked for. If Orca made `<name>-2` instead, a worktree of that name already exists that the start did not take up. The start fails for good with that reason, because a retry that missed it again would make a `-3`. Both worktrees are retained: the new one on the `failed` journal line, and the earlier one on a `retained` line.
+
+## Liveness and session continuation
+
+A worker is watched through two signals (ADR-0013): its session transcript growing (`transcript.mjs` finds the file from the session id) and its terminal changing between busy and idle. It is **stuck** only while neither moves. The limits are in `settings.mjs`:
+
+- **No movement** for 20 minutes: nudged. For 40: its session is continued.
+- **Idle or exited without submitting**, with neither signal moving for the grace: nudged twice, then continued. A transcript still growing behind an idle terminal is a worker at work.
+- **A nudge's own echo** is not movement: the nudge lands in the transcript and turns the TUI busy even in a hung session. After a nudge, movement counts only when the look it is measured against was taken at least `nudgeEchoMs` after the nudge; an earlier baseline is just replaced. So a runner that looks late never mistakes the echo for the worker.
+- **Gone**, its tab closed: continued at once, in a new terminal. About 5 seconds after the close, Orca fails the dispatch itself (`dispatch.status: failed`, `stage: process_exited`, the terminal `orphaned`). `orca-cli.mjs` reads a failed dispatch on an orphaned terminal as gone, not settled, so a runner that looks only after that, or a resume that finds it so, still continues the session.
+- **Blocked on a human**: logged loudly and journaled (`blocked`, then `unblocked` once answered), so the run view shows it as blocked, counts it in its header, lists it first in its phase's pane, and keeps it on its flash line until it is answered. After 30 minutes it fails and is kept, never continued, since continuing does not answer the question it waits on.
+
+A **continuation** carries the same session on (decision D3 on #43). With the tab alive, the runner interrupts the stalled process, types `claude --resume <id>` (pi: `pi --session-id <id>`) with the worker's launch flags into the same terminal, and then a prompt telling the agent it was interrupted and must finish and submit; its dispatch is unchanged. With the tab gone, the resume runs in a new terminal in the same worktree, and `worker-start --terminal` adopts it with that prompt as its spec: Orca settles a dispatch only from its own pane, so the new pane gets a new dispatch, and the old one is stopped (never released during the run: a reclaim releases the dispatch of its last continuation). Either way the worker is watched again, and a continued agent that submits returns its result.
+
+At most 3 continuations per agent. The next death fails it with a reason naming the cap, and it is **kept**: its process is not stopped, its tab stays open, and its worktree is retained. An agent that never started has no session to continue.
+
+Not yet confirmed against live Orca: that `worker-show` follows a dispatch whose agent was resumed in its pane, and that two concurrent interrupts stop a pi worker as they stop Claude.
 
 ## Two checks, and when each runs
 
 - **Offline:** `node scripts/test-orca-runner.mjs`. Fast and free. It runs the runner against the fake Orca, so it proves the runner does what the fake says Orca does, and nothing about the Workflow runner.
-- **The runner contract test:** `scripts/runner-contract.workflow.js`. Slow, and it spends tokens on six short agents per fresh run, so it runs by hand. It is the only check that the Orca runner gives a script what the Workflow runner gives it, and that is the promise the whole Orca runner rests on.
+- **The runner contract test:** `scripts/runner-contract.workflow.js`. Slow, and it spends tokens on eight short agents per fresh run, so it runs by hand. It is the only check that the Orca runner gives a script what the Workflow runner gives it, and that is the promise the whole Orca runner rests on.
 
 **It gates every Orca runner change.** A change to any file in this directory, or to the template's use of the hooks, is not done until the contract test returns the expected object under both runners, fresh and resumed. The offline tests do not replace it. A guarantee the script comes to rely on gets a case in the contract script first. The script has to stay byte-identical under both runners, and it must never use `Date.now()`, `Math.random()` or an argless `new Date()`.
 
@@ -32,14 +134,24 @@ The state dir defaults to `orca-run/` beside the rendered script, which is `<not
 | bad first submit, repaired in-turn | `contract:repair` first returns a result missing a required field, reads the validation error, then returns it correctly | `repaired: {count: 3, first_attempt_rejected: true}` |
 | the role table's options | `contract:options` passes `harness: 'claude'`, `model: 'sonnet'` and `piModel`, the options every template call spreads from its role table | `options: {count: 3, word: "hello"}`: the call is taken, not refused; the Workflow runner ignores `harness` and `piModel` |
 | isolated worktree | `contract:here` and `contract:isolated` (`isolation: 'worktree'`) each return their `git rev-parse --show-toplevel` | `isolated: {own_worktree: true}`: the isolated agent's top level is not the run's |
+| failed start, then success | `contract:retry` (`isolation: 'worktree'`) returns an object against a schema. Under the Orca runner its first worker start fails, injected by the preload the Orca leg is launched with (below), after its terminal and child worktree exist; the retry takes that worktree up. The Workflow runner has no start to fail, so there it is a plain call | `retried: {count: 3, word: "hello"}`: the same on both runners |
 | throwing `parallel` thunk | two thunks throw, one synchronously and one as a rejected promise, beside the agents above | `thrown: [null, null]`, and `parallel()` itself does not reject |
-| killed worker | `contract:kill` runs a nine-minute wait, and you kill it during the wait. It is awaited outside `parallel()`, so an `agent()` that throws on a dead agent cannot hide behind the null | `killed: null` |
-| resume replaying from cache | the same script, relaunched with the runner's resume handle | the same object, with the five `parallel` agents replayed, not re-run |
+| killed worker continued | `contract:continue` runs a nine-minute wait, and you kill it once, during the wait. Told it was interrupted and to carry on, it returns without waiting again | Orca runner: `continued: {done: true}`, its session continued in a new terminal. Workflow runner: `continued: null`, since it has no continuation |
+| killed worker | `contract:kill` runs a nine-minute wait, and you kill it every time it runs: once under the Workflow runner, and under the Orca runner once and then after each of its 3 continuations, which rerun the wait. Both kill cases are awaited outside `parallel()`, so an `agent()` that throws on a dead agent cannot hide behind the null | `killed: null` |
+| resume replaying from cache | the same script, relaunched with the runner's resume handle | the same object, with the six `parallel` agents replayed, not re-run |
 
-Every run must return exactly this:
+The runners legitimately differ in one case, killed worker continued, and the expected object states it rather than shaping the case to hide it: a Workflow runner agent that is killed stays dead, and the Orca runner exists partly to continue it. Every other case returns the same value on both. The script cannot tell which runner runs it, so its own check (`RUNNER_OWN`) takes either value for `continued`; comparing the returned object with its runner's line below is what checks that the Orca runner continued the agent.
+
+Every Orca runner run must return exactly this:
 
 ```json
-{"valid":{"count":3,"word":"hello"},"repaired":{"count":3,"first_attempt_rejected":true},"options":{"count":3,"word":"hello"},"isolated":{"own_worktree":true},"thrown":[null,null],"killed":null,"failures":[]}
+{"valid":{"count":3,"word":"hello"},"repaired":{"count":3,"first_attempt_rejected":true},"options":{"count":3,"word":"hello"},"isolated":{"own_worktree":true},"retried":{"count":3,"word":"hello"},"thrown":[null,null],"continued":{"done":true},"killed":null,"failures":[]}
+```
+
+Every Workflow runner run must return exactly this:
+
+```json
+{"valid":{"count":3,"word":"hello"},"repaired":{"count":3,"first_attempt_rejected":true},"options":{"count":3,"word":"hello"},"isolated":{"own_worktree":true},"retried":{"count":3,"word":"hello"},"thrown":[null,null],"continued":null,"killed":null,"failures":[]}
 ```
 
 The script checks itself as well. A non-empty `failures` names each case that broke, and the runner's log ends with `contract holds` or `N contract failure(s)`.
@@ -48,35 +160,59 @@ The script checks itself as well. A non-empty `failures` names each case that br
 
 Run each runner from an Orca terminal on the repo. `<repo>` is the absolute path of the checkout, and `<dir>` is a scratch state dir outside it.
 
-**Orca runner.** Launch it in its own terminal, so the Run binds to that terminal:
+**Orca runner.** Launch it in its own terminal, so the Run binds to that terminal. `--require` preloads `scripts/runner-contract-orca-fault.cjs`, which fails `contract:retry`'s first `worker-start` as an Orca refusal would; the runner itself carries no test hook:
 
 ```
-orca terminal create --title "runner contract (orca)" --command "node <repo>/skills/engineering/implement-spec-in-workflow/orca/runner.mjs <repo>/scripts/runner-contract.workflow.js --state-dir <dir>"
+orca terminal create --title "runner contract (orca)" --command "node --require <repo>/scripts/runner-contract-orca-fault.cjs <repo>/skills/engineering/implement-spec-in-workflow/orca/runner.mjs <repo>/scripts/runner-contract.workflow.js --state-dir <dir>"
 ```
 
-1. The runner starts the five `parallel` agents (`contract:valid`, `contract:repair`, `contract:options`, `contract:here`, `contract:isolated`). Once their results are in, it starts `contract:kill`. `contract:isolated` leaves a child worktree the runner does not remove; remove it by hand after the resume.
-2. When the log shows `>> [Contract] contract:kill: started … in terminal <handle>`, kill that worker within nine minutes: close its tab, or run `orca terminal close --terminal <handle>`. The runner logs `agent() returns null` and prints `== Result`.
-3. Resume. Run the same command with `--resume` added, against the same `--state-dir`. The five `parallel` agents log `replayed from the journal` and start no worker. `contract:kill` died, so it was journaled as failed and runs live again (see below): kill it the same way, and it prints the same result.
+1. The runner starts the six `parallel` agents (`contract:valid`, `contract:repair`, `contract:options`, `contract:here`, `contract:isolated`, `contract:retry`). `contract:retry` logs `its worker did not start: … contract_fault …; trying again in 30s`, and its second attempt starts in the same `<runId>-<n>` worktree.
+2. Once their results are in, it starts `contract:continue`. When the log shows `>> [Contract] contract:continue: started … in terminal <handle>`, kill that worker within nine minutes: close its tab, or run `orca terminal close --terminal <handle>`. The runner logs `continuing session … in a new terminal`, and the continued agent returns `{done: true}`. Kill it only once.
+3. Then it starts `contract:kill`. Kill it the same way, and kill each new terminal it is continued in: four kills in all. A continued session first shows its earlier wait again, replayed from its transcript: kill it only once it has been told it was interrupted and has started the wait anew, or the kill lands before the continuation prompt does. The fourth logs `the cap of 3` and `agent() returns null`, and the runner prints `== Result`, writes `summary.json`, and asks what to reclaim. Answer `n`, so the resume and the checks below still find every agent.
+4. Resume from a new terminal: run the same command with `--resume` added, against the same `--state-dir`, in a new `orca terminal create`. The resumed runner logs taking the Run over (`run-use`), the six `parallel` agents and `contract:continue` log `replayed from the journal` and start no worker, and `contract:kill`, journaled as failed (see below), runs live again: kill it four times as before, and it prints the same result. Its end-of-run prompt names every agent of the Run, the fresh run's included, since the resume carries each forward in its journal; one the registry already records reclaimed is not offered again.
+
+The agents the fresh run kept, the failed ones the resume keeps, and the child worktrees `contract:isolated` and `contract:retry` leave all stay until reclaimed: reclaim them at the resumed run's end-of-run prompt, or reclaim the run from the run view, which names every agent of the Run, the fresh run's included; or close their tabs and remove the `<runId>-<n>` worktrees by hand (`orca worktree rm`).
 
 **Workflow runner.** Run it in a Claude Code session that has the `Workflow` tool, for example `claude "<prompt>"` in an Orca terminal. Word the prompt so the agents do their own tasks. The Workflow runner can hand each subagent the session's request, and an agent that sees only "run a workflow" goes looking for the Workflow tool first:
 
-> Run a workflow: call the Workflow tool with scriptPath `<repo>/scripts/runner-contract.workflow.js` and no other input. When it completes, resume it exactly once: call the Workflow tool again with the same scriptPath and resumeFromRunId set to the runId the first call returned. This is the runner contract test, and every agent either run starts is part of it: each agent must do exactly what its own prompt says, nothing more. contract:repair returns a wrong result first on purpose, and contract:kill runs a nine-minute wait that I kill by hand, in both runs; neither needs the Workflow tool. Do not edit the script and do nothing else. After each run completes, print its runId and its returned value verbatim as one JSON block.
+> Run a workflow: call the Workflow tool with scriptPath `<repo>/scripts/runner-contract.workflow.js` and no other input. When it completes, resume it exactly once: call the Workflow tool again with the same scriptPath and resumeFromRunId set to the runId the first call returned. This is the runner contract test, and every agent either run starts is part of it: each agent must do exactly what its own prompt says, nothing more. contract:repair returns a wrong result first on purpose, and contract:continue and contract:kill each run a nine-minute wait that I kill by hand, in both runs; none of them needs the Workflow tool. Do not edit the script and do nothing else. After each run completes, print its runId and its returned value verbatim as one JSON block.
 
-1. When `contract:kill` is the one agent still running, open `/workflows`, press Enter to reach the agent list, select `contract:kill`, and press `x`. It shows as `skipped`, and the run completes. If the nine minutes run out first, it returns `{done: true}`, `failures` names `killed`, and the run has to be done again.
-2. On the resume, `contract:kill` runs live again, as it does under the Orca runner (see below). Kill it the same way.
+Type the prompt, or confirm it when asked: Claude Code 2.1.282 treats a prompt that arrives as pasted text alone as not the user's, and starts nothing until the user replies.
+
+1. When `contract:continue` is the one agent still running, open `/workflows`, press Enter to reach the agent list, select `contract:continue`, and press `x`. It shows as `skipped`. Then `contract:kill` starts: kill it the same way, and the run completes. If the nine minutes run out first, the agent returns `{done: true}`, `failures` names it, and the run has to be done again.
+2. On the resume, the six `parallel` agents are replayed, and `contract:continue` and `contract:kill`, which both returned null, run live again (see below). Kill each the same way.
 3. The run record is in `~/.claude/projects/<project>/<session>/workflows/<runId>.json` (`result`). The journal, which shows what was replayed, is in `…/<session>/subagents/workflows/<runId>/journal.jsonl`.
 
-Then compare the four results: Orca fresh, Orca resumed, Workflow fresh, Workflow resumed. All four must equal the object above.
+Then compare the four results: Orca fresh, Orca resumed, Workflow fresh, Workflow resumed. Each must equal its runner's object above.
 
 The script must reach the Workflow tool with LF line endings. The tool refuses a script that holds a carriage return ("script contains control characters that would be hidden in the approval dialog"), which is what a Windows checkout with `core.autocrlf` produces. `.gitattributes` pins `*.workflow.js` to LF. A checkout made before that line was added needs the file checked out again.
 
-Last pass: 2026-09-23, Orca 1.4.207 and Claude Code 2.1.280 on Windows 11, with the runner as of #30, whose entry point writes `summary.json`. All four results were equal to the expected object. The Orca fresh and resumed runs each left a `summary.json` with `"runner": "orca", "ok": true` and that object as `result`. The Orca resume started no worker. The Workflow resume replayed `contract:valid` and `contract:repair` and re-ran `contract:kill`.
+**For spec #43 the pass ran once, in #53, rather than per ticket** (decision D1 on #43). Its other tickets relied on the offline tests alone, and #53 ran the pass once the reliability work (#46, #47, #49, #50) had landed. Every other change still gates on its own pass.
 
-Not yet re-run since the runner and this script changed on `spec/21-integration`: the script gained `contract:options` and the isolated-worktree case (so the object above is not yet confirmed on either runner), a dead agent is now journaled as failed (below), so the Orca resume re-runs `contract:kill` too, and custom launches into a child worktree now create it first. The next pass must confirm both runners again.
+That one pass does not cover all of #43, and the gate above is not met for what it misses:
+
+- **#52**, the standalone run view, sits above #53 in the stack. It changed `runner.mjs`, `orca-cli.mjs` (`resumeRunner`, `resumeRunnerCommand`), `reclaim.mjs` and `registry.mjs`, and it added a new launch path, **R**'s resume from a new terminal typed by the view. No live pass has run the runner as #52 left it, and **R**'s launch has never been through one.
+- **The review fixes on top of the stack** (the `spec/43-integration` branch) have not had a live pass either. They changed: the journal fold, and a resume re-journaling every earlier agent's worker; reclaim's liveness check, and the forced reclaim of a failed agent kept running; the `starting`, `blocked` and `unblocked` journal entries, and journaling `retry` before its wait; the reclaim outcome recorded after the end-of-run prompt; runner liveness by `runner.pid` in both view modes; the registry fold reopening a resumed run; the view's short call bound and its refresh that survives an error; and the one bounded git helper in `orca-cli.mjs`.
+
+Until a pass runs on the runner as it stands, these rest on the offline tests alone. The next change to this directory runs the pass for all of them.
+
+Last pass: 2026-09-25 (#53), Orca 1.4.209 and Claude Code 2.1.282 on Windows 11, with the runner as of #53. **The contract holds under both runners, fresh and resumed.**
+
+- **Orca runner, fresh and resumed from a new terminal:** each returned the Orca object above exactly, with `failures: []` (Run `run_65b013436b27`: one fresh run and two resumes, each from its own new terminal):
+  - `contract:continue` was killed once in its wait; the runner logged `its terminal is gone; continuing session … in a new terminal`, and the continued agent returned `{done: true}` without waiting again. `contract:kill` was killed four times, each continued session only once it had started the wait again, and failed at `the cap of 3`.
+  - `contract:retry`'s first start failed on the injected `contract_fault`, and the retry 30s later started in the same `<runId>-6` worktree, found by `worktree list --limit 10000`; Orca made no `-6-2`.
+  - Each resume took the Run over from its new terminal (a further `run` line with the same Run id and the new terminal), replayed the six `parallel` agents and `contract:continue`, and ran `contract:kill` live.
+- **The first pass, and its fix:** an earlier pass that day, with the runner as of #50, returned `continued: null`. About 5 seconds after a worker's tab closes, Orca fails its dispatch itself (`dispatch.status: failed`, `stage: process_exited`, the terminal `orphaned`), and the runner read that as settled without a result, so it never continued the session, and `contract:kill` died at its first kill. `orca-cli.mjs` now reads a failed dispatch on an orphaned terminal as gone, and the fake Orca fails a closed tab's dispatch as real Orca does. A fresh run on that fix (Run `run_638e401fe2d7`) returned the Orca object exactly too; its resume killed `contract:kill` too late and got `{done: true}`, so it was run again as above.
+- **Known risk, not exercised:** the contract has no stalled-session case. Both of its kills close the tab, so the pass exercised only the continuation in a new terminal. D3's primary path, continuing in the same tab (interrupt the stalled process, type `claude --resume <id>` into it, keep the same dispatch), is not yet confirmed against live Orca. Neither is interrupting a pi worker. See "Not yet confirmed against live Orca" above.
+- **Release and retain:** nothing was released during any run. After the fresh run and both resumes, each prompt answered `n`, all 20 dispatches of the Run were `terminalState: retained` with `releaseState: not_requested`: 7 `completed`, and 13 `failed`, one for each tab closed, which Orca failed on its own. Both child worktrees were still there. Each resume's prompt named only `contract:kill`, the one agent it ran live.
+- **Workflow runner, fresh and resumed:** each returned the Workflow object above exactly, with `failures: []` (run `wf_d37077df-c47`, Claude Code 2.1.282, the prompt above passed as `claude "<prompt>"`'s argument in an Orca terminal, which started it without asking for confirmation):
+  - On the fresh run the six `parallel` agents returned in under 10 seconds. `contract:continue` and then `contract:kill` were each stopped with `x` in `/workflows` once in their wait, showed as `skipped`, and were journaled `failed`, so `continued` and `killed` came back `null`.
+  - The resume kept the same runId and appended to the same journal: the six `parallel` agents logged no new `started` and were replayed (no tokens or time in `/workflows`), and `contract:continue` and `contract:kill` each started live again and were stopped the same way. The run record at `workflows/wf_d37077df-c47.json` holds the resume's result, which overwrote the fresh one; both equalled the object.
+  - Neither run left a child worktree: the Workflow runner removed the unchanged worktrees of `contract:isolated` and `contract:retry` itself.
 
 ## A dead agent on resume
 
-Both runners journal an agent that returned `null` as failed, with no result: a worker that died by any of the runner's liveness limits, one whose worker never started, and one whose Run Orca could not create. A resume therefore runs that call live again, and every call after it, as it does for an edited call. A failed entry keeps its place among identical calls, so the k-th call with a key never replays a later call's result. In the contract test this means `contract:kill` has to be killed a second time on the resume, under either runner.
+Both runners journal an agent that returned `null` as failed, with no result: a worker that died by any of the runner's liveness limits, one whose worker never started, and one whose Run Orca could not create. A resume therefore runs that call live again, and every call after it, as it does for an edited call. A failed entry keeps its place among identical calls, so the k-th call with a key never replays a later call's result. In the contract test this means `contract:kill` runs live again on the resume, under either runner, and has to be killed again as on the fresh run. Under the Workflow runner `contract:continue` returned null too, so it also runs live again and is killed once more; under the Orca runner it returned a value and is replayed.
 
 ## Harness and model
 
@@ -84,8 +220,49 @@ Each template call spreads its role's row from the `ROLES` table: `harness` (`cl
 
 ## Worktrees and the board
 
-An `agent()` with `isolation: 'worktree'` runs in a new Orca child worktree of the run's worktree. A worker that `worker-start` launches itself gets it from `--worktree new-child`. A worker started from a custom command line (a Claude worker given `--permission-mode`, and every pi worker) cannot be moved once its process runs, so the child is made first with `orca worktree create --parent-worktree current`, its terminal opens there with `terminal create --worktree path:<child>`, and `worker-start --terminal` is told the same worktree.
+An `agent()` with `isolation: 'worktree'` runs in a new Orca child worktree of the run's worktree. Every worker starts from its harness's own command line, carrying its session id, in a terminal the runner creates. `worker-start --terminal` then adopts that terminal, and `--agent` is never used. A process that is already running cannot be moved into another worktree, so the child is made first with `orca worktree create --parent-worktree current`. The worker's terminal opens there with `terminal create --worktree path:<child>`, and `worker-start --terminal` is told the same worktree.
 
-The runner sets each child worktree's board status with `orca worktree set --workspace-status`: `in-progress` when its worker starts (`in-review` for an agent in the `Gate` phase), and `completed` when its agent reports a PR it published (a result with a `pr_url` and `published` not false). A reclaimed worktree leaves the board with its removal. A status Orca refuses is logged and the agent carries on. The run's own worktree is never touched.
+The runner sets each child worktree's board status with `orca worktree set --workspace-status`: `in-progress` when its worker starts (`in-review` for an agent in the `Gate` phase), and `completed` when its agent reports a PR it published (a result with a `pr_url` and `published` not false). A reclaimed worktree leaves the board with its removal. A status or display name Orca refuses is logged and journaled as a `warning`, and the agent carries on. The run's own worktree is never touched.
 
-The runner never removes a worktree. One whose agent died, or whose worker never started, is retained and named in the run's `worktrees_kept` with its reason, and in the log. It is journaled with the failed call, so a resume, which runs that call again in a new worktree, still names the old one. When the script throws, `summary.json` carries the same list beside the `error`.
+## What is kept, and the end-of-run prompt
+
+Nothing is reclaimed while a run runs (ADR-0012). No worker is released when it returns, no tab is closed, and no worktree is removed — not by the runner, and not by the script: under the Orca runner the template's reclaim steps hand no agent a path to remove. A worktree whose agent died, or whose worker never started, is also named in the run's `worktrees_kept`, retained because its agent died or never started, with its reason, and in the log. It is journaled with the failed call, so a resume, which runs that call again in a new worktree, still names the old one. When the script throws, `summary.json` carries the same list beside the `error`.
+
+Once `summary.json` is written, the runner prints the result and asks what to reclaim of the agents this run's journal names: as a modal in the run view while one is attached (below), otherwise in its tab. The question, its default and its answers are the same either way:
+
+| answer | reclaims | keeps |
+|---|---|---|
+| Enter (the default) | every agent that returned a value | each failed or dead agent, and any that never settled, named with why |
+| `a` | every agent | none |
+| `n` | none | every agent |
+
+Anything else is asked again. With no answer possible (stdin closed) every agent is kept. Reclaiming an agent releases its worker, closes its tab if Orca's terminal list still shows it, and removes its worktree through Orca. Even then an agent is kept, and named with the reason, when it is still live, when it failed and was kept with its worker still running (Orca shows it live: the reason says to reclaim it from the run view, which stops that worker first, or to close its tab), when its worktree holds commits no remote-tracking ref contains (only a forced reclaim, from the run view, removes that), or when Orca refuses. A worktree not named `<runId>-<n>` is the operator's own and never touched. Each reclaim is appended to the run registry, and once no agent of a run is left, so is the run. The runner exits once the prompt is answered and the operator has quit the run view; the tab stays, holding what it printed.
+
+## The run view in the runner's tab
+
+Launched in a terminal, the runner starts the run view (ADR-0012; the design is `docs/design/orca-run-view-tree.md`) as its child, in its own tab: the run as a tree of phases and agents that updates in place. The view reads the run from the state dir, the run registry and Orca, never from the runner, so what it shows does not depend on the runner. Its keys: ↑↓ move; on a phase, a click, Enter or ←/→ folds it; on an agent, a click or Enter focuses its Orca tab and worktree; `r` reclaims the selected agent by the rules above: one holding unpushed commits only when `f` confirms, and one that failed and was kept with its worker still running only when `f` confirms stopping that worker, which is stopped before anything is removed (never offered for an agent still at work); `l` opens `runner.log` in an Orca tab of its own that follows it as it grows, or brings that tab back while it is open (Orca's editor opens no file outside a worktree, and the run dir is outside every checkout); `q` quits the view, never the run.
+
+While the view is attached (decision D5 on #43):
+
+- The view owns the tab's screen and keys. The runner writes only to `runner.log`, and the view's flash line shows its latest line. Ctrl-C in the view closes the view; a Ctrl-C that reaches the runner is ignored.
+- A crash of the view never touches the run. The runner puts the tab back (main screen, cursor, no mouse reporting, no raw mode) and starts the view again after `viewRestartMs`. At the `viewCrashes`-th crash of a run, the runner stops restarting it and prints its log in the tab again, starting with the log's last 20 lines. Both limits are in `settings.mjs`.
+- `q` ends the view for good: the runner prints its log in the tab again, and asks the end-of-run question there if it is still to come. A view quit or crashed while its prompt is open hands the prompt to the next view, or to the tab.
+- With no terminal (stdout or stdin redirected, as in the offline tests) there is no view, and the runner prints as it always did.
+
+The view exits 0 when the operator quits it and 3 when it cannot run here (`run-view/exit-codes.mjs`); the runner never restarts either. Anything else is a crash.
+
+The view's one dependency, terminal-kit, is pinned in `run-view/package.json` with a committed lockfile. It is installed beside `view.mjs` on the view's first start (`npm ci`, its output in `runner.log`), because the installed skill may be a copy of the repo rather than a link to it, and the copy is where the view runs. This departs from ADR-0001's self-contained repo, and ADR-0012 records the departure: nothing is vendored, so the first view needs npm and the network. If the install fails, the view exits 3 and the runner prints its log in the tab. The offline tests import `draw.mjs` and the model, never terminal-kit, so they need no install.
+
+To look at the view without a run, point it at a run dir: `node run-view/view.mjs --attached <state-dir> [--registry <registry file>]`. `--registry` is for a fixture run, whose header comes from a registry file of its own rather than the machine's.
+
+## The run view standalone
+
+`node run-view/view.mjs --standalone [--registry <registry file>]`, which the [`orca-runs`](../../orca-runs/SKILL.md) skill opens in a new Orca tab (D8 on #43), lists every run in the run registry, grouped by project, the project of the latest run first. No runner needs to be going. Each run shows its spec, its outcome (`ok`, `partial` or `failed`, or none while no `ended` is recorded), whether its runner is alive, how many agents it keeps (those its journal names that no `reclaimed` entry has taken), and its age since it was armed. A runner is alive by the one rule attached mode's header uses too (`runnerAlive` in `run-view-model.mjs`): the process `<runDir>/runner.pid` names is alive. Its tab says nothing, since the tab outlives the runner. The one exception is the tab **R** opened, which counts as the runner while Orca lists it, until the new runner has written its own `runner.pid`. When a `runner.pid` cannot be read or probed, the view says it does not know. A run the registry records ended or reclaimed, then resumed, is running and open again: the resume's `runner` entry reopens it. Two runs in one repo are two rows, keyed by Run id.
+
+Its keys, on the list:
+
+- **Enter** or a click opens the run into the same tree attached mode shows, with the same keys, which the runs list hands on to it. **q** or Escape goes back to the list; **q** on the list closes the view.
+- **r** reclaims the whole run: every agent it keeps, one by one, under the reclaim rules above. A live agent, or one whose worktree holds unpushed commits, is kept and named with why; forcing one is done inside the run, with `r` then `f`. Each reclaimed agent is appended to the registry. Once none of the run's agents is left, the run is recorded reclaimed, but only when its runner is known dead, whether or not the run has ended: no entry undoes that record, and a live runner may start more agents, which it keeps as evidence (ADR-0012). A dead runner starts none, and **R** refuses a reclaimed run. While the runner is alive, or nobody can say, **r** reclaims what the rules allow and the run stays open, and says why.
+- **R** resumes a run whose runner is dead: a new Orca terminal in the run's worktree (its `project`), brought to the front, running `node runner.mjs <script> --state-dir <runDir> --resume [--permission-mode <mode>]`, which takes the Run over as a resume from a new terminal does (above). A run armed before the registry recorded its script resumes `workflow.js` beside its state dir, as the skill lays them out. **R** is not offered, and does nothing, on a run recorded reclaimed, whose agents are gone; nor while the runner is alive, or while nobody can say; the terminal it opened counts as the run's runner at once, so a second **R** opens nothing. **R**'s resume launch has not been through a live contract pass (below). Inside an opened run, **R** resumes that run.
+
+Only the registry's runs are listed, and a worktree is shown, and touched, only when it is named `<runId>-<n>`: an agent that ran in the run's own checkout shows no worktree, and a worktree the operator made is never listed or removed. Reading, stopping and releasing a worker are not fenced to the Run's coordinator (live, Orca 1.4.209), so the view reclaims any run without taking it over. With no terminal the standalone view exits 3 and says so; npm's output, on its first start, goes to `orca-runs-view.log` beside the registry.
