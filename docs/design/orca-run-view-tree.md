@@ -21,6 +21,7 @@ The reference design for the Orca runner's [run view](../../CONTEXT.md) (spec #4
   - A context bar with the context size.
   - Cumulative tokens, and elapsed time.
   - An agent that never started shows `—` for context and tokens.
+  - A doctor's row sits right under its patient's, indented, one per round (`└ recover`); its pane gives its whole title, `[Phase] recover -> <patient label>`.
 - **Bottom pane for a selected agent:**
   - `[Phase] label`, then its state, context, total tokens and elapsed time.
   - `worktree`, `tab` and `session` (`—` when there is none).

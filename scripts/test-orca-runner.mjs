@@ -2921,6 +2921,52 @@ viewTest('run view: blocked, starting and reclaimed are row states; a blocked ag
   assert.deepEqual([agent(1).state, view.model.alert, view.model.latest], ['running', null, '>> [Implement] impl:e: result received'])
 })
 
+// A patient in its second doctor round, as the runner journals it: the
+// doctors' n come after an agent started meanwhile, and their own lines have
+// no call key.
+viewTest('run view: a doctor\'s row is indented under its patient\'s, in round order, whatever its number', async (mode) => {
+  const orca = fakeOrca({ worker: () => new Promise(() => {}), clock: fakeClock() })
+  const stateDir = tmp()
+  const doctorJ = (type, n, min, more = {}) => ({ ...J(type, n, '[Implement] recover -> impl:a', min, more), key: null })
+  const doctorStarted = (n, min) => ({ ...startedJ(n, '[Implement] recover -> impl:a', min, 'claude', `sid-${n}`), key: null })
+  const reason = 'its session died past its continuation cap, with no result'
+  const journal = [
+    { type: 'run', at: at(0), runId: 'run_fake1', terminal: 'term_runner' },
+    startedJ(1, '[Implement] impl:a', 0, 'claude', 'sid-1'),
+    startedJ(2, '[Implement] impl:b', 1, 'claude', 'sid-2'),
+    J('doctor', 1, '[Implement] impl:a', 2, { origin: 1, round: 1, reason, doctor: 3 }),
+    doctorJ('starting', 3, 2, { run: 'run_fake1' }),
+    doctorStarted(3, 2),
+    J('queued', 5, '[Implement] impl:c', 3),
+    doctorJ('settled', 3, 4, { dispatchId: 'ctx_fake3', outcome: 'failed' }),
+    J('gaveUp', 1, '[Implement] impl:a', 4, { origin: 1, round: 1, doctor: 3, reason: 'its worker settled failed with no remedy' }),
+    J('doctor', 1, '[Implement] impl:a', 4, { origin: 1, round: 2, reason, doctor: 4 }),
+    doctorJ('starting', 4, 4, { run: 'run_fake1' }),
+    doctorStarted(4, 5),
+  ]
+  writeFileSync(join(stateDir, 'journal.jsonl'), journal.map((e) => JSON.stringify(e)).join('\n') + '\n')
+  writeFileSync(join(stateDir, 'runner.pid'), String(process.pid))
+  writeFileSync(join(stateDir, 'runner.log'), `${at(5)} >> [Implement] impl:a: doctor round 2 of 3\n`)
+  const registry = registryIn()
+  runRegistry(registry, { now: () => 0 }).armed({ runId: 'run_fake1', project: 'C:/repos/controlayer', runDir: stateDir, spec: 'implement-spec-783' })
+  const view = await treeIn(mode, { stateDir, orca, clock: fakeClock(), transcripts: sessionTranscripts({ home: tmp(), env: {} }), registry, unpushed: orca.unpushedOf })
+  assert.deepEqual(view.model.rows.map((r) => [r.key, r.depth ?? null]), [
+    ['phase:Implement', null], ['agent:1', 0], ['agent:3', 1], ['agent:4', 1], ['agent:2', 0], ['agent:5', 0],
+  ])
+  const row = (n) => view.model.rows.find((r) => r.key === `agent:${n}`).agent
+  assert.deepEqual([row(3).patient, row(4).patient, row(1).doctors, row(1).round], [1, 1, [3, 4], 2])
+  assert.deepEqual([row(3).state, row(4).state], ['done', 'running'])
+
+  const lines = () => draw(view.model, { width: 140, height: 30 }).lines.map(strip)
+  assert.match(lines()[5], /^ +1 +impl:a +● running /)
+  assert.match(lines()[6], /^ +3 +└ recover +✓ done /, 'under its patient, named by its role')
+  assert.match(lines()[7], /^ +4 +└ recover +● running /)
+  assert.match(lines()[8], /^ +2 +impl:b /)
+  // Selected, its pane has its whole title.
+  while (view.model.rows[view.model.selected].key !== 'agent:4') await view.key('DOWN')
+  assert.match(lines().at(-6), /\[Implement\] recover -> impl:a {2}● running/)
+})
+
 viewTest('run view: context size, its band and tokens come from each agent\'s Claude or pi transcript', async (mode) => {
   const { view, agent } = await viewedRun(mode)
   assert.deepEqual([agent(1).context, agent(1).band, agent(1).tokens], [210005, 'yellow', 1511676])

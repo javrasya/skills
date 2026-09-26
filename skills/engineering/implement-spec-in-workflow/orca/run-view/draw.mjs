@@ -73,8 +73,10 @@ function phaseLine(p) {
   return ` ${p.folded ? '▸' : '▾'} ${bold(p.name.padEnd(10))} ${grey(`${p.done}/${p.total} done`.padEnd(10))}  ${mixOf(p.mix)}${peak}`
 }
 
-const agentLine = (a) =>
-  `  ${String(a.n).padStart(3)}   ${a.label.padEnd(22)} ${fit(stateOf(a), 16)} ${contextCell(a)}   ${grey(size(a.tokens).padStart(6))}   ${duration(a.elapsedMs).padStart(7)}`
+// A doctor's row, under its patient's, names only its role: its label is
+// `recover -> <the patient's label>`, the row above.
+const agentLine = (a, depth = 0) =>
+  `  ${String(a.n).padStart(3)}   ${(depth ? `${'  '.repeat(depth - 1)}└ ${a.label.split(' -> ')[0]}` : a.label).padEnd(22)} ${fit(stateOf(a), 16)} ${contextCell(a)}   ${grey(size(a.tokens).padStart(6))}   ${duration(a.elapsedMs).padStart(7)}`
 
 const PANE = 4
 
@@ -133,7 +135,7 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
   const lines = [...headerLines(model?.header, W), fit(grey('─'.repeat(W)), W), fit(grey('   #   AGENT                    STATE            CONTEXT           TOKENS   ELAPSED'), W)]
   for (let i = top; i < Math.min(rows.length, top + body); i++) {
     const r = rows[i]
-    const line = r.kind === 'phase' ? phaseLine(r.phase) : agentLine(r.agent)
+    const line = r.kind === 'phase' ? phaseLine(r.phase) : agentLine(r.agent, r.depth)
     lines.push(i === selected ? c('7', fit(strip(line), W)) : fit(line, W))
   }
   while (lines.length < TOP + body) lines.push(fit('', W))

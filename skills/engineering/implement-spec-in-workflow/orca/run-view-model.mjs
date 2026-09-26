@@ -39,6 +39,20 @@ const agentsIn = (fold) => fold.agents.map((a) => {
   return { ...a, phase, label }
 })
 
+// A phase's agents in row order: each doctor right under its patient, in
+// round order, though its n comes later; one whose patient is not in the
+// phase stands on its own.
+function treeOf(agents) {
+  const byOrigin = new Map(agents.map((a) => [a.origin, a]))
+  const rows = []
+  const put = (agent, depth) => {
+    rows.push({ agent, depth })
+    for (const d of agent.doctors ?? []) if (byOrigin.get(d)?.patient === agent.origin) put(byOrigin.get(d), depth + 1)
+  }
+  for (const a of agents) if (a.patient == null || !byOrigin.has(a.patient)) put(a, 0)
+  return rows
+}
+
 // The pid a run dir's runner.pid names; null with no such file, undefined when
 // it could not be read.
 export function runnerPid(stateDir) {
@@ -131,9 +145,10 @@ function latestEvent(path) {
 //           ended being whether the run has ended (runEnded), null when it
 //           cannot be told
 //   phases  [{ name, folded, done, total, mix: {state: n}, peakContext, agents }]
-//   rows    [{ kind: 'phase', key, phase } | { kind: 'agent', key, agent, phase }],
+//   rows    [{ kind: 'phase', key, phase } | { kind: 'agent', key, agent, phase, depth }],
 //           the phases in the order the run reached them, each unfolded one
-//           followed by its agents
+//           followed by its agents, a doctor's row under its patient's at
+//           depth 1 (else 0)
 //   selected  the index of the selected row
 //   pane    { kind: 'agent', agent } | { kind: 'phase', phase, problems: [{ agent, reason }] },
 //           a phase's problems being its blocked, failed and stuck agents
@@ -151,7 +166,7 @@ function latestEvent(path) {
 //             a reclaim refused until the operator confirms it with `f`
 // An agent is { n, origin, label, title, phase, state, continuations, reason,
 // replayed, launched, runId, dispatchId, harness, sessionId, worktree, terminal,
-// waiting, nextAt, workerLeft, tabOpen, reclaimed, context, band, tokens,
+// waiting, nextAt, workerLeft, patient, round, doctors, tabOpen, reclaimed, context, band, tokens,
 // elapsedMs, transcript }. state is one of STATES: reclaimed once the registry
 // records it so, whatever it was before. worktree
 // is only ever one named `<runId>-<n>`: any other, the run's own checkout
@@ -211,7 +226,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     for (const phase of phases) {
       phase.folded = folds.get(phase.name) ?? (phase.total > 0 && phase.agents.every((a) => a.state === 'done' || a.state === 'reclaimed'))
       rows.push({ kind: 'phase', key: `phase:${phase.name}`, phase })
-      if (!phase.folded) for (const agent of phase.agents) rows.push({ kind: 'agent', key: `agent:${agent.n}`, agent, phase })
+      if (!phase.folded) for (const { agent, depth } of treeOf(phase.agents)) rows.push({ kind: 'agent', key: `agent:${agent.n}`, agent, phase, depth })
     }
     const at = rows.findIndex((r) => r.key === selectedKey)
     selected = at >= 0 ? at : Math.max(0, Math.min(selected, rows.length - 1))
