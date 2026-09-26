@@ -218,11 +218,12 @@ Last pass: 2026-09-25 (#53), Orca 1.4.209 and Claude Code 2.1.282 on Windows 11,
 | case | the script does | the Orca runner must give |
 |---|---|---|
 | a result reaches the script | `orca-contract:returned` returns an object against a schema | `returned: {count: 3, word: "hello"}` |
+| a create that times out, and the worktree it left dirty | `contract:dirty-retry` (`isolation: 'worktree'`) returns an object against a schema. The preload the run is launched with holds back its `worktree create`'s answer past the runner's create timeout (`worktreeCreateMs`, 10 minutes), after writing the untracked `contract-setup-output.txt` into the new worktree, as a setup hook's output would be. The runner logs `call_timeout … but Orca had made <path>, so it starts there`, and the agent starts in that worktree on its first attempt | `dirtyRetry: {count: 3, word: "hello"}` |
 
 Every run, fresh or resumed, must return exactly this:
 
 ```json
-{"returned":{"count":3,"word":"hello"},"failures":[]}
+{"returned":{"count":3,"word":"hello"},"dirtyRetry":{"count":3,"word":"hello"},"failures":[]}
 ```
 
 ### How an agent runs it
@@ -239,13 +240,14 @@ The steps:
 
 1. **Launch** and keep `result.terminal.handle` as `<runner>`:
    ```
-   orca terminal create --worktree path:<worktree> --title "runner contract (orca only)" --command "node <repo>/skills/engineering/implement-spec-in-workflow/orca/runner.mjs <repo>/scripts/runner-contract-orca.workflow.js --state-dir <dir>" --json
+   orca terminal create --worktree path:<worktree> --title "runner contract (orca only)" --command "node --require <repo>/scripts/runner-contract-orca-fault.cjs <repo>/skills/engineering/implement-spec-in-workflow/orca/runner.mjs <repo>/scripts/runner-contract-orca.workflow.js --state-dir <dir>" --json
    ```
+   `--require` preloads the faults the cases need (`scripts/runner-contract-orca-fault.cjs`). A fresh run takes over ten minutes, most of it `contract:dirty-retry`'s held create.
 2. **Wait for `<dir>/summary.json`.** Poll for the file. `<dir>/runner.pid` holding a pid that is no longer alive (`node -e "process.kill(+process.argv[1], 0)" <pid>` throws) and no `summary.json` means the runner died: the pass failed. Do each case's kills and answers from its row above as the log reaches them.
 3. **Answer the end-of-run prompt.** Once `runner.log` shows `== Reclaim`, send `n`, which keeps every agent so the resume finds them: `orca terminal send --terminal <runner> --text n`. The log shows `chosen: none`. The view stays on the ended run: send `q`. The log shows `!! the run view was closed; the runner prints its log in this tab again`, and the runner exits. Check its pid is dead.
 4. **Confirm the fresh run** (below). Copy `summary.json` aside, since the resume replaces it.
 5. **Resume:** run the same command with `--resume` added, against the same `<dir>`, in a new `orca terminal create`, and keep its handle as the new `<runner>`. The agents that returned a value log `replayed from the journal` and start no worker. Wait, answer and quit as in steps 2 and 3, then confirm again.
-6. **Clean up:** close the kept worker tabs, named on the `!! kept …, tab <handle>` log lines, and the runner tabs with `orca terminal close`. Remove any `<runId>-<n>` child worktree with `orca worktree rm`.
+6. **Clean up:** close the kept worker tabs, named on the `!! kept …, tab <handle>` log lines, and the runner tabs with `orca terminal close`. Remove any `<runId>-<n>` child worktree, `contract:dirty-retry`'s included, with `orca worktree rm` (add `--force`: it holds the untracked file).
 
 ### How it confirms the result
 

@@ -7,6 +7,7 @@ export const meta = { name: 'runner-contract-orca', description: 'the guarantees
 
 const EXPECTED = {
   returned: { word: 'hello', count: 3 },
+  dirtyRetry: { word: 'hello', count: 3 },
 }
 
 const HELLO = {
@@ -44,13 +45,24 @@ const awaited = async (what, call) => {
 
 phase('Contract')
 
-const returned = await awaited('orca-contract:returned', () => agent(
-  `${NOT_A_TASK} Your result is word "hello" and count 3.`,
-  { ...C, label: 'orca-contract:returned', schema: HELLO },
-))
+// contract:dirty-retry needs the fault preload (scripts/runner-contract-orca-fault.cjs):
+// it holds back its worktree create's answer past the runner's create timeout,
+// after writing an untracked file into the new worktree. Side by side, so the
+// ten-minute hold costs the run no more than itself.
+const [returned, dirtyRetry] = await Promise.all([
+  awaited('orca-contract:returned', () => agent(
+    `${NOT_A_TASK} Your result is word "hello" and count 3.`,
+    { ...C, label: 'orca-contract:returned', schema: HELLO },
+  )),
+  awaited('contract:dirty-retry', () => agent(
+    `${NOT_A_TASK} Your result is word "hello" and count 3.`,
+    { ...C, label: 'contract:dirty-retry', schema: HELLO, isolation: 'worktree' },
+  )),
+])
 
 const result = {
   returned: expect('returned', returned),
+  dirtyRetry: expect('dirtyRetry', dirtyRetry),
 }
 for (const f of failures) log('FAIL ' + f)
 log(failures.length ? `${failures.length} contract failure(s)` : 'contract holds')

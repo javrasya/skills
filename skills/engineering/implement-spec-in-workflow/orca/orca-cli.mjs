@@ -198,9 +198,10 @@ const WORKTREE_LIST_LIMIT = 10000
 const TAB_GONE = new Set(['terminal_not_writable', 'terminal_exited', 'terminal_handle_stale'])
 
 // call(args, timeoutMs) and git(cwd, args, timeoutMs) run one Orca or git
-// command; clock.timer bounds every call at callMs, plus any wait it asks for.
-// `platform` is the host's, which picks the shell `logTail` types into.
-export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(bin), git = execGit, clock = { timer: realTimer }, callMs = RUNNER_SETTINGS.orcaCallMs, platform = process.platform } = {}) {
+// command; clock.timer bounds every call at callMs, plus any wait it asks for,
+// and a worktree create at createMs. `platform` is the host's, which picks the
+// shell `logTail` types into.
+export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(bin), git = execGit, clock = { timer: realTimer }, callMs = RUNNER_SETTINGS.orcaCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, platform = process.platform } = {}) {
   const orca = (args, waitMs = 0) => withTimeout(clock, callMs + waitMs, call(args, callMs + waitMs), args.slice(0, 2).join(' '))
   const bound = { git, clock, ms: callMs }
 
@@ -229,25 +230,34 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
     return pathOf(w.id)
   }
 
-  // The worktree an earlier attempt of this start made, if there is one to
-  // take up: Orca answers a second `worktree create --name` with a new
-  // <name>-2, never an error, so a retry looks its name up first. One that
-  // holds work is refused for good, named on the error; one an agent still
-  // runs in is refused for this attempt only.
+  // The worktree Orca holds under this name, or null.
   // Orca pages the list at 200 rows across every repo on the machine, and
   // ADR-0012 keeps every worktree until the operator reclaims it, so the list
   // asks for as many as Orca's own UI does. A page still truncated cannot rule
   // the name out: that attempt fails, retryable, rather than make a <name>-2.
-  async function earlierWorktree(name) {
+  async function findWorktree(name) {
     const r = await orca(['worktree', 'list', '--limit', String(WORKTREE_LIST_LIMIT)])
     if (r?.truncated) throw new OrcaError('worktree_list_truncated', `the list stopped at ${(r.worktrees ?? []).length} worktrees, so an earlier ${name} could not be ruled out`, 'worktree list')
-    const row = (r?.worktrees ?? []).find((w) => typeof w.path === 'string' && worktreeName(w.path) === name)
+    return (r?.worktrees ?? []).find((w) => typeof w.path === 'string' && worktreeName(w.path) === name) ?? null
+  }
+
+  // The worktree an earlier attempt of this start made, if there is one to
+  // take up: Orca answers a second `worktree create --name` with a new
+  // <name>-2, never an error, so a retry looks its name up first. One an
+  // agent still runs in is refused for this attempt only. Until an attempt
+  // has reached worker-start (`dispatched`), whatever it holds is Orca's own
+  // making, such as a setup hook's untracked output, so it is taken up as it
+  // is; after that, one that holds work is refused for good, named on the
+  // error.
+  async function earlierWorktree(name, dispatched) {
+    const row = await findWorktree(name)
     if (!row) return null
     const path = row.path
     const refuse = (code, why, final) => Object.assign(new OrcaError(code, `${path} ${why}`, 'worktree reuse'), { worktree: path, final })
     // terminal list leaves closed tabs out, and agentIdentity marks an agent's pane.
     const t = await orca(['terminal', 'list', '--worktree', `path:${path}`])
     if ((t?.terminals ?? []).some((x) => x.agentIdentity && !x.orphaned)) throw refuse('worktree_held', 'still has an agent running in it', false)
+    if (!dispatched) return path
     if ((await gitIn(path, ['status', '--porcelain'], bound)).trim()) throw refuse('worktree_dirty', 'has uncommitted changes', true)
     const own = await worktreeOwnCommits(path, row.branch, bound)
     if (own > 0) throw refuse('worktree_has_commits', `has ${own} commit(s) of its own`, true)
@@ -274,7 +284,9 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
     // the handle of the tab the runner made for it, and `warnings` what went
     // wrong without stopping the start. A failure after the child exists
     // names it as the error's `worktree`, and `worktrees` lists every one it
-    // leaves when there are more; `final` marks one a retry cannot mend.
+    // leaves when there are more; `final` marks one a retry cannot mend, and
+    // `dispatched` one whose worker-start was sent, which may have put a
+    // worker in the child. `child.dispatched`: an earlier attempt's was.
     async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null }) {
       if (!sessionId) throw new Error(`workerStart: ${title} has no session id; the runner assigns one to every worker`)
       const command = launchCommand({ harness, model, effort, permissionMode, sessionId })
@@ -289,9 +301,21 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       let terminalIn = []
       const warnings = []
       if (child) {
-        worktree = child.retry ? await earlierWorktree(child.name) : null
+        worktree = child.retry ? await earlierWorktree(child.name, child.dispatched) : null
+        let c = null
         if (!worktree) {
-          const c = await orca(['worktree', 'create', '--name', child.name, '--parent-worktree', 'current'])
+          // A create Orca finishes after its answer timed out still leaves the
+          // worktree, and a retry would find it; looked up now, it costs no attempt.
+          try {
+            c = await orca(['worktree', 'create', '--name', child.name, '--parent-worktree', 'current'], Math.max(0, createMs - callMs))
+          } catch (e) {
+            if (e?.code !== 'call_timeout') throw e
+            worktree = (await findWorktree(child.name).catch(() => null))?.path ?? null
+            if (!worktree) throw e
+            warnings.push(`${e.message}, but Orca had made ${worktree}, so it starts there`)
+          }
+        }
+        if (c) {
           worktree = createdPath(c)
           if (!worktree) throw new OrcaError('bad_output', `worktree create named no path for ${child.name}`, 'worktree create')
           // Orca opens a plain shell in a new worktree; the agent gets its own.
@@ -314,10 +338,12 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
         }
       }
       let handle = null
+      let dispatching = false
       try {
         const t = await orca(['terminal', 'create', ...terminalIn, '--title', title, '--command', command])
         handle = t.terminal.handle
         await waitIdle(handle, command)
+        dispatching = true
         const r = await orca(workerStartArgs({ run, prompt, title, place, terminal: handle }))
         const effect = (r.effects || []).find((e) => e.kind === 'worktree')?.id
         return { dispatchId: r.dispatchId, taskId: r.taskId, terminal: handle, worktree: worktree ?? pathOf(effect) ?? pathOf(t.terminal.worktreeId), warnings }
@@ -325,6 +351,7 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
         if (handle) await closeQuietly(handle)
         // The caller names a worktree made for a worker that never started.
         if (worktree && e instanceof Object) e.worktree = worktree
+        if (dispatching && e instanceof Object) e.dispatched = true
         throw e
       }
     },
