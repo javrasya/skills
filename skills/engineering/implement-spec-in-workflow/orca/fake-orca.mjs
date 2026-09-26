@@ -43,6 +43,16 @@
 // answers dispatch `failed` on an orphaned terminal. The fake fails it at once,
 // so the runner never sees the window before, and reads worker-show through
 // the adapter's own workerStatus.
+//
+// Each Run has a mailbox, as real Orca's (1.4.209): what its workers send
+// (mailSend, a worker's `orchestration send`; workerDone's worker_done too)
+// waits there until its coordinator checks it (mailCheck). A check freezes
+// every waiting message into a batch, and hands that same batch back, marked
+// replayed, until it is acknowledged; `ack` names the batch, and the answer is
+// the next one. runUse re-batches an unacknowledged batch under a new
+// delivery id, its messages' ids kept. A worker_done settles the dispatch
+// that sent it. `mailCheck` is a step too, handed { ack, batch }: the batch's
+// messages before the ack applies, so a fault can fail an ack.
 import { existsSync } from 'fs'
 import { OrcaError, sameLines, launchCommand, resumeCommand, resumeRunnerCommand, tailCommand, workerStartArgs, withTimeout, workerStatus } from './orca-cli.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
@@ -67,6 +77,14 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
   const openTabs = new Set(tabs)
   let resumes = 0
   let seq = 0
+  // runId -> { pending, batch: { id, messages } | null, acked }
+  const mailboxes = new Map()
+  let messages = 0
+  let deliveries = 0
+  const mailOf = (run) => {
+    if (!mailboxes.has(run)) mailboxes.set(run, { pending: [], batch: null, acked: new Set() })
+    return mailboxes.get(run)
+  }
   const record = (c) => calls.push(clock ? { ...c, at: clock.now() } : c)
 
   async function hang(name, ms) {
@@ -161,6 +179,22 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
   }
   const live = (name) => worktrees.has(name) && !worktrees.get(name).removed
 
+  // Only the exact pane and IDs Orca issued a dispatch send as it.
+  function sender({ from, capability, taskId, dispatchId }) {
+    const d = dispatch(dispatchId, 'orchestration send')
+    if (d.taskId !== taskId || d.handle !== from || d.capability !== capability) {
+      throw new OrcaError('consumer_fenced', `a message from ${dispatchId} does not match its preamble`, 'orchestration send')
+    }
+    return d
+  }
+
+  function post(d, { type, subject = '', body = '', outcome = null }) {
+    const m = { id: `msg_fake${++messages}`, type, from: d.handle, subject, body, taskId: d.taskId, dispatchId: d.dispatchId, outcome, createdAt: clock ? clock.now() : null }
+    mailOf(d.run).pending.push(m)
+    if (type === 'worker_done' && !d.settled) Object.assign(d, { settled: true, outcome: outcome ?? 'succeeded' })
+    return m
+  }
+
   const as = (caller) => ({
     calls,
     dispatches,
@@ -183,6 +217,11 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       const r = runs.get(runId)
       if (!r) throw new OrcaError('run_not_found', `Run ${runId} not found or is inspect-only`, 'orchestration run-use')
       Object.assign(r, { coordinator: caller, generation: r.generation + 1 })
+      const box = mailboxes.get(runId)
+      if (box?.batch) {
+        box.pending.unshift(...box.batch.messages)
+        box.batch = null
+      }
       record({ verb: 'runUse', runId, terminal: caller })
       return { runId, terminal: caller }
     },
@@ -343,12 +382,39 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
 
     // Real Orca settles a Dispatch only for the exact pane and IDs it issued.
     async workerDone({ from, capability, taskId, dispatchId, subject, body }) {
-      const d = dispatch(dispatchId, 'orchestration send')
-      if (d.taskId !== taskId || d.handle !== from || d.capability !== capability) {
-        throw new OrcaError('consumer_fenced', `worker_done for ${dispatchId} does not match its preamble`, 'orchestration send')
-      }
+      const d = sender({ from, capability, taskId, dispatchId })
       record({ verb: 'workerDone', dispatchId, subject, body })
+      post(d, { type: 'worker_done', outcome: 'succeeded', subject, body })
       Object.assign(d, { settled: true, outcome: 'succeeded' })
+    },
+
+    // Not the runner's: a worker's `orchestration send` to its Run's mailbox,
+    // with the IDs from its preamble. Returns the message's id.
+    async mailSend({ from, capability, taskId, dispatchId, type, subject, body, outcome = null }) {
+      const d = sender({ from, capability, taskId, dispatchId })
+      const m = post(d, { type, subject, body, outcome: type === 'worker_done' ? outcome ?? 'succeeded' : null })
+      record({ verb: 'mailSend', id: m.id, type, dispatchId, outcome: m.outcome, body })
+      return { id: m.id }
+    },
+
+    // The mailbox of the Run bound to this terminal; none for any other.
+    async mailCheck({ ack = null } = {}) {
+      from(caller, 'orchestration check')
+      const run = [...runs].reverse().find(([, r]) => r.coordinator === caller)?.[0] ?? null
+      const box = run ? mailOf(run) : null
+      await step('mailCheck', { ack, batch: box?.batch?.messages.map((m) => ({ ...m })) ?? null })
+      let acknowledged = null
+      if (box && ack) {
+        if (box.batch?.id !== ack && !box.acked.has(ack)) throw new OrcaError('stale_delivery', '--ack requires a delivery_* ID returned by orchestration check', 'orchestration check')
+        if (box.batch?.id === ack) box.batch = null
+        box.acked.add(ack)
+        acknowledged = ack
+      }
+      const replayed = !!box?.batch
+      if (box && !box.batch && box.pending.length) box.batch = { id: `delivery_fake${++deliveries}`, messages: box.pending.splice(0) }
+      const b = box?.batch ?? null
+      record({ verb: 'mailCheck', ack, deliveryId: b?.id ?? null, ids: b ? b.messages.map((m) => m.id) : [], replayed })
+      return { deliveryId: b?.id ?? null, acknowledged, replayed, messages: b ? b.messages.map((m) => ({ ...m })) : [] }
     },
 
     async worktreeStatus({ worktree, status }) {

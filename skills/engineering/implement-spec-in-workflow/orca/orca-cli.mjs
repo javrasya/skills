@@ -543,5 +543,33 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       if (capability) args.push('--dispatch-capability', capability)
       await orca(args)
     },
+
+    // The runner's Run mailbox, read from its own terminal, which Orca binds
+    // the Run to: a consuming check. Orca hands the same batch back, marked
+    // replayed, until it is acknowledged, and a batch is frozen once issued.
+    // `ack` acknowledges one, and the answer is the next batch: read it, never
+    // drop it. deliveryId is null once the mailbox is empty. A message's
+    // payload is a JSON string, which ties it to the dispatch that sent it; a
+    // row Orca wrote itself (a rejected escalation) has no dispatch.
+    async mailCheck({ ack = null } = {}) {
+      const r = await orca(['orchestration', 'check', ...(ack ? ['--ack', ack] : [])])
+      return { deliveryId: r?.deliveryId ?? null, acknowledged: r?.acknowledged ?? null, replayed: r?.replayed === true, messages: (r?.messages ?? []).map(mailRow) }
+    },
+  }
+}
+
+function mailRow(row) {
+  let payload = row?.payload
+  if (typeof payload === 'string') {
+    try {
+      payload = JSON.parse(payload)
+    } catch {
+      payload = null
+    }
+  }
+  if (!payload || typeof payload !== 'object') payload = {}
+  return {
+    id: row?.id ?? null, type: row?.type ?? null, from: row?.from_handle ?? null, subject: row?.subject ?? null, body: row?.body ?? null,
+    taskId: payload.taskId ?? null, dispatchId: payload.dispatchId ?? null, outcome: payload.outcome ?? null, createdAt: row?.created_at ?? null,
   }
 }

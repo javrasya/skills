@@ -12,7 +12,7 @@ import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { submit } from '../skills/engineering/implement-spec-in-workflow/orca/submit.mjs'
 import { runScript, journalKey, failureSummary, finish, SUBMIT, SETTINGS, realClock, JOURNAL_ENTRIES, readJournal, attachView, runnerLog } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
-import { agentLifecycle } from '../skills/engineering/implement-spec-in-workflow/orca/lifecycle.mjs'
+import { agentLifecycle, notePrompt } from '../skills/engineering/implement-spec-in-workflow/orca/lifecycle.mjs'
 import { foldJournal } from '../skills/engineering/implement-spec-in-workflow/orca/journal.mjs'
 import { fakeOrca, fakeTranscripts } from '../skills/engineering/implement-spec-in-workflow/orca/fake-orca.mjs'
 import { RUNNER_SETTINGS } from '../skills/engineering/implement-spec-in-workflow/orca/settings.mjs'
@@ -325,11 +325,19 @@ function fakeClock() {
 const ONE = `return await agent('Do a thing.', { label: 'one', phase: 'P', schema: ${JSON.stringify(SCHEMA)} })`
 
 // Doctors (ADR-0014). A doctor's worker is played like any other, told apart
-// by its prompt; `givesUp` sends worker_done --outcome failed at once, which
-// settles its dispatch failed. withDoctor(patient, doctor) plays both.
+// by its prompt, and reports over its Run's mailbox with the IDs of its
+// preamble: `givesUp` sends worker_done --outcome failed at once, which also
+// settles its dispatch failed, and handsOff(note) a handoff with the note, then
+// worker_done --outcome succeeded. withDoctor(patient, doctor) plays both.
 // NO_DOCTOR: a run whose tests are not about doctors, with no rounds.
 const IS_DOCTOR = /^You are a doctor/
-const givesUp = async ({ state }) => { Object.assign(state, { settled: true, outcome: 'failed' }) }
+const idsOf = (p) => ({ from: p.handle, capability: p.capability, taskId: p.taskId, dispatchId: p.dispatchId })
+const GIVE_UP = 'Its transcript shows nothing a note could change.'
+const givesUp = async ({ orca, preamble }) => { await orca.mailSend({ ...idsOf(preamble), type: 'worker_done', outcome: 'failed', subject: 'giving up', body: GIVE_UP }) }
+const handsOff = (note) => async ({ orca, preamble }) => {
+  await orca.mailSend({ ...idsOf(preamble), type: 'handoff', subject: 'note', body: note })
+  await orca.mailSend({ ...idsOf(preamble), type: 'worker_done', outcome: 'succeeded', subject: 'done', body: 'handed off' })
+}
 const withDoctor = (patient, doctor = givesUp) => (w) => (IS_DOCTOR.test(w.prompt) ? doctor(w) : patient(w))
 const NO_DOCTOR = { doctorRounds: 0 }
 
@@ -988,6 +996,32 @@ test("orca-cli: a doctor's child worktree is created with setup skipped; any oth
     assert.deepEqual(verbsOf([create]), ['worktree create'])
     assert.equal(create.includes('--setup') ? flag(create, '--setup') : null, setup)
   }
+})
+
+test("orca-cli: the Run mailbox is checked from the runner's own terminal, each message tied to its dispatch by its payload, and an ack is answered with the next batch", async () => {
+  const row = (id, type, payload) => ({ id, run_id: 'run_1', delivery_contract: 'current_delivery', from_handle: 'term_d', to_handle: 'run:run_1', subject: 's', body: `body ${id}`, type, priority: 'normal', thread_id: null, payload, created_at: 'at', delivered_at: null })
+  const { argvs, orca } = recordingCli({
+    'orchestration check': (a) => (a.includes('--ack')
+      ? { runId: 'run_1', deliveryId: null, messages: [], count: 0, acknowledged: 'delivery_A' }
+      : { runId: 'run_1', deliveryId: 'delivery_A', replayed: true, acknowledged: null, count: 4, messages: [
+        row('msg_1', 'handoff', JSON.stringify({ taskId: 'task_1', dispatchId: 'ctx_1' })),
+        row('msg_2', 'worker_done', JSON.stringify({ taskId: 'task_1', dispatchId: 'ctx_1', outcome: 'failed' })),
+        row('msg_3', 'status', JSON.stringify({ _orcaLifecycleRejection: { code: 'sender_not_assignee' } })),
+        row('msg_4', 'heartbeat', 'not json'),
+      ] }),
+  })
+  const got = await orca.mailCheck()
+  assert.deepEqual(argvs.at(-1), ['orchestration', 'check'])
+  assert.deepEqual([got.deliveryId, got.replayed, got.acknowledged], ['delivery_A', true, null])
+  assert.deepEqual(got.messages.map((m) => [m.id, m.type, m.from, m.body, m.taskId, m.dispatchId, m.outcome]), [
+    ['msg_1', 'handoff', 'term_d', 'body msg_1', 'task_1', 'ctx_1', null],
+    ['msg_2', 'worker_done', 'term_d', 'body msg_2', 'task_1', 'ctx_1', 'failed'],
+    ['msg_3', 'status', 'term_d', 'body msg_3', null, null, null],
+    ['msg_4', 'heartbeat', 'term_d', 'body msg_4', null, null, null],
+  ])
+  const next = await orca.mailCheck({ ack: 'delivery_A' })
+  assert.deepEqual(argvs.at(-1), ['orchestration', 'check', '--ack', 'delivery_A'])
+  assert.deepEqual([next.deliveryId, next.acknowledged, next.messages], [null, 'delivery_A', []])
 })
 
 test('orca-cli: a custom launch that fails after its child worktree was made names that worktree on the error', async () => {
@@ -1766,7 +1800,7 @@ test('doctor: three doctors that each give up leave the patient null, failed and
   const r = await runOne(withDoctor(diesPastCap), { script: ISOLATED })
   assert.equal(r.result, null)
   assertEntries(r.journal)
-  assert.deepEqual(ofType(r.journal, 'gaveUp').map((e) => [e.n, e.round, e.reason]), [1, 2, 3].map((round) => [1, round, 'its worker settled failed with no remedy']))
+  assert.deepEqual(ofType(r.journal, 'gaveUp').map((e) => [e.n, e.round, e.reason]), [1, 2, 3].map((round) => [1, round, `it gave up: ${GIVE_UP}`]))
   assert.deepEqual(ofType(r.journal, 'settled').map((e) => [e.n, e.outcome]), [[2, 'failed'], [3, 'failed'], [4, 'failed']])
   const [failed, ...more] = ofType(r.journal, 'failed')
   assert.deepEqual(more, [])
@@ -1811,12 +1845,178 @@ for (const [what, doctor, startFails] of [
     assert.equal(own[0].patient, 1)
     assert.equal(own[0].key, null)
     assert.equal(own[0].attempts, startFails ? ATTEMPTS : 1)
-    assert.deepEqual(ofType(journal, 'gaveUp').map((e) => e.reason), ['it failed itself', 'its worker settled failed with no remedy', 'its worker settled failed with no remedy'])
+    assert.deepEqual(ofType(journal, 'gaveUp').map((e) => e.reason), ['it failed itself', `it gave up: ${GIVE_UP}`, `it gave up: ${GIVE_UP}`])
     // Its failure is no agent() null: only the patient's is, and the run ends partial for it alone.
     assert.deepEqual(ofType(journal, 'failed').filter((e) => e.patient == null).map((e) => e.n), [1])
     assert.equal(linesOf(registry).find((e) => e.type === 'ended').outcome, 'partial')
   })
 }
+
+// --- a doctor's handoff over Orca mail carries its patient on ---------------------
+
+const NOTE = 'Run the suite with --runInBand: the parallel run is what hangs.'
+// A patient that dies past its cap, gone or stuck in each continuation, and
+// submits once a continuation carries `note`.
+const curedBy = (note, death) => function dies(w) {
+  if (death === 'gone') w.state.gone = true
+  w.state.onContinue = (c) => (c.text.includes(note) ? submitGood(c) : dies(c))
+}
+const sentWith = (orca, body) => orca.calls.find((c) => c.verb === 'mailSend' && c.body === body)
+// The mailbox check that acknowledged the batch holding message `id`.
+const ackOf = (calls, id) => {
+  const batch = calls.find((c) => c.verb === 'mailCheck' && c.ids.includes(id)).deliveryId
+  return calls.findIndex((c) => c.verb === 'mailCheck' && c.ack === batch)
+}
+
+for (const death of ['gone', 'stuck']) {
+  test(`doctor: a handoff continues the patient (${death}) in its own session, worktree and ${death === 'gone' ? 'worktree, in a new tab, its own being gone' : 'tab'}, with the note in its continuation prompt, and its result is what agent() returns`, async () => {
+    const r = await runOne(withDoctor(curedBy(NOTE, death), handsOff(NOTE)), { script: ISOLATED })
+    assert.deepEqual(r.result, GOOD)
+    assertEntries(r.journal)
+    assert.deepEqual(ofType(r.journal, 'result').map((e) => [e.n, e.result]), [[1, GOOD]])
+    assert.deepEqual(ofType(r.journal, 'failed'), [])
+    assert.deepEqual(ofType(r.journal, 'gaveUp'), [])
+
+    const started = ofType(r.journal, 'started')[0]
+    const last = ofType(r.journal, 'continued').filter((e) => e.n === 1).at(-1)
+    const handoff = sentWith(r.orca, NOTE)
+    const [remedy, ...more] = ofType(r.journal, 'remedy')
+    assert.deepEqual(more, [])
+    assert.deepEqual([remedy.n, remedy.origin, remedy.round, remedy.doctor, remedy.how, remedy.messageId, remedy.reopened], [1, 1, 1, 2, 'continue', handoff.id, death === 'gone'])
+    const noted = r.continues.filter((c) => c.text.includes(NOTE))
+    assert.equal(noted.length, 1)
+    const [c] = noted
+    assert.equal(c.text, notePrompt(NOTE))
+    assert.ok(c.command.startsWith(`claude --resume ${started.sessionId}`), c.command)
+    assert.equal(c.worktree, started.worktree)
+    assert.equal(c.reopened, death === 'gone')
+    if (death === 'gone') assert.notEqual(c.terminal, last.terminal)
+    else assert.equal(c.terminal, last.terminal)
+    assert.deepEqual([remedy.dispatchId, remedy.terminal], [c.dispatchId, c.terminal])
+
+    // The handoff is journaled, then acted on, then acknowledged.
+    const mail = ofType(r.journal, 'mail')
+    const note = mail.find((e) => e.messageId === handoff.id)
+    assert.deepEqual([note.kind, note.action, note.body, note.doctor, note.patient, note.round], ['handoff', 'remedy', NOTE, 2, 1, 1])
+    assert.ok(r.journal.indexOf(note) < r.journal.indexOf(remedy))
+    assert.ok(r.orca.calls.indexOf(c) < ackOf(r.orca.calls, handoff.id), 'acknowledged only once acted on')
+    // Its worker_done after the handoff ends the doctor normally.
+    const done = r.orca.calls.find((x) => x.verb === 'mailSend' && x.type === 'worker_done')
+    assert.deepEqual(mail.filter((e) => e.messageId === done.id).map((e) => [e.kind, e.outcome, e.action]), [['worker_done', 'succeeded', 'ended']])
+    assert.deepEqual(ofType(r.journal, 'settled').map((e) => [e.n, e.outcome]), [[2, 'succeeded']])
+    assert.equal(r.orca.calls.filter((x) => x.verb === 'workerStart').length, 2, 'one doctor, and no second start of the patient')
+    const agents = foldJournal(r.journal).agents
+    assert.deepEqual(agents.map((a) => [a.origin, a.state]), [[1, 'done'], [2, 'done']])
+  })
+}
+
+test('doctor: a batch Orca delivers again before its acknowledgement is acknowledged, and its handoff applied once', async () => {
+  let failed = 0
+  const faults = { mailCheck: ({ ack, batch }) => (ack && batch?.some((m) => m.type === 'handoff') && !failed++ ? new OrcaError('runtime_unavailable', 'not now', 'orchestration check') : null) }
+  const r = await runOne(withDoctor(curedBy(NOTE, 'gone'), handsOff(NOTE)), { script: ISOLATED, faults })
+  assert.deepEqual(r.result, GOOD)
+  assertEntries(r.journal)
+  const handoff = sentWith(r.orca, NOTE)
+  const checks = r.orca.calls.filter((c) => c.verb === 'mailCheck')
+  const held = checks.filter((c) => c.ids.includes(handoff.id))
+  assert.ok(held.length >= 2, 'delivered again')
+  assert.equal(new Set(held.map((c) => c.deliveryId)).size, 1)
+  assert.equal(held.at(-1).replayed, true)
+  assert.ok(checks.some((c) => c.ack === held[0].deliveryId), 'acknowledged in the end')
+  assert.ok(r.lines.some((l) => l.includes("could not read the Run's mailbox") && l.includes('runtime_unavailable')), r.lines.join('\n'))
+  const mail = ofType(r.journal, 'mail')
+  assert.equal(new Set(mail.map((e) => e.messageId)).size, mail.length, 'one mail line per message')
+  assert.equal(ofType(r.journal, 'remedy').length, 1)
+  assert.equal(r.continues.filter((c) => c.text.includes(NOTE)).length, 1)
+})
+
+test('doctor: a runner that dies after journaling a handoff and before acknowledging it has applied it once; the resume acknowledges the batch Orca delivers again and never applies it twice', async () => {
+  const clock = fakeClock()
+  const stateDir = tmp()
+  const first = mortalOn(clock)
+  const NOTE2 = 'Stub the network: the registry is down.'
+  // The ack of the batch holding the handoff never lands: its runner dies.
+  const faults = {
+    mailCheck: ({ ack, batch }) => {
+      if (!ack || first.dead || !batch?.some((m) => m.type === 'handoff')) return null
+      first.dead = true
+      return new OrcaError('call_timeout', 'no answer within 120s', 'orchestration check')
+    },
+  }
+  // The first note carries it on, but it dies again 10 minutes later, under
+  // the resume, whose own doctor's note cures it.
+  let doctors = 0
+  const patient = function dies(w) {
+    w.state.gone = true
+    w.state.onContinue = (c) => (c.text.includes(NOTE2) ? submitGood(c) : c.text.includes(NOTE) ? void clock.at(clock.now() + 10 * MIN, () => dies(c)) : dies(c))
+  }
+  const orca = fakeOrca({ clock, faults, worker: (w) => withDoctor(patient, (d) => handsOff(++doctors === 1 ? NOTE : NOTE2)(d))({ ...w, clock }) })
+  const opts = { stateDir, out: () => {}, transcripts: fakeTranscripts(orca) }
+  runScript(ISOLATED, { ...opts, orca, clock: first }).catch(() => {})
+  await first.hung
+  const before = orca.calls.length
+  const handoff = sentWith(orca, NOTE)
+  const died = journalOf(stateDir)
+  assert.equal(ofType(died, 'mail').find((e) => e.messageId === handoff.id).action, 'remedy')
+  assert.equal(ofType(died, 'remedy').length, 1)
+  const batch = orca.calls.find((c) => c.verb === 'mailCheck' && c.ids.includes(handoff.id)).deliveryId
+  assert.equal(orca.calls.some((c) => c.verb === 'mailCheck' && c.ack === batch), false, 'never acknowledged')
+
+  assert.deepEqual(await runScript(ISOLATED, { ...opts, orca: orca.as('term_2'), clock, resume: true }), GOOD)
+  const journal = journalOf(stateDir)
+  assertEntries(journal)
+  const after = orca.calls.slice(before)
+  // Orca delivered it again, under a new delivery id, and the resume acknowledged it.
+  const again = after.find((c) => c.verb === 'mailCheck' && c.ids.includes(handoff.id))
+  assert.ok(again, 'delivered again to the resume')
+  assert.ok(after.some((c) => c.verb === 'mailCheck' && c.ack === again.deliveryId))
+  // The first note was applied once, by the first runner; the resume applied only its own doctor's.
+  assert.equal(orca.calls.filter((c) => c.verb === 'workerContinue' && c.text.includes(NOTE)).length, 1)
+  assert.equal(orca.calls.filter((c) => c.verb === 'workerContinue' && c.text.includes(NOTE2)).length, 1)
+  assert.deepEqual(ofType(journal, 'remedy').map((e) => e.messageId), [sentWith(orca, NOTE2).id])
+  const mail = ofType(journal, 'mail')
+  assert.equal(new Set(mail.map((e) => e.messageId)).size, mail.length, 'one mail line per message, the carried ones included')
+  assert.deepEqual(mail.filter((e) => e.messageId === handoff.id).map((e) => e.action), ['remedy'])
+})
+
+test('doctor: a worker_done --outcome failed over mail ends its round with no remedy, its body the reason', async () => {
+  const r = await runOne(withDoctor(diesPastCap), { script: ISOLATED })
+  assert.equal(r.result, null)
+  assertEntries(r.journal)
+  const gave = ofType(r.journal, 'mail').filter((e) => e.action === 'gaveUp')
+  assert.deepEqual(gave.map((e) => [e.kind, e.outcome, e.body, e.doctor, e.patient, e.round]), [2, 3, 4].map((d, i) => ['worker_done', 'failed', GIVE_UP, d, 1, i + 1]))
+  for (const e of gave) assert.ok(ackOf(r.orca.calls, e.messageId) >= 0, 'acknowledged')
+  assert.deepEqual(ofType(r.journal, 'gaveUp').map((e) => [e.round, e.reason]), [1, 2, 3].map((round) => [round, `it gave up: ${GIVE_UP}`]))
+  assert.deepEqual(ofType(r.journal, 'remedy'), [])
+  const firstDoctor = r.journal.findIndex((e) => e.type === 'doctor')
+  assert.equal(r.journal.slice(firstDoctor).some((e) => e.type === 'continued'), false)
+  assert.equal(r.continues.length, 3, 'only the continuations before the cap')
+})
+
+test("fake orca: a Run's mailbox holds what its workers send, hands its coordinator the same batch until acknowledged, and a run-use delivers it again under a new id", async () => {
+  const orca = fakeOrca()
+  const { runId } = await orca.runCreate({ objective: 'o' })
+  await orca.workerStart({ run: runId, prompt: 'p', title: 't', sessionId: SID })
+  const [preamble] = orca.dispatches.values()
+  const send = (body, type = 'handoff') => orca.mailSend({ ...idsOf(preamble), type, subject: 's', body })
+  assert.deepEqual(await orca.mailCheck(), { deliveryId: null, acknowledged: null, replayed: false, messages: [] })
+  const { id: a } = await send('one')
+  const batch = await orca.mailCheck()
+  assert.deepEqual([batch.replayed, batch.messages.map((m) => [m.id, m.type, m.body, m.dispatchId])], [false, [[a, 'handoff', 'one', preamble.dispatchId]]])
+  const { id: b } = await send('two')
+  const again = await orca.mailCheck()
+  assert.deepEqual([again.deliveryId, again.replayed, again.messages.map((m) => m.id)], [batch.deliveryId, true, [a]], 'frozen when first issued')
+  await assert.rejects(orca.mailCheck({ ack: 'delivery_nope' }), /stale_delivery/)
+  const next = await orca.mailCheck({ ack: batch.deliveryId })
+  assert.deepEqual([next.acknowledged, next.messages.map((m) => m.id)], [batch.deliveryId, [b]])
+  await orca.as('term_2').runUse({ runId })
+  assert.deepEqual((await orca.mailCheck()).messages, [], 'the old coordinator reads nothing')
+  const taken = await orca.as('term_2').mailCheck()
+  assert.notEqual(taken.deliveryId, next.deliveryId)
+  assert.deepEqual([taken.replayed, taken.messages.map((m) => m.id)], [false, [b]])
+  await send('done', 'worker_done')
+  assert.equal(orca.dispatches.get(preamble.dispatchId).outcome, 'succeeded', 'a worker_done settles its dispatch')
+})
 
 // --- a start that fails is retried --------------------------------------------
 
