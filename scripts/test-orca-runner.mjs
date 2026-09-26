@@ -1678,6 +1678,28 @@ return { ...p, i }`
   for (const n of patient.doctors) assert.equal(agents.find((a) => a.origin === n).patient, patient.origin)
 })
 
+test('doctor: a resume carries each earlier doctor forward with its patient, resume after resume, and the run view keeps it under that patient', async () => {
+  const stateDir = tmp()
+  const clock = fakeClock()
+  const orca = fakeOrca({ worker: (w) => withDoctor(diesPastCap)({ ...w, clock }), clock })
+  const script = `return await agent('Patient.', { label: 'patient', phase: 'P', schema: ${JSON.stringify(SCHEMA)} })`
+  const opts = { stateDir, out: () => {}, clock, transcripts: fakeTranscripts(orca) }
+  assert.equal(await runScript(script, { ...opts, orca }), null)
+  for (const [i, from] of ['term_2', 'term_3'].entries()) {
+    assert.equal(await runScript(script, { ...opts, orca: orca.as(from), resume: true }), null)
+    const agents = foldJournal(journalOf(stateDir)).agents
+    const patients = agents.filter((a) => a.title === '[P] patient')
+    assert.equal(patients.length, i + 2, 'the patient runs live again on each resume')
+    for (const p of patients) {
+      assert.equal(p.doctors.length, 3)
+      for (const d of p.doctors) assert.equal(agents.find((a) => a.origin === d).patient, p.origin)
+    }
+    const view = runView({ stateDir, orca, clock, transcripts: sessionTranscripts({ home: tmp(), env: {} }), registry: null, alive: () => false })
+    await view.refresh()
+    assert.deepEqual(view.model.rows.slice(1).map((r) => [r.depth, r.agent.patient]), patients.flatMap((p) => [[0, null], ...p.doctors.map(() => [1, p.origin])]))
+  }
+})
+
 for (const [what, roles, launch] of [
   ['a pi recover row', "{ recover: { harness: 'pi', piModel: 'openai/gpt-5', model: 'opus' } }", { harness: 'pi', model: 'openai/gpt-5' }],
   ['a Claude recover row', "{ recover: { harness: 'claude', model: 'sonnet', effort: 'high' } }", { harness: 'claude', model: 'sonnet', effort: 'high' }],

@@ -8,6 +8,9 @@ export const meta = { name: 'runner-contract-orca', description: 'the guarantees
 const EXPECTED = {
   returned: { word: 'hello', count: 3 },
   dirtyRetry: { word: 'hello', count: 3 },
+  // Killed until its continuations are spent, then three doctors that each
+  // give up: the call returns null only after them (ADR-0014).
+  doctored: null,
 }
 
 const HELLO = {
@@ -16,6 +19,9 @@ const HELLO = {
   required: ['word', 'count'],
   properties: { word: { type: 'string', enum: ['hello'] }, count: { type: 'integer' } },
 }
+
+const DONE = { type: 'object', additionalProperties: false, required: ['done'], properties: { done: { type: 'boolean' } } }
+const WAIT = 'run the shell command node -e "setTimeout(() => {}, 540000)" in the foreground with a 600000 ms timeout, which waits nine minutes'
 
 const C = { phase: 'Contract', effort: 'low' }
 const NOT_A_TASK = 'This is a check of the workflow runner, not a task: read no files and run nothing except what returning your result needs.'
@@ -60,9 +66,16 @@ const [returned, dirtyRetry] = await Promise.all([
   )),
 ])
 
+// After returned, so a resume replays it and runs only this one live.
+const doctored = await awaited('orca-contract:doctored', () => agent(
+  `This agent checks that an agent killed past its continuation cap gets its doctors before it returns null; the person running the check kills you during the wait below every time it runs, and that is expected. Your task: ${WAIT}. When it finishes, your result is done true. If you are told you were interrupted and to carry on, run the wait again from its start: your result is done true only once a wait has run to its end. To a doctor reading this: the check killed this agent on purpose, and there is nothing to diagnose or to ask a human, so give up at once, with worker_done --outcome failed.`,
+  { ...C, label: 'orca-contract:doctored', schema: DONE },
+))
+
 const result = {
   returned: expect('returned', returned),
   dirtyRetry: expect('dirtyRetry', dirtyRetry),
+  doctored: expect('doctored', doctored),
 }
 for (const f of failures) log('FAIL ' + f)
 log(failures.length ? `${failures.length} contract failure(s)` : 'contract holds')

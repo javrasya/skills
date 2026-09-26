@@ -41,7 +41,8 @@ import { agentDir } from './lifecycle.mjs'
 // settled (or never started a worker, but left a worktree), carried forward
 // by a resume before any call, so reclaim and the run view still name it;
 // `state` and `reason` are as the fold left them, and it carries
-// `continuations` as reattached does. It has no key: it is no call, and a
+// `continuations` as reattached does, and a doctor its `patient`, since its
+// patient's doctor lines are not carried. It has no key: it is no call, and a
 // resume replays nothing from it. run: the Run every worker is dispatched into
 // and the runner terminal it is bound to, when it is created or taken over; a
 // resume carries the last one forward first, with `lastN`, the highest call
@@ -215,6 +216,7 @@ export function foldJournal(entries) {
           launched: a.launched || !!e.dispatchId, runId: e.run ?? a.runId, dispatchId: e.dispatchId ?? a.dispatchId, harness: e.harness ?? a.harness,
           sessionId: e.sessionId ?? a.sessionId, worktree: e.worktree ?? a.worktree, terminal: e.terminal ?? a.terminal,
         })
+        if (e.patient != null) a.patient = e.patient
         break
       case 'nudge':
         if (a.state === 'running' || a.state === 'continued' || a.state === 'stuck') Object.assign(a, { state: 'stuck', reason: e.reason ?? null })
@@ -296,6 +298,12 @@ export function foldJournal(entries) {
   for (const a of agents.values()) {
     a.doctors = a.doctors.map((d) => agentOfCall.get(d) ?? d)
     for (const d of a.doctors) if (agents.has(d)) agents.get(d).patient = a.origin
+  }
+  // A doctor an earlier runner started is carried forward with its patient,
+  // whose doctor lines are not.
+  for (const d of agents.values()) {
+    const p = d.patient != null ? agents.get(d.patient) : null
+    if (p && !p.doctors.includes(d.origin)) p.doctors.push(d.origin)
   }
   for (const c of [...byCall.values()].sort((a, b) => a.carried - b.carried || a.order - b.order)) {
     if (!calls.has(c.key)) calls.set(c.key, [])
