@@ -56,7 +56,21 @@ import { agentDir } from './lifecycle.mjs'
 // `patient`, by origin, and fails no call. settled: a doctor's worker settled,
 // with its `outcome`: a doctor submits no result. gaveUp: a doctor round ended
 // without a remedy, about the patient, with the `round`, the `doctor` and why;
-// after the last one the patient's failed line follows.
+// after the last one the patient's failed line follows. mail: the runner read
+// a message from its Run mailbox: its `messageId`, its `kind` (Orca's type:
+// handoff, worker_done…) and the `action` the runner took on it — remedy (a
+// doctor's note carried its patient on), gaveUp (its doctor gave up: a
+// worker_done failed), ended (its doctor's worker_done succeeded) or none (it
+// came from no doctor out, or asked for nothing). It is journaled before the
+// runner acts on it and acknowledges it, so a message Orca delivers again is
+// never acted on twice; a doctor's also carries its `doctor` (n), `patient`
+// (origin) and `round`, and its `body` (the note, or why it gave up), and a
+// worker_done its `outcome`. It has no n: it is about no agent's lifecycle.
+// A resume carries each one forward before any call. remedy: a doctor's
+// handoff carried its patient on, about the patient, with the `round`, the
+// `doctor`, `how` (continue: its session continued with the note), the
+// `messageId` of the handoff, and the `dispatchId` and `terminal` it now runs
+// under, `reopened` as a continuation's.
 export const JOURNAL_ENTRIES = Object.freeze({
   queued: ['at', 'key', 'n', 'title'],
   starting: ['at', 'key', 'n', 'title', 'run'],
@@ -78,6 +92,8 @@ export const JOURNAL_ENTRIES = Object.freeze({
   doctor: ['at', 'key', 'n', 'title', 'origin', 'round', 'reason', 'doctor'],
   settled: ['at', 'key', 'n', 'title', 'dispatchId', 'outcome'],
   gaveUp: ['at', 'key', 'n', 'title', 'origin', 'round', 'doctor', 'reason'],
+  mail: ['at', 'messageId', 'kind', 'action'],
+  remedy: ['at', 'key', 'n', 'title', 'origin', 'round', 'doctor', 'how', 'messageId', 'dispatchId', 'terminal', 'reopened'],
 })
 
 // The lines that name a call's worker.
@@ -108,7 +124,7 @@ export const madeByRun = (a) => !!a.runId && (a.launched || !!a.worktree)
 
 export const readJournal = (path) => foldJournal(journalLines(path))
 
-// The fold of a journal's entries: { calls, retained, run, lastN, agents }.
+// The fold of a journal's entries: { calls, retained, run, lastN, agents, mail }.
 //
 // calls, what a resume replays and takes up: key -> what each call made under
 // it, in call order — { result } for a call that returned a value (with
@@ -152,9 +168,11 @@ export const readJournal = (path) => foldJournal(journalLines(path))
 // baseline: the porcelain lines its worktree was made with, or null. launched: a worker was started for it,
 // whatever its dispatch now reads. from and to are when it began and settled
 // here, or null: a replayed result or a carried agent launched nothing here.
+// mail: every `mail` line, one per message id, the first kept, in order.
 export function foldJournal(entries) {
   const calls = new Map()
   const retained = []
+  const mail = new Map()
   let run = null
   let lastN = 0
   // One per call, by its n: a call's lines share it, and no two calls do.
@@ -230,10 +248,12 @@ export function foldJournal(entries) {
         if (a.state === 'blocked') Object.assign(a, { state: a.continuations ? 'continued' : 'running', waiting: null, reason: null })
         break
       case 'continued':
+      case 'remedy':
         // A continued session may run under a new dispatch in a new tab: that
-        // is the worker a reclaim releases and the tab it closes.
+        // is the worker a reclaim releases and the tab it closes. A remedy's
+        // continuation is no count against the cap.
         Object.assign(a, {
-          state: 'continued', reason: null, waiting: null, continuations: e.attempt ?? a.continuations + 1,
+          state: 'continued', reason: null, waiting: null, continuations: e.type === 'remedy' ? a.continuations : e.attempt ?? a.continuations + 1,
           dispatchId: e.dispatchId ?? a.dispatchId, terminal: e.terminal ?? a.terminal, sessionId: e.sessionId ?? a.sessionId,
         })
         break
@@ -262,6 +282,7 @@ export function foldJournal(entries) {
     if (e.retained?.path && !retained.some((k) => k.path === e.retained.path)) retained.push(e.retained)
     for (const n of [e.n, e.lastN]) if (Number.isInteger(n)) lastN = Math.max(lastN, n)
     if (e.type === 'run' && typeof e.runId === 'string') run = { runId: e.runId, terminal: e.terminal ?? null }
+    if (e.type === 'mail' && typeof e.messageId === 'string' && !mail.has(e.messageId)) mail.set(e.messageId, e)
     const numbered = Number.isInteger(e.n)
     const id = numbered && JOURNAL_ENTRIES[e.type] && e.type !== 'run' && e.type !== 'retained' ? agent(e) : null
     if (typeof e.key !== 'string') continue
@@ -291,6 +312,8 @@ export function foldJournal(entries) {
       }
     } else if (e.type === 'continued' && c.worker && e.dispatchId) {
       c.worker = { ...c.worker, dispatchId: e.dispatchId, terminal: e.terminal ?? c.worker.terminal, continuations: Number.isInteger(e.attempt) ? e.attempt : c.worker.continuations + 1 }
+    } else if (e.type === 'remedy' && c.worker && e.dispatchId) {
+      c.worker = { ...c.worker, dispatchId: e.dispatchId, terminal: e.terminal ?? c.worker.terminal }
     }
   }
   // A patient's doctor line names the n its doctor was started under; the
@@ -310,5 +333,5 @@ export function foldJournal(entries) {
     const settled = c.settled && 'result' in c.settled && c.origin !== null ? { ...c.settled, origin: c.origin } : c.settled
     calls.get(c.key).push(settled ?? (c.worker ? { worker: c.worker } : { unsettled: true }))
   }
-  return { calls, retained, run, lastN, agents: [...agents.values()].sort((x, y) => x.n - y.n) }
+  return { calls, retained, run, lastN, agents: [...agents.values()].sort((x, y) => x.n - y.n), mail: [...mail.values()] }
 }

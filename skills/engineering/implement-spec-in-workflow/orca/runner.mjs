@@ -116,7 +116,7 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   let currentPhase = null
 
   const journalPath = join(stateDir, 'journal.jsonl')
-  const earlier = resume ? readJournal(journalPath) : { calls: new Map(), retained: [], run: null, lastN: 0, agents: [] }
+  const earlier = resume ? readJournal(journalPath) : { calls: new Map(), retained: [], run: null, lastN: 0, agents: [], mail: [] }
   const journaled = earlier.calls
   // A resume numbers its calls on from the last run's: the Run it takes over
   // already holds a `<runId>-<n>` child worktree for each n used, and Orca
@@ -184,6 +184,10 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   }
   // So a resume that makes no live call still leaves the Run to the next one.
   if (earlier.run) journal({ type: 'run', ...earlier.run, lastN: earlier.lastN })
+  // Every Run mailbox message an earlier runner acted on, as it journaled it:
+  // Orca delivers a batch again until it is acknowledged, and it is never
+  // acted on twice.
+  for (const m of earlier.mail) journal(m)
   // Every other agent an earlier runner of this Run made: it launched
   // nothing in this run, but its tab and `<runId>-<n>` worktree stay the Run's
   // until the operator reclaims them, so this run's journal still names it.
@@ -210,7 +214,7 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   const doctorLaunch = () => launchOf(meta.value?.roles?.recover ?? {}, permissionMode)
   const life = agentLifecycle({
     orca, clock, limits, out, stateDir, objective: () => objectiveOf(meta.value, fallbackObjective), journal, retainWorktree, onRun, takeOver: earlier.run?.runId ?? null, transcripts,
-    nextN: () => ++count, doctorLaunch, history,
+    nextN: () => ++count, doctorLaunch, history, mailHandled: earlier.mail.map((m) => m.messageId),
   })
 
   const phase = (title) => {

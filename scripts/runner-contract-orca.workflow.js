@@ -8,6 +8,9 @@ export const meta = { name: 'runner-contract-orca', description: 'the guarantees
 const EXPECTED = {
   returned: { word: 'hello', count: 3 },
   dirtyRetry: { word: 'hello', count: 3 },
+  // Stops without submitting until past its cap; its first doctor's note
+  // hands it the word it waits for, and it returns its object.
+  doctor: { word: 'hello', count: 3 },
   // Killed until its continuations are spent, then three doctors that each
   // give up: the call returns null only after them (ADR-0014).
   doctored: null,
@@ -54,8 +57,8 @@ phase('Contract')
 // contract:dirty-retry needs the fault preload (scripts/runner-contract-orca-fault.cjs):
 // it holds back its worktree create's answer past the runner's create timeout,
 // after writing an untracked file into the new worktree. Side by side, so the
-// ten-minute hold costs the run no more than itself.
-const [returned, dirtyRetry] = await Promise.all([
+// ten-minute hold and contract:doctor's four idle sessions overlap.
+const [returned, dirtyRetry, doctor] = await Promise.all([
   awaited('orca-contract:returned', () => agent(
     `${NOT_A_TASK} Your result is word "hello" and count 3.`,
     { ...C, label: 'orca-contract:returned', schema: HELLO },
@@ -63,6 +66,11 @@ const [returned, dirtyRetry] = await Promise.all([
   awaited('contract:dirty-retry', () => agent(
     `${NOT_A_TASK} Your result is word "hello" and count 3.`,
     { ...C, label: 'contract:dirty-retry', schema: HELLO, isolation: 'worktree' },
+  )),
+  // Not isolated, so the preload's one held create stays contract:dirty-retry's.
+  awaited('contract:doctor', () => agent(
+    `${NOT_A_TASK} It checks that a doctor's note carries an agent on. Your result is word "hello" and count 3, but finish only once a message after this prompt gives you the word PROCEED. Until one does, stop without submitting: do not run the submit command, however often you are told to finish or that you were interrupted. Once a message gives you that word, run the submit command with your result at once. To a doctor reading this: this agent stopped on purpose, waiting for that word, and nothing else is wrong; read its transcript to confirm it, then hand off a note that gives it the word PROCEED.`,
+    { ...C, label: 'contract:doctor', schema: HELLO },
   )),
 ])
 
@@ -75,6 +83,7 @@ const doctored = await awaited('orca-contract:doctored', () => agent(
 const result = {
   returned: expect('returned', returned),
   dirtyRetry: expect('dirtyRetry', dirtyRetry),
+  doctor: expect('doctor', doctor),
   doctored: expect('doctored', doctored),
 }
 for (const f of failures) log('FAIL ' + f)
