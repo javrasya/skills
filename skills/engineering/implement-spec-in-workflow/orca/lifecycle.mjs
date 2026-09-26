@@ -100,18 +100,27 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   let run = null
   let toldNoMode = false
 
-  // Every way a call ends in null journals one of these. retained: the
-  // worktree it left, or null. attempts counts the starts, or Run creations,
-  // it made; one that started a worker made one more start than it retried.
-  // continuations counts how often a started worker's session was continued; a
+  // The one point where a call ends in null: a start whose retries are spent,
+  // the end of supervision, and a Run it could not take over or create all
+  // come here, and nothing else writes `failed` or returns an agent() null.
+  // The doctor (#67) hooks in here. retained: the worktree it left, or null;
+  // alsoRetained: each other one, journaled after it as `retained` lines.
+  // attempts counts the starts, or Run creations, it made; one that started a
+  // worker made one more start than it retried. continuations counts how
+  // often a started worker's session was continued; a
   // continuation carries on that attempt's session. `run` is the Run it failed
   // in, once there is one: reclaim names a retained worktree by it. workerOut:
   // its worker is still out, so the call stays unsettled for the next resume,
   // which takes that worker up again. workerLeft: its worker's process was
   // left running (kept, ADR-0012), so only a reclaim that stops it first
-  // removes it (reclaim.mjs).
-  const fail = ({ key, n, title }, { reason, retained = null, attempts = 1, continuations = 0, run = null, workerOut = false, workerLeft = false }) =>
+  // removes it (reclaim.mjs). mark and said: the log line's prefix, and what
+  // it adds after `agent() returns null`.
+  const failAgent = ({ key, n, title }, { reason, retained = null, alsoRetained = [], attempts = 1, continuations = 0, run = null, workerOut = false, workerLeft = false }, { mark = '!!', said = '' } = {}) => {
     journal({ type: 'failed', key, n, title, reason, attempts, ...(run && { run }), ...(continuations && { continuations }), ...(retained && { retained }), ...(workerOut && { workerOut }), ...(workerLeft && { workerLeft }) })
+    for (const also of alsoRetained) journal({ type: 'retained', retained: also })
+    out(`${mark} ${title}: ${reason}; agent() returns null${said}`)
+    return null
+  }
 
   // Something that went wrong without failing the agent: logged and
   // journaled, never swallowed.
@@ -309,8 +318,8 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     return { w, sessionId: adopt.sessionId, attempts: 0, continued, end }
   }
 
-  // Starts the call's worker, retried as the settings table says. Null once
-  // it has failed for good, journaled.
+  // Starts the call's worker, retried as the settings table says. Once it
+  // has failed for good, the call's null.
   async function start(runId, call) {
     const { prompt, isolated, launch, key, n, title, phaseName, dir, schemaPath, resultPath, payloadPath } = call
     // The child worktrees failed attempts left. Every attempt of a call asks
@@ -342,14 +351,11 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
         }
       }))
     } catch (e) {
-      out(`!! ${title}: ${e.reason}; agent() returns null`)
       // A worktree Orca made before the start failed is named like a dead
       // agent's: the runner never removes one. The failed line carries the
       // first; a `retained` line names each other one.
       const [kept, ...more] = isolated ? [...made].map((path) => retainWorktree({ path, reason: `retained because it was created for ${title}, whose worker never started, so no agent ever reported it` })) : []
-      fail(call, { reason: e.reason, retained: kept ?? null, attempts: e.attempts, run: runId })
-      for (const retained of more) journal({ type: 'retained', retained })
-      return null
+      return failAgent(call, { reason: e.reason, retained: kept ?? null, alsoRetained: more, attempts: e.attempts, run: runId })
     }
     for (const why of w.warnings ?? []) warn(call, why)
     journal({ type: 'started', key, n, title, run: runId, dispatchId: w.dispatchId, harness: launch.harness, sessionId, worktree: w.worktree ?? null, terminal: w.terminal, dir })
@@ -439,9 +445,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       if (result.error) {
         const reason = end.dead ? `${end.dead}, with no result` : `${result.error} (outcome ${end.outcome})`
         if (kept) out(`!! ${title}: its tab ${w.terminal} is kept open`)
-        fail({ key, n, title }, { reason, retained: retain(), attempts, continuations: continued, run: runId, workerLeft: kept })
-        out(`!! ${title}: ${reason}; agent() returns null`)
-        return null
+        return failAgent(call, { reason, retained: retain(), attempts, continuations: continued, run: runId, workerLeft: kept })
       }
       journal({ type: 'result', key, n, title, result: result.value })
       out(`<< ${title}: result received`)
@@ -492,14 +496,10 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       if (adopt) {
         // Its worker is still out: the call stays unsettled for the next
         // resume, which takes that worker up, and its worktree is named.
-        out(`!!!!!!!! ${title}: ${e.reason}; agent() returns null, its worker ${adopt.dispatchId} is left out for the next resume to take up, and the next agent() asks again`)
         const kept = call.isolated && adopt.worktree ? retainWorktree({ path: adopt.worktree, reason: `retained because its agent (${title}) was still at work when this runner could not take its Run over, so it never reported — the next resume takes that agent up again` }) : null
-        fail(call, { reason: e.reason, retained: kept, attempts: e.attempts, continuations: adopt.continuations, run: adopt.run ?? takeOver, workerOut: true })
-        return null
+        return failAgent(call, { reason: e.reason, retained: kept, attempts: e.attempts, continuations: adopt.continuations, run: adopt.run ?? takeOver, workerOut: true }, { mark: '!!!!!!!!', said: `, its worker ${adopt.dispatchId} is left out for the next resume to take up, and the next agent() asks again` })
       }
-      out(`!!!!!!!! ${title}: ${e.reason}; agent() returns null, and the next agent() asks again`)
-      fail(call, { reason: e.reason, attempts: e.attempts })
-      return null
+      return failAgent(call, { reason: e.reason, attempts: e.attempts }, { mark: '!!!!!!!!', said: ', and the next agent() asks again' })
     }
     // Held until the worker settles or is stopped. It is never released during
     // the run, so its tab stays open, but a settled worker no longer works.

@@ -123,6 +123,7 @@ Not yet confirmed against live Orca: that `worker-show` follows a dispatch whose
 
 - **Offline:** `node scripts/test-orca-runner.mjs`. Fast and free. It runs the runner against the fake Orca, so it proves the runner does what the fake says Orca does, and nothing about the Workflow runner.
 - **The runner contract test:** `scripts/runner-contract.workflow.js`. Slow, and it spends tokens on eight short agents per fresh run, so it runs by hand. It is the only check that the Orca runner gives a script what the Workflow runner gives it, and that is the promise the whole Orca runner rests on.
+- **The Orca-only contract test:** `scripts/runner-contract-orca.workflow.js`, for the guarantees only the Orca runner makes. An agent runs it end to end with the Orca CLI, with no human and no `/workflows` UI (see [The Orca-only contract](#the-orca-only-contract)).
 
 **It gates every Orca runner change.** A change to any file in this directory, or to the template's use of the hooks, is not done until the contract test returns the expected object under both runners, fresh and resumed. The offline tests do not replace it. A guarantee the script comes to rely on gets a case in the contract script first. The script has to stay byte-identical under both runners, and it must never use `Date.now()`, `Math.random()` or an argless `new Date()`.
 
@@ -209,6 +210,58 @@ Last pass: 2026-09-25 (#53), Orca 1.4.209 and Claude Code 2.1.282 on Windows 11,
   - On the fresh run the six `parallel` agents returned in under 10 seconds. `contract:continue` and then `contract:kill` were each stopped with `x` in `/workflows` once in their wait, showed as `skipped`, and were journaled `failed`, so `continued` and `killed` came back `null`.
   - The resume kept the same runId and appended to the same journal: the six `parallel` agents logged no new `started` and were replayed (no tokens or time in `/workflows`), and `contract:continue` and `contract:kill` each started live again and were stopped the same way. The run record at `workflows/wf_d37077df-c47.json` holds the resume's result, which overwrote the fresh one; both equalled the object.
   - Neither run left a child worktree: the Workflow runner removed the unchanged worktrees of `contract:isolated` and `contract:retry` itself.
+
+## The Orca-only contract
+
+`scripts/runner-contract-orca.workflow.js` holds the guarantees the Orca runner makes and the Workflow runner does not. The two-runner script has to stay byte-identical under both runners, so such a case cannot go there. It is never run under the Workflow runner. Every Orca runner change runs it beside the two-runner test, fresh and resumed. A case is one key in the script's `EXPECTED`, one call, and one row below.
+
+| case | the script does | the Orca runner must give |
+|---|---|---|
+| a result reaches the script | `orca-contract:returned` returns an object against a schema | `returned: {count: 3, word: "hello"}` |
+
+Every run, fresh or resumed, must return exactly this:
+
+```json
+{"returned":{"count":3,"word":"hello"},"failures":[]}
+```
+
+### How an agent runs it
+
+It uses only the Orca CLI and the state dir's files. The CLI is `orca`, or `/Applications/Orca.app/Contents/Resources/bin/orca` on macOS when it is not on PATH. `<repo>` is the absolute path of the checkout, and `<dir>` is a new, empty scratch dir outside it. `<worktree>` is an Orca worktree of a repo Orca knows (`orca worktree list --json`), and the runner's own agents work in it. A checkout Orca does not list, such as a git worktree made outside Orca, cannot be `<worktree>`: pass the main checkout, since the script paths can point anywhere.
+
+Three rules hold for every case:
+
+- **The runner runs in a new Orca terminal**, so its Run binds to that terminal and its view attaches there.
+- **Every "kill" is `orca terminal close --terminal <handle>`.** The handle is on the worker's log line `>> [Contract] <label>: started … in terminal <handle>`, and on its `started` line in `<dir>/journal.jsonl` (`terminal`). A session continued in a new terminal has its new handle only on its `continued` journal line (`terminal`, `reopened: true`), never in the log.
+- **Every "operator answer" is `orca terminal send --terminal <runner> --text <key>`**, with no `--enter`. The run view reads single keys, and Enter is an answer of its own.
+
+The steps:
+
+1. **Launch** and keep `result.terminal.handle` as `<runner>`:
+   ```
+   orca terminal create --worktree path:<worktree> --title "runner contract (orca only)" --command "node <repo>/skills/engineering/implement-spec-in-workflow/orca/runner.mjs <repo>/scripts/runner-contract-orca.workflow.js --state-dir <dir>" --json
+   ```
+2. **Wait for `<dir>/summary.json`.** Poll for the file. `<dir>/runner.pid` holding a pid that is no longer alive (`node -e "process.kill(+process.argv[1], 0)" <pid>` throws) and no `summary.json` means the runner died: the pass failed. Do each case's kills and answers from its row above as the log reaches them.
+3. **Answer the end-of-run prompt.** Once `runner.log` shows `== Reclaim`, send `n`, which keeps every agent so the resume finds them: `orca terminal send --terminal <runner> --text n`. The log shows `chosen: none`. The view stays on the ended run: send `q`. The log shows `!! the run view was closed; the runner prints its log in this tab again`, and the runner exits. Check its pid is dead.
+4. **Confirm the fresh run** (below). Copy `summary.json` aside, since the resume replaces it.
+5. **Resume:** run the same command with `--resume` added, against the same `<dir>`, in a new `orca terminal create`, and keep its handle as the new `<runner>`. The agents that returned a value log `replayed from the journal` and start no worker. Wait, answer and quit as in steps 2 and 3, then confirm again.
+6. **Clean up:** close the kept worker tabs, named on the `!! kept …, tab <handle>` log lines, and the runner tabs with `orca terminal close`. Remove any `<runId>-<n>` child worktree with `orca worktree rm`.
+
+### How it confirms the result
+
+Both checks must hold, on the fresh run and on the resume:
+
+- **`summary.json`** is `{runner: "orca", ok: true, result}`, and `JSON.stringify(result)` equals the object above exactly. `ok: false` means the script threw, and `error` holds the stack.
+- **The log's last line.** Every `runner.log` line is `<ISO time> <text>`, and the script's own `log()` lines are indented three spaces. The script's last line is `<time>    contract holds`, or `N contract failure(s)` after a `FAIL` line per broken case. It is not the file's last line: after it come `== Result`, the result, `== Reclaim` and the prompt, and on a resume the fresh run's lines stand above it. Take the last line that matches `contract (holds|failure)`, which is the one just before the last `== Result`.
+
+### Pass notes
+
+Last pass: 2026-09-26 (#68), Orca 1.4.212 on macOS, with the runner as of #68's lifecycle failure point, driven by an agent with the steps above alone. **The Orca-only contract holds, fresh and resumed** (Run `run_0ee4fd996340`).
+
+- The skills checkout was not yet a repo in Orca, so it was added with `orca repo add`. The agent's own git worktree was not in `orca worktree list`, so `<worktree>` was the main checkout and the script paths pointed into the agent's worktree.
+- **Fresh:** `orca-contract:returned` started in the main checkout, went idle without submitting after about two minutes, was nudged once, and then submitted. The log's script lines ended `orca-contract:returned returned {"value":{"word":"hello","count":3}}`, then `contract holds`. `summary.json` held `ok: true` and the object above exactly. `n` sent with `orca terminal send --text n` logged `chosen: none`, and `q` closed the view, after which the runner's pid was dead.
+- **Resumed** from a new terminal: `orca-contract:returned` logged `replayed from the journal` and started no worker. The log's last script line was `contract holds`, and `summary.json` held the same object. With no agent to run live, the resume took no Run over: its journal's one `run` line names the fresh runner's terminal. `n` and `q` ended it as on the fresh run.
+- No kill ran, since the one case has none. `orca terminal close` was used only to clean up the worker tab and the two runner tabs.
 
 ## A dead agent on resume
 
