@@ -3601,6 +3601,10 @@ test('orca-cli: a dispatch Orca failed because its tab closed is a gone worker, 
     assert.deepEqual([failed.settled, failed.gone], [false, true], verb)
     const done = await recordingCli({ 'orchestration worker-show': closed('completed', 'settled') }).orca[verb]({ dispatch: 'ctx_9', terminal: 'term_w' })
     assert.deepEqual([done.settled, done.gone, done.outcome], [true, true, 'succeeded'], verb)
+    // Orca 1.4.212 fails it at once, and can answer so before the terminal reads orphaned (live, #72).
+    const early = { ...closed('failed', 'process_exited'), dispatch: { status: 'failed', terminationReason: 'operator_close' }, terminal: { orphaned: false } }
+    const racing = await recordingCli({ 'orchestration worker-show': early }).orca[verb]({ dispatch: 'ctx_9', terminal: 'term_w' })
+    assert.deepEqual([racing.settled, racing.gone], [false, true], verb)
   }
 })
 
