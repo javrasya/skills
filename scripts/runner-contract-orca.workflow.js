@@ -11,6 +11,9 @@ const EXPECTED = {
   // Stops without submitting until past its cap; its first doctor's note
   // hands it the word it waits for, and it returns its object.
   doctor: { word: 'hello', count: 3 },
+  // Waits for a file only the person running the check creates; its doctor
+  // escalates, needs you until they answer in its tab, then hands off.
+  needsYou: { word: 'hello', count: 3 },
   // Killed until its continuations are spent, then three doctors that each
   // give up: the call returns null only after them (ADR-0014).
   doctored: null,
@@ -27,6 +30,7 @@ const DONE = { type: 'object', additionalProperties: false, required: ['done'], 
 const WAIT = 'run the shell command node -e "setTimeout(() => {}, 540000)" in the foreground with a 600000 ms timeout, which waits nine minutes'
 
 const C = { phase: 'Contract', effort: 'low' }
+const NEEDS_YOU_FILE = 'contract-needs-you.txt'
 const NOT_A_TASK = 'This is a check of the workflow runner, not a task: read no files and run nothing except what returning your result needs.'
 
 const canon = (v) =>
@@ -58,7 +62,7 @@ phase('Contract')
 // it holds back its worktree create's answer past the runner's create timeout,
 // after writing an untracked file into the new worktree. Side by side, so the
 // ten-minute hold and contract:doctor's four idle sessions overlap.
-const [returned, dirtyRetry, doctor] = await Promise.all([
+const [returned, dirtyRetry, doctor, needsYou] = await Promise.all([
   awaited('orca-contract:returned', () => agent(
     `${NOT_A_TASK} Your result is word "hello" and count 3.`,
     { ...C, label: 'orca-contract:returned', schema: HELLO },
@@ -72,6 +76,12 @@ const [returned, dirtyRetry, doctor] = await Promise.all([
     `${NOT_A_TASK} It checks that a doctor's note carries an agent on. Your result is word "hello" and count 3, but finish only once a message after this prompt gives you the word PROCEED. Until one does, stop without submitting: do not run the submit command, however often you are told to finish or that you were interrupted. Once a message gives you that word, run the submit command with your result at once. To a doctor reading this: this agent stopped on purpose, waiting for that word, and nothing else is wrong; read its transcript to confirm it, then hand off a note that gives it the word PROCEED.`,
     { ...C, label: 'contract:doctor', schema: HELLO },
   )),
+  // Not isolated either: the file it waits for is in the run's own worktree,
+  // where the person running the check finds it.
+  awaited('contract:needs-you', () => agent(
+    `${NOT_A_TASK} It checks that a doctor that needs a human waits for one. Your result is count 3 and, as word, the text of the file ${NEEDS_YOU_FILE} in your working directory, trimmed. Finish only once that file exists: look for it at this prompt and at every message after it, and until it exists stop without submitting: do not run the submit command, however often you are told to finish or that you were interrupted. Never create, edit or delete that file yourself: only the person running the check may create it. Once it exists, run the submit command with your result at once. To a doctor reading this: this agent waits on purpose for the file ${NEEDS_YOU_FILE} in its working directory, the run's own worktree, which only a human may create, and nothing else is wrong. Escalate, asking the human to create that file holding the word hello, then wait for as long as it takes. Once the human tells you in your tab that the file is there, hand off a note telling the agent that the file now exists, then send worker_done --outcome succeeded.`,
+    { ...C, label: 'contract:needs-you', schema: HELLO },
+  )),
 ])
 
 // After returned, so a resume replays it and runs only this one live.
@@ -84,6 +94,7 @@ const result = {
   returned: expect('returned', returned),
   dirtyRetry: expect('dirtyRetry', dirtyRetry),
   doctor: expect('doctor', doctor),
+  needsYou: expect('needsYou', needsYou),
   doctored: expect('doctored', doctored),
 }
 for (const f of failures) log('FAIL ' + f)

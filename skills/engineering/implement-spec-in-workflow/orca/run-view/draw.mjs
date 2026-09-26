@@ -31,11 +31,11 @@ function fit(s, w) {
   return out + ' '.repeat(Math.max(0, w - n)) + `${E}0m`
 }
 
-const GLYPH = { queued: '·', starting: '◌', running: '●', blocked: '!', stuck: '◐', continued: '↻', done: '✓', failed: '✗', reclaimed: '○' }
-const COLOUR = { queued: '90', starting: '34', running: '36', blocked: '1;91', stuck: '33', continued: '35', done: '32', failed: '31', reclaimed: '2' }
-// The design's order for the header counts, blocked first; a phase row lists
+const GLYPH = { queued: '·', starting: '◌', running: '●', blocked: '!', 'needs you': '?', stuck: '◐', continued: '↻', done: '✓', failed: '✗', reclaimed: '○' }
+const COLOUR = { queued: '90', starting: '34', running: '36', blocked: '1;91', 'needs you': '1;33', stuck: '33', continued: '35', done: '32', failed: '31', reclaimed: '2' }
+// The design's order for the header counts, the states a human answers first; a phase row lists
 // its mix in STATES order.
-const COUNTED = ['blocked', 'starting', 'running', 'continued', 'stuck', 'queued', 'done', 'failed', 'reclaimed']
+const COUNTED = ['blocked', 'needs you', 'starting', 'running', 'continued', 'stuck', 'queued', 'done', 'failed', 'reclaimed']
 const BAND = { green: '32', yellow: '33', red: '31' }
 const BAR = 10
 const BAR_FULL = 500_000
@@ -143,7 +143,7 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
   const pane = model?.pane
   const paneLines = !pane ? [grey(' no agent has started yet')] : pane.kind === 'agent' ? agentPane(pane.agent) : phasePane(pane.phase, pane.problems)
   for (let i = 0; i < PANE; i++) lines.push(fit(paneLines[i] ?? '', W))
-  lines.push(fit(flash ? ' ' + c('1;36', flash) : alert ? ' ' + c(COLOUR.blocked, alert) : '', W))
+  lines.push(fit(flash ? ' ' + c('1;36', flash) : alert ? ' ' + c(COLOUR[alert.startsWith('NEEDS YOU') ? 'needs you' : 'blocked'], alert) : '', W))
   lines.push(fit(grey(help), W))
 
   const dialog = model?.dialog ?? null

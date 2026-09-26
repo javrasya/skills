@@ -7,7 +7,7 @@ The reference design for the Orca runner's [run view](../../CONTEXT.md) (spec #4
 ## Check your work against this
 
 - **Layout:**
-  - A header: the run's name, project, Run id, spec, whether the runner is alive, and elapsed time. Under it, the number of agents in each state, blocked first.
+  - A header: the run's name, project, Run id, spec, whether the runner is alive, and elapsed time. Under it, the number of agents in each state, blocked and needs you first.
   - One row per phase. When the phase is unfolded, one row per agent sits under it.
   - A bottom pane that describes the selected row.
   - A key-help line.
@@ -17,7 +17,7 @@ The reference design for the Orca runner's [run view](../../CONTEXT.md) (spec #4
   - When folded, also `peak ctx` for the phase.
   - Clicking the row, pressing Enter, or using ←/→ folds and unfolds it.
 - **Agent row:**
-  - The agent's number, its label, and its state as a glyph and a word (`· queued`, `◌ starting`, `● running`, `! blocked`, `◐ stuck`, `↻ continued ×N`, `✓ done`, `✗ failed`, `○ reclaimed`). `starting` covers a start being retried; `reclaimed` replaces whatever it was once the registry records it reclaimed.
+  - The agent's number, its label, and its state as a glyph and a word (`· queued`, `◌ starting`, `● running`, `! blocked`, `? needs you` (bold yellow), `◐ stuck`, `↻ continued ×N`, `✓ done`, `✗ failed`, `○ reclaimed`). `starting` covers a start being retried; `reclaimed` replaces whatever it was once the registry records it reclaimed. `needs you` is a doctor that escalated: it waits on a human for as long as it takes, until its next handoff, escalation or `worker_done`.
   - A context bar with the context size.
   - Cumulative tokens, and elapsed time.
   - An agent that never started shows `—` for context and tokens.
@@ -25,10 +25,10 @@ The reference design for the Orca runner's [run view](../../CONTEXT.md) (spec #4
 - **Bottom pane for a selected agent:**
   - `[Phase] label`, then its state, context, total tokens and elapsed time.
   - `worktree`, `tab` and `session` (`—` when there is none).
-  - `reason` when the agent failed, is stuck or blocked, or its start is being retried (with when the next attempt begins).
+  - `reason` when the agent failed, is stuck or blocked, needs you (what the human must do or decide), or its start is being retried (with when the next attempt begins).
   - The transcript path.
-- **Bottom pane for a selected phase:** its blocked agents first, then its failed and stuck ones, each with its reason.
-- **Flash line:** while any agent is blocked on a human, it names each one, its tab and what it waits on, in place of the run's latest event, until it is answered.
+- **Bottom pane for a selected phase:** its blocked and needs-you agents first, then its failed and stuck ones, each with its reason.
+- **Flash line:** while any agent is blocked on a human or needs you, it names each one, its tab and what it waits on (a doctor's escalation, its reason), in place of the run's latest event, until it is answered.
 - **Reclaim dialog** (`r`, #71): a box over the middle of the tree, titled `Reclaim`, with its options in this order: `Reclaim Selected` (naming the agent, or `every agent of <phase>`), `Reclaim Successful Ones` and `Reclaim All`. The highlighted option is inverted with a `▸`; a disabled one, Reclaim All while the runner is live, is grey and gives its reason. Its hint line reads `↑↓ or the mouse moves · Enter reclaims · Esc closes`. A confirmation that follows it (`f`) is the same box with the reason and its `f =` line. The tree keeps redrawing behind either.
 
 ## What the image does not decide

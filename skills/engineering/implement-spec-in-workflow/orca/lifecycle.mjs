@@ -73,6 +73,10 @@ export const agentDir = (n, label) => `agents/${String(n).padStart(3, '0')}-${sl
 // script value can be mistaken for.
 const SICK = Symbol('needs a doctor')
 
+// The messages a doctor that needs you can follow its escalation with; any
+// other kind (a heartbeat, a status) leaves it needing you.
+const ANSWERS = ['handoff', 'escalation', 'worker_done']
+
 const mins = (ms) => Math.round(ms / 60_000)
 const wait = (ms) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms / 6_000) / 10} min`)
 
@@ -102,7 +106,7 @@ When only a human can clear the failure (a login, credentials, a sandbox permiss
 
 Report over Orca mail to your Run's mailbox, with the IDs from your Orca preamble:
 - the note: orchestration send --type handoff --subject note --body "<the note>", then worker_done --outcome succeeded;
-- a human is needed: orchestration send --type escalation --subject "Blocked: <what>" --body "<what the human must do or decide>", then wait;
+- a human is needed: orchestration send --type escalation --subject "Blocked: <what>" --body "<what the human must do or decide>", then wait for as long as it takes: nobody hurries you. Once the human tells you in your tab that they did their part, send your note as above, or escalate again if something is still needed;
 - you give up: worker_done --outcome failed, with why in the body.
 
 ## The patient
@@ -226,6 +230,8 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   // once by its id: journaled as `mail` with what the runner did, acted on,
   // and only then acknowledged. mailboxes: a doctor's box, by each dispatch
   // it ran under; a message from no open box is journaled and acts on nothing.
+  // An escalation marks its doctor needs you (box.needsYou, what the human
+  // must do) until its next handoff, escalation or worker_done, in order.
   const handled = new Set(mailHandled)
   const mailboxes = new Map()
   let reading = Promise.resolve()
@@ -247,6 +253,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     const box = mailboxes.get(m.dispatchId) ?? null
     const open = !!box && !box.closed
     const action = !open ? 'none'
+      : m.type === 'escalation' ? 'needsYou'
       : m.type === 'handoff' ? (box.remedied ? 'none' : 'remedy')
       : m.type === 'worker_done' ? (m.outcome === 'failed' ? 'gaveUp' : 'ended')
       : 'none'
@@ -254,7 +261,11 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       type: 'mail', messageId: m.id, kind: m.type ?? null, action, ...(m.outcome && { outcome: m.outcome }),
       ...(box && { doctor: box.doctor, patient: box.patient, round: box.round }), ...(open && m.body != null && { body: m.body }),
     })
-    if (action === 'remedy') {
+    if (open && ANSWERS.includes(m.type)) box.needsYou = m.type === 'escalation' ? (m.body || m.subject || 'no reason given') : null
+    if (action === 'needsYou') {
+      out(`!!!!!!!! ${box.title} NEEDS YOU: ${box.needsYou}`)
+      out(`!!!!!!!! ${box.title}: do it, then tell it so in its tab ${box.terminal ?? '—'}; it waits for as long as it takes`)
+    } else if (action === 'remedy') {
       box.remedied = true
       await box.handoff(m)
     } else if (action === 'gaveUp') {
@@ -328,7 +339,10 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   // beginning and ending, so the run view shows it while it lasts. mail(), a
   // doctor's, reads the Run mailbox at every look, and ends the watch with
   // what it returns: the doctor's worker_done, read before Orca shows it.
-  async function watch(w, { title, harness, sessionId, nudged, blocked = () => {}, unblocked = () => {}, mail = null }) {
+  // held(), a doctor's, is whether it needs you: while it does, it waits on
+  // a human for as long as it takes, so no idle, stillness or blocked limit
+  // counts against it; each counts afresh from its next message.
+  async function watch(w, { title, harness, sessionId, nudged, blocked = () => {}, unblocked = () => {}, mail = null, held = () => false }) {
     const start = clock.now()
     let errors = 0
     let nudges = 0
@@ -361,6 +375,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
           out(`!! ${title}: could not read the Run's mailbox: ${e.message}`)
         }
       }
+      const hold = held()
       let s
       let idle = null
       try {
@@ -401,9 +416,10 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
           blockedAt = now
           out(`!!!!!!!! ${title} is BLOCKED ON A HUMAN. Answer it in terminal ${w.terminal}.`)
           out(`!!!!!!!! waiting on: ${s.waiting}`)
-          out(`!!!!!!!! ${title}: if nobody answers within ${mins(limits.blockedFailMs)} minutes, it fails, is kept as it stands, and agent() returns null`)
+          if (!hold) out(`!!!!!!!! ${title}: if nobody answers within ${mins(limits.blockedFailMs)} minutes, it fails, is kept as it stands, and agent() returns null`)
           blocked(s.waiting)
         }
+        if (hold) blockedAt = now
         if (now - blockedAt >= limits.blockedFailMs) return { dead: `blocked on a human, unanswered for ${mins(now - blockedAt)} minutes`, blocked: true }
         continue
       }
@@ -412,6 +428,11 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
         unblocked()
         blockedAt = null
         stillFrom = graceFrom = now
+      }
+      if (hold) {
+        stillFrom = graceFrom = now
+        stuckNudged = false
+        continue
       }
 
       // Idle counts only once neither signal has moved for the grace: a
@@ -541,7 +562,12 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     if (!got) return null
     const { sessionId, attempts } = got
     let { w, end = null, continued } = got
-    if (box) mailboxes.set(w.dispatchId, box)
+    const post = () => {
+      if (!box) return
+      box.terminal = w.terminal
+      mailboxes.set(w.dispatchId, box)
+    }
+    post()
     const mail = box ? async () => (await readMail(), box.ended) : null
 
     let delivered = false
@@ -558,6 +584,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
           blocked: (waiting) => journal({ type: 'blocked', key, n, title, dispatchId: w.dispatchId, terminal: w.terminal, waiting: String(waiting) }),
           unblocked: () => journal({ type: 'unblocked', key, n, title, dispatchId: w.dispatchId }),
           mail,
+          held: () => box?.needsYou != null,
         })
         // A dead session is continued in its own session (ADR-0013), unless
         // it waits on a human, Orca cannot see it, or it already submitted.
@@ -578,7 +605,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
         }
         journal({ type: 'continued', key, n, title, dispatchId: next.dispatchId, sessionId, terminal: next.terminal, reason: end.dead, attempt, reopened: next.dispatchId !== w.dispatchId })
         w = await moveTo(title, w, next)
-        if (box) mailboxes.set(w.dispatchId, box)
+        post()
         end = null
       }
       // A doctor's last messages can land after its worker settled or died.
@@ -734,7 +761,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       let handed
       const handoff = new Promise((r) => { handed = r })
       const box = {
-        doctor, patient: origin, round, ended: null, gaveUp: null, remedied: false, closed: false,
+        doctor, patient: origin, round, title: dTitle, terminal: null, ended: null, gaveUp: null, remedied: false, closed: false, needsYou: null,
         handoff: async (m) => {
           rounds.trail.push({ round, note: m.body ?? '', outcome: null })
           handed(await remedy(call, failure, { round, doctor, message: m }))
