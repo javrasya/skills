@@ -60,8 +60,9 @@ import { agentDir } from './lifecycle.mjs'
 // after the last one the patient's failed line follows. mail: the runner read
 // a message from its Run mailbox: its `messageId`, its `kind` (Orca's type:
 // handoff, worker_done…) and the `action` the runner took on it — remedy (a
-// doctor's note carried its patient on), gaveUp (its doctor gave up: a
-// worker_done failed), ended (its doctor's worker_done succeeded) or none (it
+// doctor's note carried its patient on), needsYou (its doctor escalated: it
+// needs a human, its body what they must do or decide), gaveUp (its doctor
+// gave up: a worker_done failed), ended (its doctor's worker_done succeeded) or none (it
 // came from no doctor out, or asked for nothing). It is journaled before the
 // runner acts on it and acknowledges it, so a message Orca delivers again is
 // never acted on twice; a doctor's also carries its `doctor` (n), `patient`
@@ -100,6 +101,9 @@ export const JOURNAL_ENTRIES = Object.freeze({
 
 // The lines that name a call's worker.
 const WORKER_LINES = ['started', 'reattached', 'outstanding']
+
+// The mail kinds that end a doctor's needs you, as the runner's own list does.
+const ANSWERS = ['handoff', 'escalation', 'worker_done']
 
 // Every entry of a journal, in order. A line that does not parse is skipped:
 // a torn last line is one the runner was killed while writing.
@@ -168,7 +172,9 @@ export const readJournal = (path) => foldJournal(journalLines(path))
 // entry's: queued, starting once it has its slot or while its start is
 // retried (reason: why the last attempt failed; nextAt: when the next begins),
 // running once started, carried or taken up, blocked while it waits on a human
-// (waiting: on what), stuck once nudged, continued after a continuation, done
+// (waiting: on what), needs you once a doctor escalated, until its next
+// handoff, escalation or worker_done (reason: what the human must do; a
+// second escalation replaces it), stuck once nudged, continued after a continuation, done
 // or failed once settled. A nudge journals no answer, so an agent stays stuck
 // until its next continuation or settlement; blocked lasts until unblocked or
 // settled. workerLeft: it failed with its worker's process left running.
@@ -309,7 +315,14 @@ export function foldJournal(entries) {
     if (e.retained?.path && !retained.some((k) => k.path === e.retained.path)) retained.push(e.retained)
     for (const n of [e.n, e.lastN]) if (Number.isInteger(n)) lastN = Math.max(lastN, n)
     if (e.type === 'run' && typeof e.runId === 'string') run = { runId: e.runId, terminal: e.terminal ?? null }
-    if (e.type === 'mail' && typeof e.messageId === 'string' && !mail.has(e.messageId)) mail.set(e.messageId, e)
+    if (e.type === 'mail' && typeof e.messageId === 'string' && !mail.has(e.messageId)) {
+      mail.set(e.messageId, e)
+      const d = Number.isInteger(e.doctor) ? agents.get(agentOfCall.get(e.doctor) ?? e.doctor) : null
+      if (d && d.state !== 'done' && d.state !== 'failed' && ANSWERS.includes(e.kind)) {
+        if (e.action === 'needsYou') Object.assign(d, { state: 'needs you', reason: e.body ?? null })
+        else if (d.state === 'needs you') Object.assign(d, { state: d.continuations ? 'continued' : 'running', reason: null })
+      }
+    }
     const numbered = Number.isInteger(e.n)
     const id = numbered && JOURNAL_ENTRIES[e.type] && e.type !== 'run' && e.type !== 'retained' ? agent(e) : null
     if (typeof e.key !== 'string') continue

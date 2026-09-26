@@ -19,11 +19,11 @@ export const RUNNER_PATH = fileURLToPath(new URL('./runner.mjs', import.meta.url
 
 // In the order a phase row lists its mix. An agent's state is the journal
 // fold's (journal.mjs), except reclaimed: one the registry records reclaimed.
-export const STATES = Object.freeze(['blocked', 'starting', 'running', 'continued', 'stuck', 'failed', 'queued', 'done', 'reclaimed'])
+export const STATES = Object.freeze(['blocked', 'needs you', 'starting', 'running', 'continued', 'stuck', 'failed', 'queued', 'done', 'reclaimed'])
 
-// The problems a phase's pane lists, in row order: blocked first, since a
-// human can answer it, then failed and stuck.
-const problemsOf = (agents) => [...agents.filter((a) => a.state === 'blocked'), ...agents.filter((a) => a.state === 'failed' || a.state === 'stuck')]
+// The problems a phase's pane lists, in row order: blocked and needs you
+// first, since a human can answer them, then failed and stuck.
+const problemsOf = (agents) => [...agents.filter((a) => a.state === 'blocked' || a.state === 'needs you'), ...agents.filter((a) => a.state === 'failed' || a.state === 'stuck')]
 
 // Context size bands: green below 200k, yellow from 200k to 350k, red above.
 export const bandOf = (context) => (context == null ? null : context < 200_000 ? 'green' : context <= 350_000 ? 'yellow' : 'red')
@@ -151,11 +151,12 @@ function latestEvent(path) {
 //           depth 1 (else 0)
 //   selected  the index of the selected row
 //   pane    { kind: 'agent', agent } | { kind: 'phase', phase, problems: [{ agent, reason }] },
-//           a phase's problems being its blocked, failed and stuck agents
+//           a phase's problems being its blocked, needs-you, failed and stuck agents
 //   message the latest action's outcome, for the flash line, or null
 //   latest  the last line of runner.log, the run's latest event, or null
-//   alert   while any agent is blocked on a human, the line naming each one,
-//           its tab and what it waits on, which the flash line keeps over
+//   alert   while any agent is blocked on a human, or a doctor needs you,
+//           the line naming each one, its tab and what it waits on (a
+//           doctor's escalation, its reason), which the flash line keeps over
 //           `latest` until it is answered; else null
 //   dialog  null, or what `r` opened, which takes every key and click until it
 //           closes (the tree keeps refreshing behind it):
@@ -278,9 +279,11 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     }
 
     const blocked = agents.filter((a) => a.state === 'blocked')
-    alert = blocked.length
-      ? `BLOCKED ON A HUMAN: ${blocked.map((a) => `${a.title} in tab ${a.terminal ?? '—'} waits on ${a.waiting ?? 'an answer'}`).join(' · ')}`
-      : null
+    const needed = agents.filter((a) => a.state === 'needs you')
+    alert = [
+      blocked.length && `BLOCKED ON A HUMAN: ${blocked.map((a) => `${a.title} in tab ${a.terminal ?? '—'} waits on ${a.waiting ?? 'an answer'}`).join(' · ')}`,
+      needed.length && `NEEDS YOU: ${needed.map((a) => `${a.title} in tab ${a.terminal ?? '—'}: ${a.reason ?? 'no reason given'}`).join(' · ')}`,
+    ].filter(Boolean).join(' · ') || null
 
     const byPhase = new Map()
     for (const a of agents) {

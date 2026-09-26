@@ -20,7 +20,7 @@ import { orcaCli, OrcaError, tailCommand, resumeRunnerCommand, worktreeUnpushed 
 import { runRegistry, readRegistry, OUTCOMES } from '../skills/engineering/implement-spec-in-workflow/orca/registry.mjs'
 import { transcriptPath, sessionTranscripts, claudeSlug, piDir } from '../skills/engineering/implement-spec-in-workflow/orca/transcript.mjs'
 import { agentsOf, reclaimAgent, reclaimRun } from '../skills/engineering/implement-spec-in-workflow/orca/reclaim.mjs'
-import { runView, runsView, bandOf, RUNNER_PATH, runnerAlive, runEnded } from '../skills/engineering/implement-spec-in-workflow/orca/run-view-model.mjs'
+import { runView, runsView, bandOf, STATES, RUNNER_PATH, runnerAlive, runEnded } from '../skills/engineering/implement-spec-in-workflow/orca/run-view-model.mjs'
 import { draw, drawRuns, strip, TREE_HELP } from '../skills/engineering/implement-spec-in-workflow/orca/run-view/draw.mjs'
 import { EventEmitter } from 'events'
 
@@ -2085,6 +2085,71 @@ test('doctor: a worker_done --outcome failed over mail ends its round with no re
   assert.equal(r.continues.length, 3, 'only the continuations before the cap')
 })
 
+// --- a doctor that needs a human: "? needs you" -----------------------------------
+
+const ASK = 'Log in to the package registry: run npm login in the patient\'s worktree.'
+const ASK2 = 'The login worked, but the token lacks publish scope: grant it, then tell me.'
+// A doctor that escalates at once and then waits as `how` says, and hands
+// off `note` only when the "human" answers, at each of `later`'s minutes an
+// escalation (its body) or, last, the handoff.
+const escalates = (how, note, later) => async (w) => {
+  const { orca, preamble, state, clock } = w
+  await orca.mailSend({ ...idsOf(preamble), type: 'escalation', subject: 'Blocked: a login', body: ASK })
+  if (how === 'idle') state.idle = true
+  if (how === 'waiting') state.waiting = '{"evidence":"prompt-text","text":"Allow this command?"}'
+  const t0 = clock.now()
+  for (const [min, body] of later) {
+    clock.at(t0 + min * MIN, () => (body === note ? handsOff(note)(w) : orca.mailSend({ ...idsOf(preamble), type: 'escalation', subject: 'Blocked: still', body })))
+  }
+}
+const doctorOf = (journal) => ofType(journal, 'started').find((e) => e.title.includes('recover ->'))
+
+for (const how of ['idle', 'stuck', 'waiting']) {
+  test(`needs you: a doctor that escalates (then ${how}) is never nudged, continued or failed by the blocked limit; three hours on its handoff continues the patient`, async () => {
+    const r = await runOne(withDoctor(curedBy(NOTE, 'gone'), escalates(how, NOTE, [[180, NOTE]])), { script: ISOLATED })
+    assert.deepEqual(r.result, GOOD)
+    assertEntries(r.journal)
+    const doctor = doctorOf(r.journal)
+    const mine = r.journal.filter((e) => e.n === doctor.n)
+    assert.deepEqual(mine.filter((e) => ['nudge', 'continued', 'failed'].includes(e.type)), [])
+    assert.deepEqual(r.nudges.filter((c) => c.dispatchId === doctor.dispatchId), [], 'never nudged')
+    assert.equal(r.continues.filter((c) => (c.from ?? c.dispatchId) === doctor.dispatchId).length, 0, 'never continued')
+    assert.deepEqual(ofType(r.journal, 'failed'), [])
+    assert.deepEqual(ofType(r.journal, 'gaveUp'), [])
+
+    const mail = ofType(r.journal, 'mail').filter((e) => e.doctor === doctor.n)
+    assert.deepEqual(mail.map((e) => [e.kind, e.action]), [['escalation', 'needsYou'], ['handoff', 'remedy'], ['worker_done', 'ended']])
+    assert.deepEqual([mail[0].body, mail[0].patient, mail[0].round], [ASK, 1, 1])
+    const waited = Date.parse(mail[1].at) - Date.parse(mail[0].at)
+    assert.ok(waited >= 180 * MIN && waited > RUNNER_SETTINGS.blockedFailMs * 5, `waited ${waited / MIN} minutes`)
+    // Needs you through the wait, in the fold every reader shares, until its handoff.
+    const upTo = (e) => foldJournal(r.journal.slice(0, r.journal.indexOf(e) + 1)).agents.find((a) => a.n === doctor.n)
+    assert.deepEqual([upTo(mail[0]).state, upTo(mail[0]).reason], ['needs you', ASK])
+    const lastLook = r.journal.findLast((e) => r.journal.indexOf(e) < r.journal.indexOf(mail[1]))
+    assert.equal(upTo(lastLook).state, 'needs you')
+    assert.equal(upTo(mail[1]).state, 'running')
+    assert.deepEqual(ofType(r.journal, 'remedy').map((e) => [e.n, e.doctor, e.messageId]), [[1, doctor.n, mail[1].messageId]])
+    assert.ok(r.lines.some((l) => l.includes(`recover -> one NEEDS YOU: ${ASK}`)), r.lines.join('\n'))
+    assert.ok(r.lines.some((l) => l.includes(`tell it so in its tab ${doctor.terminal}`)), r.lines.join('\n'))
+    assert.equal(r.lines.some((l) => l.includes('recover -> one: if nobody answers within')), false)
+  })
+}
+
+test('needs you: an escalation then another updates the reason, messages taken in order, and its handoff then continues the patient', async () => {
+  const r = await runOne(withDoctor(curedBy(NOTE, 'stuck'), escalates('idle', NOTE, [[60, ASK2], [120, NOTE]])), { script: ISOLATED })
+  assert.deepEqual(r.result, GOOD)
+  assertEntries(r.journal)
+  const doctor = doctorOf(r.journal)
+  const mail = ofType(r.journal, 'mail').filter((e) => e.doctor === doctor.n)
+  assert.deepEqual(mail.map((e) => [e.kind, e.action, e.body]), [['escalation', 'needsYou', ASK], ['escalation', 'needsYou', ASK2], ['handoff', 'remedy', NOTE], ['worker_done', 'ended', 'handed off']])
+  const upTo = (e) => foldJournal(r.journal.slice(0, r.journal.indexOf(e) + 1)).agents.find((a) => a.n === doctor.n)
+  assert.deepEqual([upTo(mail[0]).state, upTo(mail[0]).reason], ['needs you', ASK])
+  assert.deepEqual([upTo(mail[1]).state, upTo(mail[1]).reason], ['needs you', ASK2])
+  assert.deepEqual(r.journal.filter((e) => e.n === doctor.n && ['nudge', 'continued', 'failed'].includes(e.type)), [])
+  assert.equal(ofType(r.journal, 'remedy').length, 1)
+  assert.deepEqual(foldJournal(r.journal).agents.map((a) => [a.origin, a.state]), [[1, 'done'], [2, 'done']])
+})
+
 test("fake orca: a Run's mailbox holds what its workers send, hands its coordinator the same batch until acknowledged, and a run-use delivers it again under a new id", async () => {
   const orca = fakeOrca()
   const { runId } = await orca.runCreate({ objective: 'o' })
@@ -3139,7 +3204,7 @@ async function viewedRun(mode = 'attached') {
 viewTest('run view: the journal gives each agent its row, its state and its phase, phases in the order the run reached them', async (mode) => {
   const { view, agent } = await viewedRun(mode)
   const m = view.model
-  assert.deepEqual(m.header, { name: 'implement-spec-783', project: 'controlayer', runId: 'run_fake1', spec: '#783', alive: true, ended: false, elapsedMs: 30 * MIN, counts: { blocked: 0, starting: 0, running: 1, continued: 1, stuck: 1, failed: 1, queued: 1, done: 2, reclaimed: 0 } })
+  assert.deepEqual(m.header, { name: 'implement-spec-783', project: 'controlayer', runId: 'run_fake1', spec: '#783', alive: true, ended: false, elapsedMs: 30 * MIN, counts: { blocked: 0, 'needs you': 0, starting: 0, running: 1, continued: 1, stuck: 1, failed: 1, queued: 1, done: 2, reclaimed: 0 } })
   assert.deepEqual(m.phases.map((p) => [p.name, p.agents.map((a) => a.n)]), [['Discover', [1]], ['Implement', [2, 3, 4, 5, 6]], ['Gate', [7]]])
   assert.deepEqual([1, 2, 3, 4, 5, 6, 7].map((n) => [agent(n).label, agent(n).state]), [
     ['discover', 'done'], ['impl:a', 'running'], ['impl:b', 'stuck'], ['impl:c', 'continued'], ['impl:d', 'queued'], ['impl:e', 'failed'], ['gate:a', 'done'],
@@ -3161,9 +3226,9 @@ viewTest('run view: a folded phase sums its agents up: done of total, its mix of
   const { view } = await viewedRun(mode)
   const [discover, implement, gate] = view.model.phases
   assert.deepEqual([discover.folded, discover.done, discover.total, discover.peakContext], [true, 1, 1, 210005])
-  assert.deepEqual(discover.mix, { blocked: 0, starting: 0, running: 0, continued: 0, stuck: 0, failed: 0, queued: 0, done: 1, reclaimed: 0 })
+  assert.deepEqual(discover.mix, { blocked: 0, 'needs you': 0, starting: 0, running: 0, continued: 0, stuck: 0, failed: 0, queued: 0, done: 1, reclaimed: 0 })
   assert.deepEqual([implement.folded, implement.done, implement.total, implement.peakContext], [false, 0, 5, 363000])
-  assert.deepEqual(implement.mix, { blocked: 0, starting: 0, running: 1, continued: 1, stuck: 1, failed: 1, queued: 1, done: 0, reclaimed: 0 })
+  assert.deepEqual(implement.mix, { blocked: 0, 'needs you': 0, starting: 0, running: 1, continued: 1, stuck: 1, failed: 1, queued: 1, done: 0, reclaimed: 0 })
   assert.deepEqual([gate.folded, gate.done, gate.total, gate.peakContext], [true, 1, 1, null], 'a replayed agent ran no session here')
   // A selected phase's pane names its failed and stuck agents, each with its reason.
   await view.key('DOWN')
@@ -3211,7 +3276,7 @@ viewTest('run view: blocked, starting and reclaimed are row states; a blocked ag
   assert.deepEqual([agent(3).reason, agent(3).nextAt], ['its worker did not start: orca terminal create: runtime_unavailable', at(2.5)])
   assert.deepEqual([agent(4).waiting, agent(4).reason], [null, null], 'answered: no longer blocked')
   assert.equal(agent(5).reclaimed, true)
-  assert.deepEqual(view.model.header.counts, { blocked: 1, starting: 2, running: 1, continued: 0, stuck: 0, failed: 1, queued: 0, done: 0, reclaimed: 1 })
+  assert.deepEqual(view.model.header.counts, { blocked: 1, 'needs you': 0, starting: 2, running: 1, continued: 0, stuck: 0, failed: 1, queued: 0, done: 0, reclaimed: 1 })
   const [implement] = view.model.phases
   assert.equal(implement.folded, false)
   assert.equal(view.model.pane.kind, 'phase')
@@ -3279,6 +3344,56 @@ viewTest('run view: a doctor\'s row is indented under its patient\'s, in round o
   // Selected, its pane has its whole title.
   while (view.model.rows[view.model.selected].key !== 'agent:4') await view.key('DOWN')
   assert.match(lines().at(-6), /\[Implement\] recover -> impl:a {2}● running/)
+})
+
+// A patient's doctor that escalated, as the runner journals it: its mail
+// line names it by n, and is about no agent's lifecycle otherwise.
+viewTest('run view: a doctor that escalated is "? needs you" in bold yellow, counted in the header, listed first in its phase, and its reason on the flash line until its next message', async (mode) => {
+  const orca = fakeOrca({ worker: () => new Promise(() => {}), clock: fakeClock() })
+  const stateDir = tmp()
+  const title = '[Implement] recover -> impl:a'
+  const mailJ = (min, messageId, kind, action, body) => ({ type: 'mail', at: at(min), messageId, kind, action, doctor: 3, patient: 1, round: 1, body })
+  const journalPath = join(stateDir, 'journal.jsonl')
+  const put = (...entries) => appendFileSync(journalPath, entries.map((e) => JSON.stringify(e) + '\n').join(''))
+  put(
+    { type: 'run', at: at(0), runId: 'run_fake1', terminal: 'term_runner' },
+    startedJ(1, '[Implement] impl:a', 0, 'claude', 'sid-1'),
+    startedJ(2, '[Implement] impl:b', 1, 'claude', 'sid-2'),
+    J('failed', 4, '[Implement] impl:c', 1, { reason: 'its worker did not start: x', attempts: 4, run: 'run_fake1' }),
+    J('doctor', 1, '[Implement] impl:a', 2, { origin: 1, round: 1, reason: 'its session died past its continuation cap, with no result', doctor: 3 }),
+    { ...startedJ(3, title, 2, 'claude', 'sid-3'), key: null },
+    mailJ(3, 'msg_1', 'escalation', 'needsYou', ASK),
+  )
+  writeFileSync(join(stateDir, 'runner.pid'), String(process.pid))
+  writeFileSync(join(stateDir, 'runner.log'), `${at(3)} !!!!!!!! ${title} NEEDS YOU: ${ASK}\n`)
+  const registry = registryIn()
+  runRegistry(registry, { now: () => 0 }).armed({ runId: 'run_fake1', project: 'C:/repos/controlayer', runDir: stateDir, spec: 'implement-spec-783' })
+  const view = await treeIn(mode, { stateDir, orca, clock: fakeClock(), transcripts: sessionTranscripts({ home: tmp(), env: {} }), registry, unpushed: orca.unpushedOf })
+  const row = (n) => view.model.rows.find((r) => r.key === `agent:${n}`).agent
+  assert.ok(STATES.includes('needs you'))
+  assert.deepEqual([row(3).state, row(3).reason, row(3).patient], ['needs you', ASK, 1])
+  assert.deepEqual(view.model.header.counts, { blocked: 0, 'needs you': 1, starting: 0, running: 2, continued: 0, stuck: 0, failed: 1, queued: 0, done: 0, reclaimed: 0 })
+  assert.equal(view.model.phases[0].mix['needs you'], 1)
+  assert.deepEqual(view.model.pane.problems.map((p) => [p.agent.n, p.reason]), [[3, ASK], [4, 'its worker did not start: x']])
+  assert.equal(view.model.alert, `NEEDS YOU: ${title} in tab term_fake3: ${ASK}`)
+
+  const raw = draw(view.model, { width: 200, height: 30, flash: null, alert: view.model.alert }).lines
+  const lines = raw.map(strip)
+  assert.match(lines[1], /^ \? 1 needs you {2}● 2 running {2}✗ 1 failed/)
+  assert.ok(raw[1].includes('\x1b[1;33m? 1 needs you'), 'bold yellow in the header')
+  assert.ok(lines.some((l) => /^ +3 +└ recover +\? needs you /.test(l)), lines.join('\n'))
+  assert.ok(raw.some((l) => l.includes('\x1b[1;33m? needs you')), 'bold yellow on its row')
+  assert.match(lines[4], /\?1 ●2 ✗1/)
+  assert.ok(lines.at(-2).includes(`NEEDS YOU: ${title} in tab term_fake3: ${ASK}`), lines.at(-2))
+  assert.ok(raw.at(-2).includes('\x1b[1;33mNEEDS YOU'), 'the alert in bold yellow')
+
+  // A second escalation replaces the reason; its handoff ends the wait.
+  put(mailJ(4, 'msg_2', 'escalation', 'needsYou', ASK2))
+  await view.refresh()
+  assert.deepEqual([row(3).state, view.model.alert], ['needs you', `NEEDS YOU: ${title} in tab term_fake3: ${ASK2}`])
+  put(mailJ(5, 'msg_3', 'handoff', 'remedy', NOTE))
+  await view.refresh()
+  assert.deepEqual([row(3).state, row(3).reason, view.model.alert, view.model.header.counts['needs you']], ['running', null, null, 0])
 })
 
 viewTest('run view: context size, its band and tokens come from each agent\'s Claude or pi transcript', async (mode) => {
