@@ -46,6 +46,16 @@ import { agentDir } from './lifecycle.mjs'
 // and the runner terminal it is bound to, when it is created or taken over; a
 // resume carries the last one forward first, with `lastN`, the highest call
 // number that Run has used. queued: a call waiting for a live slot.
+// doctor: a doctor round starts for a patient, an agent whose session died
+// past its continuation cap: about the patient, with its `origin`, the
+// `round` (1 to 3), the failure `reason` it answers, and `doctor`, the n its
+// doctor is started under. The patient's call is not settled: its agent()
+// waits. A doctor's own lines are those of any agent, under its own n, with
+// key null, since it is no agent() call; its failed line also names its
+// `patient`, by origin, and fails no call. settled: a doctor's worker settled,
+// with its `outcome`: a doctor submits no result. gaveUp: a doctor round ended
+// without a remedy, about the patient, with the `round`, the `doctor` and why;
+// after the last one the patient's failed line follows.
 export const JOURNAL_ENTRIES = Object.freeze({
   queued: ['at', 'key', 'n', 'title'],
   starting: ['at', 'key', 'n', 'title', 'run'],
@@ -64,6 +74,9 @@ export const JOURNAL_ENTRIES = Object.freeze({
   outstanding: ['at', 'key', 'n', 'title', 'run', 'dispatchId', 'harness', 'sessionId', 'terminal', 'worktree', 'dir', 'origin'],
   earlier: ['at', 'n', 'title', 'run', 'dispatchId', 'harness', 'sessionId', 'terminal', 'worktree', 'origin', 'state', 'reason'],
   run: ['at', 'runId', 'terminal'],
+  doctor: ['at', 'key', 'n', 'title', 'origin', 'round', 'reason', 'doctor'],
+  settled: ['at', 'key', 'n', 'title', 'dispatchId', 'outcome'],
+  gaveUp: ['at', 'key', 'n', 'title', 'origin', 'round', 'doctor', 'reason'],
 })
 
 // The lines that name a call's worker.
@@ -120,7 +133,9 @@ export const readJournal = (path) => foldJournal(journalLines(path))
 // agents, every agent the journal names, one per `origin`, by the n of its
 // latest line: { origin, n, title, state, reason, continuations, replayed,
 // launched, runId, dispatchId, harness, sessionId, worktree, terminal, from,
-// to, waiting, nextAt, workerLeft, baseline }. The journal of a resumed run holds every agent of its Run, the ones
+// to, waiting, nextAt, workerLeft, baseline, patient, round, doctors }. patient: a
+// doctor's patient, by origin, or null; round: a patient's latest doctor
+// round, or 0; doctors: the origins of its doctors, in round order. The journal of a resumed run holds every agent of its Run, the ones
 // earlier runners made included: a resume carries each forward (`earlier`,
 // `outstanding`), and a line of the call that takes one up again
 // (`reattached`, or a replayed `result` with its `origin`) is that same agent,
@@ -164,7 +179,7 @@ export function foldJournal(entries) {
       a = {
         origin: id, n: e.n, title: null, state: 'queued', continuations: 0, reason: null, replayed: false, launched: false,
         runId: null, dispatchId: null, harness: null, sessionId: null, worktree: null, terminal: null, from: null, to: null,
-        waiting: null, nextAt: null, workerLeft: false, baseline: null,
+        waiting: null, nextAt: null, workerLeft: false, baseline: null, patient: null, round: 0, doctors: [],
       }
       agents.set(id, a)
     }
@@ -220,6 +235,13 @@ export function foldJournal(entries) {
           dispatchId: e.dispatchId ?? a.dispatchId, terminal: e.terminal ?? a.terminal, sessionId: e.sessionId ?? a.sessionId,
         })
         break
+      case 'doctor':
+        a.round = e.round ?? a.round
+        if (Number.isInteger(e.doctor) && !a.doctors.includes(e.doctor)) a.doctors.push(e.doctor)
+        break
+      case 'settled':
+        Object.assign(a, { state: 'done', reason: null, waiting: null, to: at })
+        break
       case 'result':
         Object.assign(a, { state: 'done', reason: null, waiting: null, to: at, replayed: e.replayed === true })
         break
@@ -268,6 +290,12 @@ export function foldJournal(entries) {
     } else if (e.type === 'continued' && c.worker && e.dispatchId) {
       c.worker = { ...c.worker, dispatchId: e.dispatchId, terminal: e.terminal ?? c.worker.terminal, continuations: Number.isInteger(e.attempt) ? e.attempt : c.worker.continuations + 1 }
     }
+  }
+  // A patient's doctor line names the n its doctor was started under; the
+  // doctor is the agent that n's lines made.
+  for (const a of agents.values()) {
+    a.doctors = a.doctors.map((d) => agentOfCall.get(d) ?? d)
+    for (const d of a.doctors) if (agents.has(d)) agents.get(d).patient = a.origin
   }
   for (const c of [...byCall.values()].sort((a, b) => a.carried - b.carried || a.order - b.order)) {
     if (!calls.has(c.key)) calls.set(c.key, [])

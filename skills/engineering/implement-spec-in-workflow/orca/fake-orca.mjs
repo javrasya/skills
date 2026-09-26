@@ -12,7 +12,8 @@
 // --porcelain` gives in it and the `commits` a retried start checks before
 // taking it up, and `unpushed`, the commits a test says its
 // HEAD holds that no remote-tracking ref contains (git's side, not Orca's:
-// `unpushedOf` answers for it). Every worker's terminal is one the runner
+// `unpushedOf` answers for it), and the `setup` policy it was created with
+// (`'skip'` for a doctor's, else null). Every worker's terminal is one the runner
 // launched, so, as in real Orca, its `terminalState` is `retained` for good;
 // whether its tab is open is `terminalList`'s to say. `setupLeaves` is the
 // porcelain every child worktree is born with, as a setup hook's output.
@@ -50,6 +51,7 @@ import { RUNNER_SETTINGS } from './settings.mjs'
 // is its latest dispatch's `transcript`, which a continuation carries over.
 export const fakeTranscripts = (orca) => ({
   size: ({ sessionId }) => [...orca.dispatches.values()].filter((d) => d.sessionId === sessionId).at(-1)?.transcript ?? null,
+  path: ({ sessionId }) => `C:/fake/transcripts/${sessionId}.jsonl`,
 })
 
 export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run', runPrefix = 'run_fake', coordinator = 'term_runner', tabs = [], faults = {}, callMs = RUNNER_SETTINGS.orcaCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, setupLeaves = [] } = {}) {
@@ -215,9 +217,10 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
           let name = child.name
           for (let i = 2; live(`C:/fake/worktrees/${name}`); i++) name = `${child.name}-${i}`
           made = `C:/fake/worktrees/${name}`
-          worktrees.set(made, { parent: runWorktree, name, displayName: name, removed: false, status: null, porcelain: [...setupLeaves], commits: 0, unpushed: 0 })
+          // A child made with setup skipped runs no setup hook, so it is born clean.
+          worktrees.set(made, { parent: runWorktree, name, displayName: name, removed: false, status: null, porcelain: child.setup === 'skip' ? [] : [...setupLeaves], commits: 0, unpushed: 0, setup: child.setup ?? null })
           created = !late
-          record({ verb: 'worktreeCreate', name: child.name, worktree: made })
+          record({ verb: 'worktreeCreate', name: child.name, worktree: made, setup: child.setup ?? null })
           if (name !== child.name) {
             const earlier = `C:/fake/worktrees/${child.name}`
             throw Object.assign(new OrcaError('worktree_name_taken', `asked for ${child.name}, Orca made ${name}: a worktree named ${child.name} already exists`, 'worktree create'), { worktree: made, worktrees: [made, earlier], final: true })

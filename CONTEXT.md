@@ -174,7 +174,11 @@ The **runner** is whatever executes a rendered [[implement-spec-in-workflow]] sc
 
 ### Run resume, reattach, and session continuation
 
-Three different recoveries, never one word "resume". **Run resume** re-arms a whole [[implement-spec-in-workflow]] run from its script: agents that finished return their recorded results and the rest run live. **Reattach** is the [[runner]] coming back while a worker's session is still alive — it waits on that same worker again rather than starting another. **Session continuation** is a worker whose own agent session died or stalled being carried on in the same session, worktree and tab (`claude --resume`), not restarted from its branch; it is capped, and an agent past the cap is failed and kept. An agent that **never started** has no session to continue — it is retried, not continued.
+Three different recoveries, never one word "resume". **Run resume** re-arms a whole [[implement-spec-in-workflow]] run from its script: agents that finished return their recorded results and the rest run live. **Reattach** is the [[runner]] coming back while a worker's session is still alive — it waits on that same worker again rather than starting another. **Session continuation** is a worker whose own agent session died or stalled being carried on in the same session, worktree and tab (`claude --resume`), not restarted from its branch; it is capped, and an agent past the cap gets a [[doctor]] before it is failed and kept. An agent that **never started** has no session to continue — it is retried, not continued.
+
+### Doctor, patient, note and remedy
+
+A **doctor** is an agent the Orca [[runner]] starts by itself for a failed agent, its **patient**, before the patient's `agent()` returns null: up to three doctor rounds, one after another, while the patient's call stays pending, so whatever depends on it waits and everything else carries on. A doctor reads the failed session and changes nothing; its only output is a **note**, guidance for avoiding that failure. A **remedy** is a note applied: the patient carried on with it. A doctor that ends without one — it gives up, or fails itself — spends its round, and is never itself doctored. It is titled `recover -> <patient label>` and runs on the template's `recover` role. See ADR-0014.
 
 ### Run view, and the run registry
 

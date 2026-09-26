@@ -33,6 +33,9 @@ export const RUNNER_SETTINGS = Object.freeze({
   // Sessions continued per agent; the next death fails it, and its tab and
   // worktree are kept.
   maxContinuations: 3,
+  // Doctors per agent dead past that cap, one after another (ADR-0014): once
+  // every round has ended without a remedy, it is failed and kept.
+  doctorRounds: 3,
   // Blocked on something only a human can answer: logged loudly on entry,
   // failed and kept if nobody answers within this. Never continued:
   // continuing does not answer the question it waits on.

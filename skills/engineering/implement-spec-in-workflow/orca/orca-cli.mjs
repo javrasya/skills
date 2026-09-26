@@ -319,8 +319,10 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
         if (!worktree) {
           // A create Orca finishes after its answer timed out still leaves the
           // worktree, and a retry would find it; looked up now, it costs no attempt.
+          // `setup: 'skip'` skips the repo's setup hook (a doctor's worktree);
+          // without it Orca follows the repo's setup policy.
           try {
-            c = await orca(['worktree', 'create', '--name', child.name, '--parent-worktree', 'current'], Math.max(0, createMs - callMs))
+            c = await orca(['worktree', 'create', '--name', child.name, '--parent-worktree', 'current', ...(child.setup ? ['--setup', child.setup] : [])], Math.max(0, createMs - callMs))
           } catch (e) {
             if (e?.code !== 'call_timeout') throw e
             worktree = (await findWorktree(child.name).catch(() => null))?.path ?? null

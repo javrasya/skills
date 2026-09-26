@@ -45,7 +45,7 @@ import { checkSchema } from './schema.mjs'
 import { orcaCli, launchCommand, HARNESSES, realTimer } from './orca-cli.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { agentLifecycle } from './lifecycle.mjs'
-import { JOURNAL_ENTRIES, readJournal, madeByRun } from './journal.mjs'
+import { JOURNAL_ENTRIES, readJournal, madeByRun, journalLines } from './journal.mjs'
 import { runRegistry, REGISTRY_PATH } from './registry.mjs'
 import { sessionTranscripts } from './transcript.mjs'
 import { VIEW_EXIT } from './run-view/exit-codes.mjs'
@@ -128,9 +128,10 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   // carried forward below, as `earlier` or `outstanding` lines.
   writeFileSync(journalPath, '')
   // An agent() that returned null makes a run that returns partial, not ok.
+  // A doctor that fails is no agent() call.
   let failures = 0
   const journal = (entry) => {
-    if (entry.type === 'failed') failures++
+    if (entry.type === 'failed' && entry.patient == null) failures++
     appendFileSync(journalPath, JSON.stringify({ type: entry.type, at: iso(clock), ...entry }) + '\n')
   }
   // The registry is bookkeeping for the operator: a write it refuses is
@@ -195,7 +196,22 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   for (const { key, n, title, run, dispatchId, harness, sessionId, terminal, worktree, dir, origin, continuations } of outstanding) {
     journal({ type: 'outstanding', key, n, title, run, dispatchId, harness, sessionId, terminal, worktree, dir, origin, ...(continuations && { continuations }) })
   }
-  const life = agentLifecycle({ orca, clock, limits, out, stateDir, objective: () => objectiveOf(meta.value, fallbackObjective), journal, retainWorktree, onRun, takeOver: earlier.run?.runId ?? null, transcripts })
+  // A patient's lines are the ones of its call or of its agent; its log lines
+  // the ones the runner printed under its title, in this run or an earlier one.
+  const history = ({ n, origin, title }) => {
+    let log = []
+    try {
+      log = readFileSync(join(stateDir, 'runner.log'), 'utf8').split('\n').filter((l) => l.includes(` ${title}:`) || l.includes(` ${title} `))
+    } catch {}
+    return { entries: journalLines(journalPath).filter((e) => e.n === n || e.origin === origin), log }
+  }
+  // The script's role table, when it hands one over (meta.roles): a doctor is
+  // started by the runner, not by an agent() call, so its role is read here.
+  const doctorLaunch = () => launchOf(meta.value?.roles?.recover ?? {}, permissionMode)
+  const life = agentLifecycle({
+    orca, clock, limits, out, stateDir, objective: () => objectiveOf(meta.value, fallbackObjective), journal, retainWorktree, onRun, takeOver: earlier.run?.runId ?? null, transcripts,
+    nextN: () => ++count, doctorLaunch, history,
+  })
 
   const phase = (title) => {
     currentPhase = title
@@ -209,14 +225,8 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
 
   async function agent(prompt, opts = {}) {
     if (opts.schema) checkSchema(opts.schema)
-    const harness = opts.harness ?? 'claude'
-    if (!HARNESSES.includes(harness)) throw new Error(`agent(): unknown harness "${harness}": expected one of ${HARNESSES.join(', ')}`)
-    // A pi worker's model is `piModel`, never `model`: `model` stays a Claude
-    // model the Workflow runner can take, since it ignores the harness and runs
-    // every role on Claude. Both are in the call's journal key, as every option is.
-    const launch = { harness, model: harness === 'pi' ? opts.piModel : opts.model, effort: opts.effort, permissionMode: harness === 'claude' ? permissionMode : null }
     // Refused here, before any worker, like an unsatisfiable schema.
-    launchCommand(launch)
+    const launch = launchOf(opts, permissionMode)
     const n = ++count
     const label = opts.label || `agent-${n}`
     const phaseName = opts.phase ?? currentPhase ?? 'Run'
@@ -270,6 +280,19 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   } finally {
     for (const k of retained) out(`!! kept ${k.path}: ${k.reason}`)
   }
+}
+
+// A role's launch, from an agent() call's options or a role table row. A pi
+// worker's model is `piModel`, never `model`: `model` stays a Claude model the
+// Workflow runner can take, since it ignores the harness and runs every role
+// on Claude. Both are in the call's journal key, as every option is. Throws
+// for a harness or launch no worker can start with.
+function launchOf(opts, permissionMode) {
+  const harness = opts.harness ?? 'claude'
+  if (!HARNESSES.includes(harness)) throw new Error(`agent(): unknown harness "${harness}": expected one of ${HARNESSES.join(', ')}`)
+  const launch = { harness, model: harness === 'pi' ? opts.piModel : opts.model, effort: opts.effort, permissionMode: harness === 'claude' ? permissionMode : null }
+  launchCommand(launch)
+  return launch
 }
 
 // summary.json for a run that threw: the error, and every worktree the runner

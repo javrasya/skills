@@ -53,6 +53,9 @@ Together, the journal and the log say what happened in a run, whether or not the
 | `reattached` | a resumed runner takes up a worker an earlier one started, as soon as its call is made, before the Run is taken over; a `continued` line follows if it had died | `key`, `n`, `title`, `run`, `dispatchId`, `harness`, `sessionId`, `terminal`, `worktree`, `dir` (the files its prompt named, from the line it was taken up from, however many resumes ago it started), `origin` (the `n` of the call that started its worker, which names its `<runId>-<n>` worktree), and `continuations` if its session was already continued |
 | `outstanding` | a resume carries forward, before any call, each worker the last run left out, so it stays journaled until a call takes it up | as `reattached`, with the `n` and `title` of the line it was carried from |
 | `earlier` | a resume carries forward, before any call, every other agent of the Run an earlier runner made: one that settled, or whose worker never started but left a worktree. It is no call, and replays nothing; it keeps the agent named for reclaim and the run view | `n`, `title`, `run`, `dispatchId`, `harness`, `sessionId`, `terminal`, `worktree`, `origin`, `state` and `reason` (as the journal last had them), and `continuations` if its session was continued |
+| `doctor` | a doctor round starts for a patient, an agent whose session died past its continuation cap: the patient's call stays pending | `key`, `n`, `title` and `origin` (the patient's), `round` (1 to 3), `reason` (the failure it answers), `doctor` (the `n` its doctor is started under). A doctor's own lines are any agent's, under its own `n`, with `key: null`: it is no `agent()` call. Its `failed` line also names its `patient` (by origin) and fails no call |
+| `settled` | a doctor's worker settled: a doctor submits no result | `key` (null), `n`, `title`, `dispatchId`, `outcome` (as Orca reports it) |
+| `gaveUp` | a doctor round ended without a remedy; after the last, the patient's `failed` follows | `key`, `n`, `title` and `origin` (the patient's), `round`, `doctor`, `reason` (why: it settled with no remedy, or failed itself) |
 | `run` | the Run is created, or a resume takes it over; a resume also carries the last one forward first | `runId`, `terminal` (the runner's, which the Run is bound to), and on the carried-forward line `lastN`, the highest call number the Run has used |
 
 The resume, reclaim and the run view all read the journal through one fold, `foldJournal` in `journal.mjs`. A resume reads `type`, `key`, `n`, `result` and `retained`, the worker fields of `started`, `reattached`, `outstanding` and `continued`, `workerOut`, and the last `run`. A `reattached` line replaces the `outstanding` line for the same dispatch, so a call has one worker; an `outstanding` line no call took up follows every call that run made under its key. A `started` line with no dispatch or session, as in a journal from before launch fields were added, is a call with no worker out, so such a journal still resumes; a worker line with no `dir` is read as named by its own `n` and title.
@@ -118,7 +121,20 @@ A worker is watched through two signals (ADR-0013): its session transcript growi
 
 A **continuation** carries the same session on (decision D3 on #43). With the tab alive, the runner interrupts the stalled process, types `claude --resume <id>` (pi: `pi --session-id <id>`) with the worker's launch flags into the same terminal, and then a prompt telling the agent it was interrupted and must finish and submit; its dispatch is unchanged. With the tab gone, the resume runs in a new terminal in the same worktree, and `worker-start --terminal` adopts it with that prompt as its spec: Orca settles a dispatch only from its own pane, so the new pane gets a new dispatch, and the old one is stopped (never released during the run: a reclaim releases the dispatch of its last continuation). Either way the worker is watched again, and a continued agent that submits returns its result.
 
-At most 3 continuations per agent. The next death fails it with a reason naming the cap, and it is **kept**: its process is not stopped, its tab stays open, and its worktree is retained. An agent that never started has no session to continue.
+At most 3 continuations per agent. The next death does not fail it yet: it gets a **doctor** (ADR-0014). An agent that never started has no session to continue.
+
+## Doctors
+
+An agent whose session died past its continuation cap is the **patient** of up to three doctor rounds (`doctorRounds` in `settings.mjs`), one after another, and its `agent()` stays pending through them: whatever depends on it waits, and every other agent carries on. The patient frees its live slot first.
+
+A doctor is a supervised worker started through the same lifecycle as any agent (journal, live cap, start retries, liveness), under the run's next agent number:
+
+- its own child worktree, `<runId>-<n>`, created with the repo's setup hook skipped (`worktree create --setup skip`);
+- titled `[<patient's phase>] recover -> <patient label>`;
+- on the `recover` row of the template's role table, which the template hands the runner as `meta.roles`, since no `agent()` call starts a doctor; Claude when a script has none;
+- its prompt gives it the patient's title and prompt, its failure reason, its journal entries and runner log lines, its transcript path, its worktree path if any, and the round out of three. It says the doctor changes nothing (no files, environment or logins), that its only output is a note, and that when a human is needed it states the situation and what the human must do or decide, without questioning them. It has no submit command: it reports over Orca mail.
+
+A doctor that ends without a remedy spends its round: its worker settles (`worker_done --outcome failed` when it gives up), or it fails itself after its own start retries and continuations. A doctor is never doctored. No remedy is applied yet, so every round ends so, and after the third the patient's call returns null: it is failed and **kept**, as before, its process not stopped, its tab open and its worktree retained.
 
 Not yet confirmed against live Orca: that `worker-show` follows a dispatch whose agent was resumed in its pane, and that two concurrent interrupts stop a pi worker as they stop Claude.
 
