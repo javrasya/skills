@@ -197,6 +197,11 @@ That one pass does not cover all of #43, and the gate above is not met for what 
 
 Until a pass runs on the runner as it stands, these rest on the offline tests alone. The next change to this directory runs the pass for all of them.
 
+Latest attempt: 2026-09-26 (#71), Orca 1.4.212 and Claude Code on macOS, with the runner as of #71, launched as above from `orca terminal create`, driven with `orca terminal` verbs only. **The contract did not hold, for reasons outside #71, so the gate is still unmet for this runner as it stands:**
+
+- Run `run_de70cafc6b8b`, fresh: `contract:valid`, `contract:repair` and `contract:here` returned; `contract:isolated` and `contract:retry` failed (`orca terminal create: call_timeout: no answer within 120s`, then every retry refused with `worktree_held` on its own `<runId>-<n>` worktree), and `contract:options` sat blocked on a Claude permission hook for 35 minutes (the launch passed no `--permission-mode`). The run was stopped there, before `contract:continue`; the resume leg was not run. The create timeout and the reuse refusal are the worktree-create and timeout work of #67's other slices.
+- **The reclaim dialog, in that run's attached view in its real Orca tab, while the runner was live:** `orca terminal send --text r` opened it (`▸ Reclaim Selected — every agent of Contract`, `Reclaim Successful Ones — the 3 done`, `Reclaim All — the runner is still live`); `--text $'\x1b[B'` moved the highlight to Reclaim Successful Ones; `--text $'\x1b'` closed it with `nothing reclaimed` on the flash line. The run registry recorded no `reclaimed` entry for the run and both of its child worktrees were still there. On a fixture run the same day, SGR mouse motion (`\x1b[<35;x;yM`) and presses sent the same way moved the highlight, and a press on the greyed-out Reclaim All did not.
+
 Last pass: 2026-09-25 (#53), Orca 1.4.209 and Claude Code 2.1.282 on Windows 11, with the runner as of #53. **The contract holds under both runners, fresh and resumed.**
 
 - **Orca runner, fresh and resumed from a new terminal:** each returned the Orca object above exactly, with `failures: []` (Run `run_65b013436b27`: one fresh run and two resumes, each from its own new terminal):
