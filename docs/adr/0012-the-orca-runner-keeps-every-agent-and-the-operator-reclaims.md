@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-09-24. Amends ADR-0011's consequence "it releases every worker it started". Applies to the **Orca runner only**; the Workflow runner, and the shared workflow script, are unchanged.
+Accepted — 2026-09-24. Amended by #71: the end-of-run prompt is gone, and an agent is reclaimed only from the run view. Amends ADR-0011's consequence "it releases every worker it started". Applies to the **Orca runner only**; the Workflow runner, and the shared workflow script, are unchanged.
 
 ## Context
 
@@ -22,7 +22,7 @@ Three places for the operator's view were weighed: a native Orca plugin panel (n
 
 **Nothing is reclaimed during an Orca-runner run.** Workers are not released on return, worktrees are not removed by the publish lane or finalize, and the runner's tab does not `exit`.
 
-**Reclaim is the operator's act.** At the run's end the runner's tab asks what to reclaim, defaulting to *keep the failed and dead agents, reclaim the rest*. At any later time the operator reclaims an agent, or a whole run, from the run view. Reclaim never touches a live agent, and never removes a worktree holding commits that were not pushed without being forced.
+**Reclaim is the operator's act, and only the run view's.** The runner asks nothing at the run's end: it writes `summary.json` and stays in its tab until the operator quits the view. On a run's tree, `r` opens the reclaim dialog, which takes every key and click while it is open: *Reclaim Selected* (the agent under the cursor, or every agent of the phase under it), *Reclaim Successful Ones* (the agents that are done), and *Reclaim All*, greyed out with its reason while the runner is live. Arrow keys and the mouse move the highlight, only Enter accepts, and Esc reclaims nothing. The standalone runs list keeps its own `r`, which reclaims a whole run. Reclaim never touches a live agent, and never removes a worktree holding commits that were not pushed without being forced.
 
 **The run view is a terminal UI, not a web page.** It is an htop-style tree of phases and agents with each agent's state, context size (green under 200k tokens, yellow to 350k, red above), and elapsed time. Arrow keys move, and Enter or a mouse click focuses the agent's Orca tab and worktree (`orca terminal switch`). It is built on **terminal-kit**, whose SGR mouse input was confirmed to reach Node in an Orca tab. It runs in two modes: **attached**, as a child process in the runner's tab showing that run, and **standalone**, listing every run on the machine by project, where a run can be reclaimed or resumed (ADR-0013).
 
@@ -31,7 +31,7 @@ Three places for the operator's view were weighed: a native Orca plugin panel (n
 ## Consequences
 
 - **A failed run leaves its evidence where the operator can see it**: the runner's tab and log, the failed agent's tab and transcript, and its worktree.
-- **Disk and tabs accumulate until reclaimed.** A run of seven tickets keeps dozens of worktrees if the operator never answers the end-of-run prompt; the standalone view is how they are found again.
+- **Disk and tabs accumulate until reclaimed.** A run of seven tickets keeps dozens of worktrees if the operator never reclaims them from the run view; the standalone view is how they are found again.
 - **The two runners now differ in reclaim.** The shared script still names each worktree's path. The Workflow runner reclaims as before, and the Orca runner defers to the operator. The glossary's Worktree reclaim entry records the exception.
 - **The view's first start needs npm and the network.** terminal-kit is pinned in `run-view/package.json` with a committed lockfile, and installed beside `view.mjs` with `npm ci` the first time a view starts. It is not vendored, so this departs from ADR-0001's promise that cloning the repo and running the link script installs every dependency. It is not vendored because the installed skill may be a detached copy of the repo, and the copy is where the view runs. Vendoring would also mean committing terminal-kit's whole dependency tree for one screen. A failed install costs only the view: it exits as unavailable, and the runner prints its log in the tab.
 - **The view depends on the Orca CLI's output shapes** (`worker-list`, `terminal list`, `worktree ps`). An Orca upgrade that changes them breaks the view, not the run.

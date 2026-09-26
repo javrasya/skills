@@ -24,32 +24,30 @@
 // and writes to runner.log alone while the view lives (attachView).
 //
 // Nothing is reclaimed during a run (ADR-0012): no worker is released, no tab
-// closed, no worktree removed. Only after summary.json is written does the
-// runner ask the operator what to reclaim (reclaim.mjs); once answered it
-// writes what was reclaimed and what kept to reclaim.json beside it, and exits.
+// closed, no worktree removed. The runner reclaims nothing at the end either:
+// it writes summary.json and stays in its tab until the operator quits the run
+// view, whose reclaim dialog is the only place an agent is reclaimed.
 //
 // The run itself is recorded in the machine-wide run registry (registry.mjs,
 // orca-runs.jsonl in the Claude directory): `armed` and the runner's terminal when the Run
 // is created, the new runner's terminal when a resume takes it over, `ended`
 // with ok, partial or failed when the script settles, and `reclaimed` for what
-// the operator reclaims at the end.
+// the operator reclaims from the run view.
 //
 // No change to this directory is done until the runner contract test passes
 // under both runners (README.md). The offline tests do not replace it.
 import { mkdirSync, writeFileSync, readFileSync, rmSync, appendFileSync, realpathSync } from 'fs'
-import { createInterface } from 'readline'
 import { spawn } from 'child_process'
 import { createHash } from 'crypto'
 import { basename, dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { checkSchema } from './schema.mjs'
-import { orcaCli, launchCommand, HARNESSES, realTimer, worktreeUnpushed } from './orca-cli.mjs'
+import { orcaCli, launchCommand, HARNESSES, realTimer } from './orca-cli.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { agentLifecycle } from './lifecycle.mjs'
 import { JOURNAL_ENTRIES, readJournal, madeByRun } from './journal.mjs'
-import { runRegistry, readRegistry, REGISTRY_PATH } from './registry.mjs'
+import { runRegistry, REGISTRY_PATH } from './registry.mjs'
 import { sessionTranscripts } from './transcript.mjs'
-import { agentsOf, endOfRunPrompt } from './reclaim.mjs'
 import { VIEW_EXIT } from './run-view/exit-codes.mjs'
 
 export { SUBMIT, workerPrompt } from './lifecycle.mjs'
@@ -276,8 +274,7 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
 
 // summary.json for a run that threw: the error, and every worktree the runner
 // retained because its agent died or never started, since the arming session
-// reads this file and not the log. What the operator then keeps of every
-// agent is reclaim.json's (finish).
+// reads this file and not the log.
 export const failureSummary = (e) => ({ runner: 'orca', ok: false, error: e?.stack ?? String(e), worktrees_kept: Array.isArray(e?.worktrees_kept) ? e.worktrees_kept : [] })
 
 // The run's result names each worktree retained because its agent died or
@@ -291,50 +288,16 @@ function withRetained(result, retained) {
   return { ...result, worktrees_kept: [...kept, ...retained.filter((k) => !named.has(k.path))] }
 }
 
-// The end of a run: summary.json first, since the arming session waits for it
-// and not for this tab, then the result, then the end-of-run prompt over the
-// agents this run's journal names: every agent of its Run, the ones earlier
-// runners of it made included, except those the registry already records
-// reclaimed. `ask(question)` resolves to the operator's answer, or null once
-// none can come; `registry` is a runRegistry writer, or null; `unpushed(path)`
-// counts a worktree's unpushed commits. Once the prompt is answered (or there
-// was none to ask), reclaim.json beside summary.json records the outcome:
-//   { choice, answered, reclaimed: [agent], kept: [agent + reason] }
-// with choice null and both lists empty when no agent was left to ask about,
-// and each agent as { name, title, worktree, terminal }. It is the prompt's
-// answer only: a later reclaim from the run view is the registry's.
-export async function finish({ stateDir, summary, orca, ask, out, registry = null, unpushed = worktreeUnpushed }) {
+// The end of a run: summary.json, since the arming session waits for it and
+// not for this tab, then the result in the log. Nothing is asked and nothing
+// reclaimed: the operator reclaims from the run view (ADR-0012).
+export function finish({ stateDir, summary, out }) {
   mkdirSync(stateDir, { recursive: true })
   writeFileSync(join(stateDir, 'summary.json'), JSON.stringify(summary, null, 2))
   if (summary.ok) {
     out('== Result')
     out(JSON.stringify(summary.result, null, 2))
   }
-  let agents = agentsOf(join(stateDir, 'journal.jsonl'))
-  if (registry?.path) {
-    try {
-      const runs = readRegistry(registry.path).filter((r) => agents.some((a) => a.runId === r.runId))
-      // A name is `<runId>-<n>`, so it names one agent across runs.
-      const done = new Set(runs.flatMap((r) => r.reclaimedAgents.map((x) => x.agent)))
-      agents = agents.filter((a) => !done.has(a.name))
-    } catch (e) {
-      out(`!! run registry: could not read what is already reclaimed: ${e?.message ?? e}`)
-    }
-  }
-  const outcome = await endOfRunPrompt({ agents, ask, out, orca, unpushed, registry })
-  const named = ({ name, title, worktree, terminal }) => ({ name, title, worktree: worktree ?? null, terminal: terminal ?? null })
-  const record = {
-    choice: outcome?.choice ?? null,
-    answered: outcome?.answered ?? false,
-    reclaimed: (outcome?.reclaimed ?? []).map(named),
-    kept: (outcome?.kept ?? []).map(({ agent, reason }) => ({ ...named(agent), reason })),
-  }
-  try {
-    writeFileSync(join(stateDir, 'reclaim.json'), JSON.stringify(record, null, 2))
-  } catch (e) {
-    out(`!! could not write reclaim.json: ${e?.message ?? e}`)
-  }
-  return outcome
 }
 
 // The run view attached to the runner's tab (D5 on #43): a child process that
@@ -349,33 +312,22 @@ export async function finish({ stateDir, summary, orca, ask, out, registry = nul
 //                'error' with no pid
 //   tab(s)       prints to the tab; log(s) appends to runner.log, and prints
 //                to the tab too once no view is attached
-//   ask(q)       the end-of-run question on the tab's own stdin, for when no
-//                view is left to ask it in
 //   tail()       runner.log's last lines
 //   restore()    puts the tab back after a view exits, as a crashed one cannot
 //   guard(on)    ignores a Ctrl-C that reaches the runner while a view lives:
 //                one that dies outside raw mode lets Ctrl-C reach every
 //                process on the console
-// Returns { start(), gate(print), ask(question, prompt), closed, crashes() }.
-// gate wraps a print so it reaches the tab only once no view is attached. ask
-// puts the end-of-run prompt ({ title, lines }, from endOfRunPrompt) in the
-// view as its modal, again in each view restarted before it is answered.
-// closed resolves once no view is attached.
-export function attachView({ spawnView, tab, log, ask: askTab, tail = () => [], clock = realClock, limits = SETTINGS, restore = () => {}, guard = () => {} }) {
+// Returns { start(), gate(print), closed, crashes() }. gate wraps a print so
+// it reaches the tab only once no view is attached. closed resolves once no
+// view is attached.
+export function attachView({ spawnView, tab, log, tail = () => [], clock = realClock, limits = SETTINGS, restore = () => {}, guard = () => {} }) {
   let attached = true
   let crashes = 0
-  let pending = null
   let child = null
   let close
   const closed = new Promise((r) => {
     close = r
   })
-  const send = (m) => {
-    try {
-      child?.send(m)
-    } catch {}
-  }
-
   function fallBack(why) {
     attached = false
     child = null
@@ -383,11 +335,6 @@ export function attachView({ spawnView, tab, log, ask: askTab, tail = () => [], 
     for (const line of tail()) tab(line)
     log(`!! ${why}; the runner prints its log in this tab again`)
     close()
-    if (pending) {
-      const p = pending
-      pending = null
-      askTab(p.question).then(p.resolve, () => p.resolve(null))
-    }
   }
 
   function start() {
@@ -415,18 +362,12 @@ export function attachView({ spawnView, tab, log, ask: askTab, tail = () => [], 
     }
     c.on('message', (m) => {
       if (m?.type === 'detach') detached = true
-      if (m?.type === 'endChoice' && pending) {
-        const p = pending
-        pending = null
-        p.resolve(m.answer ?? '')
-      }
     })
     c.on('exit', ended)
     c.on('error', (e) => {
       log(`!! the run view: ${e?.message ?? e}`)
       if (c.pid === undefined) ended(null, null)
     })
-    if (pending) send(pending.prompt)
   }
 
   return {
@@ -436,13 +377,6 @@ export function attachView({ spawnView, tab, log, ask: askTab, tail = () => [], 
     },
     gate: (print) => (s) => {
       if (!attached) print(s)
-    },
-    ask(question, prompt = {}) {
-      if (!attached) return askTab(question)
-      return new Promise((resolve) => {
-        pending = { question, resolve, prompt: { type: 'endPrompt', title: prompt.title ?? 'The run ended', lines: prompt.lines ?? [], question } }
-        send(pending.prompt)
-      })
     },
     closed,
     crashes: () => crashes,
@@ -466,21 +400,6 @@ function logTail(stateDir, n = 20) {
     return readFileSync(join(stateDir, 'runner.log'), 'utf8').trimEnd().split('\n').slice(-n)
   } catch {
     return []
-  }
-}
-
-// One question at a time on this tab's stdin. Once stdin ends, every question
-// is answered null.
-function stdinAsker() {
-  const rl = createInterface({ input: process.stdin, output: process.stdout })
-  let closed = false
-  rl.on('close', () => { closed = true })
-  return {
-    ask: (question) => (closed ? Promise.resolve(null) : new Promise((r) => {
-      rl.once('close', () => r(null))
-      rl.question(question, r)
-    })),
-    close: () => rl.close(),
   }
 }
 
@@ -512,16 +431,11 @@ if (isMain) {
   // step 4); a stale one from an earlier run must never pass for this run's.
   // The session clears it before launch too; this is defence in depth.
   rmSync(join(dir, 'summary.json'), { force: true })
-  rmSync(join(dir, 'reclaim.json'), { force: true })
   // runner.pid lets the arming session tell a runner that died before writing
   // summary.json (killed, OOM) from one still running: the tab outlives the
   // runner, so the tab cannot say. Written before anything else can fail.
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, 'runner.pid'), String(process.pid))
-  // The tab's stdin is the view's while one is attached, so it is read only
-  // once a question has to be asked there.
-  let asker = null
-  const askTab = (question) => (asker ??= stdinAsker()).ask(question)
   const ignore = () => {}
   // With no terminal (the offline tests, a redirected launch) there is no view,
   // and the runner prints as it always did.
@@ -530,7 +444,6 @@ if (isMain) {
       spawnView: () => spawn(process.execPath, [VIEW, '--attached', dir], { stdio: ['inherit', 'inherit', 'inherit', 'ipc'] }),
       tab: (s) => console.log(s),
       log: (s) => say(s),
-      ask: askTab,
       tail: () => logTail(dir),
       restore: restoreTab,
       guard: (on) => (on ? process.on('SIGINT', ignore) : process.off('SIGINT', ignore)),
@@ -560,12 +473,11 @@ if (isMain) {
     summary = failureSummary(e)
   }
   try {
-    await finish({ stateDir: dir, summary, orca, ask: view ? view.ask : askTab, out: say, registry: runRegistry(REGISTRY_PATH) })
-    // The view stays on the ended run until the operator quits it.
-    await view?.closed
+    finish({ stateDir: dir, summary, out: say })
   } catch (e) {
-    sayError(`!! reclaim: ${e?.stack ?? e}`)
-  } finally {
-    asker?.close()
+    sayError(`!! could not write summary.json: ${e?.stack ?? e}`)
   }
+  // The view stays on the ended run until the operator quits it: its reclaim
+  // dialog is where the operator reclaims.
+  await view?.closed
 }

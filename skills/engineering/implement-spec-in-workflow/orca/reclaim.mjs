@@ -1,7 +1,7 @@
 // Reclaim (ADR-0012): the operator's act of removing an agent's tab and
-// worktree, for one agent or a whole run. Nothing is reclaimed while a run
-// runs; the runner's end-of-run prompt and the run view both reclaim through
-// here, so both keep the same rules:
+// worktree, for one agent or a whole run. The runner itself reclaims nothing;
+// the run view's reclaim dialog and the standalone runs list's run-level `r`
+// both reclaim through here, so both keep the same rules:
 //   - an agent still live is refused, except one that failed and was kept
 //     with its worker left running: that one only with `stop`, a reclaim the
 //     operator confirms, which stops its worker first;
@@ -179,67 +179,4 @@ export async function reclaimRun(agents, { orca, unpushed = worktreeUnpushed, fo
     if (!kept.some((k) => k.agent.runId === runId)) record({ runId })
   }
   return { reclaimed, kept }
-}
-
-// The three answers to the end-of-run prompt, and what each keeps. The default
-// keeps the failed and dead agents — every call that came back null — and any
-// that never settled; it reclaims the rest.
-export const END_CHOICES = Object.freeze(['default', 'all', 'none'])
-
-export function keepFor(choice) {
-  if (choice === 'all') return () => null
-  if (choice === 'none') return () => 'you chose to keep every agent'
-  return (a) => (a.state === 'ok' ? null : a.state === 'failed' ? `it failed: ${a.reason ?? 'no result'}` : 'it never settled')
-}
-
-// Enter, `a` or `n`; anything else is asked again. No answer at all (stdin
-// closed) keeps everything: nothing is removed without the operator.
-export function parseChoice(answer) {
-  if (answer === null || answer === undefined) return 'none'
-  const a = String(answer).trim().toLowerCase()
-  if (a === '') return 'default'
-  if (a === 'a' || a === 'all') return 'all'
-  if (a === 'n' || a === 'none') return 'none'
-  return null
-}
-
-// The end-of-run prompt: names what the default keeps, asks with
-// `ask(question, { title, lines })` (resolving to the answer, or null once there
-// can be none), reclaims, and names every agent kept and why. title and lines
-// are what was printed before the question, for a caller that shows the
-// prompt somewhere else than the log: the run view draws them as its modal.
-// Returns { choice, answered, reclaimed, kept }; answered is false when no
-// answer could come. No agents, no prompt: null.
-export async function endOfRunPrompt({ agents, ask, out, ...rest }) {
-  if (!agents.length) return null
-  const byDefault = keepFor('default')
-  const keptByDefault = agents.filter((a) => byDefault(a))
-  const lines = []
-  const show = (s) => {
-    lines.push(s.trim())
-    out(s)
-  }
-  out('== Reclaim')
-  show(`   ${agents.length} agent${agents.length === 1 ? '' : 's'} kept their tab and worktree through this run. Reclaiming one closes its tab and removes its worktree.`)
-  if (keptByDefault.length) {
-    show(`   The default keeps ${keptByDefault.length} failed or dead:`)
-    for (const a of keptByDefault) show(`     ${a.title} (${byDefault(a)})`)
-  } else {
-    show('   None failed or died.')
-  }
-  show('   The tree stays live while you decide: Enter, a or n answers — typed here, or pressed in the run view.')
-  const question = `   Enter = keep those and reclaim the other ${agents.length - keptByDefault.length}, a = reclaim all, n = keep all: `
-  let choice = null
-  let answer
-  while (!choice) {
-    answer = await ask(question, { title: 'The run ended. Reclaim what?', lines })
-    choice = parseChoice(answer)
-    if (!choice) out(`?? "${answer}" is not an answer: press Enter, a or n`)
-  }
-  out(`   ${answer === null ? 'no answer: keeping every agent' : `chosen: ${choice}`}`)
-  const outcome = await reclaimRun(agents, { ...rest, out, keep: keepFor(choice) })
-  outcome.answered = answer !== null
-  for (const a of outcome.reclaimed) out(`<< reclaimed ${a.title}`)
-  for (const { agent, reason } of outcome.kept) out(`!! kept ${agent.title}${agent.worktree ? ` in ${agent.worktree}` : ''}${agent.terminal ? `, tab ${agent.terminal}` : ''}: ${reason}`)
-  return { choice, ...outcome }
 }

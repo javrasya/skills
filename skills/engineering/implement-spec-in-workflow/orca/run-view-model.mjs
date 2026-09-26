@@ -5,7 +5,7 @@
 // standalone mode, every run the registry knows, each opened into a runView.
 // The model is read from the run's journal, its agents' session transcripts,
 // Orca's terminal list and the run registry; the actions go to Orca, and a
-// reclaim goes through reclaim.mjs, so the view keeps the end-of-run rules.
+// reclaim goes through reclaim.mjs, so the view keeps its rules.
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from 'fs'
 import { basename, dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
@@ -122,6 +122,13 @@ function latestEvent(path) {
 //   alert   while any agent is blocked on a human, the line naming each one,
 //           its tab and what it waits on, which the flash line keeps over
 //           `latest` until it is answered; else null
+//   dialog  null, or what `r` opened, which takes every key and click until it
+//           closes (the tree keeps refreshing behind it):
+//           { kind: 'choose', title, options: [{ id, label, detail, disabled, reason }], highlight }
+//             the reclaim dialog, its options in RECLAIM_OPTIONS order and
+//             highlight the index of the one Enter takes
+//           { kind: 'confirm', title, lines }
+//             a reclaim refused until the operator confirms it with `f`
 // An agent is { n, origin, label, title, phase, state, continuations, reason,
 // replayed, launched, runId, dispatchId, harness, sessionId, worktree, terminal,
 // waiting, nextAt, workerLeft, tabOpen, reclaimed, context, band, tokens,
@@ -152,7 +159,31 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   let latest = null
   let alert = null
   let logTab = null
-  const view = { model: null, refresh, key, click, focus, reclaim, openLog }
+  // null, { kind: 'choose', highlight }, or { kind: 'confirm', n, title,
+  // lines, confirm, queue }: queue holds the confirmations still to ask after
+  // this one, each a reclaim's answer.
+  let dialog = null
+  const view = { model: null, refresh, key, click, highlight, focus, reclaim, openLog }
+
+  const agentsNow = () => phases.flatMap((p) => p.agents)
+  function optionsFor(row) {
+    const done = agentsNow().filter((a) => a.state === 'done').length
+    const alive = header?.alive
+    return [
+      { id: 'selected', label: 'Reclaim Selected', detail: !row ? 'nothing is selected' : row.kind === 'agent' ? row.agent.title : `every agent of ${row.phase.name}`, disabled: false, reason: null },
+      { id: 'successful', label: 'Reclaim Successful Ones', detail: `the ${done} done`, disabled: false, reason: null },
+      { id: 'all', label: 'Reclaim All', detail: 'every agent of the run', disabled: alive !== false, reason: alive === true ? 'the runner is still live' : alive === false ? null : 'whether the runner is alive cannot be told' },
+    ]
+  }
+  // What view.model.dialog is, with a highlight on a disabled option moved
+  // to the first one enabled: Reclaim All disables itself while the runner lives.
+  function dialogModel(row) {
+    if (!dialog) return null
+    if (dialog.kind === 'confirm') return { kind: 'confirm', title: dialog.title, lines: dialog.lines }
+    const options = optionsFor(row)
+    if (options[dialog.highlight]?.disabled !== false) dialog.highlight = Math.max(0, options.findIndex((o) => !o.disabled))
+    return { kind: 'choose', title: 'Reclaim', options, highlight: dialog.highlight }
+  }
 
   function layout() {
     const rows = []
@@ -168,7 +199,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     const pane = !row ? null
       : row.kind === 'agent' ? { kind: 'agent', agent: row.agent }
       : { kind: 'phase', phase: row.phase, problems: problemsOf(row.phase.agents).map((agent) => ({ agent, reason: agent.reason })) }
-    view.model = { header, phases, rows, selected, pane, message, latest, alert }
+    view.model = { header, phases, rows, selected, pane, message, latest, alert, dialog: dialogModel(row) }
     return view.model
   }
 
@@ -275,14 +306,35 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
 
   const activate = (row) => (!row ? {} : row.kind === 'phase' ? toggle(row.phase) : focus(row.agent))
 
-  // Reclaims agent `n`, or with no `n` the selected one, through reclaim.mjs,
-  // as the journal names it for reclaim: refused while it is live, or while
-  // its worktree holds unpushed commits unless `force`. One that failed and
-  // was kept with its worker running is refused as `stoppable` unless `stop`,
-  // which stops that worker first: both are the operator's confirmed `f`
-  // (view.mjs), never the plain `r`. A reclaim is recorded
-  // in the registry. What it answers names the agent as `agent: { n, title }`,
-  // so a forced retry goes to the agent refused, never to whatever row the
+  // One agent's reclaim through reclaim.mjs, as the journal names it for
+  // reclaim, recorded in the registry once done: reclaimAgent's answer, or
+  // null for an agent that launched nothing in this run.
+  async function attempt(a, { force = false, stop = false } = {}) {
+    const agent = agentsOf(journalPath).find((x) => x.origin === a.origin)
+    if (!agent) return null
+    let r
+    try {
+      r = await reclaimAgent(agent, { orca, unpushed, force, stop })
+    } catch (e) {
+      r = { reclaimed: false, reason: e?.message ?? String(e) }
+    }
+    if (r.reclaimed && registry) {
+      try {
+        runRegistry(registry, clock).reclaimed({ runId: agent.runId, agent: agent.name })
+      } catch (e) {
+        r.notes.push(`the run registry did not record it: ${e?.message ?? e}`)
+      }
+    }
+    return r
+  }
+
+  // Reclaims agent `n`, or with no `n` the selected one, by the reclaim rules:
+  // refused while it is live, or while its worktree holds unpushed commits
+  // unless `force`. One that failed and was kept with its worker running is
+  // refused as `stoppable` unless `stop`, which stops that worker first: both
+  // are what the operator confirms with `f` in the dialog, never the choice
+  // alone. What it answers names the agent as `agent: { n, title }`, so a
+  // confirmed retry goes to the agent refused, never to whatever row the
   // selection sits on by then: a refresh that folds its phase moves it.
   async function reclaim({ n, force = false, stop = false } = {}) {
     let a
@@ -291,29 +343,134 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
       if (row?.kind !== 'agent') return say('select an agent to reclaim')
       a = row.agent
     } else {
-      a = phases.flatMap((p) => p.agents).find((x) => x.n === n)
+      a = agentsNow().find((x) => x.n === n)
       if (!a) return say(`no agent ${n} in this run to reclaim`)
     }
     const target = { n: a.n, title: a.title }
-    const agent = agentsOf(journalPath).find((x) => x.origin === a.origin)
-    if (!agent) return { ...say(`${a.title} has nothing to reclaim: it launched nothing in this run`), agent: target }
-    let r
-    try {
-      r = await reclaimAgent(agent, { orca, unpushed, force, stop })
-    } catch (e) {
-      r = { reclaimed: false, reason: e?.message ?? String(e) }
-    }
+    const r = await attempt(a, { force, stop })
+    if (!r) return { ...say(`${a.title} has nothing to reclaim: it launched nothing in this run`), agent: target }
     if (!r.reclaimed) return { ...say(`kept ${a.title}: ${r.reason}`), reclaim: r, agent: target }
-    let note = r.notes.length ? `; ${r.notes.join('; ')}` : ''
-    if (registry) {
-      try {
-        runRegistry(registry, clock).reclaimed({ runId: agent.runId, agent: agent.name })
-      } catch (e) {
-        note += `; the run registry did not record it: ${e?.message ?? e}`
-      }
-    }
     await refresh()
-    return { ...say(`reclaimed ${a.title}${note}`), reclaim: r, agent: target }
+    return { ...say(`reclaimed ${a.title}${r.notes.length ? `; ${r.notes.join('; ')}` : ''}`), reclaim: r, agent: target }
+  }
+
+  // The confirmation a refused reclaim `res` asks for, as the dialog, or null:
+  // `f` stops the worker of an agent kept running when it failed (stop), or
+  // removes a worktree that holds unpushed commits (force). `confirmed` is
+  // what `f` already confirmed for this agent, so a stopped agent whose
+  // worktree is then refused for its commits asks again, for that.
+  function confirmationOf(res, confirmed = {}) {
+    const r = res?.reclaim
+    if (!res?.agent || !r || r.reclaimed) return null
+    const about = { kind: 'confirm', n: res.agent.n, title: `Reclaim ${res.agent.title}?` }
+    if (r.stoppable && !confirmed.stop) return { ...about, confirm: { ...confirmed, stop: true }, lines: [r.reason, '', 'f = stop its worker, then reclaim it · any other key cancels'] }
+    if (r.unpushed > 0 && !confirmed.force) return { ...about, confirm: { ...confirmed, force: true }, lines: [r.reason, '', 'f = force the reclaim, and those commits are lost · any other key cancels'] }
+    return null
+  }
+  // The first of `queue` that asks for a confirmation, holding the rest.
+  function nextConfirmation(queue) {
+    for (let i = 0; i < queue.length; i++) {
+      const d = confirmationOf(queue[i])
+      if (d) return { ...d, queue: queue.slice(i + 1) }
+    }
+    return null
+  }
+
+  // The agents an option names, none already reclaimed.
+  function chosen(id, row) {
+    const list = id === 'selected' ? (row.kind === 'agent' ? [row.agent] : row.phase.agents) : id === 'successful' ? agentsNow().filter((a) => a.state === 'done') : agentsNow()
+    return list.filter((a) => !a.reclaimed)
+  }
+
+  // Enter in the reclaim dialog: every agent the highlighted option names, one
+  // at a time, by the reclaim rules; each one refused for a reason the
+  // operator may confirm is then asked about, one confirmation at a time.
+  async function accept() {
+    const row = current()
+    const option = optionsFor(row)[dialog.highlight]
+    dialog = null
+    if (option.disabled) return say(`${option.label} is not available: ${option.reason}`)
+    if (option.id === 'selected' && !row) return say('select an agent or a phase to reclaim')
+    const what = option.id === 'selected' ? (row.kind === 'agent' ? row.agent.title : row.phase.name) : option.id === 'successful' ? 'the done agents' : 'the run'
+    if (option.id === 'selected' && row.kind === 'agent') {
+      const res = await reclaim({ n: row.agent.n })
+      dialog = nextConfirmation([res])
+      layout()
+      return { ...res, option: option.id }
+    }
+    const list = chosen(option.id, row)
+    if (!list.length) return { ...say(`${what}: no agent left to reclaim`), option: option.id, reclaimed: [], kept: [] }
+    const reclaimed = []
+    const kept = []
+    const notes = []
+    for (const a of list) {
+      const r = await attempt(a)
+      if (!r) continue
+      const target = { n: a.n, title: a.title }
+      if (r.reclaimed) {
+        reclaimed.push(target)
+        for (const note of r.notes) notes.push(`${a.title}: ${note}`)
+      } else kept.push({ agent: target, reclaim: r })
+    }
+    if (reclaimed.length) await refresh()
+    dialog = nextConfirmation(kept)
+    const asked = kept.filter((k) => confirmationOf(k)).length
+    const text = [
+      `reclaimed ${reclaimed.length} of ${list.length} agent${list.length === 1 ? '' : 's'} of ${what}`,
+      ...kept.filter((k) => !confirmationOf(k)).map(({ agent, reclaim: r }) => `kept ${agent.title}: ${r.reason}`),
+      ...(asked ? [`${asked} to confirm`] : []),
+      ...notes,
+    ].join('; ')
+    return { ...say(text), option: option.id, reclaimed, kept: kept.map(({ agent, reclaim: r }) => ({ agent, reason: r.reason })) }
+  }
+
+  // A key while the dialog is open: the tree takes none.
+  async function dialogKey(name) {
+    if (dialog.kind === 'confirm') {
+      const { n, confirm, queue, title } = dialog
+      dialog = null
+      if (name !== 'f') {
+        dialog = nextConfirmation(queue)
+        return say(`${title.replace(/^Reclaim (.*)\?$/, '$1')}: reclaim cancelled`)
+      }
+      const res = await reclaim({ n, ...confirm })
+      const again = confirmationOf(res, confirm)
+      dialog = again ? { ...again, queue } : nextConfirmation(queue)
+      layout()
+      return res
+    }
+    const options = optionsFor(current())
+    switch (name) {
+      case 'UP':
+      case 'DOWN': {
+        const step = name === 'UP' ? -1 : 1
+        for (let i = dialog.highlight + step; i >= 0 && i < options.length; i += step) {
+          if (!options[i].disabled) {
+            dialog.highlight = i
+            break
+          }
+        }
+        layout()
+        return {}
+      }
+      case 'ENTER':
+        return accept()
+      case 'ESCAPE':
+        dialog = null
+        return say('nothing reclaimed')
+      default:
+        return {}
+    }
+  }
+
+  // The mouse on option `index` of the reclaim dialog, hovering or clicking:
+  // it moves the highlight there, unless that option is disabled. Only Enter
+  // accepts.
+  function highlight(index) {
+    if (dialog?.kind !== 'choose') return {}
+    if (optionsFor(current())[index]?.disabled === false) dialog.highlight = index
+    layout()
+    return {}
   }
 
   // runner.log in a tab of its own that follows it (orca.logTail): Orca's
@@ -339,8 +496,10 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   }
 
   // Key names as terminal-kit gives them. Returns what the key did: { quit }
-  // for q, which ends the view only, never the run.
+  // for q, which ends the view only, never the run. While the dialog is open
+  // every key is its.
   async function key(name) {
+    if (dialog) return dialogKey(name)
     const rows = view.model?.rows ?? []
     switch (name) {
       case 'UP':
@@ -357,7 +516,9 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
       case 'RIGHT':
         return current()?.kind === 'phase' ? toggle(current().phase) : {}
       case 'r':
-        return reclaim()
+        dialog = { kind: 'choose', highlight: 0 }
+        layout()
+        return {}
       case 'l':
         return openLog()
       case 'q':
@@ -367,8 +528,10 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     }
   }
 
-  // A click on row `index` selects it and does what Enter would.
+  // A click on row `index` selects it and does what Enter would; none while
+  // the dialog is open.
   async function click(index) {
+    if (dialog) return {}
     const row = view.model?.rows[index]
     if (!row) return {}
     selected = index
@@ -529,7 +692,7 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
   const openBecause = (run) => (run.alive === true ? 'its runner is alive' : run.alive === null ? 'whether its runner is alive cannot be told' : null)
 
   // Every agent of the run the registry does not already record reclaimed,
-  // by the reclaim rules, as the end-of-run prompt's `a` does. The run is
+  // by the reclaim rules, as the tree's Reclaim All does. The run is
   // recorded reclaimed once none of its agents is left, but only when it is
   // closable: a run whose runner is alive, or may be, stays open, so the
   // agents it starts later are kept and listed (ADR-0012); one whose runner
@@ -593,10 +756,11 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
   const activate = (row) => (!row ? {} : row.kind === 'project' ? toggle(row.project) : open(row.run.runId))
 
   // Key names as terminal-kit gives them. With a run open its tree takes the
-  // keys, except R, and q or Escape, which go back to the list; q on the
-  // list returns { quit }.
+  // keys, except R, and q or Escape, which go back to the list, unless its
+  // dialog is open, which takes every key; q on the list returns { quit }.
   async function key(name) {
     if (opened) {
+      if (opened.view.model?.dialog) return opened.view.key(name)
       if (name === 'q' || name === 'ESCAPE') return close()
       if (name === 'R') return resume()
       return opened.view.key(name)
