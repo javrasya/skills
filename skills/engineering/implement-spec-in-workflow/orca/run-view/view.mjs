@@ -10,10 +10,10 @@
 //
 // It reads runs from their run dirs, the registry and Orca (run-view-model.mjs),
 // never from a runner, so a crash here never touches a run; the runner restarts
-// an attached view. Over IPC an attached view takes only the end-of-run prompt
-// ({type: 'endPrompt', title, lines, question}), answered with {type:
-// 'endChoice', answer}, and it sends {type: 'detach'} before the operator's
-// quit. Exit codes: exit-codes.mjs.
+// an attached view. Over IPC an attached view only sends {type: 'detach'}
+// before the operator's quit. Exit codes: exit-codes.mjs. The reclaim dialog,
+// and each confirmation after it, is the model's (view.model.dialog): this
+// file only hands it the keys, clicks and mouse moves.
 //
 // terminal-kit is installed beside this file on first use (npm ci), because
 // the skill may be a detached copy of the repo; npm's output goes to the log:
@@ -111,17 +111,18 @@ const runs = standalone ? runsView({ orca, registry, unpushed }) : null
 const view = standalone ? null : runView({ stateDir: runDir, orca, registry, unpushed })
 const top = runs ?? view
 const tree = () => (runs ? runs.opened() : view)
-let modal = null
 let flash = null
 let rowAt = () => null
+let optionAt = () => null
 
 function render() {
   const t = tree()
   const size = { width: term.width, height: term.height }
   // A blocked agent's alert stays on the flash line until it is answered: only
   // an action's own outcome, until the next key, goes over it.
-  const screen = t ? draw(t.model, { ...size, flash: flash ?? (t.model?.alert ? null : t.model?.latest), alert: t.model?.alert, modal, ...(runs && { help: TREE_HELP }) }) : drawRuns(runs.model, { ...size, flash: flash ?? runs.model?.message })
+  const screen = t ? draw(t.model, { ...size, flash: flash ?? (t.model?.alert ? null : t.model?.latest), alert: t.model?.alert, ...(runs && { help: TREE_HELP }) }) : drawRuns(runs.model, { ...size, flash: flash ?? runs.model?.message })
   rowAt = screen.rowAt
+  optionAt = screen.optionAt ?? (() => null)
   process.stdout.write('\x1b[H' + screen.lines.join('\r\n'))
 }
 
@@ -161,60 +162,25 @@ const said = (r) => {
   return r
 }
 
-// Enter, a and n are the prompt's answers, as parseChoice reads them; every
-// other key leaves it open.
-const ANSWERS = { ENTER: '', a: 'a', n: 'n' }
-
-// The confirmation a refused reclaim asks for, or null: `f` stops the worker
-// of an agent kept running when it failed (stop), or removes a worktree that
-// holds unpushed commits (force). `confirmed` is what `f` already confirmed
-// for this agent, so a stopped agent whose worktree is then refused for its
-// commits asks again, for that.
-function confirmation(r, t, confirmed = {}) {
-  if (!r?.agent || !t || !r.reclaim) return null
-  const about = { n: r.agent.n, in: t, title: `Reclaim ${r.agent.title}?` }
-  if (r.reclaim.stoppable && !confirmed.stop) {
-    return { ...about, confirm: { ...confirmed, stop: true }, lines: [r.reclaim.reason, '', 'f = stop its worker, then reclaim it · any other key cancels'] }
-  }
-  if (r.reclaim.unpushed > 0 && !confirmed.force) {
-    return { ...about, confirm: { ...confirmed, force: true }, lines: [r.reclaim.reason, '', 'f = force the reclaim, and those commits are lost · any other key cancels'] }
-  }
-  return null
-}
 term.on('key', (name) => {
   if (name === 'CTRL_C') return quit()
-  // `f` confirms the reclaim of the agent the modal names, the one `r` was
-  // refused for, wherever the selection has moved since, in the tree it was
-  // refused in.
-  if (modal?.confirm) {
-    const { n, in: t, confirm } = modal
-    modal = null
-    return act(async () => {
-      if (name !== 'f') return (flash = 'reclaim cancelled')
-      modal = confirmation(said(await t.reclaim({ n, ...confirm })), t, confirm) ?? modal
-    })
-  }
-  if (modal) {
-    // The end prompt keeps the tree alive: Enter, a and n answer it, every
-    // other key still drives the tree, and `r` waits until it is answered.
-    if (name in ANSWERS) {
-      process.send?.({ type: 'endChoice', answer: ANSWERS[name] })
-      modal = null
-      flash = null
-      return render()
-    }
-    if (name === 'r') return (flash = 'answer the reclaim prompt first')
-  }
   act(async () => {
     flash = null
-    const t = tree()
     const r = said(await top.key(name))
     if (r?.quit) return quit()
-    modal = confirmation(r, t) ?? modal
   })
 })
+// Hovering or clicking an option of the reclaim dialog moves its highlight;
+// while it is open the tree takes no click.
 term.on('mouse', (name, d) => {
-  if (name !== 'MOUSE_LEFT_BUTTON_PRESSED' || modal?.confirm) return
+  const t = tree()
+  if (t?.model?.dialog) {
+    const k = optionAt(d.y)
+    if (k === null || (name !== 'MOUSE_MOTION' && name !== 'MOUSE_LEFT_BUTTON_PRESSED')) return
+    if (k === t.model.dialog.highlight) return
+    return act(() => t.highlight(k))
+  }
+  if (name !== 'MOUSE_LEFT_BUTTON_PRESSED') return
   const i = rowAt(d.y)
   if (i === null) return
   act(async () => {
@@ -223,18 +189,12 @@ term.on('mouse', (name, d) => {
   })
 })
 term.on('resize', () => act(() => {}))
-if (!standalone) {
-  process.on('message', (m) => {
-    if (m?.type !== 'endPrompt') return
-    modal = { title: m.title, lines: [...m.lines, '', m.question.trim()] }
-    act(() => {})
-  })
-  // The runner is gone: nothing is left to show the run for.
-  process.on('disconnect', quit)
-}
+// The runner is gone: nothing is left to show the run for.
+if (!standalone) process.on('disconnect', quit)
 
 term.fullscreen(true)
 term.hideCursor(true)
-term.grabInput({ mouse: 'button' })
+// motion, not button: the dialog's highlight follows the hover.
+term.grabInput({ mouse: 'motion' })
 await refresh()
 setInterval(refresh, REFRESH_MS)

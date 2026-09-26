@@ -105,13 +105,27 @@ function phasePane(p, problems) {
 const HELP = ' ↑↓ move · ←→ / click a phase to fold · ⏎/click focus tab · r reclaim · l log · q quit'
 const TOP = 4
 
-// model: runView's model. flash: the flash line's text (an action's outcome,
-// or the latest event); alert: a blocked agent's line, drawn loud in its place
-// when there is no flash. modal: { title, lines } drawn over the middle. help:
-// the key line, for a tree the standalone view opened.
-// Returns the screen's lines, height of them, and rowAt(y), the index in
-// model.rows of the row drawn on terminal line y (1-based), or null.
-export function draw(model, { width: W = 140, height: H = 40, flash = null, alert = null, modal = null, help = HELP } = {}) {
+// The dialog's box lines, each already fitted to mw and coloured, and the
+// index among them of its first option.
+function dialogBox(d, mw) {
+  const plain = (l) => c('100', fit(' ' + l, mw))
+  const head = c('7', fit(' ' + d.title, mw))
+  if (d.kind === 'confirm') return { box: [head, ...d.lines.map(plain), plain('')], first: null }
+  const options = d.options.map((o, i) =>
+    o.disabled ? c('100;90', fit(`   ${o.label} — ${o.reason}`, mw))
+      : i === d.highlight ? c('7', fit(` ▸ ${o.label} — ${o.detail}`, mw))
+      : plain(`  ${o.label} — ${o.detail}`))
+  return { box: [head, ...options, plain(''), plain('↑↓ or the mouse moves · Enter reclaims · Esc closes'), plain('')], first: 1 }
+}
+
+// model: runView's model, its dialog drawn over the middle. flash: the flash
+// line's text (an action's outcome, or the latest event); alert: a blocked
+// agent's line, drawn loud in its place when there is no flash. help: the key
+// line, for a tree the standalone view opened.
+// Returns the screen's lines, height of them; rowAt(y), the index in
+// model.rows of the row drawn on terminal line y (1-based), or null; and
+// optionAt(y), the index of the dialog's option drawn there, or null.
+export function draw(model, { width: W = 140, height: H = 40, flash = null, alert = null, help = HELP } = {}) {
   const rows = model?.rows ?? []
   const selected = model?.selected ?? 0
   const body = Math.max(1, H - TOP - 1 - PANE - 2)
@@ -130,17 +144,14 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
   lines.push(fit(flash ? ' ' + c('1;36', flash) : alert ? ' ' + c(COLOUR.blocked, alert) : '', W))
   lines.push(fit(grey(help), W))
 
-  // The modal's terminal rows, so rowAt can keep the rows it does not cover
-  // clickable while the end prompt is up.
-  let modalTop = 0
-  let modalBottom = 0
-  if (modal) {
+  const dialog = model?.dialog ?? null
+  let optionsAt = null
+  if (dialog) {
     const mw = Math.min(W - 4, 100)
     const left = Math.max(0, Math.floor((W - mw) / 2))
-    const box = [c('7', fit(' ' + modal.title, mw)), ...modal.lines.map((l) => c('100', fit(' ' + l, mw))), c('100', fit('', mw))]
+    const { box, first } = dialogBox(dialog, mw)
     const at = Math.max(0, Math.floor((H - box.length) / 2))
-    modalTop = at
-    modalBottom = at + box.length
+    if (first !== null) optionsAt = at + first + 1
     box.forEach((b, i) => {
       if (at + i < lines.length) lines[at + i] = fit(' '.repeat(left) + b, W)
     })
@@ -149,12 +160,12 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
     lines: lines.slice(0, H),
     rowAt: (y) => {
       const i = top + (y - TOP - 1)
-      if (!(y > TOP && y <= TOP + body && i < rows.length)) return null
-      // A confirmation takes every click; the end prompt only hides the rows
-      // its box covers — the rest of the tree stays clickable.
-      if (modal?.confirm) return null
-      if (y >= modalTop && y < modalBottom) return null
-      return i
+      // The dialog takes every click: the tree behind it takes none.
+      return !dialog && y > TOP && y <= TOP + body && i < rows.length ? i : null
+    },
+    optionAt: (y) => {
+      const k = optionsAt === null ? -1 : y - optionsAt
+      return k >= 0 && k < dialog.options.length ? k : null
     },
   }
 }

@@ -28,6 +28,7 @@ The reference design for the Orca runner's [run view](../../CONTEXT.md) (spec #4
   - The transcript path.
 - **Bottom pane for a selected phase:** its blocked agents first, then its failed and stuck ones, each with its reason.
 - **Flash line:** while any agent is blocked on a human, it names each one, its tab and what it waits on, in place of the run's latest event, until it is answered.
+- **Reclaim dialog** (`r`, #71): a box over the middle of the tree, titled `Reclaim`, with its options in this order: `Reclaim Selected` (naming the agent, or `every agent of <phase>`), `Reclaim Successful Ones` and `Reclaim All`. The highlighted option is inverted with a `▸`; a disabled one, Reclaim All while the runner is live, is grey and gives its reason. Its hint line reads `↑↓ or the mouse moves · Enter reclaims · Esc closes`. A confirmation that follows it (`f`) is the same box with the reason and its `f =` line. The tree keeps redrawing behind either.
 
 ## What the image does not decide
 
@@ -37,7 +38,7 @@ The reference design for the Orca runner's [run view](../../CONTEXT.md) (spec #4
   - Context size and its bar are coloured by band: green below 200k, yellow from 200k to 350k, red above 350k.
   - States have their own colours. Cumulative tokens are grey. The selected row is shown inverted.
 - **Exact spacing and column widths** are a guide, not a contract.
-- **The key-help line** lists the view's own keys (#51): `l` opens the log in a tab of its own that follows it; `R` resume, `e` end-of-run and `s` all runs were the prototype's.
+- **The key-help line** lists the view's own keys (#51): `l` opens the log in a tab of its own that follows it; `R` resume, `e` and `s` all runs were the prototype's.
 
 ## Last design check
 
@@ -84,5 +85,5 @@ The same screen with colour removed, from the prototype at 140 columns. The stat
  reason worker did not start: orca worktree create timed out after 60s (3/3 attempts)
  transcript ~/.claude/projects/…-run-55d94954c294-17/(none).jsonl
 
- ↑↓ move · ←→ / click a phase to fold · ⏎/click focus tab · r reclaim · R resume · e end-of-run · s all runs · q quit
+ ↑↓ move · ←→ / click a phase to fold · ⏎/click focus tab · r reclaim · R resume · s all runs · q quit
 ```
