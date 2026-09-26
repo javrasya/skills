@@ -2282,6 +2282,136 @@ test("fake orca: a Run's mailbox holds what its workers send, hands its coordina
   assert.equal(orca.dispatches.get(preamble.dispatchId).outcome, 'succeeded', 'a worker_done settles its dispatch')
 })
 
+// --- a resume mid-recovery ------------------------------------------------------
+
+// A runner of ISOLATED that dies mid-round: `play(first)` is the worker, which
+// kills `first`, the runner's mortal clock, when the test says; `faults(first)`
+// and `patch(first, orca)` too. The resume runs to its end from term_2.
+async function midRound(play, { faults = () => ({}), patch = () => ({}) } = {}) {
+  const clock = fakeClock()
+  const stateDir = tmp()
+  const first = mortalOn(clock)
+  const orca = fakeOrca({ clock, faults: faults(first), worker: (w) => play(first)({ ...w, clock }) })
+  const opts = { stateDir, out: () => {}, transcripts: fakeTranscripts(orca) }
+  runScript(ISOLATED, { ...opts, orca: Object.assign(orca.as('term_runner'), patch(first, orca)), clock: first }).catch(() => {})
+  await first.hung
+  const died = journalOf(stateDir)
+  const before = orca.calls.length
+  const result = await runScript(ISOLATED, { ...opts, orca: orca.as('term_2'), clock, resume: true })
+  const journal = journalOf(stateDir)
+  const after = orca.calls.slice(before)
+  const of = (verb) => after.filter((c) => c.verb === verb)
+  return { orca, died, result, journal, after, of }
+}
+const upTo = (journal, e) => foldJournal(journal.slice(0, journal.indexOf(e) + 1)).agents
+
+test('resume: a live doctor is taken up, and no second one started; its patient stays pending until the handoff, and is never continued before it', async () => {
+  // The doctor hands off 10 minutes on, before any stillness nudges it; its runner dies as it starts.
+  const r = await midRound((first) => withDoctor(curedBy(NOTE, 'gone'), (d) => {
+    first.dead = true
+    d.clock.at(d.clock.now() + 10 * MIN, () => handsOff(NOTE)(d))
+  }))
+  assert.deepEqual(ofType(r.died, 'doctor').map((e) => [e.n, e.round, e.doctor]), [[1, 1, 2]])
+  assert.deepEqual(ofType(r.died, 'remedy'), [])
+  assert.deepEqual(r.result, GOOD)
+  assertEntries(r.journal)
+  const doctor = doctorOf(r.died)
+  assert.deepEqual(r.of('workerStart'), [], 'no doctor started again, and no patient')
+  const [patientUp, doctorUp, ...more] = ofType(r.journal, 'reattached')
+  assert.deepEqual(more, [])
+  assert.deepEqual([patientUp.title, patientUp.origin], ['[P] one', 1])
+  assert.deepEqual([doctorUp.dispatchId, doctorUp.origin, doctorUp.patient, doctorUp.round, doctorUp.key], [doctor.dispatchId, 2, 1, 1, null])
+  // Its round goes on: journaled again, not a new one.
+  const [round, ...rounds] = ofType(r.journal, 'doctor')
+  assert.deepEqual(rounds, [])
+  assert.deepEqual([round.n, round.origin, round.round, round.doctor], [patientUp.n, 1, 1, doctorUp.n])
+  // Pending: nothing continues the patient until its doctor's note does.
+  assert.deepEqual(r.of('workerContinue').map((c) => c.text), [notePrompt(NOTE)])
+  const [remedy] = ofType(r.journal, 'remedy')
+  assert.deepEqual([remedy.messageId, remedy.round, remedy.doctor], [sentWith(r.orca, NOTE).id, 1, doctorUp.n])
+  assert.ok(atMs(remedy) >= 10 * MIN, remedy.at)
+  assert.ok(r.journal.indexOf(remedy) < r.journal.indexOf(ofType(r.journal, 'result')[0]))
+  const before = upTo(r.journal, r.journal[r.journal.indexOf(remedy) - 1])
+  assert.deepEqual(before.map((a) => [a.origin, a.state]), [[1, 'failed'], [2, 'running']])
+  const agents = foldJournal(r.journal).agents
+  assert.deepEqual(agents.map((a) => [a.origin, a.state, a.patient]), [[1, 'done', null], [2, 'done', 1]])
+  assert.deepEqual(agents[0].rounds.map((x) => [x.round, x.doctor, x.outcome]), [[1, 2, 'remedy']])
+})
+
+test('resume: a handoff journaled before its runner died, and not yet applied, is applied once by the resume, which acknowledges the batch Orca delivers again', async () => {
+  let tries = 0
+  // The first runner dies continuing its patient with the note: that call never reaches Orca.
+  const r = await midRound(() => withDoctor(curedBy(NOTE, 'gone'), handsOff(NOTE)), {
+    patch: (first, orca) => ({
+      workerContinue: (a) => {
+        if (!a.prompt.includes(NOTE)) return orca.workerContinue(a)
+        tries++
+        first.dead = true
+        return first.sleep(0)
+      },
+    }),
+  })
+  const handoff = sentWith(r.orca, NOTE)
+  assert.equal(tries, 1)
+  assert.deepEqual(ofType(r.died, 'mail').filter((e) => e.messageId === handoff.id).map((e) => e.action), ['remedy'])
+  assert.deepEqual(ofType(r.died, 'remedy'), [], 'journaled as mail, never applied')
+  assert.deepEqual(r.result, GOOD)
+  assertEntries(r.journal)
+  // Applied once: one continuation with the note, one remedy line, for that handoff.
+  assert.deepEqual(r.of('workerContinue').map((c) => c.text), [notePrompt(NOTE)])
+  assert.deepEqual(ofType(r.journal, 'remedy').map((e) => [e.messageId, e.round, e.how]), [[handoff.id, 1, 'continue']])
+  assert.deepEqual(r.of('workerStart'), [], 'no second doctor')
+  const again = r.after.find((c) => c.verb === 'mailCheck' && c.ids.includes(handoff.id))
+  assert.ok(again, 'delivered again to the resume')
+  assert.ok(r.after.some((c) => c.verb === 'mailCheck' && c.ack === again.deliveryId))
+  assert.deepEqual(ofType(r.journal, 'mail').filter((e) => e.messageId === handoff.id).map((e) => e.action), ['remedy'])
+  assert.deepEqual(foldJournal(r.journal).agents.map((a) => [a.origin, a.state]), [[1, 'done'], [2, 'done']])
+})
+
+test('resume: a doctor that needs you stays waiting across a resume, never nudged, continued or failed, until its handoff three hours on', async () => {
+  // Its runner dies once it has journaled the escalation.
+  const r = await midRound(() => withDoctor(curedBy(NOTE, 'gone'), escalates('idle', NOTE, [[180, NOTE]])), {
+    faults: (first) => ({
+      mailCheck: ({ ack, batch }) => {
+        if (ack && batch?.some((m) => m.type === 'escalation')) first.dead = true
+        return null
+      },
+    }),
+  })
+  const doctor = doctorOf(r.died)
+  assert.deepEqual(ofType(r.died, 'mail').map((e) => [e.action, e.body]), [['needsYou', ASK]])
+  assert.deepEqual(r.result, GOOD)
+  assertEntries(r.journal)
+  assert.deepEqual(r.of('workerStart'), [])
+  const up = ofType(r.journal, 'reattached').find((e) => e.dispatchId === doctor.dispatchId)
+  assert.equal(up.needsYou, ASK)
+  const state = (e) => upTo(r.journal, e).find((a) => a.origin === 2)
+  assert.deepEqual([state(up).state, state(up).reason], ['needs you', ASK])
+  const handoff = ofType(r.journal, 'mail').find((e) => e.action === 'remedy')
+  assert.equal(state(r.journal[r.journal.indexOf(handoff) - 1]).state, 'needs you')
+  assert.ok(atMs(handoff) >= 180 * MIN, handoff.at)
+  assert.deepEqual(r.journal.filter((e) => e.origin === 2 || e.n === up.n).filter((e) => ['nudge', 'continued', 'failed'].includes(e.type)), [])
+  assert.deepEqual(r.of('terminalSend').filter((c) => c.dispatchId === doctor.dispatchId), [], 'never nudged')
+  assert.deepEqual(r.of('workerContinue').map((c) => c.text), [notePrompt(NOTE)], 'only the patient, with the note')
+  assert.deepEqual(ofType(r.journal, 'gaveUp'), [])
+})
+
+test("resume: a held patient whose worker never started stays pending, and its live doctor's handoff retries its start with the note", async () => {
+  const faults = startFailsThrough()
+  const r = await midRound((first) => withDoctor(submitsWith(START_NOTE), (d) => {
+    first.dead = true
+    d.clock.at(d.clock.now() + 30 * MIN, () => handsOff(START_NOTE)(d))
+  }), { faults: () => faults })
+  assert.deepEqual(r.result, GOOD)
+  assertEntries(r.journal)
+  assert.deepEqual(r.of('workerStart').map((c) => [c.title, c.worktree]), [['[P] one', CHILD_WT]], 'the patient retried in its worktree, and no second doctor')
+  const [remedy, ...more] = ofType(r.journal, 'remedy')
+  assert.deepEqual(more, [])
+  assert.deepEqual([remedy.origin, remedy.how, remedy.round], [1, 'restart', 1])
+  const agents = foldJournal(r.journal).agents
+  assert.deepEqual(agents.map((a) => [a.origin, a.state, a.patient]), [[1, 'done', null], [2, 'done', 1]])
+})
+
 // --- a start that fails is retried --------------------------------------------
 
 const ISOLATED = `return await agent('Do a thing.', { label: 'one', phase: 'P', schema: ${JSON.stringify(SCHEMA)}, isolation: 'worktree' })`

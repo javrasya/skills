@@ -15,7 +15,10 @@
 // The Workflow runner's resumeFromRunId promises the same. A resume, from any
 // terminal, takes the journaled Run over (run-use) before it starts a worker,
 // and takes up each worker the last run left out: watched again if Orca still
-// shows it live, its session continued if it died. When the script settles the
+// shows it live, its session continued if it died. A patient whose agent()
+// waited on its doctor stays pending: its round goes on, its doctor taken up
+// like any worker, never a second one started, and a handoff journaled but not
+// yet applied is applied once. When the script settles the
 // runner writes summary.json to the state dir: {runner, ok, result | error},
 // and on a failure also worktrees_kept, the worktrees it retained because
 // their agent died or never started. Every line
@@ -198,7 +201,9 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
     journal({ type: 'earlier', n, title, run, dispatchId, harness, sessionId, terminal, worktree, origin, state, reason, ...(continuations && { continuations }), ...(workerLeft && { workerLeft }), ...(patient != null && { patient }), ...(rounds.length && { round, rounds }) })
   }
   for (const { key, n, title, run, dispatchId, harness, sessionId, terminal, worktree, dir, origin, continuations } of outstanding) {
-    journal({ type: 'outstanding', key, n, title, run, dispatchId, harness, sessionId, terminal, worktree, dir, origin, ...(continuations && { continuations }) })
+    // A patient's rounds ride along: a resume goes on from them.
+    const rounds = earlier.agents.find((a) => a.origin === origin)?.rounds ?? []
+    journal({ type: 'outstanding', key, n, title, run, dispatchId, harness, sessionId, terminal, worktree, dir, origin, ...(continuations && { continuations }), ...(rounds.length && { round: rounds.at(-1).round, rounds }) })
   }
   // A patient's lines are the ones of its call or of its agent; its log lines
   // the ones the runner printed under its title, in this run or an earlier one.
@@ -257,15 +262,18 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
       out(`>> ${title}: ${entry ? 'failed in the last run' : 'not in the journal'}; this call and every one after it run live`)
       replaying = false
     }
-    if (entry?.unsettled) out(`>> ${title}: its worker never started in the last run; it starts now`)
+    if (entry?.unsettled && !entry.held) out(`>> ${title}: its worker never started in the last run; it starts now`)
 
     const call = { prompt, schema: opts.schema, isolated: opts.isolation === 'worktree', launch, key, n, label, title, phaseName }
+    // A patient's doctor rounds so far, and, while its agent() waited on
+    // them, the round the resume goes on with: it is not started again.
+    const treated = entry?.rounds ? { rounds: entry.rounds, ...(entry.held && { held: entry.held, origin: entry.held.origin }) } : {}
     // Its worker is its own whatever came before it: it runs this very call.
     if (entry?.worker) {
       aside.delete(entry.worker.worktree)
-      return life({ ...call, adopt: entry.worker })
+      return life({ ...call, ...treated, adopt: entry.worker })
     }
-    return life(call)
+    return life({ ...call, ...treated })
   }
 
   try {
