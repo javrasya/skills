@@ -20,6 +20,10 @@ import { agentDir } from './lifecycle.mjs'
 // slot and its worker is being started. retry: a call's start, or its Run's
 // creation, failed and is tried again: journaled before the backoff's wait,
 // with why the last attempt failed and `nextAt`, when the next one begins.
+// baseline: a child worktree was made for a call's worker, before its
+// terminal opens: `lines`, its `git status --porcelain` lines then (none when
+// clean), are what it held before any agent touched it. A create that timed
+// out has none.
 // blocked: its worker waits on a human, with what it waits on (`waiting`);
 // unblocked: it no longer does. warning: something that went wrong without
 // failing the call. A nudge's
@@ -50,6 +54,7 @@ export const JOURNAL_ENTRIES = Object.freeze({
   failed: ['at', 'key', 'n', 'title', 'reason', 'attempts'],
   retained: ['at', 'retained'],
   retry: ['at', 'key', 'n', 'title', 'attempt', 'reason', 'nextAt'],
+  baseline: ['at', 'key', 'n', 'title', 'worktree', 'lines'],
   warning: ['at', 'key', 'n', 'title', 'reason'],
   nudge: ['at', 'key', 'n', 'title', 'dispatchId', 'reason', 'attempt'],
   blocked: ['at', 'key', 'n', 'title', 'dispatchId', 'terminal', 'waiting'],
@@ -115,7 +120,7 @@ export const readJournal = (path) => foldJournal(journalLines(path))
 // agents, every agent the journal names, one per `origin`, by the n of its
 // latest line: { origin, n, title, state, reason, continuations, replayed,
 // launched, runId, dispatchId, harness, sessionId, worktree, terminal, from,
-// to, waiting, nextAt, workerLeft }. The journal of a resumed run holds every agent of its Run, the ones
+// to, waiting, nextAt, workerLeft, baseline }. The journal of a resumed run holds every agent of its Run, the ones
 // earlier runners made included: a resume carries each forward (`earlier`,
 // `outstanding`), and a line of the call that takes one up again
 // (`reattached`, or a replayed `result` with its `origin`) is that same agent,
@@ -127,7 +132,8 @@ export const readJournal = (path) => foldJournal(journalLines(path))
 // (waiting: on what), stuck once nudged, continued after a continuation, done
 // or failed once settled. A nudge journals no answer, so an agent stays stuck
 // until its next continuation or settlement; blocked lasts until unblocked or
-// settled. workerLeft: it failed with its worker's process left running. launched: a worker was started for it,
+// settled. workerLeft: it failed with its worker's process left running.
+// baseline: the porcelain lines its worktree was made with, or null. launched: a worker was started for it,
 // whatever its dispatch now reads. from and to are when it began and settled
 // here, or null: a replayed result or a carried agent launched nothing here.
 export function foldJournal(entries) {
@@ -158,7 +164,7 @@ export function foldJournal(entries) {
       a = {
         origin: id, n: e.n, title: null, state: 'queued', continuations: 0, reason: null, replayed: false, launched: false,
         runId: null, dispatchId: null, harness: null, sessionId: null, worktree: null, terminal: null, from: null, to: null,
-        waiting: null, nextAt: null, workerLeft: false,
+        waiting: null, nextAt: null, workerLeft: false, baseline: null,
       }
       agents.set(id, a)
     }
@@ -173,6 +179,9 @@ export function foldJournal(entries) {
       case 'retry':
         a.from ??= at
         Object.assign(a, { state: 'starting', reason: e.reason ?? null, nextAt: e.nextAt ?? null })
+        break
+      case 'baseline':
+        Object.assign(a, { worktree: e.worktree ?? a.worktree, baseline: Array.isArray(e.lines) ? e.lines : a.baseline })
         break
       case 'started':
       case 'reattached':

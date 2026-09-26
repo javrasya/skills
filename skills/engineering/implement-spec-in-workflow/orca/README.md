@@ -44,6 +44,7 @@ Together, the journal and the log say what happened in a run, whether or not the
 | `failed` | a call returned null: its worker never started, died past the continuation cap, was blocked on a human too long, went over a limit, or left no valid result, or its Run could not be created | `key`, `n`, `title`, `reason` (human-readable; after retries, the last attempt's), `attempts` (starts or Run creations made), `continuations` if its session was continued, `retained` if it left a worktree, `workerOut: true` when a resume could not take its Run over and its worker is still out: the call stays unsettled, and the next resume takes that worker up, and `workerLeft: true` when its worker's process was left running (blocked on a human, or stalled past the continuation cap): only a reclaim that stops it first removes it |
 | `retained` | a resume carries forward a worktree an earlier run kept | `retained` |
 | `retry` | an attempt at a call's worker start, or at creating the Run, failed and another follows: journaled as it fails, before the backoff's wait, so the reason is on the journal through the wait | `key`, `n`, `title`, `attempt` (the next one, from 2), `reason` (why the last one failed), `nextAt` (when the next attempt begins) |
+| `baseline` | the runner made a call's child worktree, before it opens the agent's terminal: what the worktree held before any agent touched it. A create that timed out, its worktree found by name after, has none | `key`, `n`, `title`, `worktree` (its path), `lines` (its `git status --porcelain` lines, `[]` when clean) |
 | `warning` | something went wrong without failing the call: its worktree's display name or board status could not be set | `key`, `n`, `title`, `reason` |
 | `nudge` | the runner typed a nudge to a worker | `key`, `n`, `title`, `dispatchId`, `reason`, `attempt` (the nudge's number since the session started or was last continued) |
 | `blocked` | a worker is blocked on a human | `key`, `n`, `title`, `dispatchId`, `terminal` (the tab to answer it in), `waiting` (what Orca says it waits on) |
@@ -97,9 +98,11 @@ A start is safe to repeat. An isolated agent's child worktree is always named `<
 
 - If the list still comes back `truncated`, the name cannot be ruled out, so that attempt fails and is retried. It is never read as "not found".
 - If no worktree has that name, the retry creates it.
-- If the worktree is clean and no agent runs in it, the retry takes it up.
 - If an agent still runs in it (`terminal list`), only that attempt fails.
-- If it has uncommitted changes (`git status --porcelain`), or commits no other branch holds, the start fails for good with that reason. The worktree is retained, like a dead agent's.
+- If no earlier attempt sent its worker-start, no worker has been in it, and the retry takes it up whatever it holds.
+- Once one did, the worktree is judged against its **baseline**: the `git status --porcelain` lines it held right after the runner made it, journaled as `baseline` before its agent's terminal opened. If its lines differ from the baseline (from none, for a create that timed out), or it has commits no other branch holds, the start fails for good with that reason, and the worktree is retained, like a dead agent's. Otherwise the retry takes it up.
+
+An agent whose worktree was made with a baseline of any lines is told so in its prompt, under the Orca runner only: those files were there before it, it never stages or commits them, and it stages its own changes by path. With a baseline of none, or no baseline, the prompt has no such section.
 
 Every `worktree create`, first attempt or retry, is checked against the name it asked for. If Orca made `<name>-2` instead, a worktree of that name already exists that the start did not take up. The start fails for good with that reason, because a retry that missed it again would make a `-3`. Both worktrees are retained: the new one on the `failed` journal line, and the earlier one on a `retained` line.
 

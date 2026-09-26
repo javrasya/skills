@@ -8,12 +8,14 @@
 // records every Orca call in order, stamped with `clock`'s time when one is
 // given, so a test can assert on the sequence and its timing. `worktrees`
 // holds every worktree Orca knows, the run's own included, by path, with the
-// board `status` last set on it, the `dirty` and `commits` a retried start
-// checks before taking it up, and `unpushed`, the commits a test says its
+// board `status` last set on it, the `porcelain` lines `git status
+// --porcelain` gives in it and the `commits` a retried start checks before
+// taking it up, and `unpushed`, the commits a test says its
 // HEAD holds that no remote-tracking ref contains (git's side, not Orca's:
 // `unpushedOf` answers for it). Every worker's terminal is one the runner
 // launched, so, as in real Orca, its `terminalState` is `retained` for good;
-// whether its tab is open is `terminalList`'s to say.
+// whether its tab is open is `terminalList`'s to say. `setupLeaves` is the
+// porcelain every child worktree is born with, as a setup hook's output.
 //
 // `faults` fails a step the way real Orca can: step -> ({ count, ...ctx }) =>
 // an error to throw, 'hang' for a call Orca never answers (it fails as the
@@ -21,7 +23,7 @@
 // 'hang-after' is a create Orca finishes but never answers: the worktree
 // exists, and the call times out at `createMs`. count is how many
 // times that step has run, and orca this fake, so a fault can also change
-// what Orca holds, a worktree's `dirty` for one. Steps: runCreate, worktreeStatus, and a start's
+// what Orca holds, a worktree's `porcelain` for one. Steps: runCreate, worktreeStatus, and a start's
 // worktreeCreate, worktreeSet, terminalCreate, waitIdle and workerStart, the
 // order the adapter runs them in, and runUse.
 //
@@ -41,7 +43,7 @@
 // so the runner never sees the window before, and reads worker-show through
 // the adapter's own workerStatus.
 import { existsSync } from 'fs'
-import { OrcaError, launchCommand, resumeCommand, resumeRunnerCommand, tailCommand, workerStartArgs, withTimeout, workerStatus } from './orca-cli.mjs'
+import { OrcaError, sameLines, launchCommand, resumeCommand, resumeRunnerCommand, tailCommand, workerStartArgs, withTimeout, workerStatus } from './orca-cli.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 
 // The runner's transcript reader, over the fake's sessions: a session's size
@@ -50,10 +52,10 @@ export const fakeTranscripts = (orca) => ({
   size: ({ sessionId }) => [...orca.dispatches.values()].filter((d) => d.sessionId === sessionId).at(-1)?.transcript ?? null,
 })
 
-export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run', runPrefix = 'run_fake', coordinator = 'term_runner', tabs = [], faults = {}, callMs = RUNNER_SETTINGS.orcaCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs } = {}) {
+export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run', runPrefix = 'run_fake', coordinator = 'term_runner', tabs = [], faults = {}, callMs = RUNNER_SETTINGS.orcaCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, setupLeaves = [] } = {}) {
   const calls = []
   const dispatches = new Map()
-  const worktrees = new Map([[runWorktree, { parent: null, name: null, displayName: null, removed: false, status: null, dirty: false, commits: 0, unpushed: 0 }]])
+  const worktrees = new Map([[runWorktree, { parent: null, name: null, displayName: null, removed: false, status: null, porcelain: [], commits: 0, unpushed: 0 }]])
   // handle -> { path, title, open }: the tabs logTail opened.
   const logTabs = new Map()
   const counts = {}
@@ -112,7 +114,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
   }
 
   // As the real adapter decides it: the worktree a retry takes up, by name.
-  function earlierWorktree(name, dispatched) {
+  function earlierWorktree(name, dispatched, baseline) {
     const found = findWorktree(name)
     if (!found) return null
     const [path, w] = found
@@ -122,7 +124,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       record({ verb: 'worktreeReuse', worktree: path })
       return path
     }
-    if (w.dirty) throw refuse('worktree_dirty', 'has uncommitted changes', true)
+    if (!sameLines(w.porcelain, baseline ?? [])) throw refuse('worktree_dirty', baseline?.length ? 'has changed since it was made' : 'has uncommitted changes', true)
     if (w.commits > 0) throw refuse('worktree_has_commits', `has ${w.commits} commit(s) of its own`, true)
     record({ verb: 'worktreeReuse', worktree: path })
     return path
@@ -194,8 +196,9 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       const warnings = []
       let worktree = runWorktree
       let made = null
+      let created = false
       if (child) {
-        made = child.retry ? earlierWorktree(child.name, child.dispatched) : null
+        made = child.retry ? earlierWorktree(child.name, child.dispatched, child.baseline ?? null) : null
         let timedOut = null
         let late = null
         if (!made) {
@@ -212,7 +215,8 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
           let name = child.name
           for (let i = 2; live(`C:/fake/worktrees/${name}`); i++) name = `${child.name}-${i}`
           made = `C:/fake/worktrees/${name}`
-          worktrees.set(made, { parent: runWorktree, name, displayName: name, removed: false, status: null, dirty: false, commits: 0, unpushed: 0 })
+          worktrees.set(made, { parent: runWorktree, name, displayName: name, removed: false, status: null, porcelain: [...setupLeaves], commits: 0, unpushed: 0 })
+          created = !late
           record({ verb: 'worktreeCreate', name: child.name, worktree: made })
           if (name !== child.name) {
             const earlier = `C:/fake/worktrees/${child.name}`
@@ -235,7 +239,12 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       }
       let opened = false
       let dispatching = false
+      let baseline = child?.baseline ?? null
       try {
+        if (created) {
+          baseline = [...worktrees.get(made).porcelain]
+          await child.onBaseline?.({ worktree: made, lines: baseline })
+        }
         await step('terminalCreate', { title, worktree: made })
         opened = true
         await step('waitIdle', { title, worktree: made })
@@ -248,15 +257,16 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
         if (dispatching && e instanceof Object) e.dispatched = true
         throw e
       }
-      const argv = workerStartArgs({ run, prompt, title, place: ['--worktree', child ? `path:${worktree}` : 'current'], terminal: preamble.handle })
+      const text = typeof prompt === 'function' ? prompt(baseline) : prompt
+      const argv = workerStartArgs({ run, prompt: text, title, place: ['--worktree', child ? `path:${worktree}` : 'current'], terminal: preamble.handle })
       if (argv.includes('--agent')) throw new Error(`fake orca: worker-start for ${title} was called with --agent`)
       // Like Claude Code, the agent titles its own tab from its prompt.
       const d = {
-        ...preamble, run, title, ...launch, sessionId, command, prompt, worktree, tabTitle: prompt.slice(0, 30), ...fresh(), transcript: null, onNudge: null, onContinue: null, terminalState: 'retained',
+        ...preamble, run, title, ...launch, sessionId, command, prompt: text, worktree, tabTitle: text.slice(0, 30), ...fresh(), transcript: null, onNudge: null, onContinue: null, terminalState: 'retained',
       }
       dispatches.set(d.dispatchId, d)
       record({ verb: 'workerStart', dispatchId: d.dispatchId, title, ...launch, sessionId, command, argv, placement: child ? 'new-child' : 'current', worktree })
-      play(d, () => worker({ prompt, preamble, worktree, orca, state: d }))
+      play(d, () => worker({ prompt: text, preamble, worktree, orca, state: d }))
       return { dispatchId: d.dispatchId, taskId: d.taskId, terminal: d.handle, worktree, warnings }
     },
 

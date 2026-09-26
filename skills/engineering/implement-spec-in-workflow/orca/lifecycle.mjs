@@ -15,13 +15,22 @@ import { sessionTranscripts } from './transcript.mjs'
 
 export const SUBMIT = fileURLToPath(new URL('./submit.mjs', import.meta.url))
 
-export function workerPrompt(prompt, { schemaPath, resultPath, payloadPath }) {
+// The files a worktree held before its agent, from its baseline's porcelain
+// lines: named for the agent so it never commits them, since it cannot tell
+// them from its own. A baseline of none adds nothing.
+const baselineSection = (baseline) => (baseline?.length ? `
+
+---
+These files were in your worktree before you, left by its setup: ${baseline.map((l) => l.slice(3)).join(', ')}. They are not your work, so never stage or commit them. Stage your own changes by path (\`git add <path>\`), never with \`git add -A\`, \`git add .\` or \`git commit -a\`.` : '')
+
+// `baseline`: the porcelain lines of the worktree it starts in, or null.
+export function workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline = null }) {
   const what = schemaPath
     ? `Write your result to ${payloadPath} as one JSON object that matches the JSON Schema in ${schemaPath}.`
     : `Write your answer to ${payloadPath} as plain text.`
   const command = [`node "${SUBMIT}"`, schemaPath && `--schema "${schemaPath}"`, `--result "${resultPath}"`, `--payload "${payloadPath}"`,
     '--from <worker_handle> --dispatch-capability <capability> --task-id <task_id> --dispatch-id <dispatch_id>'].filter(Boolean).join(' ')
-  return `${prompt}
+  return `${prompt}${baselineSection(baseline)}
 
 ---
 How this run receives your result: your final message is not read. Your result reaches the workflow only through the submit command below, and submit sends your worker_done for you — never send worker_done yourself.
@@ -329,6 +338,14 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     // Once any attempt has sent its worker-start, a worker may have run in
     // that worktree, and a retry no longer takes it up whatever it holds.
     let dispatched = false
+    // The porcelain lines its worktree was made with, journaled before its
+    // terminal opens: what a retry judges it against, and what its agent is
+    // told is not its own. None for a create that timed out.
+    let baseline = null
+    const onBaseline = ({ worktree, lines }) => {
+      baseline = lines
+      journal({ type: 'baseline', key, n, title, worktree, lines })
+    }
     let w, sessionId
     let attempts = 0
     try {
@@ -341,11 +358,11 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
         try {
           const w = await orca.workerStart({
             run: runId,
-            prompt: workerPrompt(prompt, { schemaPath, resultPath, payloadPath }),
+            prompt: (baseline) => workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline }),
             title,
             ...launch,
             sessionId,
-            child: isolated ? { name: `${runId}-${n}`, displayName: title, retry: attempt > 1, dispatched } : null,
+            child: isolated ? { name: `${runId}-${n}`, displayName: title, retry: attempt > 1, dispatched, baseline, onBaseline } : null,
           })
           return { w, sessionId }
         } catch (e) {

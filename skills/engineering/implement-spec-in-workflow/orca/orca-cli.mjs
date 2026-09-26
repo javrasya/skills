@@ -72,6 +72,13 @@ export function gitIn(cwd, args, { git = execGit, clock = { timer: realTimer }, 
   return withTimeout(clock, ms, git(cwd, args, ms), `git ${args[0]}`)
 }
 
+// `git status --porcelain` as its lines, each kept whole: a line's leading
+// space is its index column, so the output is never trimmed.
+export const porcelainLines = (text) => String(text ?? '').split('\n').map((l) => l.replace(/\r$/, '')).filter(Boolean)
+
+// Whether a worktree's porcelain lines are its baseline's, in any order.
+export const sameLines = (lines, baseline) => lines.length === baseline.length && [...lines].sort().join('\n') === [...baseline].sort().join('\n')
+
 // Commits on a worktree's branch that no other branch and no remote holds:
 // work of its own, which a retry never takes a worktree over with.
 export async function worktreeOwnCommits(path, branch, bound) {
@@ -248,8 +255,9 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
   // has reached worker-start (`dispatched`), whatever it holds is Orca's own
   // making, such as a setup hook's untracked output, so it is taken up as it
   // is; after that, one that holds work is refused for good, named on the
-  // error.
-  async function earlierWorktree(name, dispatched) {
+  // error. Work is what it holds beyond its `baseline`, the porcelain lines it
+  // was made with: with none (a create that timed out), any line is work.
+  async function earlierWorktree(name, dispatched, baseline) {
     const row = await findWorktree(name)
     if (!row) return null
     const path = row.path
@@ -258,7 +266,8 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
     const t = await orca(['terminal', 'list', '--worktree', `path:${path}`])
     if ((t?.terminals ?? []).some((x) => x.agentIdentity && !x.orphaned)) throw refuse('worktree_held', 'still has an agent running in it', false)
     if (!dispatched) return path
-    if ((await gitIn(path, ['status', '--porcelain'], bound)).trim()) throw refuse('worktree_dirty', 'has uncommitted changes', true)
+    const lines = porcelainLines(await gitIn(path, ['status', '--porcelain'], bound))
+    if (!sameLines(lines, baseline ?? [])) throw refuse('worktree_dirty', baseline?.length ? 'has changed since it was made' : 'has uncommitted changes', true)
     const own = await worktreeOwnCommits(path, row.branch, bound)
     if (own > 0) throw refuse('worktree_has_commits', `has ${own} commit(s) of its own`, true)
     return path
@@ -286,7 +295,11 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
     // names it as the error's `worktree`, and `worktrees` lists every one it
     // leaves when there are more; `final` marks one a retry cannot mend, and
     // `dispatched` one whose worker-start was sent, which may have put a
-    // worker in the child. `child.dispatched`: an earlier attempt's was.
+    // worker in the child. `child.dispatched`: an earlier attempt's was;
+    // `child.baseline`: the porcelain lines an earlier attempt's create left,
+    // or null. A child this attempt creates has its own taken before its
+    // terminal opens, and handed to `child.onBaseline({ worktree, lines })`.
+    // `prompt` may be a function of the child's baseline (null without one).
     async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null }) {
       if (!sessionId) throw new Error(`workerStart: ${title} has no session id; the runner assigns one to every worker`)
       const command = launchCommand({ harness, model, effort, permissionMode, sessionId })
@@ -300,9 +313,9 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       let place = ['--worktree', 'current']
       let terminalIn = []
       const warnings = []
+      let c = null
       if (child) {
-        worktree = child.retry ? await earlierWorktree(child.name, child.dispatched) : null
-        let c = null
+        worktree = child.retry ? await earlierWorktree(child.name, child.dispatched, child.baseline ?? null) : null
         if (!worktree) {
           // A create Orca finishes after its answer timed out still leaves the
           // worktree, and a retry would find it; looked up now, it costs no attempt.
@@ -339,12 +352,19 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       }
       let handle = null
       let dispatching = false
+      let baseline = child?.baseline ?? null
       try {
+        // Only a create answered in time: one looked up after its timeout may
+        // still be running its setup, so its lines are no baseline.
+        if (c) {
+          baseline = porcelainLines(await gitIn(worktree, ['status', '--porcelain'], bound))
+          await child.onBaseline?.({ worktree, lines: baseline })
+        }
         const t = await orca(['terminal', 'create', ...terminalIn, '--title', title, '--command', command])
         handle = t.terminal.handle
         await waitIdle(handle, command)
         dispatching = true
-        const r = await orca(workerStartArgs({ run, prompt, title, place, terminal: handle }))
+        const r = await orca(workerStartArgs({ run, prompt: typeof prompt === 'function' ? prompt(baseline) : prompt, title, place, terminal: handle }))
         const effect = (r.effects || []).find((e) => e.kind === 'worktree')?.id
         return { dispatchId: r.dispatchId, taskId: r.taskId, terminal: handle, worktree: worktree ?? pathOf(effect) ?? pathOf(t.terminal.worktreeId), warnings }
       } catch (e) {

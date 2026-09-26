@@ -326,11 +326,11 @@ const ONE = `return await agent('Do a thing.', { label: 'one', phase: 'P', schem
 
 // Runs a script (one agent() by default) on the default settings table, each
 // worker played by `worker`.
-async function runOne(worker, { script = ONE, orcaPatch = {}, permissionMode = null, faults = {}, settings = {} } = {}) {
+async function runOne(worker, { script = ONE, orcaPatch = {}, permissionMode = null, faults = {}, settings = {}, setupLeaves = [] } = {}) {
   const clock = fakeClock()
   const lines = []
   const stateDir = tmp()
-  const orca = Object.assign(fakeOrca({ worker: (w) => worker({ ...w, clock }), clock, faults }), orcaPatch)
+  const orca = Object.assign(fakeOrca({ worker: (w) => worker({ ...w, clock }), clock, faults, setupLeaves }), orcaPatch)
   const result = await runScript(script, { orca, stateDir, out: (s) => lines.push(s), clock, permissionMode, settings, transcripts: fakeTranscripts(orca) })
   const of = (verb) => orca.calls.filter((c) => c.verb === verb)
   const log = readFileSync(join(stateDir, 'runner.log'), 'utf8').trimEnd().split('\n')
@@ -935,7 +935,7 @@ test('entry point: runner.pid names this run\'s runner, and the skill\'s probe s
 // cannot be moved into a worktree worker-start makes afterwards.
 const CHILD = { name: 'run_1-3', displayName: '[Implement] impl:#1' }
 const CHILD_PATH = 'C:/wt/run_1-3'
-const childCli = (replies = {}, opts) => recordingCli({ 'worktree create': { worktree: { id: `repo::${CHILD_PATH}`, path: CHILD_PATH }, startupTerminal: { handle: 'term_shell' } }, ...replies }, opts)
+const childCli = (replies = {}, opts) => recordingCli({ 'worktree create': { worktree: { id: `repo::${CHILD_PATH}`, path: CHILD_PATH }, startupTerminal: { handle: 'term_shell' } }, ...replies }, { git: gitStub().git, ...opts })
 
 for (const [what, launch, command] of [
   ['a Claude worker', { harness: 'claude', model: 'opus' }, `claude --session-id ${SID} --model opus`],
@@ -1059,6 +1059,52 @@ test('orca-cli: a retry after a worker-start was sent refuses a worktree of its 
     assert.equal(e.worktree, CHILD_PATH, code)
     for (const v of ['worktree create', 'terminal create']) assert.equal(verbsOf(argvs).includes(v), false, `${code}: ${v}`)
   }
+})
+
+// A setup hook's output, as `git status --porcelain` prints it.
+const SETUP = ['?? node_modules/', ' M package-lock.json']
+
+test("orca-cli: a child it creates has its porcelain taken as its baseline and handed on before the agent's terminal opens, and the prompt is made from it", async () => {
+  const g = gitStub({ status: `${SETUP.join('\n')}\n` })
+  const { argvs, orca } = childCli({}, { git: g.git })
+  const handed = []
+  const w = await orca.workerStart({
+    ...START,
+    prompt: (baseline) => `baseline: ${JSON.stringify(baseline)}`,
+    child: { ...CHILD, onBaseline: (b) => handed.push({ ...b, verbs: verbsOf(argvs) }) },
+  })
+  assert.equal(w.worktree, CHILD_PATH)
+  assert.deepEqual(handed, [{ worktree: CHILD_PATH, lines: SETUP, verbs: ['worktree create', 'terminal close', 'worktree set'] }], 'its index column kept, before terminal create')
+  assert.deepEqual(g.runs, [[CHILD_PATH, 'status', '--porcelain']])
+  assert.equal(flag(argvs.at(-1), '--spec'), `baseline: ${JSON.stringify(SETUP)}`)
+
+  const late = childCli({ 'worktree create': () => new Promise(() => {}), 'worktree list': { worktrees: [{ path: CHILD_PATH }] } }, { clock: fakeClock(), git: gitStub({ status: '?? node_modules/\n' }).git })
+  const none = []
+  await late.orca.workerStart({ ...START, prompt: (b) => `baseline: ${JSON.stringify(b)}`, child: { ...CHILD, onBaseline: (b) => none.push(b) } })
+  assert.deepEqual(none, [], 'a create that timed out has no baseline')
+  assert.equal(flag(late.argvs.at(-1), '--spec'), 'baseline: null')
+})
+
+test('orca-cli: a retry after a worker-start was sent takes up a worktree whose porcelain is still its baseline, and refuses one changed since, for good', async () => {
+  for (const [status, code] of [
+    [` M package-lock.json\n?? node_modules/\n`, null],
+    [`${SETUP.join('\n')}\n?? notes.txt\n`, 'worktree_dirty'],
+    ['?? node_modules/\n', 'worktree_dirty'],
+  ]) {
+    const { argvs, orca } = childCli(EARLIER, { git: gitStub({ status, 'rev-list': '0\n' }).git })
+    const got = await orca.workerStart({ ...START, prompt: (b) => `baseline: ${JSON.stringify(b)}`, child: { ...CHILD, retry: true, dispatched: true, baseline: SETUP } }).catch((x) => x)
+    if (!code) {
+      assert.equal(got.worktree, CHILD_PATH, 'the same lines in another order are its baseline')
+      assert.equal(flag(argvs.at(-1), '--spec'), `baseline: ${JSON.stringify(SETUP)}`, "a worktree taken up keeps the baseline it was made with")
+      continue
+    }
+    assert.equal(got.code, code, status)
+    assert.equal(got.final, true)
+    assert.equal(got.message, `orca worktree reuse: worktree_dirty: ${CHILD_PATH} has changed since it was made`)
+  }
+  const commits = childCli(EARLIER, { git: gitStub({ status: `${SETUP.join('\n')}\n`, 'rev-list': '1\n' }).git })
+  const e = await commits.orca.workerStart({ ...START, child: { ...CHILD, retry: true, dispatched: true, baseline: SETUP } }).catch((x) => x)
+  assert.equal(e.code, 'worktree_has_commits', 'its baseline spares no commit')
 })
 
 test("orca-cli: a retry asks for Orca's whole worktree list, and a page still truncated fails the attempt, retryable, never read as 'not found'", async () => {
@@ -1436,11 +1482,11 @@ test('lifecycle: a retry whose worktree list is truncated journals retry, then f
   orca.workerStart = cliStart({ 'terminal wait': { wait: { satisfied: false } }, 'worktree list': { worktrees: [], truncated: true } })
   const { life, call, journal, kept } = lifecycleOn(orca)
   assert.equal(await life(call('impl', { isolated: true })), null)
-  assert.deepEqual(journal.map((e) => e.type), ['starting', 'retry', 'retry', 'retry', 'failed'])
-  assert.match(journal[2].reason, /worktree_list_truncated/)
+  assert.deepEqual(journal.map((e) => e.type), ['starting', 'baseline', 'retry', 'retry', 'retry', 'failed'])
+  assert.match(journal[3].reason, /worktree_list_truncated/)
   assert.match(journal[4].reason, /worktree_list_truncated/)
   assert.equal(kept.length, 1)
-  assert.equal(journal[4].retained, kept[0])
+  assert.equal(journal[5].retained, kept[0])
 })
 
 test('lifecycle: a create Orca answers under a suffixed name fails at once, retaining both worktrees', async () => {
@@ -1587,7 +1633,7 @@ test('retry: a worktree create that times out after Orca made the worktree finds
 
   const none = await runOne(submitGood, { script: ISOLATED, faults: { worktreeCreate: ({ count }) => (count === 1 ? 'hang' : null) } })
   assert.deepEqual(none.result, GOOD)
-  assert.deepEqual(types(none), ['starting', 'retry', 'started', 'result'], 'with no worktree made, the attempt fails as the create did')
+  assert.deepEqual(types(none), ['starting', 'retry', 'baseline', 'started', 'result'], 'with no worktree made, the attempt fails as the create did')
   assert.equal(entries(none, 'retry')[0].reason, 'its worker did not start: orca worktreeCreate: call_timeout: no answer within 600s')
 })
 
@@ -1608,7 +1654,7 @@ test('retry: a start whose Orca call never answers counts as failed once it time
 test('retry: a start that fails after its worktree was made takes that clean worktree up again and succeeds, making no second one', async () => {
   const r = await runOne(submitGood, { script: ISOLATED, faults: { waitIdle: ({ count }) => count === 1 && new OrcaError('agent_not_ready', 'never idle', 'terminal wait') } })
   assert.deepEqual(r.result, GOOD, 'nothing retained')
-  assert.deepEqual(types(r), ['starting', 'retry', 'started', 'result'])
+  assert.deepEqual(types(r), ['starting', 'baseline', 'retry', 'started', 'result'])
   assert.equal(verbCount(r, 'worktreeCreate'), 1)
   assert.deepEqual([...r.orca.worktrees.keys()], ['C:/fake/run', CHILD_WT])
   assert.deepEqual(r.orca.calls.filter((c) => c.verb === 'worktreeReuse').map((c) => c.worktree), [CHILD_WT])
@@ -1617,7 +1663,7 @@ test('retry: a start that fails after its worktree was made takes that clean wor
 })
 
 for (const [what, spoil] of [
-  ['untracked setup output', (w) => { w.dirty = true }],
+  ['untracked setup output', (w) => { w.porcelain.push('?? node_modules/') }],
   ['commits', (w) => { w.commits = 2 }],
 ]) {
   test(`retry: a retry that finds its worktree holding ${what}, with no worker ever dispatched, takes it up and the agent delivers`, async () => {
@@ -1632,7 +1678,7 @@ for (const [what, spoil] of [
       },
     })
     assert.deepEqual(r.result, GOOD)
-    assert.deepEqual(types(r), ['starting', 'retry', 'started', 'result'])
+    assert.deepEqual(types(r), ['starting', 'baseline', 'retry', 'started', 'result'])
     assert.equal(verbCount(r, 'worktreeCreate'), 1)
     assert.deepEqual(r.orca.calls.filter((c) => c.verb === 'worktreeReuse').map((c) => c.worktree), [CHILD_WT])
     assert.equal(entries(r, 'started')[0].worktree, CHILD_WT)
@@ -1640,7 +1686,7 @@ for (const [what, spoil] of [
 }
 
 for (const [what, spoil, reason] of [
-  ['uncommitted changes', (w) => { w.dirty = true }, `its worker did not start: orca worktree reuse: worktree_dirty: ${CHILD_WT} has uncommitted changes`],
+  ['uncommitted changes', (w) => { w.porcelain.push('?? notes.txt') }, `its worker did not start: orca worktree reuse: worktree_dirty: ${CHILD_WT} has uncommitted changes`],
   ['commits', (w) => { w.commits = 2 }, `its worker did not start: orca worktree reuse: worktree_has_commits: ${CHILD_WT} has 2 commit(s) of its own`],
 ]) {
   test(`retry: a retry after a worker-start was sent that finds its worktree with ${what} fails with that reason, and keeps the worktree`, async () => {
@@ -1655,7 +1701,7 @@ for (const [what, spoil, reason] of [
       },
     })
     assert.equal(r.result, null)
-    assert.deepEqual(types(r), ['starting', 'retry', 'failed'], 'no further attempt: a retry cannot mend it')
+    assert.deepEqual(types(r), ['starting', 'baseline', 'retry', 'failed'], 'no further attempt: a retry cannot mend it')
     const [failed] = entries(r, 'failed')
     assert.equal(failed.reason, reason)
     assert.equal(failed.attempts, 2)
@@ -1667,11 +1713,70 @@ for (const [what, spoil, reason] of [
   })
 }
 
+// --- a worktree judged against its baseline -----------------------------------
+
+const BORN = ['?? node_modules/', '?? package-lock.json']
+
+test("baseline: a worktree born with setup output has that output journaled as its baseline before the agent's terminal opens", async () => {
+  let atTerminal = null
+  const orca = fakeOrca({ worker: submitting(), setupLeaves: BORN, faults: { terminalCreate: () => { atTerminal = journal.map((e) => e.type) } } })
+  const { life, call, journal } = lifecycleOn(orca)
+  assert.deepEqual(await life(call('impl', { isolated: true })), GOOD)
+  assert.deepEqual(atTerminal, ['starting', 'baseline'])
+  const [b] = journal.filter((e) => e.type === 'baseline')
+  assertEntries([{ ...b, at: new Date(0).toISOString() }])
+  assert.deepEqual([b.n, b.title, b.worktree, b.lines], [1, '[P] impl', CHILD_WT, BORN])
+  assert.deepEqual(foldJournal(journal).agents[0].baseline, BORN)
+
+  const clean = await runOne(submitGood, { script: ISOLATED })
+  assert.deepEqual(entries(clean, 'baseline').map((e) => e.lines), [[]], 'a clean one is journaled with none')
+  const late = await runOne(submitGood, { script: ISOLATED, setupLeaves: BORN, faults: { worktreeCreate: () => 'hang-after' } })
+  assert.deepEqual(entries(late, 'baseline'), [], 'a create that timed out has no baseline')
+})
+
+// A worker-start that fails once it was sent, so a worker may have run.
+const failsOnceSent = (spoil = () => {}) => ({
+  workerStart: ({ count, worktree, orca }) => {
+    if (count > 1) return null
+    spoil(orca.worktrees.get(worktree))
+    return new OrcaError('call_timeout', 'no answer within 120s', 'orchestration worker-start')
+  },
+})
+
+test('baseline: a retry after a dispatched worker takes up a worktree unchanged since its baseline, and refuses one changed since', async () => {
+  const same = await runOne(submitGood, { script: ISOLATED, setupLeaves: BORN, faults: failsOnceSent() })
+  assert.deepEqual(same.result, GOOD)
+  assert.deepEqual(types(same), ['starting', 'baseline', 'retry', 'started', 'result'], 'one baseline, from its create')
+  assert.deepEqual(same.orca.calls.filter((c) => c.verb === 'worktreeReuse').map((c) => c.worktree), [CHILD_WT])
+  assert.equal(verbCount(same, 'worktreeCreate'), 1)
+
+  const changed = await runOne(submitGood, { script: ISOLATED, setupLeaves: BORN, faults: failsOnceSent((w) => w.porcelain.push('?? notes.txt')) })
+  assert.equal(changed.result, null)
+  assert.deepEqual(types(changed), ['starting', 'baseline', 'retry', 'failed'])
+  const [failed] = entries(changed, 'failed')
+  assert.equal(failed.reason, `its worker did not start: orca worktree reuse: worktree_dirty: ${CHILD_WT} has changed since it was made`)
+  assert.equal(failed.retained.path, CHILD_WT)
+})
+
+test("baseline: the agent's prompt names its worktree's baseline files with the staging rule, and carries no such section with none", async () => {
+  const rule = /These files were in your worktree before you, left by its setup: node_modules\/, package-lock\.json\. They are not your work, so never stage or commit them\. Stage your own changes by path/
+  const promptOf = (r) => [...r.orca.dispatches.values()][0].prompt
+  const born = await runOne(submitGood, { script: ISOLATED, setupLeaves: BORN })
+  assert.match(promptOf(born), rule)
+  assert.ok(promptOf(born).startsWith('Do a thing.\n\n---\nThese files'), promptOf(born))
+  const retried = await runOne(submitGood, { script: ISOLATED, setupLeaves: BORN, faults: failsOnceSent() })
+  assert.match(promptOf(retried), rule, 'a worktree taken up again keeps its baseline')
+  for (const r of [await runOne(submitGood, { script: ISOLATED }), await runOne(submitGood, { script: ISOLATED, setupLeaves: BORN, faults: { worktreeCreate: () => 'hang-after' } }), await runOne(submitGood, { setupLeaves: BORN })]) {
+    assert.doesNotMatch(promptOf(r), /before you|stage/i)
+    assert.ok(promptOf(r).startsWith('Do a thing.\n\n---\nHow this run receives your result'))
+  }
+})
+
 test('retry: a start that fails every time is null after its retries, each journaled as retry at the backoff the table sets, then failed with the last reason', async () => {
   const r = await runOne(submitGood, { script: ISOLATED, faults: { terminalCreate: ({ count }) => new OrcaError('runtime_unavailable', `try ${count}`, 'terminal create') } })
   assert.equal(r.result, null)
   assertEntries(r.journal)
-  assert.deepEqual(types(r), ['starting', 'retry', 'retry', 'retry', 'failed'])
+  assert.deepEqual(types(r), ['starting', 'baseline', 'retry', 'retry', 'retry', 'failed'])
   const retries = entries(r, 'retry')
   assert.deepEqual(retries.map((e) => e.attempt), [2, 3, 4])
   assert.deepEqual(retries.map((e) => e.reason), [1, 2, 3].map((i) => `its worker did not start: orca terminal create: runtime_unavailable: try ${i}`))
@@ -1711,7 +1816,7 @@ test('warnings: a display name or board status Orca refuses is logged and journa
   const r = await runOne(submitGood, { script: ISOLATED, faults: { worktreeSet: refused, worktreeStatus: refused } })
   assert.deepEqual(r.result, GOOD)
   assertEntries(r.journal)
-  assert.deepEqual(types(r), ['starting', 'warning', 'started', 'warning', 'result'])
+  assert.deepEqual(types(r), ['starting', 'baseline', 'warning', 'started', 'warning', 'result'])
   const reasons = entries(r, 'warning').map((e) => e.reason)
   assert.deepEqual(reasons, [
     "could not set its worktree's display name: orca worktree set: selector_not_found: no such worktree",
@@ -3253,7 +3358,7 @@ test('continuation: a worker whose tab is closed, and whose dispatch Orca then f
 const RUNS_AT = Date.parse('2026-09-20T12:00:00.000Z')
 const PROJECT = 'C:/repos/controlayer'
 const HAND_MADE = 'C:/fake/worktrees/my-feature'
-const blankWorktree = () => ({ parent: null, name: null, displayName: null, removed: false, status: null, dirty: false, commits: 0, unpushed: 0 })
+const blankWorktree = () => ({ parent: null, name: null, displayName: null, removed: false, status: null, porcelain: [], commits: 0, unpushed: 0 })
 
 // The registry fixture's three runs at noon, on a fake Orca, their journals
 // written beside it:
