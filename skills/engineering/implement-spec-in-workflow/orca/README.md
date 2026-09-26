@@ -258,12 +258,22 @@ Both checks must hold, on the fresh run and on the resume:
 
 ### Pass notes
 
+Last pass: 2026-09-26 (#69), Orca 1.4.212 on macOS, with the runner as of #69, driven by an agent with the steps above alone, launched with the preload. **The Orca-only contract holds, fresh and resumed** (Run `run_6d1d57987103`).
+
+- **Fresh:** `contract:dirty-retry`'s create was held back; its worktree `run_6d1d57987103-2` held `?? contract-setup-output.txt` (and the repo's setup hook ran `npm install` in it). The runner logged `orca worktree create: call_timeout: no answer within 600s, but Orca had made …/run_6d1d57987103-2, so it starts there`, journaled it as a `warning`, and started the agent in that worktree with no `retry` line. Both agents went idle once, were nudged, and submitted. `summary.json` held `ok: true` and the object above exactly; the log's script lines ended `contract holds`. `n` and `q` ended it, and the runner's pid was dead.
+- **Resumed** from a new terminal: both agents logged `replayed from the journal` and started no worker; `summary.json` held the same object, and `contract holds` was the last script line.
+- The host slept twice during the run (`pmset -g log`: 10:06:54Z to 10:22:33Z, and again after the result). The create's 600s bound, set at 10:06:20Z, fired at 10:22:38Z, five seconds after the wake: Node's timers count the time the host sleeps, and fire overdue on waking. See [a bound that fires on waking](#a-bound-that-fires-on-waking).
+
 Last pass: 2026-09-26 (#68), Orca 1.4.212 on macOS, with the runner as of #68's lifecycle failure point, driven by an agent with the steps above alone. **The Orca-only contract holds, fresh and resumed** (Run `run_0ee4fd996340`).
 
 - The skills checkout was not yet a repo in Orca, so it was added with `orca repo add`. The agent's own git worktree was not in `orca worktree list`, so `<worktree>` was the main checkout and the script paths pointed into the agent's worktree.
 - **Fresh:** `orca-contract:returned` started in the main checkout, went idle without submitting after about two minutes, was nudged once, and then submitted. The log's script lines ended `orca-contract:returned returned {"value":{"word":"hello","count":3}}`, then `contract holds`. `summary.json` held `ok: true` and the object above exactly. `n` sent with `orca terminal send --text n` logged `chosen: none`, and `q` closed the view, after which the runner's pid was dead.
 - **Resumed** from a new terminal: `orca-contract:returned` logged `replayed from the journal` and started no worker. The log's last script line was `contract holds`, and `summary.json` held the same object. With no agent to run live, the resume took no Run over: its journal's one `run` line names the fresh runner's terminal. `n` and `q` ended it as on the fresh run.
 - No kill ran, since the one case has none. `orca terminal close` was used only to clean up the worker tab and the two runner tabs.
+
+## A bound that fires on waking
+
+Every bound the runner keeps (a call's timeout, the backoff, the liveness limits) is a Node timer, and on macOS Node's timers count the time the host sleeps: a timer due while the host sleeps fires as soon as it wakes, and Orca, asleep with it, never had the chance to answer. So a laptop that sleeps through a call fails that call as `call_timeout`, however little of its bound Orca had. `run_0476d67e2fed`'s 5m01s is this: `publish:#2`'s `worktree create` was sent at 00:26:17Z, in a dark wake; the host went to sleep at 00:26:18Z for 300 s, and woke at 00:31:18Z, the second the create's 120 s bound fired (`pmset -g log`). Orca finished the create on waking, which is how its setup hook's output got there. The create's own bound and the lookup after a timeout make that case cost no attempt; a sleeping host still stretches every other wait.
 
 ## A dead agent on resume
 
