@@ -326,6 +326,9 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     // for the same `<runId>-<n>` name, so a retry takes that one up again;
     // one Orca made under a suffixed name leaves both it and that one.
     const made = new Set()
+    // Once any attempt has sent its worker-start, a worker may have run in
+    // that worktree, and a retry no longer takes it up whatever it holds.
+    let dispatched = false
     let w, sessionId
     let attempts = 0
     try {
@@ -342,11 +345,12 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
             title,
             ...launch,
             sessionId,
-            child: isolated ? { name: `${runId}-${n}`, displayName: title, retry: attempt > 1 } : null,
+            child: isolated ? { name: `${runId}-${n}`, displayName: title, retry: attempt > 1, dispatched } : null,
           })
           return { w, sessionId }
         } catch (e) {
           for (const path of [e?.worktree, ...(Array.isArray(e?.worktrees) ? e.worktrees : [])]) if (path) made.add(path)
+          if (e?.dispatched) dispatched = true
           throw e
         }
       }))

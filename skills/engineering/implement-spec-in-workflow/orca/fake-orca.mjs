@@ -17,7 +17,9 @@
 //
 // `faults` fails a step the way real Orca can: step -> ({ count, ...ctx }) =>
 // an error to throw, 'hang' for a call Orca never answers (it fails as the
-// adapter's call timeout does, on `clock`), or nothing. count is how many
+// adapter's call timeout does, on `clock`), or nothing. On worktreeCreate,
+// 'hang-after' is a create Orca finishes but never answers: the worktree
+// exists, and the call times out at `createMs`. count is how many
 // times that step has run, and orca this fake, so a fault can also change
 // what Orca holds, a worktree's `dirty` for one. Steps: runCreate, worktreeStatus, and a start's
 // worktreeCreate, worktreeSet, terminalCreate, waitIdle and workerStart, the
@@ -48,7 +50,7 @@ export const fakeTranscripts = (orca) => ({
   size: ({ sessionId }) => [...orca.dispatches.values()].filter((d) => d.sessionId === sessionId).at(-1)?.transcript ?? null,
 })
 
-export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run', runPrefix = 'run_fake', coordinator = 'term_runner', tabs = [], faults = {}, callMs = RUNNER_SETTINGS.orcaCallMs } = {}) {
+export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run', runPrefix = 'run_fake', coordinator = 'term_runner', tabs = [], faults = {}, callMs = RUNNER_SETTINGS.orcaCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs } = {}) {
   const calls = []
   const dispatches = new Map()
   const worktrees = new Map([[runWorktree, { parent: null, name: null, displayName: null, removed: false, status: null, dirty: false, commits: 0, unpushed: 0 }]])
@@ -63,13 +65,17 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
   let seq = 0
   const record = (c) => calls.push(clock ? { ...c, at: clock.now() } : c)
 
-  async function step(name, ctx = {}) {
+  async function hang(name, ms) {
+    if (!clock) throw new Error(`fake orca: ${name} hangs, but no clock was given to time it out`)
+    await withTimeout(clock, ms, new Promise(() => {}), name)
+  }
+
+  // Resolves 'hang-after' for its caller to act on; throws every other fault.
+  async function step(name, ctx = {}, ms = callMs) {
     counts[name] = (counts[name] ?? 0) + 1
     const f = faults[name]?.({ ...ctx, count: counts[name], orca })
-    if (f === 'hang') {
-      if (!clock) throw new Error(`fake orca: ${name} hangs, but no clock was given to time it out`)
-      await withTimeout(clock, callMs, new Promise(() => {}), name)
-    }
+    if (f === 'hang') await hang(name, ms)
+    if (f === 'hang-after') return f
     if (f) throw f
   }
 
@@ -99,13 +105,23 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     if (r && r.coordinator !== caller) throw new OrcaError('consumer_fenced', `This coordinator terminal is no longer bound to Run ${run}`, verb)
   }
 
+  // The worktree list, looked up by name as the adapter does.
+  function findWorktree(name) {
+    record({ verb: 'worktreeList', name })
+    return [...worktrees].find(([, w]) => w.name === name && !w.removed) ?? null
+  }
+
   // As the real adapter decides it: the worktree a retry takes up, by name.
-  function earlierWorktree(name) {
-    const found = [...worktrees].find(([, w]) => w.name === name && !w.removed)
+  function earlierWorktree(name, dispatched) {
+    const found = findWorktree(name)
     if (!found) return null
     const [path, w] = found
     const refuse = (code, why, final) => Object.assign(new OrcaError(code, `${path} ${why}`, 'worktree reuse'), { worktree: path, final })
     if ([...dispatches.values()].some((d) => d.worktree === path && !d.released)) throw refuse('worktree_held', 'still has an agent running in it', false)
+    if (!dispatched) {
+      record({ verb: 'worktreeReuse', worktree: path })
+      return path
+    }
     if (w.dirty) throw refuse('worktree_dirty', 'has uncommitted changes', true)
     if (w.commits > 0) throw refuse('worktree_has_commits', `has ${w.commits} commit(s) of its own`, true)
     record({ verb: 'worktreeReuse', worktree: path })
@@ -179,9 +195,18 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       let worktree = runWorktree
       let made = null
       if (child) {
-        made = child.retry ? earlierWorktree(child.name) : null
+        made = child.retry ? earlierWorktree(child.name, child.dispatched) : null
+        let timedOut = null
+        let late = null
         if (!made) {
-          await step('worktreeCreate', { name: child.name })
+          try {
+            late = await step('worktreeCreate', { name: child.name }, createMs)
+          } catch (e) {
+            if (e?.code !== 'call_timeout') throw e
+            timedOut = e
+          }
+        }
+        if (!made && !timedOut) {
           // Real Orca never refuses a taken name: it makes <name>-2, which
           // the adapter refuses for good, naming both.
           let name = child.name
@@ -193,6 +218,12 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
             const earlier = `C:/fake/worktrees/${child.name}`
             throw Object.assign(new OrcaError('worktree_name_taken', `asked for ${child.name}, Orca made ${name}: a worktree named ${child.name} already exists`, 'worktree create'), { worktree: made, worktrees: [made, earlier], final: true })
           }
+          if (late) timedOut = await hang('worktreeCreate', createMs).catch((e) => e)
+        }
+        if (timedOut) {
+          made = findWorktree(child.name)?.[0] ?? null
+          if (!made) throw timedOut
+          warnings.push(`${timedOut.message}, but Orca had made ${made}, so it starts there`)
         }
         worktree = made
         try {
@@ -203,15 +234,18 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
         }
       }
       let opened = false
+      let dispatching = false
       try {
         await step('terminalCreate', { title, worktree: made })
         opened = true
         await step('waitIdle', { title, worktree: made })
+        dispatching = true
         fence(caller, run, 'orchestration worker-start')
         await step('workerStart', { title, worktree: made })
       } catch (e) {
         if (opened) record({ verb: 'terminalClose', terminal: preamble.handle })
         if (made && e instanceof Object) e.worktree = made
+        if (dispatching && e instanceof Object) e.dispatched = true
         throw e
       }
       const argv = workerStartArgs({ run, prompt, title, place: ['--worktree', child ? `path:${worktree}` : 'current'], terminal: preamble.handle })

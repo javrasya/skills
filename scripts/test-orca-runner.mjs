@@ -966,6 +966,7 @@ test('orca-cli: a custom launch that fails after its child worktree was made nam
   const e = await orca.workerStart({ ...START, harness: 'pi', child: CHILD }).catch((x) => x)
   assert.match(e.message, /agent_not_ready/)
   assert.equal(e.worktree, CHILD_PATH)
+  assert.equal(e.dispatched, undefined, 'it failed before its worker-start was sent')
   assert.equal(flag(argvs.at(-1), '--terminal'), 'term_own', 'its agent terminal is closed')
 })
 
@@ -977,7 +978,26 @@ test('orca-cli: a call Orca never answers fails as call_timeout on the clock; a 
   assert.match(e.message, /^orca orchestration worker-start: call_timeout: no answer within 120s$/)
   assert.equal(clock.now(), RUNNER_SETTINGS.orcaCallMs)
   assert.equal(e.worktree, CHILD_PATH)
+  assert.equal(e.dispatched, true, 'Orca may have put a worker in it')
   assert.deepEqual(verbsOf(argvs).slice(-2), ['orchestration worker-start', 'terminal close'])
+})
+
+test('orca-cli: a worktree create is bounded by its own timeout; one that runs out after Orca made the worktree finds it by name, and the start carries on in it', async () => {
+  const clock = fakeClock()
+  const hung = () => new Promise(() => {})
+  const { argvs, orca } = childCli({ 'worktree create': hung, 'worktree list': { worktrees: [{ path: 'C:/wt/other' }, { path: CHILD_PATH, branch: 'refs/heads/u/run_1-3' }] } }, { clock })
+  const w = await orca.workerStart({ ...START, child: CHILD })
+  assert.equal(clock.now(), RUNNER_SETTINGS.worktreeCreateMs)
+  assert.deepEqual(verbsOf(argvs), ['worktree create', 'worktree list', 'worktree set', 'terminal create', 'terminal wait', 'orchestration worker-start'])
+  assert.equal(flag(argvs[3], '--worktree'), `path:${CHILD_PATH}`)
+  assert.equal(w.worktree, CHILD_PATH)
+  assert.deepEqual(w.warnings, [`orca worktree create: call_timeout: no answer within 600s, but Orca had made ${CHILD_PATH}, so it starts there`])
+
+  const none = childCli({ 'worktree create': hung, 'worktree list': { worktrees: [{ path: 'C:/wt/other' }] } }, { clock: fakeClock() })
+  const e = await none.orca.workerStart({ ...START, child: CHILD }).catch((x) => x)
+  assert.equal(e.code, 'call_timeout', 'no worktree of its name: the attempt fails as the create did')
+  assert.equal(e.worktree, undefined)
+  assert.deepEqual(verbsOf(none.argvs), ['worktree create', 'worktree list'])
 })
 
 test('orca-cli: a wait is bounded by the call timeout on top of the time it asks Orca to wait', async () => {
@@ -1000,7 +1020,7 @@ const EARLIER = {
 test('orca-cli: a retried start takes up the clean worktree of its name, which a second create would have made <name>-2', async () => {
   const g = gitStub({ status: '', 'rev-list': '0\n' })
   const { argvs, orca } = childCli(EARLIER, { git: g.git })
-  const w = await orca.workerStart({ ...START, harness: 'pi', child: { ...CHILD, retry: true } })
+  const w = await orca.workerStart({ ...START, harness: 'pi', child: { ...CHILD, retry: true, dispatched: true } })
   assert.equal(w.worktree, CHILD_PATH)
   assert.deepEqual(verbsOf(argvs), ['worktree list', 'terminal list', 'worktree set', 'terminal create', 'terminal wait', 'orchestration worker-start'])
   assert.equal(flag(argvs[1], '--worktree'), `path:${CHILD_PATH}`)
@@ -1013,7 +1033,19 @@ test('orca-cli: a retried start takes up the clean worktree of its name, which a
   assert.deepEqual(verbsOf(none.argvs).slice(0, 2), ['worktree list', 'worktree create'], 'a retry with no worktree of its name yet makes it')
 })
 
-test('orca-cli: a retry refuses a worktree of its name that holds work, for good, and one an agent still runs in, for this attempt', async () => {
+test('orca-cli: a retry no earlier attempt of which sent its worker-start takes up its worktree whatever it holds, reading none of it', async () => {
+  const g = gitStub({ status: '?? node_modules/\n?? package-lock.json\n', 'rev-list': '2\n' })
+  const { argvs, orca } = childCli(EARLIER, { git: g.git })
+  const w = await orca.workerStart({ ...START, child: { ...CHILD, retry: true, dispatched: false } })
+  assert.equal(w.worktree, CHILD_PATH)
+  assert.deepEqual(verbsOf(argvs).slice(0, 3), ['worktree list', 'terminal list', 'worktree set'])
+  assert.deepEqual(g.runs, [])
+  const held = childCli({ ...EARLIER, 'terminal list': { terminals: [{ handle: 'term_x', agentIdentity: 'claude', orphaned: false }] } }, { git: g.git })
+  const e = await held.orca.workerStart({ ...START, child: { ...CHILD, retry: true } }).catch((x) => x)
+  assert.equal(e.code, 'worktree_held', 'one an agent runs in is still refused')
+})
+
+test('orca-cli: a retry after a worker-start was sent refuses a worktree of its name that holds work, for good, and one an agent still runs in, for this attempt', async () => {
   const held = { ...EARLIER, 'terminal list': { terminals: [{ handle: 'term_x', agentIdentity: 'claude', orphaned: false }] } }
   for (const [replies, answers, code, final] of [
     [EARLIER, { status: '?? notes.txt\n', 'rev-list': '0' }, 'worktree_dirty', true],
@@ -1021,7 +1053,7 @@ test('orca-cli: a retry refuses a worktree of its name that holds work, for good
     [held, {}, 'worktree_held', false],
   ]) {
     const { argvs, orca } = childCli(replies, { git: gitStub(answers).git })
-    const e = await orca.workerStart({ ...START, child: { ...CHILD, retry: true } }).catch((x) => x)
+    const e = await orca.workerStart({ ...START, child: { ...CHILD, retry: true, dispatched: true } }).catch((x) => x)
     assert.equal(e.code, code)
     assert.equal(e.final, final, code)
     assert.equal(e.worktree, CHILD_PATH, code)
@@ -1535,10 +1567,28 @@ const types = (r) => r.journal.filter((e) => e.type !== 'run').map((e) => e.type
 const atMs = (e) => Date.parse(e.at)
 const verbCount = (r, verb) => r.orca.calls.filter((c) => c.verb === verb).length
 
-test('settings: a failed start or Run creation is retried after 30s, 2 and 5 minutes; every Orca call is bounded', () => {
+test('settings: a failed start or Run creation is retried after 30s, 2 and 5 minutes; every Orca call is bounded, and worktreeCreateMs bounds a worktree create at 10 minutes', () => {
   assert.deepEqual(RUNNER_SETTINGS.retryBackoffMs, [30_000, 2 * MIN, 5 * MIN])
   assert.ok(Object.isFrozen(RUNNER_SETTINGS.retryBackoffMs))
   assert.equal(RUNNER_SETTINGS.orcaCallMs, 2 * MIN)
+  assert.equal(RUNNER_SETTINGS.worktreeCreateMs, 10 * MIN)
+  assert.ok(RUNNER_SETTINGS.worktreeCreateMs > RUNNER_SETTINGS.orcaCallMs)
+})
+
+test('retry: a worktree create that times out after Orca made the worktree finds it by name, and the agent starts in it on the same attempt', async () => {
+  const r = await runOne(submitGood, { script: ISOLATED, faults: { worktreeCreate: () => 'hang-after' } })
+  assert.deepEqual(r.result, GOOD)
+  assert.deepEqual(types(r), ['starting', 'warning', 'started', 'result'], 'no retry')
+  assert.equal(entries(r, 'warning')[0].reason, `orca worktreeCreate: call_timeout: no answer within 600s, but Orca had made ${CHILD_WT}, so it starts there`)
+  assert.equal(atMs(entries(r, 'started')[0]), RUNNER_SETTINGS.worktreeCreateMs)
+  assert.equal(entries(r, 'started')[0].worktree, CHILD_WT)
+  assert.equal(verbCount(r, 'worktreeCreate'), 1)
+  assert.equal(verbCount(r, 'worktreeList'), 1)
+
+  const none = await runOne(submitGood, { script: ISOLATED, faults: { worktreeCreate: ({ count }) => (count === 1 ? 'hang' : null) } })
+  assert.deepEqual(none.result, GOOD)
+  assert.deepEqual(types(none), ['starting', 'retry', 'started', 'result'], 'with no worktree made, the attempt fails as the create did')
+  assert.equal(entries(none, 'retry')[0].reason, 'its worker did not start: orca worktreeCreate: call_timeout: no answer within 600s')
 })
 
 test('retry: a start whose Orca call never answers counts as failed once it times out, and is retried', async () => {
@@ -1566,11 +1616,11 @@ test('retry: a start that fails after its worktree was made takes that clean wor
   assert.equal(r.orca.worktrees.get(CHILD_WT).displayName, '[P] one')
 })
 
-for (const [what, spoil, reason] of [
-  ['uncommitted changes', (w) => { w.dirty = true }, `its worker did not start: orca worktree reuse: worktree_dirty: ${CHILD_WT} has uncommitted changes`],
-  ['commits', (w) => { w.commits = 2 }, `its worker did not start: orca worktree reuse: worktree_has_commits: ${CHILD_WT} has 2 commit(s) of its own`],
+for (const [what, spoil] of [
+  ['untracked setup output', (w) => { w.dirty = true }],
+  ['commits', (w) => { w.commits = 2 }],
 ]) {
-  test(`retry: a retry that finds its worktree with ${what} fails with that reason, and keeps the worktree`, async () => {
+  test(`retry: a retry that finds its worktree holding ${what}, with no worker ever dispatched, takes it up and the agent delivers`, async () => {
     const r = await runOne(submitGood, {
       script: ISOLATED,
       faults: {
@@ -1578,6 +1628,29 @@ for (const [what, spoil, reason] of [
           if (count > 1) return null
           spoil(orca.worktrees.get(worktree))
           return new OrcaError('agent_not_ready', 'never idle', 'terminal wait')
+        },
+      },
+    })
+    assert.deepEqual(r.result, GOOD)
+    assert.deepEqual(types(r), ['starting', 'retry', 'started', 'result'])
+    assert.equal(verbCount(r, 'worktreeCreate'), 1)
+    assert.deepEqual(r.orca.calls.filter((c) => c.verb === 'worktreeReuse').map((c) => c.worktree), [CHILD_WT])
+    assert.equal(entries(r, 'started')[0].worktree, CHILD_WT)
+  })
+}
+
+for (const [what, spoil, reason] of [
+  ['uncommitted changes', (w) => { w.dirty = true }, `its worker did not start: orca worktree reuse: worktree_dirty: ${CHILD_WT} has uncommitted changes`],
+  ['commits', (w) => { w.commits = 2 }, `its worker did not start: orca worktree reuse: worktree_has_commits: ${CHILD_WT} has 2 commit(s) of its own`],
+]) {
+  test(`retry: a retry after a worker-start was sent that finds its worktree with ${what} fails with that reason, and keeps the worktree`, async () => {
+    const r = await runOne(submitGood, {
+      script: ISOLATED,
+      faults: {
+        workerStart: ({ count, worktree, orca }) => {
+          if (count > 1) return null
+          spoil(orca.worktrees.get(worktree))
+          return new OrcaError('call_timeout', 'no answer within 120s', 'orchestration worker-start')
         },
       },
     })
