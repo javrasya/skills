@@ -202,12 +202,23 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   const view = { model: null, refresh, key, click, highlight, focus, reclaim, openLog }
 
   const agentsNow = () => phases.flatMap((p) => p.agents)
+  // A doctor is reclaimed with its patient, and never on its own (#77): a
+  // reclaim that names a doctor reclaims its patient, then its doctors, and
+  // one on its own only once its patient is reclaimed.
+  const patientOf = (a) => (a.patient == null ? null : agentsNow().find((p) => p.origin === a.patient) ?? null)
+  const doctorsOf = (a) => agentsNow().filter((d) => d.patient === a.origin && !d.reclaimed)
+  const withPatient = (a) => {
+    const p = patientOf(a)
+    return p && !p.reclaimed ? p : a
+  }
+  const withDoctors = (n) => (n ? `, with ${n === 1 ? 'its doctor' : `its ${n} doctors`}` : '')
   function optionsFor(row) {
-    const done = agentsNow().filter((a) => a.state === 'done').length
+    const done = chosen('successful', row)
     const ended = header?.ended
+    const one = row?.kind === 'agent' ? withPatient(row.agent) : null
     return [
-      { id: 'selected', label: 'Reclaim Selected', detail: !row ? 'nothing is selected' : row.kind === 'agent' ? row.agent.title : `every agent of ${row.phase.name}`, disabled: false, reason: null },
-      { id: 'successful', label: 'Reclaim Successful Ones', detail: `the ${done} done`, disabled: false, reason: null },
+      { id: 'selected', label: 'Reclaim Selected', detail: !row ? 'nothing is selected' : one ? `${one.title}${withDoctors(doctorsOf(one).length)}` : `every agent of ${row.phase.name}`, disabled: false, reason: null },
+      { id: 'successful', label: 'Reclaim Successful Ones', detail: `the ${done.length} done${done.some((a) => doctorsOf(a).length) ? ', with their doctors' : ''}`, disabled: false, reason: null },
       { id: 'all', label: 'Reclaim All', detail: 'every agent of the run', disabled: ended !== true, reason: ended === true ? null : ended === false ? 'the run is still going' : 'whether the run has ended cannot be told' },
     ]
   }
@@ -368,6 +379,24 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     return r
   }
 
+  // `a`'s reclaim, then, once it is reclaimed or had nothing to reclaim, each
+  // of its doctors': { r, doctors: { reclaimed, kept } }, each doctor as
+  // { agent: { n, title }, reclaim }. Its doctors are kept while it is.
+  async function withItsDoctors(a, opts = {}) {
+    const r = await attempt(a, opts)
+    const doctors = { reclaimed: [], kept: [] }
+    for (const d of doctorsOf(a)) {
+      const target = { n: d.n, title: d.title }
+      if (r && !r.reclaimed) {
+        doctors.kept.push({ agent: target, reclaim: { reclaimed: false, reason: `its patient ${a.title} was kept` } })
+        continue
+      }
+      const dr = await attempt(d)
+      if (dr) (dr.reclaimed ? doctors.reclaimed : doctors.kept).push({ agent: target, reclaim: dr })
+    }
+    return { r, doctors }
+  }
+
   // Reclaims agent `n`, or with no `n` the selected one, by the reclaim rules:
   // refused while it is live, or while its worktree holds unpushed commits
   // unless `force`. One that failed and was kept with its worker running is
@@ -386,12 +415,21 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
       a = agentsNow().find((x) => x.n === n)
       if (!a) return say(`no agent ${n} in this run to reclaim`)
     }
+    a = withPatient(a)
     const target = { n: a.n, title: a.title }
-    const r = await attempt(a, { force, stop })
-    if (!r) return { ...say(`${a.title} has nothing to reclaim: it launched nothing in this run`), agent: target }
-    if (!r.reclaimed) return { ...say(`kept ${a.title}: ${r.reason}`), reclaim: r, agent: target }
-    await refresh()
-    return { ...say(`reclaimed ${a.title}${r.notes.length ? `; ${r.notes.join('; ')}` : ''}`), reclaim: r, agent: target }
+    const family = doctorsOf(a).length > 0
+    const { r, doctors } = await withItsDoctors(a, { force, stop })
+    const also = family ? { doctors: { reclaimed: doctors.reclaimed.map((d) => d.agent), kept: doctors.kept } } : {}
+    if (r && !r.reclaimed) return { ...say(`kept ${a.title}: ${r.reason}`), reclaim: r, agent: target, ...also }
+    if (!r && !doctors.reclaimed.length && !doctors.kept.length) return { ...say(`${a.title} has nothing to reclaim: it launched nothing in this run`), agent: target }
+    if (r || doctors.reclaimed.length) await refresh()
+    const notes = [
+      ...(r?.notes ?? []),
+      ...doctors.reclaimed.flatMap(({ agent, reclaim: dr }) => dr.notes.map((note) => `${agent.title}: ${note}`)),
+      ...doctors.kept.map(({ agent, reclaim: dr }) => `kept ${agent.title}: ${dr.reason}`),
+    ]
+    const what = r ? a.title : `${a.title}'s doctors`
+    return { ...say(`reclaimed ${what}${withDoctors(r ? doctors.reclaimed.length : 0)}${notes.length ? `; ${notes.join('; ')}` : ''}`), reclaim: r, agent: target, ...also }
   }
 
   // The confirmation a refused reclaim `res` asks for, as the dialog, or null:
@@ -416,10 +454,11 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     return null
   }
 
-  // The agents an option names, none already reclaimed.
+  // The agents an option names, none already reclaimed, and no doctor whose
+  // patient is not: its patient's reclaim takes it.
   function chosen(id, row) {
-    const list = id === 'selected' ? (row.kind === 'agent' ? [row.agent] : row.phase.agents) : id === 'successful' ? agentsNow().filter((a) => a.state === 'done') : agentsNow()
-    return list.filter((a) => !a.reclaimed)
+    const list = id === 'selected' ? (row.kind === 'agent' ? [withPatient(row.agent)] : row.phase.agents) : id === 'successful' ? agentsNow().filter((a) => a.state === 'done') : agentsNow()
+    return list.filter((a) => !a.reclaimed && withPatient(a) === a)
   }
 
   // Enter in the reclaim dialog: every agent the highlighted option names, one
@@ -434,29 +473,32 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     const what = option.id === 'selected' ? (row.kind === 'agent' ? row.agent.title : row.phase.name) : option.id === 'successful' ? 'the done agents' : 'the run'
     if (option.id === 'selected' && row.kind === 'agent') {
       const res = await reclaim({ n: row.agent.n })
-      dialog = nextConfirmation([res])
+      dialog = nextConfirmation([res, ...(res.doctors?.kept ?? [])])
       layout()
       return { ...res, option: option.id }
     }
     const list = chosen(option.id, row)
     if (!list.length) return { ...say(`${what}: no agent left to reclaim`), option: option.id, reclaimed: [], kept: [] }
+    const total = list.reduce((n, a) => n + 1 + doctorsOf(a).length, 0)
     const reclaimed = []
     const kept = []
     const notes = []
-    for (const a of list) {
-      const r = await attempt(a)
-      if (!r) continue
-      const target = { n: a.n, title: a.title }
+    const put = (target, r) => {
       if (r.reclaimed) {
         reclaimed.push(target)
-        for (const note of r.notes) notes.push(`${a.title}: ${note}`)
+        for (const note of r.notes) notes.push(`${target.title}: ${note}`)
       } else kept.push({ agent: target, reclaim: r })
+    }
+    for (const a of list) {
+      const { r, doctors } = await withItsDoctors(a)
+      if (r) put({ n: a.n, title: a.title }, r)
+      for (const { agent, reclaim: dr } of [...doctors.reclaimed, ...doctors.kept]) put(agent, dr)
     }
     if (reclaimed.length) await refresh()
     dialog = nextConfirmation(kept)
     const asked = kept.filter((k) => confirmationOf(k)).length
     const text = [
-      `reclaimed ${reclaimed.length} of ${list.length} agent${list.length === 1 ? '' : 's'} of ${what}`,
+      `reclaimed ${reclaimed.length} of ${total} agent${total === 1 ? '' : 's'} of ${what}`,
       ...kept.filter((k) => !confirmationOf(k)).map(({ agent, reclaim: r }) => `kept ${agent.title}: ${r.reason}`),
       ...(asked ? [`${asked} to confirm`] : []),
       ...notes,
@@ -475,7 +517,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
       }
       const res = await reclaim({ n, ...confirm })
       const again = confirmationOf(res, confirm)
-      dialog = again ? { ...again, queue } : nextConfirmation(queue)
+      dialog = again ? { ...again, queue: [...(res.doctors?.kept ?? []), ...queue] } : nextConfirmation([...(res.doctors?.kept ?? []), ...queue])
       layout()
       return res
     }

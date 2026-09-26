@@ -48,7 +48,19 @@ export function duration(ms) {
   const m = Math.floor((s % 3600) / 60)
   return h ? `${h}h${String(m).padStart(2, '0')}m` : `${m}m${String(s % 60).padStart(2, '0')}s`
 }
-const stateOf = (a) => c(COLOUR[a.state], `${GLYPH[a.state]} ${a.state}${a.state === 'continued' && a.continuations ? ` ×${a.continuations}` : ''}`)
+// A patient's STATE is its trail: one ✗ per failure a doctor answered, then
+// its glyph and state, the last ✗ its glyph while it is failed, a remedy's
+// continued drawn ● to tell it from the runner's own ↻. The count is its
+// attempt, but continued counts the doctors' continuations, so that
+// `continued ×n` means one thing (#77): `✗✗● continued ×2` is on attempt 3.
+// The runner's own continuations are the pane's, never the label's.
+function stateOf(a) {
+  if (!a.failures) return c(COLOUR[a.state], `${GLYPH[a.state]} ${a.state}`)
+  const count = a.state === 'continued' ? a.attempt - 1 : a.attempt
+  const glyph = a.state === 'failed' ? '' : a.state === 'continued' ? GLYPH.running : GLYPH[a.state]
+  return c(COLOUR.failed, '✗'.repeat(a.failures)) + c(COLOUR[a.state], `${glyph} ${a.state}${count > 1 ? ` ×${count}` : ''}`)
+}
+const STATE_W = 18
 const banded = (a, s) => (a.band ? c(BAND[a.band], s) : s)
 function contextCell(a) {
   if (a.context == null) return grey('░'.repeat(BAR)) + ' ' + '—'.padStart(4)
@@ -76,7 +88,7 @@ function phaseLine(p) {
 // A doctor's row, under its patient's, names only its role: its label is
 // `recover -> <the patient's label>`, the row above.
 const agentLine = (a, depth = 0) =>
-  `  ${String(a.n).padStart(3)}   ${(depth ? `${'  '.repeat(depth - 1)}└ ${a.label.split(' -> ')[0]}` : a.label).padEnd(22)} ${fit(stateOf(a), 16)} ${contextCell(a)}   ${grey(size(a.tokens).padStart(6))}   ${duration(a.elapsedMs).padStart(7)}`
+  `  ${String(a.n).padStart(3)}   ${(depth ? `${'  '.repeat(depth - 1)}└ ${a.label.split(' -> ')[0]}` : a.label).padEnd(22)} ${fit(stateOf(a), STATE_W)} ${contextCell(a)}   ${grey(size(a.tokens).padStart(6))}   ${duration(a.elapsedMs).padStart(7)}`
 
 const PANE = 4
 
@@ -88,7 +100,7 @@ function agentPane(a) {
   const tab = a.terminal ? `${cyan(shortHandle(a.terminal))}${a.tabOpen === true ? grey(' (open)') : a.tabOpen === false ? grey(' (closed)') : ''}` : grey('—')
   return [
     ` ${bold(a.title ?? `[${a.phase}] ${a.label}`)}  ${stateOf(a)}  ctx ${a.context == null ? '—' : banded(a, size(a.context))}  total ${grey(size(a.tokens))}  ${duration(a.elapsedMs)}`,
-    ` worktree ${a.worktree ? cyan(worktreeName(a.worktree)) : grey('—')}   tab ${tab}   session ${grey(a.sessionId ?? '—')}`,
+    ` worktree ${a.worktree ? cyan(worktreeName(a.worktree)) : grey('—')}   tab ${tab}   session ${grey(a.sessionId ?? '—')}${a.continuations ? `   ${c(COLOUR.continued, `the runner continued it ${a.continuations} time${a.continuations === 1 ? '' : 's'}`)}` : ''}`,
     a.reason ? ` ${c(a.state === 'failed' || a.state === 'blocked' ? '31' : '33', 'reason')} ${a.reason}${a.state === 'starting' && a.nextAt ? grey(`; next attempt at ${a.nextAt.slice(11, 19)}`) : ''}` : '',
     grey(` transcript ${a.transcript ?? '—'}`),
   ]
@@ -132,7 +144,7 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
   const selected = model?.selected ?? 0
   const body = Math.max(1, H - TOP - 1 - PANE - 2)
   const top = Math.max(0, Math.min(selected - body + 1, rows.length - body))
-  const lines = [...headerLines(model?.header, W), fit(grey('─'.repeat(W)), W), fit(grey('   #   AGENT                    STATE            CONTEXT           TOKENS   ELAPSED'), W)]
+  const lines = [...headerLines(model?.header, W), fit(grey('─'.repeat(W)), W), fit(grey('   #   AGENT                    STATE              CONTEXT           TOKENS   ELAPSED'), W)]
   for (let i = top; i < Math.min(rows.length, top + body); i++) {
     const r = rows[i]
     const line = r.kind === 'phase' ? phaseLine(r.phase) : agentLine(r.agent, r.depth)

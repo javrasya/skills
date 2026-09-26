@@ -3443,9 +3443,17 @@ viewTest('run view: a doctor\'s row is indented under its patient\'s, in round o
   const row = (n) => view.model.rows.find((r) => r.key === `agent:${n}`).agent
   assert.deepEqual([row(3).patient, row(4).patient, row(1).doctors, row(1).round], [1, 1, [3, 4], 2])
   assert.deepEqual([row(3).state, row(4).state], ['done', 'running'])
+  // Each doctor is a row of its own, in the header's counts and its phase's mix.
+  const counts = { blocked: 0, 'needs you': 0, starting: 0, running: 2, continued: 0, stuck: 0, failed: 1, queued: 1, done: 1, reclaimed: 0 }
+  assert.deepEqual(view.model.header.counts, counts)
+  const [implement] = view.model.phases
+  assert.deepEqual([implement.total, implement.done, implement.mix], [5, 1, counts])
 
   const lines = () => draw(view.model, { width: 140, height: 30 }).lines.map(strip)
-  assert.match(lines()[5], /^ +1 +impl:a +● running /)
+  assert.match(lines()[1], /● 2 running {2}· 1 queued {2}✓ 1 done {2}✗ 1 failed/)
+  assert.match(lines()[4], /^ ▾ Implement +1\/5 done +●2 ✗1 ·1 ✓1 *$/)
+  // A round that gave up answered the same failure the next one answers.
+  assert.match(lines()[5], /^ +1 +impl:a +✗ failed /)
   assert.match(lines()[6], /^ +3 +└ recover +✓ done /, 'under its patient, named by its role')
   assert.match(lines()[7], /^ +4 +└ recover +● running /)
   assert.match(lines()[8], /^ +2 +impl:b /)
@@ -3480,18 +3488,19 @@ viewTest('run view: a doctor that escalated is "? needs you" in bold yellow, cou
   const row = (n) => view.model.rows.find((r) => r.key === `agent:${n}`).agent
   assert.ok(STATES.includes('needs you'))
   assert.deepEqual([row(3).state, row(3).reason, row(3).patient], ['needs you', ASK, 1])
-  assert.deepEqual(view.model.header.counts, { blocked: 0, 'needs you': 1, starting: 0, running: 2, continued: 0, stuck: 0, failed: 1, queued: 0, done: 0, reclaimed: 0 })
+  // Its patient is ✗ failed while its doctor is at work (#77).
+  assert.deepEqual(view.model.header.counts, { blocked: 0, 'needs you': 1, starting: 0, running: 1, continued: 0, stuck: 0, failed: 2, queued: 0, done: 0, reclaimed: 0 })
   assert.equal(view.model.phases[0].mix['needs you'], 1)
-  assert.deepEqual(view.model.pane.problems.map((p) => [p.agent.n, p.reason]), [[3, ASK], [4, 'its worker did not start: x']])
+  assert.deepEqual(view.model.pane.problems.map((p) => [p.agent.n, p.reason]), [[3, ASK], [1, 'its session died past its continuation cap, with no result'], [4, 'its worker did not start: x']])
   assert.equal(view.model.alert, `NEEDS YOU: ${title} in tab term_fake3: ${ASK}`)
 
   const raw = draw(view.model, { width: 200, height: 30, flash: null, alert: view.model.alert }).lines
   const lines = raw.map(strip)
-  assert.match(lines[1], /^ \? 1 needs you {2}● 2 running {2}✗ 1 failed/)
+  assert.match(lines[1], /^ \? 1 needs you {2}● 1 running {2}✗ 2 failed/)
   assert.ok(raw[1].includes('\x1b[1;33m? 1 needs you'), 'bold yellow in the header')
   assert.ok(lines.some((l) => /^ +3 +└ recover +\? needs you /.test(l)), lines.join('\n'))
   assert.ok(raw.some((l) => l.includes('\x1b[1;33m? needs you')), 'bold yellow on its row')
-  assert.match(lines[4], /\?1 ●2 ✗1/)
+  assert.match(lines[4], /\?1 ●1 ✗2/)
   assert.ok(lines.at(-2).includes(`NEEDS YOU: ${title} in tab term_fake3: ${ASK}`), lines.at(-2))
   assert.ok(raw.at(-2).includes('\x1b[1;33mNEEDS YOU'), 'the alert in bold yellow')
 
@@ -3502,6 +3511,102 @@ viewTest('run view: a doctor that escalated is "? needs you" in bold yellow, cou
   put(mailJ(5, 'msg_3', 'handoff', 'remedy', NOTE))
   await view.refresh()
   assert.deepEqual([row(3).state, row(3).reason, view.model.alert, view.model.header.counts['needs you']], ['running', null, null, 0])
+})
+
+// A patient's journal through its doctor rounds, as the runner writes it: the
+// runner continued it to its cap, then each round is its `doctor` line, its
+// doctor's own lines under key null, and how the round ended: 'remedy' (the
+// doctor's note carried it on), 'gaveUp' (its doctor settled failed), or null
+// (its doctor still at work). `then`: the patient's lines after the last round.
+const DOCTOR_TITLE = '[Implement] recover -> impl:a'
+function roundsJournal(rounds, then = []) {
+  const reason = 'its session died past its continuation cap, with no result'
+  const patient = (type, min, more) => J(type, 1, '[Implement] impl:a', min, more)
+  const lines = [
+    { type: 'run', at: at(0), runId: 'run_fake1', terminal: 'term_runner' },
+    startedJ(1, '[Implement] impl:a', 0, 'claude', 'sid-1'),
+    patient('continued', 1, { dispatchId: 'ctx_fake1', sessionId: 'sid-1', terminal: 'term_fake1', reason: 'it exited', attempt: 3, reopened: false }),
+  ]
+  rounds.forEach((outcome, i) => {
+    const round = i + 1
+    const doctor = 2 + i
+    const min = 2 + 2 * i
+    const own = (e) => ({ ...e, key: null })
+    lines.push(
+      patient('doctor', min, { origin: 1, round, reason, doctor }),
+      own(J('starting', doctor, DOCTOR_TITLE, min, { run: 'run_fake1' })),
+      own(startedJ(doctor, DOCTOR_TITLE, min, 'claude', `sid-${doctor}`)),
+    )
+    if (outcome === 'remedy') {
+      lines.push(
+        { type: 'mail', at: at(min + 1), messageId: `m${round}`, kind: 'handoff', action: 'remedy', doctor, patient: 1, round, body: `note ${round}` },
+        patient('remedy', min + 1, { origin: 1, round, doctor, how: 'continue', messageId: `m${round}`, dispatchId: 'ctx_fake1', terminal: 'term_fake1', reopened: false }),
+        own(J('settled', doctor, DOCTOR_TITLE, min + 1, { dispatchId: `ctx_fake${doctor}`, outcome: 'succeeded' })),
+      )
+    } else if (outcome === 'gaveUp') {
+      lines.push(
+        own(J('settled', doctor, DOCTOR_TITLE, min + 1, { dispatchId: `ctx_fake${doctor}`, outcome: 'failed' })),
+        patient('gaveUp', min + 1, { origin: 1, round, doctor, reason: 'its worker settled failed with no remedy' }),
+      )
+    }
+  })
+  return [...lines, ...then.map(([type, more]) => patient(type, 2 + 2 * rounds.length, more))]
+}
+
+async function roundsRun(mode, rounds, then) {
+  const orca = fakeOrca({ worker: () => new Promise(() => {}), clock: fakeClock() })
+  const stateDir = tmp()
+  writeFileSync(join(stateDir, 'journal.jsonl'), roundsJournal(rounds, then).map((e) => JSON.stringify(e)).join('\n') + '\n')
+  writeFileSync(join(stateDir, 'runner.pid'), String(process.pid))
+  const registry = registryIn()
+  runRegistry(registry, { now: () => 0 }).armed({ runId: 'run_fake1', project: 'C:/repos/controlayer', runDir: stateDir, spec: 'implement-spec-783' })
+  const view = await treeIn(mode, { stateDir, orca, clock: fakeClock(), transcripts: { usage: () => null }, registry, unpushed: orca.unpushedOf })
+  if (view.model.phases[0].folded) await view.key('ENTER')
+  return { view, patient: () => view.model.phases[0].agents.find((a) => a.n === 1) }
+}
+
+// Moves the selection onto row `key`, which must be drawn.
+async function selectRow(view, key) {
+  const at = view.model.rows.findIndex((r) => r.key === key)
+  assert.ok(at >= 0, `no row ${key}`)
+  while (view.model.selected !== at) await view.key(view.model.selected < at ? 'DOWN' : 'UP')
+}
+
+// One ✗ per failure a doctor answered, then the glyph and state; the count is
+// the attempt, continued counting the doctors' continuations of it.
+const TRAILS = [
+  ['1 round, its doctor at work', [null], [], ['failed', 1, 1], '✗ failed'],
+  ['1 round, remedied', ['remedy'], [], ['continued', 1, 2], '✗● continued'],
+  ['1 round, remedied, and its session then continued by the runner', ['remedy'], [['continued', { dispatchId: 'ctx_fake1', sessionId: 'sid-1', terminal: 'term_fake1', reason: 'it exited', attempt: 1, reopened: false }]], ['continued', 1, 2], '✗● continued'],
+  ['2 rounds, the second\'s doctor at work', ['remedy', null], [], ['failed', 2, 2], '✗✗ failed ×2'],
+  ['2 rounds, both remedied', ['remedy', 'remedy'], [], ['continued', 2, 3], '✗✗● continued ×2'],
+  ['3 rounds, the second given up, then done', ['remedy', 'gaveUp', 'remedy'], [['result', { result: GOOD }]], ['done', 2, 3], '✗✗✓ done ×3'],
+]
+for (const [name, rounds, then, fold, label] of TRAILS) {
+  viewTest(`run view: a patient's STATE is its trail: ${name} is ${label}`, async (mode) => {
+    const { view, patient } = await roundsRun(mode, rounds, then)
+    assert.deepEqual([patient().state, patient().failures, patient().attempt], fold)
+    assert.equal(patient().rounds.length, rounds.length)
+    await selectRow(view, 'agent:1')
+    const lines = draw(view.model, { width: 140, height: 30 }).lines.map(strip)
+    assert.match(lines[5], new RegExp(`^ +1 +impl:a +${label} +░`))
+    assert.match(lines.at(-6), new RegExp(`\\[Implement\\] impl:a {2}${label} {2}ctx`))
+    for (let n = 2; n <= 1 + rounds.length; n++) assert.ok(lines.some((l) => new RegExp(`^ +${n} +└ recover `).test(l)), `doctor ${n}`)
+  })
+}
+
+viewTest('run view: the runner\'s own continuations are never in STATE: the detail pane names them', async (mode) => {
+  const { view, agent } = await viewedRun(mode)
+  assert.deepEqual([agent(4).state, agent(4).continuations, agent(4).failures], ['continued', 2, 0])
+  await selectRow(view, 'agent:4')
+  const lines = draw(view.model, { width: 140, height: 30 }).lines.map(strip)
+  assert.ok(!lines.slice(0, -6).join('\n').includes('×'), 'no ×n in STATE')
+  const pane = lines.slice(-6, -2)
+  assert.match(pane[0], /\[Implement\] impl:c {2}↻ continued {2}ctx/)
+  assert.match(pane[1], /session sid-4 {3}the runner continued it 2 times/)
+  // One the runner never continued names none.
+  await selectRow(view, 'agent:2')
+  assert.ok(!draw(view.model, { width: 140, height: 30 }).lines.map(strip).some((l) => l.includes('the runner continued it')))
 })
 
 viewTest('run view: context size, its band and tokens come from each agent\'s Claude or pi transcript', async (mode) => {
@@ -3794,6 +3899,112 @@ viewTest('reclaim dialog: Reclaim Selected on a phase row reclaims that phase\'s
   assert.deepEqual(after().filter((c) => c.verb === 'workerRelease').map((c) => c.dispatchId), ['ctx_fake2', 'ctx_fake3'])
 })
 
+// Implement: impl:a (1), a patient its doctor (3) carried on to done, its
+// worktree and its doctor's each their own, and impl:b (2), done. With
+// `failed`, impl:a's doctor gave up and impl:a failed, its doctor done.
+async function familyRun(mode, { failed = false } = {}) {
+  const orca = fakeOrca({ worker: () => new Promise(() => {}), clock: fakeClock() })
+  for (let n = 1; n <= 3; n++) await orca.workerStart({ run: 'run_fake1', prompt: 'p', title: `t${n}`, sessionId: SID, child: { name: `run_fake1-${n}`, displayName: `t${n}` } })
+  for (let n = 1; n <= 3; n++) orca.dispatches.get(`ctx_fake${n}`).settled = true
+  const stateDir = tmp()
+  const reason = 'its session died past its continuation cap, with no result'
+  const own = (e) => ({ ...e, key: null })
+  const ends = failed
+    ? [own(J('settled', 3, DOCTOR_TITLE, 5, { dispatchId: 'ctx_fake3', outcome: 'succeeded' })), J('gaveUp', 1, '[Implement] impl:a', 5, { origin: 1, round: 1, doctor: 3, reason: 'it gave up: no idea' }),
+      J('failed', 1, '[Implement] impl:a', 6, { reason, attempts: 1, run: 'run_fake1' })]
+    : [{ type: 'mail', at: at(5), messageId: 'm1', kind: 'handoff', action: 'remedy', doctor: 3, patient: 1, round: 1, body: 'note' },
+      J('remedy', 1, '[Implement] impl:a', 5, { origin: 1, round: 1, doctor: 3, how: 'continue', messageId: 'm1', dispatchId: 'ctx_fake1', terminal: 'term_fake1', reopened: false }),
+      own(J('settled', 3, DOCTOR_TITLE, 5, { dispatchId: 'ctx_fake3', outcome: 'succeeded' })), J('result', 1, '[Implement] impl:a', 8, { result: GOOD })]
+  const journal = [
+    { type: 'run', at: at(0), runId: 'run_fake1', terminal: 'term_runner' },
+    startedJ(1, '[Implement] impl:a', 0, 'claude', 'sid-1'),
+    startedJ(2, '[Implement] impl:b', 1, 'claude', 'sid-2'),
+    J('doctor', 1, '[Implement] impl:a', 3, { origin: 1, round: 1, reason, doctor: 3 }),
+    own(J('starting', 3, DOCTOR_TITLE, 3, { run: 'run_fake1' })),
+    own(startedJ(3, DOCTOR_TITLE, 3, 'claude', 'sid-3')),
+    J('result', 2, '[Implement] impl:b', 4, { result: GOOD }),
+    ...ends,
+  ]
+  writeFileSync(join(stateDir, 'journal.jsonl'), journal.map((e) => JSON.stringify(e)).join('\n') + '\n')
+  writeFileSync(join(stateDir, 'runner.pid'), String(process.pid))
+  const registry = registryIn()
+  runRegistry(registry, { now: () => 0 }).armed({ runId: 'run_fake1', project: 'C:/repos/controlayer', runDir: stateDir, spec: 'implement-spec-783' })
+  runRegistry(registry, { now: () => 0 }).ended({ runId: 'run_fake1', outcome: failed ? 'partial' : 'ok' })
+  const view = await treeIn(mode, { stateDir, orca, clock: fakeClock(), transcripts: { usage: () => null }, registry, unpushed: orca.unpushedOf })
+  if (view.model.phases[0].folded) await view.key('ENTER')
+  return { orca, registry, view, press: pressOn(view) }
+}
+
+// Each dialog option, as the row it is chosen on and its index.
+const OPTIONS = [
+  ['Reclaim Selected on the patient\'s row', 'agent:1', 0],
+  ['Reclaim Selected on its doctor\'s row', 'agent:3', 0],
+  ['Reclaim Selected on their phase\'s row', 'phase:Implement', 0],
+  ['Reclaim Successful Ones', 'phase:Implement', 1],
+  ['Reclaim All', 'phase:Implement', 2],
+]
+const choose = async ({ view, press }, row, option) => {
+  await selectRow(view, row)
+  await press('r')
+  for (let i = 0; i < option; i++) await press('DOWN')
+  assert.equal(view.model.dialog.highlight, option)
+  return press('ENTER')
+}
+
+viewTest('reclaim dialog: under every option, a doctor is reclaimed with its patient, right after it', async (mode) => {
+  for (const [name, row, option] of OPTIONS) {
+    const run = await familyRun(mode)
+    await selectRow(run.view, row)
+    await run.press('r')
+    if (option === 0 && row !== 'phase:Implement') assert.equal(run.view.model.dialog.options[0].detail, '[Implement] impl:a, with its doctor', name)
+    if (option === 1) assert.equal(run.view.model.dialog.options[1].detail, 'the 2 done, with their doctors')
+    await run.press('ESCAPE')
+    await choose(run, row, option)
+    const expected = row === 'phase:Implement' ? ['run_fake1-1', 'run_fake1-3', 'run_fake1-2'] : ['run_fake1-1', 'run_fake1-3']
+    assert.deepEqual(reclaimedIn(run.registry), expected, name)
+    assert.deepEqual(run.orca.calls.filter((c) => c.verb === 'worktreeRemove').map((c) => c.path), expected.map((e) => wt(Number(e.slice(-1)))), name)
+    assert.equal(run.view.model.dialog, null, name)
+    if (row === 'phase:Implement') assert.match(run.view.model.message, /^reclaimed 3 of 3 agents of /, name)
+    else assert.match(run.view.model.message, /^reclaimed \[Implement\] impl:a, with its doctor$/, name)
+  }
+})
+
+viewTest('reclaim dialog: under every option, a doctor is never reclaimed on its own: kept while its patient is, then reclaimed with it once f confirms it', async (mode) => {
+  for (const [name, row, option] of OPTIONS) {
+    const run = await familyRun(mode)
+    run.orca.worktrees.get(wt(1)).unpushed = 2
+    const r = await choose(run, row, option)
+    assert.ok(!reclaimedIn(run.registry).includes('run_fake1-1'), name)
+    assert.ok(!reclaimedIn(run.registry).includes('run_fake1-3'), name)
+    assert.equal(run.orca.dispatches.get('ctx_fake3').released, false, name)
+    if (row === 'phase:Implement') assert.deepEqual(r.kept.map((k) => [k.agent.n, k.reason]), [[1, `${wt(1)} holds 2 unpushed commits; only a forced reclaim removes it`], [3, 'its patient [Implement] impl:a was kept']], name)
+    assert.equal(run.view.model.dialog?.title, 'Reclaim [Implement] impl:a?', name)
+    await run.press('f')
+    assert.deepEqual(reclaimedIn(run.registry).filter((a) => a !== 'run_fake1-2'), ['run_fake1-1', 'run_fake1-3'], name)
+    assert.equal(run.view.model.dialog, null, name)
+  }
+  // Cancelled, neither is reclaimed.
+  const run = await familyRun(mode)
+  run.orca.worktrees.get(wt(1)).unpushed = 2
+  await choose(run, 'agent:3', 0)
+  await run.press('x')
+  assert.deepEqual(reclaimedIn(run.registry), [])
+})
+
+viewTest('reclaim dialog: a done doctor of a failed patient is no successful one: Reclaim Successful Ones leaves it with its patient', async (mode) => {
+  const run = await familyRun(mode, { failed: true })
+  const agent = (n) => run.view.model.phases[0].agents.find((a) => a.n === n)
+  assert.deepEqual([agent(1).state, agent(3).state], ['failed', 'done'])
+  await selectRow(run.view, 'phase:Implement')
+  await run.press('r')
+  assert.equal(run.view.model.dialog.options[1].detail, 'the 1 done')
+  await run.press('ESCAPE')
+  const r = await choose(run, 'phase:Implement', 1)
+  assert.deepEqual([r.reclaimed.map((a) => a.n), r.kept], [[2], []])
+  assert.deepEqual(reclaimedIn(run.registry), ['run_fake1-2'])
+  assert.equal(run.orca.dispatches.get('ctx_fake3').released, false)
+})
+
 // Implement: impl:a failed and was kept with its worker running, and its
 // worktree holds a commit; impl:b is done, with 3 unpushed commits. Gate:
 // gate:a is done, with 5.
@@ -4077,7 +4288,7 @@ viewTest('run view: the screen is the design\'s tree, a click lands on the row d
   assert.match(lines[4], /^ ▸ Discover +1\/1 done +✓1 +peak ctx 210k/, 'a folded phase')
   assert.match(lines[5], /^ ▾ Implement +0\/5 done +●1 ↻1 ◐1 ✗1 ·1 *$/, 'an unfolded phase')
   assert.match(lines[6], /^ +2 +impl:a +● running +█+░* 363k +724k +29m00s/)
-  assert.match(lines[8], /^ +4 +impl:c +↻ continued ×2 /)
+  assert.match(lines[8], /^ +4 +impl:c +↻ continued +░/)
   assert.match(lines[10], /^ +6 +impl:e +✗ failed +░{10} +— +— /, 'an agent that never started')
   assert.ok(!lines.some((l) => /PROTOTYPE|Tab ▸|Timeline/.test(l)), 'no status bar')
   assert.match(lines.at(-2), /== Discover/)

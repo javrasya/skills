@@ -159,14 +159,19 @@ export const readJournal = (path) => foldJournal(journalLines(path))
 // agents, every agent the journal names, one per `origin`, by the n of its
 // latest line: { origin, n, title, state, reason, continuations, replayed,
 // launched, runId, dispatchId, harness, sessionId, worktree, terminal, from,
-// to, waiting, nextAt, workerLeft, baseline, patient, round, doctors, rounds }. patient: a
+// to, waiting, nextAt, workerLeft, baseline, patient, round, doctors, rounds, failures,
+// attempt }. patient: a
 // doctor's patient, by origin, or null; round: a patient's latest doctor
 // round, or 0; doctors: the origins of its doctors, in round order; rounds:
 // each of its rounds, { round, doctor (origin), reason (the failure it
 // answered), outcome, note, why }, where outcome is remedy (its doctor's note,
 // `note`, carried it on), gaveUp (it ended without one, `why`) or null while
 // it runs. A round after a remedy is that remedy failing: its continuations
-// count afresh from it. The journal of a resumed run holds every agent of its Run, the ones
+// count afresh from it. failures: how many of its failures a doctor answered,
+// a round after one that gave up answering the same failure; attempt: the
+// attempt it is on, 1 + its remedies, each remedy carrying it into the next.
+// A patient is failed while a round answers its failure, and continued once a
+// remedy carries it on, until it settles. The journal of a resumed run holds every agent of its Run, the ones
 // earlier runners made included: a resume carries each forward (`earlier`,
 // `outstanding`), and a line of the call that takes one up again
 // (`reattached`, or a replayed `result` with its `origin`) is that same agent,
@@ -224,7 +229,7 @@ export function foldJournal(entries) {
       a = {
         origin: id, n: e.n, title: null, state: 'queued', continuations: 0, reason: null, replayed: false, launched: false,
         runId: null, dispatchId: null, harness: null, sessionId: null, worktree: null, terminal: null, from: null, to: null,
-        waiting: null, nextAt: null, workerLeft: false, baseline: null, patient: null, round: 0, doctors: [], rounds: [],
+        waiting: null, nextAt: null, workerLeft: false, baseline: null, patient: null, round: 0, doctors: [], rounds: [], failures: 0, attempt: 1,
       }
       agents.set(id, a)
     }
@@ -276,7 +281,7 @@ export function foldJournal(entries) {
         }
         break
       case 'unblocked':
-        if (a.state === 'blocked') Object.assign(a, { state: a.continuations ? 'continued' : 'running', waiting: null, reason: null })
+        if (a.state === 'blocked') Object.assign(a, { state: a.continuations || a.rounds.at(-1)?.outcome === 'remedy' ? 'continued' : 'running', waiting: null, reason: null })
         break
       case 'remedy':
         // Its start retried: nothing runs until its worker starts.
@@ -296,7 +301,7 @@ export function foldJournal(entries) {
         if (e.type === 'remedy') Object.assign(roundOf(a, e), { outcome: 'remedy', note: mail.get(e.messageId)?.body ?? null })
         break
       case 'doctor':
-        a.round = e.round ?? a.round
+        Object.assign(a, { state: 'failed', reason: e.reason ?? null, waiting: null, round: e.round ?? a.round })
         if (Number.isInteger(e.doctor) && !a.doctors.includes(e.doctor)) a.doctors.push(e.doctor)
         roundOf(a, e).reason = e.reason ?? null
         break
@@ -371,6 +376,8 @@ export function foldJournal(entries) {
     a.doctors = a.doctors.map((d) => agentOfCall.get(d) ?? d)
     for (const r of a.rounds) if (r.doctor != null) r.doctor = agentOfCall.get(r.doctor) ?? r.doctor
     for (const d of a.doctors) if (agents.has(d)) agents.get(d).patient = a.origin
+    a.failures = a.rounds.filter((r, i) => i === 0 || a.rounds[i - 1].outcome === 'remedy').length
+    a.attempt = 1 + a.rounds.filter((r) => r.outcome === 'remedy').length
   }
   // A doctor an earlier runner started is carried forward with its patient,
   // whose doctor lines are not.
