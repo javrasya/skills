@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-09-24. Extends ADR-0011. Applies to the **Orca runner only**; the Workflow runner, and the shared workflow script, are unchanged.
+Accepted — 2026-09-24. Extends ADR-0011. Amended by #74 (spec #67): a failed agent gets its doctor rounds before null (ADR-0014), and a reused worktree is judged against its baseline (#70). Applies to the **Orca runner only**; the Workflow runner, and the shared workflow script, are unchanged.
 
 ## Context
 
@@ -26,10 +26,10 @@ Orca also constrains where the orchestrator may live. It identifies the caller b
 **`runner.mjs` is the orchestrator, and it is made reliable in itself.** No durability engine and no second system.
 
 - **Orca is the truth for live workers, and the journal is the truth for the run.** Each journal entry carries a timestamp. `started` records the dispatch id, the Claude or pi session id, the worktree and the tab. `failed` records the reason. The runner copies everything it prints to a `runner.log` in the run directory.
-- **Starting is idempotent, keyed by `<runId>-<n>`.** A clean worktree of that name with no worker is reused. A dirty one fails the start and is kept.
+- **Starting is idempotent, keyed by `<runId>-<n>`.** A worktree of that name with no worker is reused (amended by #74, from #70). As first decided, a clean one was reused and a dirty one failed the start and was kept. A dirty tree is not the test, though: Orca's setup hook leaves files in a tree before any agent runs. So reuse is judged against the worktree's **baseline**, the `git status --porcelain` lines it held right after the runner made it, journaled before its agent's terminal opens. While no attempt has sent its worker-start, no worker has been in it, and it is reused whatever it holds. Once one did, it is reused only if its lines are still its baseline's and it has no commits of its own. Otherwise the start fails for good and the worktree is kept.
 - **A start that fails is retried**, 3 times with backoff (about 30s, 2m, 5m), before the agent returns null. **Every `orca` call has a timeout**, so a hung call is a failure to retry rather than a silent stall.
 - **An agent is stuck when neither its transcript nor its terminal's busy or idle state has moved for a set time.** It is nudged, and then its session is continued.
-- **Session continuation** carries a dead or stalled session on in the same session, worktree and tab, capped at 3. An agent past the cap is failed and kept (ADR-0012). An agent that never started has no session, so it is retried, not continued.
+- **Session continuation** carries a dead or stalled session on in the same session, worktree and tab, capped at 3. An agent past the cap gets a doctor round before null (amended by #74, ADR-0014): as first decided, it was failed and kept at once (ADR-0012). It is the patient of up to three doctor rounds, while its `agent()` stays pending, and only once they are spent is it failed and kept. The rounds build on each other. A doctor's note carries the patient on with a fresh count of continuations, and a start in a later round would get a fresh set of start retries, so a second round never starts with none left. Round *k*'s doctor is handed every earlier round's note and how it ended, so it never repeats a note that already failed. The journal's fold gives each patient its round count and each round's outcome, and links each doctor to its patient, so resume, reclaim and the run view read one answer. An agent that never started has no session, so it is retried, not continued.
 - **Resume run relaunches the runner in a new tab**, which takes the Run over with `run-use`, reattaches to the workers still alive, continues the dead ones, and replays finished agents from the journal. It is started from the run view (ADR-0012) or by hand.
 - **The run view is a separate process.** It is a child of the runner in the runner's tab, so a crash in the view never touches the run.
 

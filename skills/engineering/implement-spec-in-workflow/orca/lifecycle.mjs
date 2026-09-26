@@ -82,7 +82,18 @@ const NUDGE = 'The workflow has not received your result: your final message is 
 // new terminal, whose preamble then carries new IDs.
 // The doctor's whole brief: it gets no submit command, since its only output
 // is a note, sent as Orca mail (ADR-0014).
-export function doctorPrompt({ patient, reason, round, rounds, transcript, worktree, entries, log }) {
+// earlier: each earlier round of this patient, { round, note, outcome }, so
+// that no doctor hands it a note that already failed.
+const earlierRounds = (earlier) => (earlier.length ? `
+
+## Earlier doctor rounds
+Each earlier round's note, and how that round ended. None of them cured the patient: never hand it a note that already failed.
+${earlier.map(({ round, note, outcome }) => `
+### Round ${round}
+Note: ${note ?? 'none'}
+Outcome: ${outcome}`).join('\n')}` : '')
+
+export function doctorPrompt({ patient, reason, round, rounds, transcript, worktree, entries, log, earlier = [] }) {
   return `You are a doctor in a workflow run. One of its agents, the patient, failed, and its agent() call waits on you: its dependents wait with it. Work out why it failed, and write a note: guidance that lets the patient avoid that failure when it carries on. This is doctor round ${round} of ${rounds}.
 
 Change nothing. Edit, create or delete no file, in any worktree; change no environment, configuration or installed tool; log in to or out of nothing. Read only. Your only output is the note.
@@ -98,7 +109,7 @@ Report over Orca mail to your Run's mailbox, with the IDs from your Orca preambl
 Title: ${patient.title}
 Failure reason: ${reason}
 Transcript: ${transcript}
-Worktree: ${worktree ?? 'none: it ran in the run\'s own worktree'}
+Worktree: ${worktree ?? 'none: it ran in the run\'s own worktree'}${earlierRounds(earlier)}
 
 ## Its prompt
 ${patient.prompt}
@@ -661,9 +672,10 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     // the run, so its tab stays open, but a settled worker no longer works.
     // Journaled so the run view can show a call that waits here: nothing
     // else about it is written until its worker starts.
-    // A patient's doctor rounds so far, and each doctor whose note carried it
-    // on: watched to its end before the call returns, so none outlives it.
-    const rounds = { round: 0, doctors: [] }
+    // A patient's doctor rounds so far, each one's note and outcome (trail),
+    // and each doctor whose note carried it on: watched to its end before the
+    // call returns, so none outlives it.
+    const rounds = { round: 0, doctors: [], trail: [] }
     let from = null
     let got
     for (;;) {
@@ -699,11 +711,17 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   // what supervise carries the patient on from, or null if that failed. A
   // doctor that ends without one, by giving up, settling or failing itself,
   // spends its round; once every round is spent, the call is failed and
-  // kept, as without a doctor. rounds: the call's rounds so far.
+  // kept, as without a doctor. rounds: the call's rounds so far. Each round
+  // builds on the ones before it: its doctor is handed their notes and
+  // outcomes, and a remedy carries the patient on with a fresh count of
+  // continuations.
   async function treat(call, failure, rounds) {
     const { key, n, title, label, phaseName, prompt } = call
     const origin = call.adopt?.origin ?? n
     const max = limits.doctorRounds
+    // Back here after a remedy: that round's note carried it on, and it died again.
+    const last = rounds.trail.at(-1)
+    if (last && last.outcome === null) last.outcome = `its note carried the patient on, and it failed again: ${failure.reason}`
     const transcript = transcripts.path?.({ harness: failure.harness, sessionId: failure.sessionId, worktree: failure.worktree }) ?? `none found for ${failure.harness} session ${failure.sessionId}`
     while (rounds.round < max) {
       const round = ++rounds.round
@@ -717,10 +735,13 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       const handoff = new Promise((r) => { handed = r })
       const box = {
         doctor, patient: origin, round, ended: null, gaveUp: null, remedied: false, closed: false,
-        handoff: async (m) => handed(await remedy(call, failure, { round, doctor, message: m })),
+        handoff: async (m) => {
+          rounds.trail.push({ round, note: m.body ?? '', outcome: null })
+          handed(await remedy(call, failure, { round, doctor, message: m }))
+        },
       }
       const ended = life({
-        prompt: doctorPrompt({ patient: { title, prompt }, reason: failure.reason, round, rounds: max, transcript, worktree: failure.worktree, entries, log }),
+        prompt: doctorPrompt({ patient: { title, prompt }, reason: failure.reason, round, rounds: max, transcript, worktree: failure.worktree, entries, log, earlier: rounds.trail.map((t) => ({ ...t })) }),
         schema: null, isolated: true, setup: 'skip', launch: doctorLaunch(), key: null, n: doctor, label: dLabel, title: dTitle, phaseName, patient: origin, round, box,
       }).then((end) => {
         box.closed = true
@@ -735,6 +756,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       }
       const { end } = first
       const why = box.gaveUp !== null ? `it gave up: ${box.gaveUp}` : end ? `its worker settled ${end.outcome} with no remedy` : 'it failed itself'
+      rounds.trail.push({ round, note: null, outcome: `no remedy: ${why}` })
       journal({ type: 'gaveUp', key, n, title, origin, round, doctor, reason: why })
       out(`!! ${title}: doctor round ${round} of ${max} ended without a remedy: ${why}`)
     }
@@ -745,7 +767,9 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   // and worktree, in its own tab, or a new one in its worktree once that tab
   // is gone, with the note in its continuation prompt. It resolves to what
   // supervise carries the patient on from, or { from: null } once a
-  // continuation that failed has failed the call.
+  // continuation that failed has failed the call. A new round starts a new
+  // count of continuations: one carried on past its cap would otherwise die
+  // past it again at its first death.
   async function remedy(call, failure, { round, doctor, message }) {
     const { key, n, title, launch } = call
     const origin = call.adopt?.origin ?? n
@@ -759,7 +783,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       return { from: null }
     }
     journal({ type: 'remedy', key, n, title, origin, round, doctor, how: 'continue', messageId: message.id, dispatchId: next.dispatchId, terminal: next.terminal, reopened: next.dispatchId !== w.dispatchId })
-    return { from: { w: await moveTo(title, w, next), sessionId, attempts: failure.attempts, continued: failure.continuations } }
+    return { from: { w: await moveTo(title, w, next), sessionId, attempts: failure.attempts, continued: 0 } }
   }
 
   return life

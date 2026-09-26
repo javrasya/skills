@@ -1910,6 +1910,98 @@ for (const death of ['gone', 'stuck']) {
   })
 }
 
+// --- doctor rounds build on each other ------------------------------------------
+
+const NOTES = ['Note one: retry the flaky step.', 'Note two: pin the port.', 'Note three: run it in band.']
+// Round k's doctor hands off NOTES[k - 1] while k is in `handing`, and gives up otherwise.
+const doctorsHanding = (handing) => {
+  let round = 0
+  return (d) => (handing.includes(++round) ? handsOff(NOTES[round - 1])(d) : givesUp(d))
+}
+const doctorPrompts = (orca) => [...orca.dispatches.values()].filter((d) => d.title.includes('recover ->')).map((d) => d.prompt)
+
+test("doctor: a patient that dies past its cap again after a handoff gets round two with a fresh continuation count, and round two's doctor is handed round one's note and outcome", async () => {
+  const r = await runOne(withDoctor(curedBy(NOTES[2], 'gone'), doctorsHanding([1])), { script: ISOLATED })
+  assert.equal(r.result, null)
+  assertEntries(r.journal)
+  const doctors = ofType(r.journal, 'doctor')
+  assert.deepEqual(doctors.map((e) => e.round), [1, 2, 3])
+  const [remedy, ...more] = ofType(r.journal, 'remedy')
+  assert.deepEqual(more, [])
+  assert.equal(remedy.round, 1)
+  // A fresh count: three more continuations between the remedy and round two.
+  const between = r.journal.slice(r.journal.indexOf(remedy), r.journal.indexOf(doctors[1])).filter((e) => e.type === 'continued' && e.n === 1)
+  assert.deepEqual(between.map((e) => e.attempt), [1, 2, 3])
+  assert.deepEqual(ofType(r.journal, 'continued').filter((e) => e.n === 1).map((e) => e.attempt), [1, 2, 3, 1, 2, 3])
+  assert.match(doctors[1].reason, /already continued 3 times, the cap of 3, with no result$/)
+  const handed = r.lines.findIndex((l) => l.includes('doctor round 1 handed off a note'))
+  assert.ok(r.lines.slice(handed).some((l) => l.includes('(continuation 1 of 3)')), r.lines.join('\n'))
+  const [first, second, third] = doctorPrompts(r.orca)
+  assert.equal(first.includes('## Earlier doctor rounds'), false, first)
+  assert.ok(second.includes(`## Earlier doctor rounds`), second)
+  assert.ok(second.includes(`### Round 1\nNote: ${NOTES[0]}\nOutcome: its note carried the patient on, and it failed again: ${doctors[1].reason}`), second)
+  assert.equal(second.includes('### Round 2'), false, second)
+  assert.ok(third.includes(`### Round 1\nNote: ${NOTES[0]}\n`), third)
+  assert.ok(third.includes(`### Round 2\nNote: none\nOutcome: no remedy: it gave up: ${GIVE_UP}`), third)
+  // The fold: three rounds, the first remedied, and a fresh count after it.
+  const patient = foldJournal(r.journal).agents.find((a) => a.origin === 1)
+  assert.deepEqual(patient.rounds.map((x) => [x.round, x.outcome, x.note, x.why]), [[1, 'remedy', NOTES[0], null], [2, 'gaveUp', null, `it gave up: ${GIVE_UP}`], [3, 'gaveUp', null, `it gave up: ${GIVE_UP}`]])
+  assert.deepEqual(patient.rounds.map((x) => x.reason), doctors.map((e) => e.reason))
+  const [failed] = ofType(r.journal, 'failed').filter((e) => e.n === 1)
+  assert.equal(failed.continuations, 3)
+  assert.deepEqual([patient.state, patient.continuations], ['failed', 3])
+})
+
+test('doctor: a patient that succeeds in round three returns its result, and the fold records its 3 rounds', async () => {
+  const r = await runOne(withDoctor(curedBy(NOTES[2], 'gone'), doctorsHanding([1, 2, 3])), { script: ISOLATED })
+  assert.deepEqual(r.result, GOOD)
+  assertEntries(r.journal)
+  assert.deepEqual(ofType(r.journal, 'failed'), [])
+  assert.deepEqual(ofType(r.journal, 'remedy').map((e) => e.round), [1, 2, 3])
+  assert.deepEqual(ofType(r.journal, 'continued').filter((e) => e.n === 1).map((e) => e.attempt), [1, 2, 3, 1, 2, 3, 1, 2, 3])
+  const third = doctorPrompts(r.orca)[2]
+  for (const [i, note] of NOTES.slice(0, 2).entries()) assert.ok(third.includes(`### Round ${i + 1}\nNote: ${note}\nOutcome: its note carried the patient on, and it failed again: `), third)
+  const patient = foldJournal(r.journal).agents.find((a) => a.origin === 1)
+  assert.equal(patient.state, 'done')
+  assert.equal(patient.round, 3)
+  assert.deepEqual(patient.rounds.map((x) => [x.round, x.outcome, x.note]), NOTES.map((note, i) => [i + 1, 'remedy', note]))
+  assert.equal(r.orca.calls.filter((c) => c.verb === 'workerStart').length, 4, 'three doctors, and the patient started once')
+})
+
+test('doctor: the fold links every doctor to its patient across rounds, and a resume carries the rounds and the links', async () => {
+  const stateDir = tmp()
+  const clock = fakeClock()
+  const play = withDoctor(curedBy(NOTES[2], 'gone'), doctorsHanding([1, 3]))
+  const orca = fakeOrca({ worker: (w) => play({ ...w, clock }), clock })
+  const opts = { stateDir, out: () => {}, clock, transcripts: fakeTranscripts(orca) }
+  assert.deepEqual(await runScript(ISOLATED, { ...opts, orca }), GOOD)
+  const linked = (journal) => {
+    const agents = foldJournal(journal).agents
+    const patient = agents.find((a) => a.origin === 1)
+    assert.deepEqual(patient.doctors, [2, 3, 4])
+    assert.deepEqual(patient.rounds.map((x) => [x.round, x.doctor, x.outcome]), [[1, 2, 'remedy'], [2, 3, 'gaveUp'], [3, 4, 'remedy']])
+    for (const d of patient.doctors) assert.equal(agents.find((a) => a.origin === d).patient, 1)
+    assert.deepEqual(agents.filter((a) => a.patient != null).map((a) => a.origin), [2, 3, 4])
+    return agents
+  }
+  const fresh = journalOf(stateDir)
+  assertEntries(fresh)
+  assert.deepEqual(ofType(fresh, 'doctor').map((e) => [e.round, e.doctor]), [[1, 2], [2, 3], [3, 4]])
+  linked(fresh)
+  assert.deepEqual(await runScript(ISOLATED, { ...opts, orca: orca.as('term_2'), resume: true }), GOOD)
+  const resumed = journalOf(stateDir)
+  assertEntries(resumed)
+  assert.deepEqual(ofType(resumed, 'doctor'), [], 'the resume replays the patient, and starts no doctor')
+  linked(resumed)
+  const view = runView({ stateDir, orca, clock, transcripts: sessionTranscripts({ home: tmp(), env: {} }), registry: null, alive: () => false })
+  await view.refresh()
+  // Every agent is done, so its phase is folded until it is opened.
+  await view.key('ENTER')
+  assert.deepEqual(view.model.rows.slice(1).map((row) => [row.depth, row.agent.origin]), [[0, 1], [1, 2], [1, 3], [1, 4]])
+  const [p] = agentsOf(join(stateDir, 'journal.jsonl')).filter((a) => a.origin === 1)
+  assert.equal(p.state, 'ok')
+})
+
 test('doctor: a batch Orca delivers again before its acknowledgement is acknowledged, and its handoff applied once', async () => {
   let failed = 0
   const faults = { mailCheck: ({ ack, batch }) => (ack && batch?.some((m) => m.type === 'handoff') && !failed++ ? new OrcaError('runtime_unavailable', 'not now', 'orchestration check') : null) }
