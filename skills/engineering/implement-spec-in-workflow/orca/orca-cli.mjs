@@ -173,11 +173,16 @@ export function workerStatus(r) {
   // agentWait: an object is a wait only a human can answer; null means
   // Orca looked and found none; absent means it never looked.
   const wait = r.observation?.agentWait ?? r.terminal?.agentWait ?? null
-  // A worker never given a terminal is not one whose terminal is gone.
-  const gone = Boolean(handle) && (!r.terminal || r.terminal.orphaned === true)
-  // About 5 s after a worker's tab closes, Orca fails its dispatch itself
-  // (stage process_exited; live, Orca 1.4.209). That is a death whose session
-  // the runner continues, not a worker that settled without a result.
+  // A worker never given a terminal is not one whose terminal is gone. Orca
+  // 1.4.212 fails the dispatch of a closed tab at once (terminationReason
+  // operator_close), and worker-show can answer so before it reads the terminal
+  // orphaned: a runner that polled in between read a killed worker as settled
+  // (live, #72).
+  const closed = r.dispatch?.terminationReason === 'operator_close'
+  const gone = Boolean(handle) && (!r.terminal || r.terminal.orphaned === true || closed)
+  // Orca fails a closed tab's dispatch itself (stage process_exited; about 5 s
+  // after the close on Orca 1.4.209). That is a death whose session the runner
+  // continues, not a worker that settled without a result.
   const failedByClose = gone && r.dispatch?.status === 'failed'
   return {
     settled: !failedByClose && (r.worker?.stage === 'settled' || SETTLED_DISPATCH.has(r.dispatch?.status)),
@@ -319,8 +324,10 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
         if (!worktree) {
           // A create Orca finishes after its answer timed out still leaves the
           // worktree, and a retry would find it; looked up now, it costs no attempt.
+          // `setup: 'skip'` skips the repo's setup hook (a doctor's worktree);
+          // without it Orca follows the repo's setup policy.
           try {
-            c = await orca(['worktree', 'create', '--name', child.name, '--parent-worktree', 'current'], Math.max(0, createMs - callMs))
+            c = await orca(['worktree', 'create', '--name', child.name, '--parent-worktree', 'current', ...(child.setup ? ['--setup', child.setup] : [])], Math.max(0, createMs - callMs))
           } catch (e) {
             if (e?.code !== 'call_timeout') throw e
             worktree = (await findWorktree(child.name).catch(() => null))?.path ?? null

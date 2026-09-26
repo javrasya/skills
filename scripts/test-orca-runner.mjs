@@ -324,6 +324,15 @@ function fakeClock() {
 
 const ONE = `return await agent('Do a thing.', { label: 'one', phase: 'P', schema: ${JSON.stringify(SCHEMA)} })`
 
+// Doctors (ADR-0014). A doctor's worker is played like any other, told apart
+// by its prompt; `givesUp` sends worker_done --outcome failed at once, which
+// settles its dispatch failed. withDoctor(patient, doctor) plays both.
+// NO_DOCTOR: a run whose tests are not about doctors, with no rounds.
+const IS_DOCTOR = /^You are a doctor/
+const givesUp = async ({ state }) => { Object.assign(state, { settled: true, outcome: 'failed' }) }
+const withDoctor = (patient, doctor = givesUp) => (w) => (IS_DOCTOR.test(w.prompt) ? doctor(w) : patient(w))
+const NO_DOCTOR = { doctorRounds: 0 }
+
 // Runs a script (one agent() by default) on the default settings table, each
 // worker played by `worker`.
 async function runOne(worker, { script = ONE, orcaPatch = {}, permissionMode = null, faults = {}, settings = {}, setupLeaves = [] } = {}) {
@@ -407,6 +416,16 @@ test('one run: the rendered workflow template names its spec in the Run objectiv
   const creates = orca.calls.filter((c) => c.verb === 'runCreate')
   assert.equal(creates.length, 1)
   assert.match(creates[0].objective, /spec #227\b/)
+})
+
+test("doctor: the rendered template's recover row is the doctor's harness and model on the Orca runner", async () => {
+  const text = readFileSync(TEMPLATE, 'utf8').replace(/__RUNNER__/g, 'orca').replace(/__SPEC__/g, '227').replace(/__[A-Z_]+__/g, 'x')
+  const clock = fakeClock()
+  const orca = fakeOrca({ worker: withDoctor(diesPastCap), clock })
+  await runScript(text, { orca, stateDir: tmp(), out: () => {}, clock, transcripts: fakeTranscripts(orca) }).catch(() => {})
+  const doctors = orca.calls.filter((c) => c.verb === 'workerStart' && c.title.includes('recover ->'))
+  assert.equal(doctors.length, 3)
+  for (const d of doctors) assert.deepEqual([d.title, d.harness, d.model], ['[Graph] recover -> graph:spec-227', 'claude', 'opus'])
 })
 
 test('titles: every agent is titled [Phase] label, on its task and on its tab', async () => {
@@ -564,7 +583,7 @@ test('continuation: a fourth death fails the agent with a reason naming the cap,
     state.idle = true
     state.onContinue = idleAgain
   }
-  const r = await runOne(idleAgain, { script: oneOn('claude', ", isolation: 'worktree'") })
+  const r = await runOne(withDoctor(idleAgain), { script: oneOn('claude', ", isolation: 'worktree'") })
   assert.equal(r.result, null)
   assert.equal(r.continues.length, 3)
   assert.equal(new Set(r.continues.map((c) => c.terminal)).size, 1, 'each continued in its own terminal')
@@ -960,6 +979,16 @@ for (const [what, launch, command] of [
     assert.equal(w.terminal, 'term_own')
   })
 }
+
+test("orca-cli: a doctor's child worktree is created with setup skipped; any other follows the repo's setup policy", async () => {
+  for (const [child, setup] of [[{ ...CHILD, setup: 'skip' }, 'skip'], [CHILD, null]]) {
+    const { argvs, orca } = childCli()
+    await orca.workerStart({ ...START, harness: 'claude', child })
+    const [create] = argvs
+    assert.deepEqual(verbsOf([create]), ['worktree create'])
+    assert.equal(create.includes('--setup') ? flag(create, '--setup') : null, setup)
+  }
+})
 
 test('orca-cli: a custom launch that fails after its child worktree was made names that worktree on the error', async () => {
   const { argvs, orca } = childCli({ 'terminal wait': { wait: { satisfied: false } } })
@@ -1518,7 +1547,7 @@ function assertEntries(journal) {
 const iso = (ms) => new Date(ms).toISOString()
 
 test("journal: every entry is timestamped from the runner's clock", async () => {
-  const r = await runOne(async () => {})
+  const r = await runOne(async () => {}, { settings: NO_DOCTOR })
   assertEntries(r.journal)
   const at = (c) => iso(c.at)
   const [n1, n2, n3, n4] = r.nudges
@@ -1589,7 +1618,7 @@ const FAILURES = [
 
 for (const [what, worker, opts, reason, attempts] of FAILURES) {
   test(`journal: a call that ends in null (${what}) is journaled failed with its reason and attempt count`, async () => {
-    const r = await runOne(worker, opts)
+    const r = await runOne(withDoctor(worker), opts)
     assert.equal(r.result, null)
     assertEntries(r.journal)
     const failed = r.journal.filter((e) => e.type === 'failed')
@@ -1598,6 +1627,194 @@ for (const [what, worker, opts, reason, attempts] of FAILURES) {
     assert.equal(failed[0].attempts, attempts)
     assert.equal(r.journal.filter((e) => e.type === 'retry').length, attempts - 1)
     assert.equal(r.journal.some((e) => e.type === 'started'), what !== 'never started' && what !== 'Run creation failed')
+  })
+}
+
+// --- a failed agent gets a doctor (ADR-0014) --------------------------------------
+
+// A session dead past its cap: its tab gone again in every continuation.
+const diesPastCap = ({ state }) => {
+  state.gone = true
+  state.onContinue = diesPastCap
+}
+const indexOf = (journal, pred) => journal.findIndex(pred)
+
+test('doctor: an agent dead past its cap starts a doctor and its agent() stays pending; a dependent waits for it, an independent agent runs meanwhile', async () => {
+  const script = `const S = ${JSON.stringify(SCHEMA)}
+const [p, i] = await parallel([
+  async () => {
+    const p = await agent('Patient.', { label: 'patient', phase: 'P', schema: S })
+    const d = await agent('Dependent.', { label: 'dependent', phase: 'P', schema: S })
+    return { p, d }
+  },
+  () => agent('Independent.', { label: 'independent', phase: 'P', schema: S }),
+])
+return { ...p, i }`
+  // Each doctor works 15 minutes, then gives up; the independent agent
+  // submits at 30, while the second doctor works.
+  const doctor = async (w) => { w.clock.at(w.clock.now() + 15 * MIN, () => givesUp(w)) }
+  const r = await runOne(withDoctor(async (w) => {
+    if (w.prompt.startsWith('Patient.')) return diesPastCap(w)
+    if (w.prompt.startsWith('Independent.')) return void w.clock.at(30 * MIN, () => submitGood(w))
+    return submitGood(w)
+  }, doctor), { script })
+  assert.deepEqual(r.result, { p: null, d: GOOD, i: GOOD })
+  assertEntries(r.journal)
+  const titled = (title, type) => indexOf(r.journal, (e) => e.title === title && e.type === type)
+  const rounds = ofType(r.journal, 'doctor')
+  assert.deepEqual(rounds.map((e) => [e.n, e.title, e.round]), [1, 2, 3].map((round) => [1, '[P] patient', round]))
+  // Pending: the patient's call fails only once its last doctor gave up.
+  const failed = titled('[P] patient', 'failed')
+  assert.ok(indexOf(r.journal, (e) => e.type === 'gaveUp' && e.round === 3) < failed)
+  assert.equal(indexOf(r.journal, (e) => e.type === 'failed' && e.title === '[P] patient'), failed)
+  assert.ok(titled('[P] patient', 'doctor') < titled('[P] independent', 'result'), 'the independent agent delivered while a doctor worked')
+  assert.ok(titled('[P] independent', 'result') < failed)
+  assert.ok(failed < titled('[P] dependent', 'starting'), 'the dependent started only once the patient resolved')
+  // The fold links each doctor to its patient.
+  const agents = foldJournal(r.journal).agents
+  const patient = agents.find((a) => a.title === '[P] patient')
+  assert.deepEqual(patient.doctors, rounds.map((e) => e.doctor))
+  assert.equal(patient.round, 3)
+  for (const n of patient.doctors) assert.equal(agents.find((a) => a.origin === n).patient, patient.origin)
+})
+
+test('doctor: a resume carries each earlier doctor forward with its patient, resume after resume, and the run view keeps it under that patient', async () => {
+  const stateDir = tmp()
+  const clock = fakeClock()
+  const orca = fakeOrca({ worker: (w) => withDoctor(diesPastCap)({ ...w, clock }), clock })
+  const script = `return await agent('Patient.', { label: 'patient', phase: 'P', schema: ${JSON.stringify(SCHEMA)} })`
+  const opts = { stateDir, out: () => {}, clock, transcripts: fakeTranscripts(orca) }
+  assert.equal(await runScript(script, { ...opts, orca }), null)
+  for (const [i, from] of ['term_2', 'term_3'].entries()) {
+    assert.equal(await runScript(script, { ...opts, orca: orca.as(from), resume: true }), null)
+    const agents = foldJournal(journalOf(stateDir)).agents
+    const patients = agents.filter((a) => a.title === '[P] patient')
+    assert.equal(patients.length, i + 2, 'the patient runs live again on each resume')
+    for (const p of patients) {
+      assert.equal(p.doctors.length, 3)
+      for (const d of p.doctors) assert.equal(agents.find((a) => a.origin === d).patient, p.origin)
+    }
+    const view = runView({ stateDir, orca, clock, transcripts: sessionTranscripts({ home: tmp(), env: {} }), registry: null, alive: () => false })
+    await view.refresh()
+    assert.deepEqual(view.model.rows.slice(1).map((r) => [r.depth, r.agent.patient]), patients.flatMap((p) => [[0, null], ...p.doctors.map(() => [1, p.origin])]))
+  }
+})
+
+for (const [what, roles, launch] of [
+  ['a pi recover row', "{ recover: { harness: 'pi', piModel: 'openai/gpt-5', model: 'opus' } }", { harness: 'pi', model: 'openai/gpt-5' }],
+  ['a Claude recover row', "{ recover: { harness: 'claude', model: 'sonnet', effort: 'high' } }", { harness: 'claude', model: 'sonnet', effort: 'high' }],
+  ['no role table', null, { harness: 'claude', model: undefined }],
+]) {
+  test(`doctor: its worktree is created with setup skipped under the run's next <runId>-<n>, titled recover -> <patient label>, on the recover role (${what})`, async () => {
+    const script = `export const meta = { name: 'implement-spec-9', description: 'd', phases: [] }
+${roles ? `meta.roles = ${roles}` : ''}
+const S = ${JSON.stringify(SCHEMA)}
+await agent('Build a.', { label: 'a', phase: 'Implement', schema: S, isolation: 'worktree' })
+return await agent('Patient.', { label: 'impl:#7', phase: 'Implement', schema: S, isolation: 'worktree' })`
+    const r = await runOne(withDoctor((w) => (w.prompt.startsWith('Patient.') ? diesPastCap(w) : submitGood(w))), { script })
+    assert.equal(r.result, null)
+    const creates = r.orca.calls.filter((c) => c.verb === 'worktreeCreate')
+    assert.deepEqual(creates.map((c) => [c.name, c.setup]), [['run_fake1-1', null], ['run_fake1-2', null], ['run_fake1-3', 'skip'], ['run_fake1-4', 'skip'], ['run_fake1-5', 'skip']])
+    const doctors = r.orca.calls.filter((c) => c.verb === 'workerStart').slice(2)
+    assert.equal(doctors.length, 3)
+    for (const [i, d] of doctors.entries()) {
+      assert.equal(d.title, '[Implement] recover -> impl:#7')
+      assert.equal(d.worktree, `C:/fake/worktrees/run_fake1-${i + 3}`)
+      assert.equal(r.orca.worktrees.get(d.worktree).displayName, '[Implement] recover -> impl:#7')
+      assert.deepEqual({ harness: d.harness, model: d.model, ...(launch.effort && { effort: d.effort }) }, launch)
+    }
+    assert.deepEqual(ofType(r.journal, 'doctor').map((e) => e.doctor), [3, 4, 5])
+  })
+}
+
+test("doctor: its prompt carries the patient's title, prompt, failure reason, journal entries, log lines, transcript and worktree, and the round of three", async () => {
+  const PROMPT = 'Patient: build the frobnicator.'
+  for (const isolation of ['worktree', null]) {
+    const script = `return await agent(${JSON.stringify(PROMPT)}, { label: 'impl:#7', phase: 'Implement', schema: ${JSON.stringify(SCHEMA)}${isolation ? ", isolation: 'worktree'" : ''} })`
+    const r = await runOne(withDoctor(diesPastCap), { script })
+    const started = ofType(r.journal, 'started')[0]
+    const [reason] = ofType(r.journal, 'doctor').map((e) => e.reason)
+    assert.match(reason, /the cap of 3, with no result$/)
+    const doctors = [...r.orca.dispatches.values()].filter((d) => d.title.includes('recover ->'))
+    assert.equal(doctors.length, 3)
+    for (const [i, { prompt }] of doctors.entries()) {
+      assert.match(prompt, IS_DOCTOR)
+      assert.ok(prompt.includes(`doctor round ${i + 1} of 3`), prompt)
+      assert.ok(prompt.includes('Title: [Implement] impl:#7'), prompt)
+      assert.ok(prompt.includes(`## Its prompt\n${PROMPT}\n`), prompt)
+      assert.ok(prompt.includes(`Failure reason: ${reason}`), prompt)
+      assert.ok(prompt.includes(`Transcript: C:/fake/transcripts/${started.sessionId}.jsonl`), prompt)
+      assert.ok(prompt.includes(isolation ? `Worktree: ${started.worktree}` : "Worktree: none: it ran in the run's own worktree"), prompt)
+      // Its journal entries, whole, and the runner's log lines about it.
+      assert.ok(prompt.includes(JSON.stringify(started)), prompt)
+      for (const e of ofType(r.journal, 'continued')) assert.ok(prompt.includes(JSON.stringify(e)), prompt)
+      const log = r.log.filter((l) => l.includes(' [Implement] impl:#7: started on '))
+      assert.equal(log.length, 1)
+      assert.ok(prompt.includes(log[0]), prompt)
+      // Earlier rounds are in its patient's journal entries.
+      assert.equal(prompt.includes('"type":"gaveUp"'), i > 0)
+      assert.ok(prompt.includes('Change nothing.') && /no file/.test(prompt) && /environment/.test(prompt) && /log in/.test(prompt), prompt)
+      assert.ok(prompt.includes('Your only output is the note.'), prompt)
+      assert.ok(prompt.includes('state the situation and what the human must do or decide') && prompt.includes('Do not question them'), prompt)
+      // Its only output is a note: it is given no submit command.
+      assert.equal(prompt.includes(SUBMIT), false)
+    }
+  }
+})
+
+test('doctor: three doctors that each give up leave the patient null, failed and kept', async () => {
+  const r = await runOne(withDoctor(diesPastCap), { script: ISOLATED })
+  assert.equal(r.result, null)
+  assertEntries(r.journal)
+  assert.deepEqual(ofType(r.journal, 'gaveUp').map((e) => [e.n, e.round, e.reason]), [1, 2, 3].map((round) => [1, round, 'its worker settled failed with no remedy']))
+  assert.deepEqual(ofType(r.journal, 'settled').map((e) => [e.n, e.outcome]), [[2, 'failed'], [3, 'failed'], [4, 'failed']])
+  const [failed, ...more] = ofType(r.journal, 'failed')
+  assert.deepEqual(more, [])
+  assert.equal(failed.n, 1)
+  assert.match(failed.reason, /the cap of 3, with no result$/)
+  assert.equal(failed.workerLeft, true)
+  // Kept: its process not stopped, its tab open, its worktree retained.
+  const started = ofType(r.journal, 'started')[0]
+  assert.equal(r.orca.calls.some((c) => c.verb === 'workerStop' && c.dispatch === started.dispatchId), false)
+  assert.equal(r.released, 0)
+  assert.equal(failed.retained.path, started.worktree)
+  assert.ok(r.lines.some((l) => l.startsWith(`!! kept ${started.worktree}:`)), r.lines.join('\n'))
+  assert.ok(r.lines.some((l) => l.includes('after 3 doctor rounds without a remedy')), r.lines.join('\n'))
+})
+
+for (const [what, doctor, startFails] of [
+  ['dies past its own cap', diesPastCap, false],
+  ['never starts', givesUp, true],
+]) {
+  test(`doctor: a doctor that ${what} fails itself and uses up its round, and no doctor is started for it`, async () => {
+    let round = 0
+    // The first doctor fails itself; the next two give up.
+    const clock = fakeClock()
+    const stateDir = tmp()
+    const registry = registryIn()
+    const orca = fakeOrca({ worker: (w) => withDoctor(diesPastCap, (d) => (++round === 1 ? doctor(d) : givesUp(d)))({ ...w, clock }), clock })
+    if (startFails) {
+      const real = orca.workerStart
+      orca.workerStart = async (a) => {
+        if (a.title.includes('recover ->') && ofType(journalOf(stateDir), 'doctor').length === 1) throw new Error('orca orchestration worker-start: outcome_unknown')
+        return real(a)
+      }
+    }
+    const result = await runScript(ISOLATED, { orca, stateDir, out: () => {}, clock, transcripts: fakeTranscripts(orca), registry })
+    const journal = journalOf(stateDir)
+    assert.equal(result, null)
+    assertEntries(journal)
+    const rounds = ofType(journal, 'doctor')
+    assert.deepEqual(rounds.map((e) => [e.n, e.round]), [[1, 1], [1, 2], [1, 3]], 'three rounds, all for the patient')
+    const own = ofType(journal, 'failed').filter((e) => e.n === rounds[0].doctor)
+    assert.equal(own.length, 1)
+    assert.equal(own[0].patient, 1)
+    assert.equal(own[0].key, null)
+    assert.equal(own[0].attempts, startFails ? ATTEMPTS : 1)
+    assert.deepEqual(ofType(journal, 'gaveUp').map((e) => e.reason), ['it failed itself', 'its worker settled failed with no remedy', 'its worker settled failed with no remedy'])
+    // Its failure is no agent() null: only the patient's is, and the run ends partial for it alone.
+    assert.deepEqual(ofType(journal, 'failed').filter((e) => e.patient == null).map((e) => e.n), [1])
+    assert.equal(linesOf(registry).find((e) => e.type === 'ended').outcome, 'partial')
   })
 }
 
@@ -2081,7 +2298,7 @@ async function endedRun({ script = END, worker = endWorker } = {}) {
   const stateDir = tmp()
   const registry = registryIn()
   const orca = fakeOrca({ worker: (w) => worker({ ...w, clock }), clock })
-  const result = await runScript(script, { orca, stateDir, out: () => {}, clock, registry, project: 'C:/repo' })
+  const result = await runScript(script, { orca, stateDir, out: () => {}, clock, registry, project: 'C:/repo', settings: NO_DOCTOR })
   return { orca, stateDir, clock, registry, result, during: orca.calls.length }
 }
 
@@ -2726,6 +2943,52 @@ viewTest('run view: blocked, starting and reclaimed are row states; a blocked ag
   assert.deepEqual([agent(1).state, view.model.alert, view.model.latest], ['running', null, '>> [Implement] impl:e: result received'])
 })
 
+// A patient in its second doctor round, as the runner journals it: the
+// doctors' n come after an agent started meanwhile, and their own lines have
+// no call key.
+viewTest('run view: a doctor\'s row is indented under its patient\'s, in round order, whatever its number', async (mode) => {
+  const orca = fakeOrca({ worker: () => new Promise(() => {}), clock: fakeClock() })
+  const stateDir = tmp()
+  const doctorJ = (type, n, min, more = {}) => ({ ...J(type, n, '[Implement] recover -> impl:a', min, more), key: null })
+  const doctorStarted = (n, min) => ({ ...startedJ(n, '[Implement] recover -> impl:a', min, 'claude', `sid-${n}`), key: null })
+  const reason = 'its session died past its continuation cap, with no result'
+  const journal = [
+    { type: 'run', at: at(0), runId: 'run_fake1', terminal: 'term_runner' },
+    startedJ(1, '[Implement] impl:a', 0, 'claude', 'sid-1'),
+    startedJ(2, '[Implement] impl:b', 1, 'claude', 'sid-2'),
+    J('doctor', 1, '[Implement] impl:a', 2, { origin: 1, round: 1, reason, doctor: 3 }),
+    doctorJ('starting', 3, 2, { run: 'run_fake1' }),
+    doctorStarted(3, 2),
+    J('queued', 5, '[Implement] impl:c', 3),
+    doctorJ('settled', 3, 4, { dispatchId: 'ctx_fake3', outcome: 'failed' }),
+    J('gaveUp', 1, '[Implement] impl:a', 4, { origin: 1, round: 1, doctor: 3, reason: 'its worker settled failed with no remedy' }),
+    J('doctor', 1, '[Implement] impl:a', 4, { origin: 1, round: 2, reason, doctor: 4 }),
+    doctorJ('starting', 4, 4, { run: 'run_fake1' }),
+    doctorStarted(4, 5),
+  ]
+  writeFileSync(join(stateDir, 'journal.jsonl'), journal.map((e) => JSON.stringify(e)).join('\n') + '\n')
+  writeFileSync(join(stateDir, 'runner.pid'), String(process.pid))
+  writeFileSync(join(stateDir, 'runner.log'), `${at(5)} >> [Implement] impl:a: doctor round 2 of 3\n`)
+  const registry = registryIn()
+  runRegistry(registry, { now: () => 0 }).armed({ runId: 'run_fake1', project: 'C:/repos/controlayer', runDir: stateDir, spec: 'implement-spec-783' })
+  const view = await treeIn(mode, { stateDir, orca, clock: fakeClock(), transcripts: sessionTranscripts({ home: tmp(), env: {} }), registry, unpushed: orca.unpushedOf })
+  assert.deepEqual(view.model.rows.map((r) => [r.key, r.depth ?? null]), [
+    ['phase:Implement', null], ['agent:1', 0], ['agent:3', 1], ['agent:4', 1], ['agent:2', 0], ['agent:5', 0],
+  ])
+  const row = (n) => view.model.rows.find((r) => r.key === `agent:${n}`).agent
+  assert.deepEqual([row(3).patient, row(4).patient, row(1).doctors, row(1).round], [1, 1, [3, 4], 2])
+  assert.deepEqual([row(3).state, row(4).state], ['done', 'running'])
+
+  const lines = () => draw(view.model, { width: 140, height: 30 }).lines.map(strip)
+  assert.match(lines()[5], /^ +1 +impl:a +● running /)
+  assert.match(lines()[6], /^ +3 +└ recover +✓ done /, 'under its patient, named by its role')
+  assert.match(lines()[7], /^ +4 +└ recover +● running /)
+  assert.match(lines()[8], /^ +2 +impl:b /)
+  // Selected, its pane has its whole title.
+  while (view.model.rows[view.model.selected].key !== 'agent:4') await view.key('DOWN')
+  assert.match(lines().at(-6), /\[Implement\] recover -> impl:a {2}● running/)
+})
+
 viewTest('run view: context size, its band and tokens come from each agent\'s Claude or pi transcript', async (mode) => {
   const { view, agent } = await viewedRun(mode)
   assert.deepEqual([agent(1).context, agent(1).band, agent(1).tokens], [210005, 'yellow', 1511676])
@@ -3196,7 +3459,7 @@ async function attachedRun({ onStart = () => {}, attached = true } = {}) {
     await onStart(views, { ...w, clock })
     await endWorker({ ...w, clock })
   }, clock })
-  const result = await runScript(END, { orca, stateDir, out: gate((s) => tab.push(s)), clock, registry, project: 'C:/repo' })
+  const result = await runScript(END, { orca, stateDir, out: gate((s) => tab.push(s)), clock, registry, project: 'C:/repo', settings: NO_DOCTOR })
   // As the entry point ends a run: summary.json, then it waits on the view.
   const end = () => finish({ stateDir, summary: { runner: 'orca', ok: true, result }, out: say })
   return { clock, stateDir, tab, guards, views, view, orca, registry, result, end, verbs: () => orca.calls.map((c) => c.verb) }
@@ -3338,6 +3601,10 @@ test('orca-cli: a dispatch Orca failed because its tab closed is a gone worker, 
     assert.deepEqual([failed.settled, failed.gone], [false, true], verb)
     const done = await recordingCli({ 'orchestration worker-show': closed('completed', 'settled') }).orca[verb]({ dispatch: 'ctx_9', terminal: 'term_w' })
     assert.deepEqual([done.settled, done.gone, done.outcome], [true, true, 'succeeded'], verb)
+    // Orca 1.4.212 fails it at once, and can answer so before the terminal reads orphaned (live, #72).
+    const early = { ...closed('failed', 'process_exited'), dispatch: { status: 'failed', terminationReason: 'operator_close' }, terminal: { orphaned: false } }
+    const racing = await recordingCli({ 'orchestration worker-show': early }).orca[verb]({ dispatch: 'ctx_9', terminal: 'term_w' })
+    assert.deepEqual([racing.settled, racing.gone], [false, true], verb)
   }
 })
 
