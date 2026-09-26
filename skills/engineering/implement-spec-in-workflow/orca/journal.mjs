@@ -49,7 +49,8 @@ import { agentDir } from './lifecycle.mjs'
 // resume carries the last one forward first, with `lastN`, the highest call
 // number that Run has used. queued: a call waiting for a live slot.
 // doctor: a doctor round starts for a patient, an agent whose session died
-// past its continuation cap: about the patient, with its `origin`, the
+// past its continuation cap or was blocked on a human past the blocked limit,
+// or whose start failed through every retry: about the patient, with its `origin`, the
 // `round` (1 to 3), the failure `reason` it answers, and `doctor`, the n its
 // doctor is started under. The patient's call is not settled: its agent()
 // waits. A doctor's own lines are those of any agent, under its own n, with
@@ -70,7 +71,9 @@ import { agentDir } from './lifecycle.mjs'
 // worker_done its `outcome`. It has no n: it is about no agent's lifecycle.
 // A resume carries each one forward before any call. remedy: a doctor's
 // handoff carried its patient on, about the patient, with the `round`, the
-// `doctor`, `how` (continue: its session continued with the note), the
+// `doctor`, `how` (continue: its session continued with the note; restart:
+// its worker never started, and its start is retried with the note in its
+// worker's prompt, `dispatchId` and `terminal` null until it starts), the
 // `messageId` of the handoff, and the `dispatchId` and `terminal` it now runs
 // under, `reopened` as a continuation's. It starts the patient's count of
 // continuations afresh: its next `continued` line is attempt 1.
@@ -275,8 +278,14 @@ export function foldJournal(entries) {
       case 'unblocked':
         if (a.state === 'blocked') Object.assign(a, { state: a.continuations ? 'continued' : 'running', waiting: null, reason: null })
         break
-      case 'continued':
       case 'remedy':
+        // Its start retried: nothing runs until its worker starts.
+        if (e.how === 'restart') {
+          Object.assign(a, { state: 'starting', reason: null, waiting: null, nextAt: null })
+          break
+        }
+      // falls through
+      case 'continued':
         // A continued session may run under a new dispatch in a new tab: that
         // is the worker a reclaim releases and the tab it closes. A remedy
         // starts a fresh count against the cap.

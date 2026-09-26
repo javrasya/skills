@@ -665,7 +665,7 @@ test('liveness: transcript growth restarts the no-movement clock', async () => {
 })
 
 test('liveness: a worker blocked on a human is logged loudly once, never nudged, and after 30 minutes fails and is kept, never continued', async () => {
-  const r = await runOne(async ({ state }) => { state.waiting = '{"evidence":"prompt-text","text":"Allow this command?"}' })
+  const r = await runOne(async ({ state }) => { state.waiting = '{"evidence":"prompt-text","text":"Allow this command?"}' }, { settings: NO_DOCTOR })
   assert.equal(r.result, null)
   assert.equal(r.nudges.length, 0)
   assert.equal(r.continues.length, 0)
@@ -706,7 +706,7 @@ test('liveness: a blocked worker the operator answers in time is journaled unblo
 })
 
 test('liveness: a worker Orca cannot start, or cannot be watched, is null', async () => {
-  const start = await runOne(async () => {}, { orcaPatch: { workerStart: async () => { throw new Error('orca orchestration worker-start: outcome_unknown') } } })
+  const start = await runOne(async () => {}, { settings: NO_DOCTOR, orcaPatch: { workerStart: async () => { throw new Error('orca orchestration worker-start: outcome_unknown') } } })
   assert.equal(start.result, null)
   assert.ok(start.lines.some((l) => l.includes('its worker did not start')), start.lines.join('\n'))
 
@@ -1529,7 +1529,7 @@ test('lifecycle: calls share one Run and the live cap, and a queued call starts 
 test('lifecycle: an isolated worker that never started leaves its worktree retained, and on its failed journal line', async () => {
   const orca = fakeOrca()
   orca.workerStart = async () => { throw Object.assign(new Error('agent_not_ready'), { worktree: 'C:/fake/worktrees/orphan' }) }
-  const { life, call, journal, kept } = lifecycleOn(orca)
+  const { life, call, journal, kept } = lifecycleOn(orca, { ...FAST, ...NO_DOCTOR })
   assert.equal(await life(call('impl', { isolated: true })), null)
   assert.deepEqual(kept.map((k) => k.path), ['C:/fake/worktrees/orphan'])
   assert.deepEqual(journal.map((e) => e.type), ['starting', 'retry', 'retry', 'retry', 'failed'], 'a worker that never started has no started line')
@@ -1543,7 +1543,7 @@ const cliStart = (replies) => childCli({ 'worktree create': (args) => ({ worktre
 test('lifecycle: a retry whose worktree list is truncated journals retry, then failed with that reason, and keeps the first attempt\'s worktree', async () => {
   const orca = fakeOrca()
   orca.workerStart = cliStart({ 'terminal wait': { wait: { satisfied: false } }, 'worktree list': { worktrees: [], truncated: true } })
-  const { life, call, journal, kept } = lifecycleOn(orca)
+  const { life, call, journal, kept } = lifecycleOn(orca, { ...FAST, ...NO_DOCTOR })
   assert.equal(await life(call('impl', { isolated: true })), null)
   assert.deepEqual(journal.map((e) => e.type), ['starting', 'baseline', 'retry', 'retry', 'retry', 'failed'])
   assert.match(journal[3].reason, /worktree_list_truncated/)
@@ -1555,7 +1555,7 @@ test('lifecycle: a retry whose worktree list is truncated journals retry, then f
 test('lifecycle: a create Orca answers under a suffixed name fails at once, retaining both worktrees', async () => {
   const orca = fakeOrca()
   orca.workerStart = cliStart({ 'worktree create': (args) => ({ worktree: { path: `C:/wt/${flag(args, '--name')}-2` } }) })
-  const { life, call, journal, kept } = lifecycleOn(orca)
+  const { life, call, journal, kept } = lifecycleOn(orca, { ...FAST, ...NO_DOCTOR })
   assert.equal(await life(call('impl', { isolated: true })), null)
   assert.deepEqual(journal.map((e) => e.type), ['starting', 'failed', 'retained'], 'final: never retried into a -3')
   assert.match(journal[1].reason, /worktree_name_taken/)
@@ -1655,11 +1655,12 @@ for (const [what, worker, opts, reason, attempts] of FAILURES) {
     const r = await runOne(withDoctor(worker), opts)
     assert.equal(r.result, null)
     assertEntries(r.journal)
-    const failed = r.journal.filter((e) => e.type === 'failed')
+    // Its doctors' own lines aside: those of a doctor that never starts either.
+    const failed = r.journal.filter((e) => e.type === 'failed' && e.patient == null)
     assert.equal(failed.length, 1)
     assert.match(failed[0].reason, reason)
     assert.equal(failed[0].attempts, attempts)
-    assert.equal(r.journal.filter((e) => e.type === 'retry').length, attempts - 1)
+    assert.equal(r.journal.filter((e) => e.type === 'retry' && e.n === failed[0].n).length, attempts - 1)
     assert.equal(r.journal.some((e) => e.type === 'started'), what !== 'never started' && what !== 'Run creation failed')
   })
 }
@@ -2150,6 +2151,112 @@ test('needs you: an escalation then another updates the reason, messages taken i
   assert.deepEqual(foldJournal(r.journal).agents.map((a) => [a.origin, a.state]), [[1, 'done'], [2, 'done']])
 })
 
+// --- a doctor for a never-started agent and a blocked one ---------------------
+
+const START_NOTE = 'Orca restarted its runtime mid-start: start again, it answers now.'
+// The patient's worker-start fails through every retry, and the one after,
+// its doctor's retry, goes through.
+const startFailsThrough = () => {
+  let fails = 0
+  return { workerStart: ({ title }) => (title === '[P] one' && ++fails <= ATTEMPTS ? new OrcaError('runtime_unavailable', `try ${fails}`, 'orchestration worker-start') : null) }
+}
+// A patient that submits only with `note` in its prompt.
+const submitsWith = (note) => (w) => (w.prompt.includes(note) ? submitGood(w) : diesPastCap(w))
+const ISOLATED_KEY = () => journalKey('Do a thing.', { label: 'one', phase: 'P', schema: SCHEMA, isolation: 'worktree' })
+
+test("doctor: a start that fails through every retry starts a doctor, whose handoff retries the start with the note in the worker's prompt; its result reaches the script under the original call's key", async () => {
+  const r = await runOne(withDoctor(submitsWith(START_NOTE), handsOff(START_NOTE)), { script: ISOLATED, faults: startFailsThrough() })
+  assert.deepEqual(r.result, GOOD)
+  assertEntries(r.journal)
+  assert.deepEqual(ofType(r.journal, 'failed'), [])
+  assert.deepEqual(ofType(r.journal, 'gaveUp'), [])
+  assert.deepEqual(ofType(r.journal, 'retry').map((e) => [e.n, e.attempt]), [[1, 2], [1, 3], [1, 4]])
+  const [round, ...moreRounds] = ofType(r.journal, 'doctor')
+  assert.deepEqual(moreRounds, [])
+  assert.deepEqual([round.n, round.origin, round.round, round.doctor, round.reason], [1, 1, 1, 2, `its worker did not start: orca orchestration worker-start: runtime_unavailable: try ${ATTEMPTS}`])
+  // Its doctor is told there is no transcript, and which worktree the start left.
+  const doctor = [...r.orca.dispatches.values()].find((d) => d.title === '[P] recover -> one')
+  assert.ok(doctor.prompt.includes('Transcript: none: its worker never started'), doctor.prompt)
+  assert.ok(doctor.prompt.includes(`Worktree: ${CHILD_WT}`), doctor.prompt)
+
+  const handoff = sentWith(r.orca, START_NOTE)
+  const [remedy, ...more] = ofType(r.journal, 'remedy')
+  assert.deepEqual(more, [])
+  assert.deepEqual([remedy.n, remedy.origin, remedy.round, remedy.doctor, remedy.how, remedy.messageId], [1, 1, 1, 2, 'restart', handoff.id])
+  assert.ok(indexOf(r.journal, (e) => e.type === 'mail' && e.messageId === handoff.id) < r.journal.indexOf(remedy))
+  // The start retried once, in the worktree its spent start left, with the
+  // note after the prompt its worker receives; no session was continued.
+  const starts = r.orca.calls.filter((c) => c.verb === 'workerStart' && c.title === '[P] one')
+  assert.equal(starts.length, 1)
+  assert.equal(starts[0].worktree, CHILD_WT)
+  assert.deepEqual(r.orca.calls.filter((c) => c.verb === 'worktreeCreate').map((c) => c.name), ['run_fake1-1', 'run_fake1-2'], "the patient's one worktree, and its doctor's")
+  const { prompt } = r.orca.dispatches.get(starts[0].dispatchId)
+  assert.ok(prompt.startsWith('Do a thing.\n\n---\nHow this run receives your result'), prompt)
+  assert.ok(prompt.endsWith(`## The doctor's note\n${START_NOTE}`), prompt)
+  assert.deepEqual(r.continues, [])
+  const [started] = ofType(r.journal, 'started').filter((e) => e.n === 1)
+  assert.ok(r.journal.indexOf(remedy) < r.journal.indexOf(started))
+
+  // Every line of the call carries the key of the original agent() call; its doctor's none.
+  const key = ISOLATED_KEY()
+  assert.deepEqual(ofType(r.journal, 'result').map((e) => [e.n, e.key, e.result]), [[1, key, GOOD]])
+  for (const e of r.journal.filter((x) => x.n === 1)) assert.equal(e.key, key, e.type)
+  for (const e of r.journal.filter((x) => x.n === 2)) assert.equal(e.key, null, e.type)
+  assert.deepEqual(foldJournal(r.journal).agents.map((a) => [a.origin, a.state, a.patient]), [[1, 'done', null], [2, 'done', 1]])
+})
+
+test('doctor: an agent blocked on a human past the limit starts a doctor, and a handoff continues its session with the note, in its own tab', async () => {
+  const blocked = (w) => {
+    w.state.waiting = '{"evidence":"hook"}'
+    w.state.onContinue = (c) => (c.text.includes(NOTE) ? submitGood(c) : undefined)
+  }
+  const r = await runOne(withDoctor(blocked, handsOff(NOTE)), { script: ISOLATED })
+  assert.deepEqual(r.result, GOOD)
+  assertEntries(r.journal)
+  assert.deepEqual(ofType(r.journal, 'failed'), [])
+  const [round, ...moreRounds] = ofType(r.journal, 'doctor')
+  assert.deepEqual(moreRounds, [])
+  assert.deepEqual([round.n, round.round, round.doctor, round.reason], [1, 1, 2, 'blocked on a human, unanswered for 30 minutes, with no result'])
+  assert.ok(atMs(round) >= 30 * MIN, round.at)
+  assert.ok(r.lines.some((l) => l.includes('a doctor diagnoses it while its agent() waits')), r.lines.join('\n'))
+
+  const started = ofType(r.journal, 'started')[0]
+  const handoff = sentWith(r.orca, NOTE)
+  const [remedy, ...more] = ofType(r.journal, 'remedy')
+  assert.deepEqual(more, [])
+  assert.deepEqual([remedy.n, remedy.round, remedy.doctor, remedy.how, remedy.messageId, remedy.reopened], [1, 1, 2, 'continue', handoff.id, false])
+  // Never stopped while its doctor worked: the one continuation interrupts it
+  // in its own tab, in its own session, with the note.
+  assert.equal(r.orca.calls.some((c) => c.verb === 'workerStop' && c.dispatch === started.dispatchId), false)
+  const [c, ...others] = r.continues
+  assert.deepEqual(others, [])
+  assert.deepEqual([c.text, c.terminal, c.worktree, c.interrupted], [notePrompt(NOTE), started.terminal, started.worktree, true])
+  assert.ok(c.command.startsWith(`claude --resume ${started.sessionId}`), c.command)
+  assert.deepEqual(ofType(r.journal, 'result').map((e) => [e.n, e.key]), [[1, ISOLATED_KEY()]])
+  assert.deepEqual(foldJournal(r.journal).agents.map((a) => [a.origin, a.state]), [[1, 'done'], [2, 'done']])
+})
+
+test("doctor: a resume after a never-started patient's start was retried with a note replays its result by the original call's key", async () => {
+  const clock = fakeClock()
+  const stateDir = tmp()
+  const orca = fakeOrca({ clock, faults: startFailsThrough(), worker: (w) => withDoctor(submitsWith(START_NOTE), handsOff(START_NOTE))({ ...w, clock }) })
+  const opts = { stateDir, out: () => {}, clock, transcripts: fakeTranscripts(orca) }
+  assert.deepEqual(await runScript(ISOLATED, { ...opts, orca }), GOOD)
+  assert.equal(ofType(journalOf(stateDir), 'remedy')[0].how, 'restart')
+  const before = orca.calls.length
+
+  assert.deepEqual(await runScript(ISOLATED, { ...opts, orca: orca.as('term_2'), resume: true }), GOOD)
+  const journal = journalOf(stateDir)
+  assertEntries(journal)
+  const [replayed, ...more] = ofType(journal, 'result')
+  assert.deepEqual(more, [])
+  assert.deepEqual([replayed.key, replayed.replayed, replayed.origin, replayed.result], [ISOLATED_KEY(), true, 1, GOOD])
+  assert.deepEqual(orca.calls.slice(before).filter((c) => /^(workerStart|worktreeCreate|workerContinue|runUse)$/.test(c.verb)), [], 'nothing started again')
+  // The patient is the agent the first run made, its doctor carried with it.
+  const agents = foldJournal(journal).agents.sort((x, y) => x.origin - y.origin)
+  assert.deepEqual(agents.map((a) => [a.origin, a.state, a.patient]), [[1, 'done', null], [2, 'done', 1]])
+})
+
 test("fake orca: a Run's mailbox holds what its workers send, hands its coordinator the same batch until acknowledged, and a run-use delivers it again under a new id", async () => {
   const orca = fakeOrca()
   const { runId } = await orca.runCreate({ objective: 'o' })
@@ -2266,6 +2373,7 @@ for (const [what, spoil, reason] of [
   test(`retry: a retry after a worker-start was sent that finds its worktree with ${what} fails with that reason, and keeps the worktree`, async () => {
     const r = await runOne(submitGood, {
       script: ISOLATED,
+      settings: NO_DOCTOR,
       faults: {
         workerStart: ({ count, worktree, orca }) => {
           if (count > 1) return null
@@ -2324,7 +2432,7 @@ test('baseline: a retry after a dispatched worker takes up a worktree unchanged 
   assert.deepEqual(same.orca.calls.filter((c) => c.verb === 'worktreeReuse').map((c) => c.worktree), [CHILD_WT])
   assert.equal(verbCount(same, 'worktreeCreate'), 1)
 
-  const changed = await runOne(submitGood, { script: ISOLATED, setupLeaves: BORN, faults: failsOnceSent((w) => w.porcelain.push('?? notes.txt')) })
+  const changed = await runOne(submitGood, { script: ISOLATED, settings: NO_DOCTOR, setupLeaves: BORN, faults: failsOnceSent((w) => w.porcelain.push('?? notes.txt')) })
   assert.equal(changed.result, null)
   assert.deepEqual(types(changed), ['starting', 'baseline', 'retry', 'failed'])
   const [failed] = entries(changed, 'failed')
@@ -2347,7 +2455,7 @@ test("baseline: the agent's prompt names its worktree's baseline files with the 
 })
 
 test('retry: a start that fails every time is null after its retries, each journaled as retry at the backoff the table sets, then failed with the last reason', async () => {
-  const r = await runOne(submitGood, { script: ISOLATED, faults: { terminalCreate: ({ count }) => new OrcaError('runtime_unavailable', `try ${count}`, 'terminal create') } })
+  const r = await runOne(submitGood, { script: ISOLATED, settings: NO_DOCTOR, faults: { terminalCreate: ({ count }) => new OrcaError('runtime_unavailable', `try ${count}`, 'terminal create') } })
   assert.equal(r.result, null)
   assertEntries(r.journal)
   assert.deepEqual(types(r), ['starting', 'baseline', 'retry', 'retry', 'retry', 'failed'])
@@ -2366,7 +2474,7 @@ test('retry: a start that fails every time is null after its retries, each journ
 })
 
 test('retry: the backoff is whatever the settings table says', async () => {
-  const r = await runOne(submitGood, { settings: { retryBackoffMs: [1_000, 7_000] }, faults: { terminalCreate: () => new OrcaError('runtime_unavailable', '', 'terminal create') } })
+  const r = await runOne(submitGood, { settings: { ...NO_DOCTOR, retryBackoffMs: [1_000, 7_000] }, faults: { terminalCreate: () => new OrcaError('runtime_unavailable', '', 'terminal create') } })
   assert.equal(r.result, null)
   assert.deepEqual(entries(r, 'retry').map((e) => [atMs(e), Date.parse(e.nextAt)]), [[0, 1_000], [1_000, 8_000]])
   assert.equal(entries(r, 'failed')[0].attempts, 3)

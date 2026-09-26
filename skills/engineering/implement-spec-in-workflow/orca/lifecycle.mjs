@@ -23,8 +23,19 @@ const baselineSection = (baseline) => (baseline?.length ? `
 ---
 These files were in your worktree before you, left by its setup: ${baseline.map((l) => l.slice(3)).join(', ')}. They are not your work, so never stage or commit them. Stage your own changes by path (\`git add <path>\`), never with \`git add -A\`, \`git add .\` or \`git commit -a\`.` : '')
 
+// A doctor's note for a patient whose worker never started: its start is
+// retried with the note after the prompt the worker receives.
+const noteSection = (note) => (note == null ? '' : `
+
+---
+An earlier start of this task failed before any worker ran, and a doctor, an agent that read what the workflow runner recorded of it, worked out why. Its note follows: keep it in mind as you work.
+
+## The doctor's note
+${note}`)
+
 // `baseline`: the porcelain lines of the worktree it starts in, or null.
-export function workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline = null }) {
+// `note`: a doctor's note for a start retried after its retries were spent.
+export function workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline = null, note = null }) {
   const what = schemaPath
     ? `Write your result to ${payloadPath} as one JSON object that matches the JSON Schema in ${schemaPath}.`
     : `Write your answer to ${payloadPath} as plain text.`
@@ -37,7 +48,7 @@ How this run receives your result: your final message is not read. Your result r
 1. ${what}
 2. Run this, replacing the four <placeholders> with the values from your Orca preamble, copied exactly:
    ${command}
-3. If submit exits non-zero it prints every error: fix the payload and run it again until it exits 0. Then stop and idle.`
+3. If submit exits non-zero it prints every error: fix the payload and run it again until it exits 0. Then stop and idle.${noteSection(note)}`
 }
 
 // FIFO slots: a freed slot passes straight to the longest-waiting call.
@@ -173,8 +184,9 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   // The one point where a call ends in null: a start whose retries are spent,
   // the end of supervision, and a Run it could not take over or create all
   // come here, and nothing else writes `failed` or returns an agent() null.
-  // A session dead past its cap first gets its doctor rounds (treat), and
-  // comes here only once they are spent. retained: the worktree it left, or null;
+  // A session dead past its cap or blocked past the limit, and a start whose
+  // retries are spent, first get their doctor rounds (treat), and come here
+  // only once they are spent. retained: the worktree it left, or null;
   // alsoRetained: each other one, journaled after it as `retained` lines.
   // attempts counts the starts, or Run creations, it made; one that started a
   // worker made one more start than it retried. continuations counts how
@@ -416,7 +428,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
           blockedAt = now
           out(`!!!!!!!! ${title} is BLOCKED ON A HUMAN. Answer it in terminal ${w.terminal}.`)
           out(`!!!!!!!! waiting on: ${s.waiting}`)
-          if (!hold) out(`!!!!!!!! ${title}: if nobody answers within ${mins(limits.blockedFailMs)} minutes, it fails, is kept as it stands, and agent() returns null`)
+          if (!hold) out(`!!!!!!!! ${title}: if nobody answers within ${mins(limits.blockedFailMs)} minutes, it fails and is kept as it stands, and ${limits.doctorRounds ? 'a doctor diagnoses it while its agent() waits' : 'agent() returns null'}`)
           blocked(s.waiting)
         }
         if (hold) blockedAt = now
@@ -484,20 +496,23 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   }
 
   // Starts the call's worker, retried as the settings table says. Once it
-  // has failed for good, the call's null.
-  async function start(runId, call) {
+  // has failed for good, the call's null, or, for an agent() call, its
+  // patient's failure, handed to its doctors. again: a doctor's remedy, the
+  // start retried with its `note`, carrying on from the `made`, `dispatched`
+  // and `baseline` the spent start left, so its first attempt is a retry.
+  async function start(runId, call, again = null) {
     const { prompt, isolated, launch, key, n, title, phaseName, dir, schemaPath, resultPath, payloadPath, patient = null, setup = null } = call
     // The child worktrees failed attempts left. Every attempt of a call asks
     // for the same `<runId>-<n>` name, so a retry takes that one up again;
     // one Orca made under a suffixed name leaves both it and that one.
-    const made = new Set()
+    const made = new Set(again?.made)
     // Once any attempt has sent its worker-start, a worker may have run in
     // that worktree, and a retry no longer takes it up whatever it holds.
-    let dispatched = false
+    let dispatched = again?.dispatched ?? false
     // The porcelain lines its worktree was made with, journaled before its
     // terminal opens: what a retry judges it against, and what its agent is
     // told is not its own. None for a create that timed out.
-    let baseline = null
+    let baseline = again?.baseline ?? null
     const onBaseline = ({ worktree, lines }) => {
       baseline = lines
       journal({ type: 'baseline', key, n, title, worktree, lines })
@@ -514,11 +529,11 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
         try {
           const w = await orca.workerStart({
             run: runId,
-            prompt: patient != null ? prompt : (baseline) => workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline }),
+            prompt: patient != null ? prompt : (baseline) => workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline, note: again?.note ?? null }),
             title,
             ...launch,
             sessionId,
-            child: isolated ? { name: `${runId}-${n}`, displayName: title, retry: attempt > 1, dispatched, baseline, onBaseline, ...(setup && { setup }) } : null,
+            child: isolated ? { name: `${runId}-${n}`, displayName: title, retry: attempt > 1 || !!again, dispatched, baseline, onBaseline, ...(setup && { setup }) } : null,
           })
           return { w, sessionId }
         } catch (e) {
@@ -530,9 +545,17 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     } catch (e) {
       // A worktree Orca made before the start failed is named like a dead
       // agent's: the runner never removes one. The failed line carries the
-      // first; a `retained` line names each other one.
-      const [kept, ...more] = isolated ? [...made].map((path) => retainWorktree({ path, reason: `retained because it was created for ${title}, whose worker never started, so no agent ever reported it` })) : []
-      return failAgent(call, { reason: e.reason, retained: kept ?? null, alsoRetained: more, attempts: e.attempts, run: runId })
+      // first; a `retained` line names each other one. A patient's are
+      // retained only once its doctor rounds end in null.
+      const retainMade = () => {
+        const [kept, ...more] = isolated ? [...made].map((path) => retainWorktree({ path, reason: `retained because it was created for ${title}, whose worker never started, so no agent ever reported it` })) : []
+        return { retained: kept ?? null, alsoRetained: more }
+      }
+      const failure = { reason: e.reason, attempts: e.attempts, run: runId }
+      if (patient == null) {
+        return { [SICK]: { ...failure, harness: launch.harness, sessionId: null, worktree: isolated ? [...made][0] ?? null : null, keep: retainMade, restart: { made: [...made], dispatched, baseline } } }
+      }
+      return failAgent(call, { ...failure, ...retainMade() })
     }
     for (const why of w.warnings ?? []) warn(call, why)
     journal({ type: 'started', key, n, title, run: runId, dispatchId: w.dispatchId, harness: launch.harness, sessionId, worktree: w.worktree ?? null, terminal: w.terminal, dir })
@@ -550,16 +573,18 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   }
 
   // call.from: a patient carried on by its doctor's remedy, { w, sessionId,
-  // attempts, continued }, watched again without a start. call.box: a
-  // doctor's mailbox, which take() fills from its messages.
+  // attempts, continued }, watched again without a start, or { restart }, the
+  // start of a patient whose worker never started, retried with the note.
+  // call.box: a doctor's mailbox, which take() fills from its messages.
   async function supervise(runId, call) {
     const { schema, isolated, launch, key, n, title, resultPath, patient = null, box = null } = call
     if (launch.harness === 'claude' && !launch.permissionMode && !toldNoMode) {
       toldNoMode = true
       out("!! no --permission-mode given: Claude workers start in Claude's own default permission mode, not in the orchestrator's.")
     }
-    const got = call.from ?? (call.adopt ? await takeUp(call) : await start(runId, call))
-    if (!got) return null
+    const { from = null } = call
+    const got = from?.restart ? await start(runId, call, from.restart) : from ?? (call.adopt ? await takeUp(call) : await start(runId, call))
+    if (!got || got[SICK]) return got
     const { sessionId, attempts } = got
     let { w, end = null, continued } = got
     const post = () => {
@@ -633,9 +658,9 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
         if (kept) out(`!! ${title}: its tab ${w.terminal} is kept open`)
         const failure = { reason, attempts, continuations: continued, run: runId, workerLeft: kept }
         // A doctor is never itself doctored: its failure spends its round.
-        if (end.capped && patient == null) {
+        if (kept && patient == null) {
           sick = true
-          return { [SICK]: { ...failure, harness: launch.harness, sessionId, worktree: isolated ? w.worktree ?? null : null, w, gone: !!end.gone } }
+          return { [SICK]: { ...failure, harness: launch.harness, sessionId, worktree: isolated ? w.worktree ?? null : null, w, gone: !!end.gone, keep: () => ({ retained: keep(call, w) }) } }
         }
         return failAgent(call, { ...failure, retained: retain() })
       }
@@ -732,7 +757,8 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     return got
   }
 
-  // A session dead past its cap: up to limits.doctorRounds doctors, one after
+  // A patient, a session dead past its cap or blocked past the limit, or a
+  // start whose retries are spent: up to limits.doctorRounds doctors, one after
   // another, while its agent() stays pending (ADR-0014). A doctor's handoff
   // is its remedy, applied as its message is read: treat then resolves to
   // what supervise carries the patient on from, or null if that failed. A
@@ -749,7 +775,8 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     // Back here after a remedy: that round's note carried it on, and it died again.
     const last = rounds.trail.at(-1)
     if (last && last.outcome === null) last.outcome = `its note carried the patient on, and it failed again: ${failure.reason}`
-    const transcript = transcripts.path?.({ harness: failure.harness, sessionId: failure.sessionId, worktree: failure.worktree }) ?? `none found for ${failure.harness} session ${failure.sessionId}`
+    const transcript = failure.sessionId == null ? 'none: its worker never started'
+      : transcripts.path?.({ harness: failure.harness, sessionId: failure.sessionId, worktree: failure.worktree }) ?? `none found for ${failure.harness} session ${failure.sessionId}`
     while (rounds.round < max) {
       const round = ++rounds.round
       const doctor = nextN()
@@ -787,12 +814,15 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       journal({ type: 'gaveUp', key, n, title, origin, round, doctor, reason: why })
       out(`!! ${title}: doctor round ${round} of ${max} ended without a remedy: ${why}`)
     }
-    return failAgent(call, { ...failure, retained: keep(call, failure.w) }, { said: `, after ${max} doctor rounds without a remedy` })
+    return failAgent(call, { ...failure, ...failure.keep() }, { said: `, after ${max} doctor rounds without a remedy` })
   }
 
   // A doctor's handoff: the patient's session carries on in its own session
   // and worktree, in its own tab, or a new one in its worktree once that tab
-  // is gone, with the note in its continuation prompt. It resolves to what
+  // is gone, with the note in its continuation prompt. A patient whose worker
+  // never started has its start retried instead, with the note in its
+  // worker's prompt, once it has a live slot again: under the same call, so
+  // its journal key stays the original call's. It resolves to what
   // supervise carries the patient on from, or { from: null } once a
   // continuation that failed has failed the call. A new round starts a new
   // count of continuations: one carried on past its cap would otherwise die
@@ -800,6 +830,11 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   async function remedy(call, failure, { round, doctor, message }) {
     const { key, n, title, launch } = call
     const origin = call.adopt?.origin ?? n
+    if (failure.restart) {
+      out(`>> ${title}: doctor round ${round} handed off a note; retrying its start with it`)
+      journal({ type: 'remedy', key, n, title, origin, round, doctor, how: 'restart', messageId: message.id, dispatchId: null, terminal: null, reopened: false })
+      return { from: { restart: { ...failure.restart, note: message.body ?? '' } } }
+    }
     const { w, sessionId } = failure
     out(`>> ${title}: doctor round ${round} handed off a note; continuing session ${sessionId} with it ${failure.gone ? `in a new terminal in ${w.worktree ?? 'its worktree'}` : `in terminal ${w.terminal}`}`)
     let next

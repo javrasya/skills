@@ -11,6 +11,9 @@
 //   a create carries no task title to match), past the adapter's bound on it,
 //   after writing an untracked file into the new worktree as a setup hook
 //   would. The runner has to find that worktree by name and start in it.
+//   It also fails every worker-start of contract:never-started until its
+//   doctor's has gone through, so its start retries are spent, a doctor is
+//   started, and only the start its note retries succeeds.
 const cp = require('child_process')
 const fs = require('fs')
 const path = require('path')
@@ -18,11 +21,13 @@ const { EventEmitter } = require('events')
 const { syncBuiltinESMExports } = require('module')
 
 const LABEL = 'contract:retry'
+const NEVER = 'contract:never-started'
 const ORCA_ONLY = process.argv.some((a) => path.basename(a) === 'runner-contract-orca.workflow.js')
 const SETUP_OUTPUT = 'contract-setup-output.txt'
 const execFile = cp.execFile
 let failed = false
 let held = false
+let doctored = false
 
 cp.execFile = function (file, args, options, callback) {
   if (ORCA_ONLY && !held && args?.[0] === 'worktree' && args[1] === 'create' && typeof callback === 'function') {
@@ -37,12 +42,16 @@ cp.execFile = function (file, args, options, callback) {
       setTimeout(() => callback(err, stdout, stderr), holdMs)
     })
   }
-  const title = Array.isArray(args) ? args[args.indexOf('--task-title') + 1] : null
-  if (ORCA_ONLY || failed || args?.[0] !== 'orchestration' || args[1] !== 'worker-start' || typeof title !== 'string' || !title.includes(LABEL)) {
-    return execFile.apply(this, arguments)
-  }
-  failed = true
-  const envelope = { ok: false, error: { code: 'contract_fault', message: `the runner contract test fails ${LABEL}'s first start on purpose` } }
+  const title = Array.isArray(args) && args.includes('--task-title') ? args[args.indexOf('--task-title') + 1] : null
+  const starting = args?.[0] === 'orchestration' && args[1] === 'worker-start' && typeof title === 'string' && typeof callback === 'function'
+  // Its doctor is titled `[<phase>] recover -> contract:never-started`.
+  if (ORCA_ONLY && starting && title.includes(NEVER) && title.includes('recover ->')) doctored = true
+  const fault = !starting ? null
+    : ORCA_ONLY ? (title.includes(NEVER) && !doctored ? `the runner contract test fails every start of ${NEVER} on purpose until its doctor has started` : null)
+    : (!failed && title.includes(LABEL) ? `the runner contract test fails ${LABEL}'s first start on purpose` : null)
+  if (!fault) return execFile.apply(this, arguments)
+  if (!ORCA_ONLY) failed = true
+  const envelope = { ok: false, error: { code: 'contract_fault', message: fault } }
   setImmediate(() => callback(Object.assign(new Error('Command failed'), { code: 1 }), JSON.stringify(envelope), ''))
   return new EventEmitter()
 }

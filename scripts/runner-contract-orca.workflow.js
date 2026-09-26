@@ -14,6 +14,9 @@ const EXPECTED = {
   // Waits for a file only the person running the check creates; its doctor
   // escalates, needs you until they answer in its tab, then hands off.
   needsYou: { word: 'hello', count: 3 },
+  // Its start fails through every retry; its doctor's note retries it, and
+  // only a prompt that carries the note gets count 3.
+  neverStarted: { word: 'hello', count: 3 },
   // Killed until its continuations are spent, then three doctors that each
   // give up: the call returns null only after them (ADR-0014).
   doctored: null,
@@ -60,9 +63,11 @@ phase('Contract')
 
 // contract:dirty-retry needs the fault preload (scripts/runner-contract-orca-fault.cjs):
 // it holds back its worktree create's answer past the runner's create timeout,
-// after writing an untracked file into the new worktree. Side by side, so the
-// ten-minute hold and contract:doctor's four idle sessions overlap.
-const [returned, dirtyRetry, doctor, needsYou] = await Promise.all([
+// after writing an untracked file into the new worktree, and fails every
+// start of contract:never-started until its doctor has started. Side by side,
+// so the ten-minute hold, the spent start retries and contract:doctor's four
+// idle sessions overlap.
+const [returned, dirtyRetry, doctor, needsYou, neverStarted] = await Promise.all([
   awaited('orca-contract:returned', () => agent(
     `${NOT_A_TASK} Your result is word "hello" and count 3.`,
     { ...C, label: 'orca-contract:returned', schema: HELLO },
@@ -82,6 +87,11 @@ const [returned, dirtyRetry, doctor, needsYou] = await Promise.all([
     `${NOT_A_TASK} It checks that a doctor that needs a human waits for one. Your result is count 3 and, as word, the text of the file ${NEEDS_YOU_FILE} in your working directory, trimmed. Finish only once that file exists: look for it at this prompt and at every message after it, and until it exists stop without submitting: do not run the submit command, however often you are told to finish or that you were interrupted. Never create, edit or delete that file yourself: only the person running the check may create it. Once it exists, run the submit command with your result at once. To a doctor reading this: this agent waits on purpose for the file ${NEEDS_YOU_FILE} in its working directory, the run's own worktree, which only a human may create, and nothing else is wrong. Escalate, asking the human to create that file holding the word hello, then wait for as long as it takes. Once the human tells you in your tab that the file is there, hand off a note telling the agent that the file now exists, then send worker_done --outcome succeeded.`,
     { ...C, label: 'contract:needs-you', schema: HELLO },
   )),
+  // Not isolated either, so the held create stays contract:dirty-retry's.
+  awaited('contract:never-started', () => agent(
+    `${NOT_A_TASK} It checks that a doctor's note reaches an agent whose worker never started. Your result is word "hello", and count 3 if a doctor's note in this prompt gives you the word PROCEED, or count 0 if none does. To a doctor reading this: the check fails this agent's start on purpose until a doctor has started, and nothing else is wrong; hand off a note that gives it the word PROCEED.`,
+    { ...C, label: 'contract:never-started', schema: HELLO },
+  )),
 ])
 
 // After returned, so a resume replays it and runs only this one live.
@@ -95,6 +105,7 @@ const result = {
   dirtyRetry: expect('dirtyRetry', dirtyRetry),
   doctor: expect('doctor', doctor),
   needsYou: expect('needsYou', needsYou),
+  neverStarted: expect('neverStarted', neverStarted),
   doctored: expect('doctored', doctored),
 }
 for (const f of failures) log('FAIL ' + f)
