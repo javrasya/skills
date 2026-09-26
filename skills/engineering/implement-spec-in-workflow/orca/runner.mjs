@@ -194,8 +194,8 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   const stillOut = new Set(outstanding.map((w) => w.origin))
   for (const a of earlier.agents) {
     if (!madeByRun(a) || stillOut.has(a.origin)) continue
-    const { n, title, runId: run, dispatchId, harness, sessionId, terminal, worktree, origin, state, reason, continuations, workerLeft, patient } = a
-    journal({ type: 'earlier', n, title, run, dispatchId, harness, sessionId, terminal, worktree, origin, state, reason, ...(continuations && { continuations }), ...(workerLeft && { workerLeft }), ...(patient != null && { patient }) })
+    const { n, title, runId: run, dispatchId, harness, sessionId, terminal, worktree, origin, state, reason, continuations, workerLeft, patient, round, rounds } = a
+    journal({ type: 'earlier', n, title, run, dispatchId, harness, sessionId, terminal, worktree, origin, state, reason, ...(continuations && { continuations }), ...(workerLeft && { workerLeft }), ...(patient != null && { patient }), ...(rounds.length && { round, rounds }) })
   }
   for (const { key, n, title, run, dispatchId, harness, sessionId, terminal, worktree, dir, origin, continuations } of outstanding) {
     journal({ type: 'outstanding', key, n, title, run, dispatchId, harness, sessionId, terminal, worktree, dir, origin, ...(continuations && { continuations }) })
