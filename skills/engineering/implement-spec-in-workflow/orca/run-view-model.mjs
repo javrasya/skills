@@ -69,6 +69,24 @@ export function runnerAlive(stateDir) {
   }
 }
 
+// Whether a run has ended, which is not whether its runner lives: once the
+// script ends the runner writes summary.json and waits on its attached view
+// until the operator quits it (runner.mjs), live all the while. `run` is its
+// registry run, or null; `alive` its runner's liveness. It has ended when the
+// registry records `ended` with no resume after (state is not 'running'),
+// when its runner is gone (nothing runs the script), or when a live runner has
+// written summary.json: the runner removes a stale one before it writes the
+// runner.pid that names it live, so that one is this run's. A live runner with
+// no summary.json is still running the script. null when it cannot be told:
+// the runner's liveness unknown and no `ended` recorded, since a summary.json
+// then may be an earlier run's.
+export function runEnded({ run, alive, stateDir }) {
+  if (run && run.state !== 'running') return true
+  if (alive === false) return true
+  if (alive === true) return existsSync(join(stateDir, 'summary.json'))
+  return null
+}
+
 // What an injected liveness answered, as true, false or null (does not know).
 const livenessOf = (alive, stateDir) => {
   try {
@@ -109,7 +127,9 @@ function latestEvent(path) {
 
 // view = runView({ stateDir, orca, … }); await view.refresh() reads the run
 // again, and view.model is then:
-//   header  { name, project, runId, spec, alive, elapsedMs, counts: {state: n} }
+//   header  { name, project, runId, spec, alive, ended, elapsedMs, counts: {state: n} },
+//           ended being whether the run has ended (runEnded), null when it
+//           cannot be told
 //   phases  [{ name, folded, done, total, mix: {state: n}, peakContext, agents }]
 //   rows    [{ kind: 'phase', key, phase } | { kind: 'agent', key, agent, phase }],
 //           the phases in the order the run reached them, each unfolded one
@@ -168,15 +188,16 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   const agentsNow = () => phases.flatMap((p) => p.agents)
   function optionsFor(row) {
     const done = agentsNow().filter((a) => a.state === 'done').length
-    const alive = header?.alive
+    const ended = header?.ended
     return [
       { id: 'selected', label: 'Reclaim Selected', detail: !row ? 'nothing is selected' : row.kind === 'agent' ? row.agent.title : `every agent of ${row.phase.name}`, disabled: false, reason: null },
       { id: 'successful', label: 'Reclaim Successful Ones', detail: `the ${done} done`, disabled: false, reason: null },
-      { id: 'all', label: 'Reclaim All', detail: 'every agent of the run', disabled: alive !== false, reason: alive === true ? 'the runner is still live' : alive === false ? null : 'whether the runner is alive cannot be told' },
+      { id: 'all', label: 'Reclaim All', detail: 'every agent of the run', disabled: ended !== true, reason: ended === true ? null : ended === false ? 'the run is still going' : 'whether the run has ended cannot be told' },
     ]
   }
   // What view.model.dialog is, with a highlight on a disabled option moved
-  // to the first one enabled: Reclaim All disables itself while the runner lives.
+  // to the first one enabled: Reclaim All disables itself until the run has
+  // ended.
   function dialogModel(row) {
     if (!dialog) return null
     if (dialog.kind === 'confirm') return { kind: 'confirm', title: dialog.title, lines: dialog.lines }
@@ -272,6 +293,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
       runId: runId ?? run?.runId ?? null,
       spec: number ? `#${number}` : null,
       alive: isAlive,
+      ended: runEnded({ run, alive: isAlive, stateDir }),
       elapsedMs: start === null ? null : Math.max(0, end - start),
       counts: countOf(agents),
     }
