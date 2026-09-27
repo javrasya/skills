@@ -41,8 +41,18 @@ export const RUNNER_SETTINGS = Object.freeze({
   // continuing does not answer the question it waits on.
   blockedFailMs: 30 * MIN,
   // Orca calls that fail in a row while watching a worker before it counts
-  // as dead: one transient CLI failure must not kill a long agent.
+  // as dead: one transient CLI failure must not kill a long agent. A call
+  // that finds Orca not there at all is an outage, never one of these.
   watchErrors: 3,
+  // An Orca outage (ADR-0015): Orca itself not there, as while it updates.
+  // Every Orca call waits on it, and the runner's clocks stop for its length.
+  // It is probed after outageProbeMs, each wait twice the last, up to
+  // outageProbeMaxMs; one still going at outageLimitMs pauses the run, which
+  // fails no agent, and is probed every pausedProbeMs until Orca answers.
+  outageProbeMs: 5_000,
+  outageProbeMaxMs: 30_000,
+  outageLimitMs: 10 * MIN,
+  pausedProbeMs: 2 * MIN,
   // One Orca call, beyond any wait it asks Orca for: one that has not
   // answered by then is killed and counts as failed.
   orcaCallMs: 2 * MIN,
@@ -50,6 +60,12 @@ export const RUNNER_SETTINGS = Object.freeze({
   // it has been seen to finish past orcaCallMs. One that runs out is looked
   // up by name before its attempt counts as failed.
   worktreeCreateMs: 10 * MIN,
+  // A Claude worker's prompt must show in its transcript within this of
+  // worker-start's return. Missing, the runner presses Enter in its terminal
+  // (a dialog may have eaten worker-start's), then clears its input and types
+  // the prompt again, waiting this long after each; still missing, the start
+  // fails, and is retried as below.
+  promptDeliveryMs: 20_000,
   // A worker start, or the Run's creation, that fails is tried again after
   // each of these waits in turn; once they are spent, agent() is null. So it
   // is attempted at most four times: the first attempt, then one after each

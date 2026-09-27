@@ -13,9 +13,16 @@ import { sessionTranscripts } from './transcript.mjs'
 import { agentName, agentsOf, ownWorktree, reclaimAgent, reclaimRun } from './reclaim.mjs'
 import { foldJournal, journalLines, timeOf } from './journal.mjs'
 import { REGISTRY_PATH, readRegistry, runRegistry } from './registry.mjs'
-import { worktreeUnpushed } from './orca-cli.mjs'
+import { orcaUnreachable, worktreeUnpushed } from './orca-cli.mjs'
+import { probesBy } from './outage.mjs'
+import { RUNNER_SETTINGS } from './settings.mjs'
 
 export const RUNNER_PATH = fileURLToPath(new URL('./runner.mjs', import.meta.url))
+
+// What every key that needs Orca says, and does nothing else, while Orca is
+// not there (ADR-0015): the run's journal says an outage is under way, or the
+// view's own call found Orca gone.
+export const ORCA_GONE = 'Orca unreachable — try again when it is back'
 
 // In the order a phase row lists its mix. An agent's state is the journal
 // fold's (journal.mjs), except reclaimed: one the registry records reclaimed.
@@ -94,8 +101,9 @@ export function runnerAlive(stateDir) {
 // no summary.json is still running the script. null when it cannot be told:
 // the runner's liveness unknown and no `ended` recorded, since a summary.json
 // then may be an earlier run's.
+// A halted run has not ended: its runner waits in its tab to carry it on.
 export function runEnded({ run, alive, stateDir }) {
-  if (run && run.state !== 'running') return true
+  if (run && run.state !== 'running' && run.state !== 'halted') return true
   if (alive === false) return true
   if (alive === true) return existsSync(join(stateDir, 'summary.json'))
   return null
@@ -141,15 +149,21 @@ function latestEvent(path) {
 
 // view = runView({ stateDir, orca, … }); await view.refresh() reads the run
 // again, and view.model is then:
-//   header  { name, project, runId, spec, alive, ended, elapsedMs, counts: {state: n} },
+//   header  { name, project, runId, spec, alive, ended, elapsedMs, counts: {state: n}, outage },
 //           ended being whether the run has ended (runEnded), null when it
-//           cannot be told
+//           cannot be told; outage the Orca outage its live runner is in, or
+//           null: { phase: 'waiting' | 'paused', since, elapsedMs, probes },
+//           probes being how many it has had by the outage settings
 //   phases  [{ name, folded, done, total, mix: {state: n}, peakContext, agents }]
 //   rows    [{ kind: 'phase', key, phase } | { kind: 'agent', key, agent, phase, depth }],
-//           the phases in the order the run reached them, each unfolded one
-//           followed by its agents, a doctor's row under its patient's at
+//           the phases in the order the script's meta declares them (the
+//           journal's `phases`), then any it does not declare in the order
+//           their agents were called; each unfolded one followed by its
+//           agents in call order (n), a doctor's row under its patient's at
 //           depth 1 (else 0)
 //   selected  the index of the selected row
+//   selectedAt  clock.now() when the selection last moved to another row,
+//           which the selected row's scrolling name counts from (draw.mjs)
 //   pane    { kind: 'agent', agent } | { kind: 'phase', phase, problems: [{ agent, reason }] },
 //           a phase's problems being its blocked, needs-you, failed and stuck agents
 //   message the latest action's outcome, for the flash line, or null
@@ -182,8 +196,14 @@ function latestEvent(path) {
 // transcripts (transcript.mjs); registry is the run registry's path, or null;
 // unpushed(path) counts a worktree's unpushed commits; alive(stateDir) says
 // whether the runner lives (runnerAlive), header.alive being null when it
-// cannot say.
-export function runView({ stateDir, orca, clock = { now: () => Date.now() }, transcripts = sessionTranscripts(), registry = REGISTRY_PATH, unpushed = worktreeUnpushed, alive = runnerAlive }) {
+// cannot say. resumeOrca(): attached, what R does during an outage: it asks
+// the runner to probe Orca at once. While an outage is under way, Enter on an
+// agent, l and r say ORCA_GONE and ask Orca nothing; an agent keeps its state.
+// resumeHalted(node): attached, what R does on a halted run with no outage:
+// it asks the runner to resume that node, or with null every held one.
+// header.halted is the fold's halt, { since, nodes }, nodes being every node
+// still failed or needing decisions, or null.
+export function runView({ stateDir, orca, clock = { now: () => Date.now() }, transcripts = sessionTranscripts(), registry = REGISTRY_PATH, unpushed = worktreeUnpushed, alive = runnerAlive, resumeOrca = null, resumeHalted = null }) {
   const journalPath = join(stateDir, 'journal.jsonl')
   // name -> folded, only for phases the operator folded or unfolded.
   const folds = new Map()
@@ -191,6 +211,8 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   let header = null
   let selectedKey = null
   let selected = 0
+  // The row the selection was on at the last layout, and since when.
+  let shown = { key: null, at: null }
   let message = null
   let latest = null
   let alert = null
@@ -244,10 +266,11 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     selected = at >= 0 ? at : Math.max(0, Math.min(selected, rows.length - 1))
     const row = rows[selected] ?? null
     selectedKey = row?.key ?? null
+    if (shown.key !== selectedKey) shown = { key: selectedKey, at: clock.now() }
     const pane = !row ? null
       : row.kind === 'agent' ? { kind: 'agent', agent: row.agent }
       : { kind: 'phase', phase: row.phase, problems: problemsOf(row.phase.agents).map((agent) => ({ agent, reason: agent.reason })) }
-    view.model = { header, phases, rows, selected, pane, message, latest, alert, dialog: dialogModel(row) }
+    view.model = { header, phases, rows, selected, selectedAt: shown.at, pane, message, latest, alert, dialog: dialogModel(row) }
     return view.model
   }
 
@@ -296,18 +319,28 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
       needed.length && `NEEDS YOU: ${needed.map((a) => `${a.title} in tab ${a.terminal ?? '—'}: ${a.reason ?? 'no reason given'}`).join(' · ')}`,
     ].filter(Boolean).join(' · ') || null
 
+    // A resume journals its carried lines before the calls it replays, so
+    // the order lines come in is no phase order: the script's is, and one it
+    // does not declare follows, as its first agent was called. The fold's
+    // agents are in call order.
     const byPhase = new Map()
-    for (const a of agents) {
+    for (const a of [...agents].sort((x, y) => x.n - y.n)) {
       if (!byPhase.has(a.phase)) byPhase.set(a.phase, [])
       byPhase.get(a.phase).push(a)
     }
+    const declared = fold.phases ?? []
+    const rank = (name) => (declared.includes(name) ? declared.indexOf(name) : declared.length)
     const countOf = (list) => Object.fromEntries(STATES.map((s) => [s, list.filter((a) => a.state === s).length]))
-    phases = [...byPhase].map(([name, list]) => {
+    phases = [...byPhase].sort(([x], [y]) => rank(x) - rank(y)).map(([name, list]) => {
       const contexts = list.map((a) => a.context).filter((c) => c != null)
       return { name, folded: false, done: list.filter((a) => a.state === 'done').length, total: list.length, mix: countOf(list), peakContext: contexts.length ? Math.max(...contexts) : null, agents: list }
     })
 
     const isAlive = livenessOf(alive, stateDir)
+    // An outage a dead runner journaled is no one's any more.
+    const since = fold.outage && isAlive !== false ? Date.parse(fold.outage.since) : NaN
+    const lasted = Number.isFinite(since) ? Math.max(0, now - since) : null
+    const outage = lasted === null ? null : { ...fold.outage, elapsedMs: lasted, probes: probesBy(lasted, RUNNER_SETTINGS) }
     const times = entries.map(timeOf).filter((t) => t !== null)
     const armedAt = run?.armedAt ? Date.parse(run.armedAt) : NaN
     const start = Number.isFinite(armedAt) ? armedAt : times.length ? Math.min(...times) : null
@@ -325,6 +358,8 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
       ended: runEnded({ run, alive: isAlive, stateDir }),
       elapsedMs: start === null ? null : Math.max(0, end - start),
       counts: countOf(agents),
+      outage,
+      halted: fold.halted ? { since: fold.halted.since, nodes: fold.halted.nodes } : null,
     }
     return layout()
   }
@@ -335,6 +370,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     return { message: text }
   }
   const current = () => view.model?.rows[selected] ?? null
+  const orcaAway = () => header?.outage != null
 
   function toggle(phase) {
     folds.set(phase.name, !phase.folded)
@@ -345,12 +381,14 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   // Brings the agent's tab, and its worktree, to the front in Orca.
   async function focus(agent) {
     if (!agent.terminal) return say(`${agent.title} has no tab: its worker never started here`)
+    if (orcaAway()) return say(ORCA_GONE)
     try {
       await orca.terminalSwitch({ terminal: agent.terminal })
       message = null
       layout()
       return { switched: agent.terminal }
     } catch (e) {
+      if (orcaUnreachable(e)) return say(ORCA_GONE)
       return say(`could not focus ${agent.title}'s tab ${agent.terminal}: ${e?.message ?? e}`)
     }
   }
@@ -406,6 +444,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   // confirmed retry goes to the agent refused, never to whatever row the
   // selection sits on by then: a refresh that folds its phase moves it.
   async function reclaim({ n, force = false, stop = false } = {}) {
+    if (orcaAway()) return say(ORCA_GONE)
     let a
     if (n === undefined) {
       const row = current()
@@ -420,7 +459,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     const family = doctorsOf(a).length > 0
     const { r, doctors } = await withItsDoctors(a, { force, stop })
     const also = family ? { doctors: { reclaimed: doctors.reclaimed.map((d) => d.agent), kept: doctors.kept } } : {}
-    if (r && !r.reclaimed) return { ...say(`kept ${a.title}: ${r.reason}`), reclaim: r, agent: target, ...also }
+    if (r && !r.reclaimed) return { ...say(r.unreachable ? ORCA_GONE : `kept ${a.title}: ${r.reason}`), reclaim: r, agent: target, ...also }
     if (!r && !doctors.reclaimed.length && !doctors.kept.length) return { ...say(`${a.title} has nothing to reclaim: it launched nothing in this run`), agent: target }
     if (r || doctors.reclaimed.length) await refresh()
     const notes = [
@@ -497,7 +536,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     if (reclaimed.length) await refresh()
     dialog = nextConfirmation(kept)
     const asked = kept.filter((k) => confirmationOf(k)).length
-    const text = [
+    const text = kept.some((k) => k.reclaim.unreachable) ? `${ORCA_GONE}; reclaimed ${reclaimed.length} of ${total} before it went` : [
       `reclaimed ${reclaimed.length} of ${total} agent${total === 1 ? '' : 's'} of ${what}`,
       ...kept.filter((k) => !confirmationOf(k)).map(({ agent, reclaim: r }) => `kept ${agent.title}: ${r.reason}`),
       ...(asked ? [`${asked} to confirm`] : []),
@@ -559,13 +598,15 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   // editor opens no file outside a worktree, and the run dir is outside every
   // checkout. While that tab is open, `l` again brings it back.
   async function openLog() {
+    if (orcaAway()) return say(ORCA_GONE)
     const path = join(stateDir, 'runner.log')
     if (!existsSync(path)) return say(`could not open ${path}: the runner has not written it yet`)
     if (logTab) {
       try {
         await orca.terminalSwitch({ terminal: logTab })
         return say(`switched to the tab following ${path}`)
-      } catch {
+      } catch (e) {
+        if (orcaUnreachable(e)) return say(ORCA_GONE)
         logTab = null
       }
     }
@@ -573,8 +614,26 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
       logTab = (await orca.logTail({ path, title: 'runner.log' })).terminal
       return say(`opened ${path} in a tab that follows it`)
     } catch (e) {
+      if (orcaUnreachable(e)) return say(ORCA_GONE)
       return say(`could not open ${path}: ${e?.message ?? e}`)
     }
+  }
+
+  // R, attached: the runner probes Orca at once during an outage, and carries
+  // on if Orca answers (runner.mjs). Else, on a halted run (ADR-0016), it
+  // resumes the selected node when that failed or needs you, or every held
+  // node; both go over the one channel to the runner.
+  function askResume() {
+    if (orcaAway()) {
+      resumeOrca?.()
+      return say('asked the runner to probe Orca now: it carries on at once if Orca answers')
+    }
+    const halted = header?.halted
+    if (!halted || !resumeHalted) return say('Orca is there and the run is not halted: nothing to resume')
+    const a = current()?.kind === 'agent' ? current().agent : null
+    const node = a?.node && halted.nodes.includes(a.node) ? a.node : null
+    resumeHalted(node)
+    return say(node ? `asked the runner to resume ${node}` : `asked the runner to resume every held node: ${halted.nodes.join(', ') || 'none left'}`)
   }
 
   // Key names as terminal-kit gives them. Returns what the key did: { quit }
@@ -598,11 +657,14 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
       case 'RIGHT':
         return current()?.kind === 'phase' ? toggle(current().phase) : {}
       case 'r':
+        if (orcaAway()) return say(ORCA_GONE)
         dialog = { kind: 'choose', highlight: 0 }
         layout()
         return {}
       case 'l':
         return openLog()
+      case 'R':
+        return resumeOrca || resumeHalted ? askResume() : {}
       case 'q':
         return { quit: true }
       default:
@@ -634,9 +696,10 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
 //   message   the latest action's outcome, or null
 //   opened    { runId, view }: the run Enter opened, as a runView, or null
 // A run is { runId, name, spec, project, runDir, script, permissionMode,
-// terminal, outcome, alive, kept, reclaimed, closable, armedAt, ageMs,
-// resumable }. outcome is ok, partial or failed, or null while no `ended` is
-// recorded. alive is runnerAlive's answer for its run dir, the rule attached
+// terminal, outcome, paused, alive, kept, reclaimed, closable, armedAt, ageMs,
+// resumable }. outcome is ok, partial or failed, halted while its runner has
+// halted it (ADR-0016), or null while no `ended` is recorded; paused is the registry's { reason, at } while its runner has
+// paused it (an Orca outage past its limit), else null. alive is runnerAlive's answer for its run dir, the rule attached
 // mode's header reads too: whether the process its runner.pid names is alive,
 // never whether its tab is open, since the tab outlives the runner. Just after
 // R, until the new runner has written its own runner.pid, the tab R opened
@@ -719,7 +782,7 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
       const run = {
         runId: r.runId, name: r.spec, spec: number ? `#${number}` : null, project: r.project, runDir: r.runDir,
         script: r.script, permissionMode: r.permissionMode, terminal: launched.get(r.runId)?.terminal ?? r.runner?.terminal ?? null,
-        outcome: r.state === 'running' ? null : r.state, alive: live, reclaimed: r.reclaimed,
+        outcome: r.state === 'running' ? null : r.state, paused: r.state === 'running' ? r.paused ?? null : null, alive: live, reclaimed: r.reclaimed,
         kept: r.reclaimed ? 0 : agents.filter((a) => !done.has(a.name)).length,
         closable: !r.reclaimed && live === false,
         armedAt: Number.isFinite(armedAt) ? armedAt : null, ageMs: Number.isFinite(armedAt) ? Math.max(0, now - armedAt) : null, resumable: live === false && !r.reclaimed,
@@ -801,6 +864,7 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
     }
     await refresh()
     const agents = (n) => `${n} agent${n === 1 ? '' : 's'}`
+    if (r.kept.some((k) => k.unreachable)) return { ...say(`${ORCA_GONE}; reclaimed ${r.reclaimed.length} of ${left.length} agents of ${label} before it went`), reclaimed: r.reclaimed, kept: r.kept }
     const text = r.kept.length
       ? `reclaimed ${r.reclaimed.length} of ${left.length} agents of ${label}; ${r.kept.map(({ agent, reason }) => `kept ${agent.title}: ${reason}`).join('; ')}`
       : stays
@@ -818,6 +882,8 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
     if (!run) return say('select a run to resume')
     const label = labelOf(run)
     if (run.reclaimed) return say(`${label} is reclaimed: its agents are gone and the registry closed it, so there is nothing to resume`)
+    if (run.alive === true && run.paused) return say(`${label}'s runner is alive and paused on an Orca outage: it carries on by itself once Orca is back, and R in its tab ${run.terminal} probes Orca at once`)
+    if (run.alive === true && run.outcome === 'halted') return say(`${label}'s runner is alive and halted, in tab ${run.terminal}: R there resumes it`)
     if (run.alive === true) return say(`${label}'s runner is alive, in tab ${run.terminal}: nothing to resume`)
     if (run.alive === null) return say(`could not tell whether ${label}'s runner is alive: its runner.pid, or Orca's list of the tab R opened, did not answer`)
     if (!run.project || !run.runDir) return say(`${label} has no ${run.project ? 'run directory' : 'worktree'} recorded to resume in`)
@@ -828,6 +894,7 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
     try {
       t = await orca.resumeRunner({ worktree: run.project, title: `${run.name ?? run.runId} (resumed)`, runner, script, stateDir: run.runDir, permissionMode: run.permissionMode })
     } catch (e) {
+      if (orcaUnreachable(e)) return say(ORCA_GONE)
       return say(`could not resume ${label}: ${e?.message ?? e}`)
     }
     if (t.terminal) launched.set(runId, { terminal: t.terminal, pid: runnerPid(run.runDir), starting: true })

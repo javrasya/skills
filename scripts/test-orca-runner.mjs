@@ -12,16 +12,18 @@ import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { submit } from '../skills/engineering/implement-spec-in-workflow/orca/submit.mjs'
 import { runScript, journalKey, failureSummary, finish, SUBMIT, SETTINGS, realClock, JOURNAL_ENTRIES, readJournal, attachView, runnerLog } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
-import { agentLifecycle, notePrompt } from '../skills/engineering/implement-spec-in-workflow/orca/lifecycle.mjs'
+import { agentLifecycle, notePrompt, workerPrompt, doctorPrompt, NO_ASK } from '../skills/engineering/implement-spec-in-workflow/orca/lifecycle.mjs'
+import { mergeMcpAnswers, copyMcpAnswers } from '../skills/engineering/implement-spec-in-workflow/orca/mcp-answers.mjs'
 import { foldJournal } from '../skills/engineering/implement-spec-in-workflow/orca/journal.mjs'
 import { fakeOrca, fakeTranscripts } from '../skills/engineering/implement-spec-in-workflow/orca/fake-orca.mjs'
 import { RUNNER_SETTINGS } from '../skills/engineering/implement-spec-in-workflow/orca/settings.mjs'
-import { orcaCli, OrcaError, tailCommand, resumeRunnerCommand, worktreeUnpushed } from '../skills/engineering/implement-spec-in-workflow/orca/orca-cli.mjs'
+import { orcaCli, OrcaError, tailCommand, resumeRunnerCommand, worktreeUnpushed, orcaUnreachable } from '../skills/engineering/implement-spec-in-workflow/orca/orca-cli.mjs'
+import { orcaOutage, probesBy } from '../skills/engineering/implement-spec-in-workflow/orca/outage.mjs'
 import { runRegistry, readRegistry, OUTCOMES } from '../skills/engineering/implement-spec-in-workflow/orca/registry.mjs'
-import { transcriptPath, sessionTranscripts, claudeSlug, piDir } from '../skills/engineering/implement-spec-in-workflow/orca/transcript.mjs'
+import { transcriptPath, sessionTranscripts, claudeSlug, piDir, promptDelivered } from '../skills/engineering/implement-spec-in-workflow/orca/transcript.mjs'
 import { agentsOf, reclaimAgent, reclaimRun } from '../skills/engineering/implement-spec-in-workflow/orca/reclaim.mjs'
 import { runView, runsView, bandOf, STATES, RUNNER_PATH, runnerAlive, runEnded } from '../skills/engineering/implement-spec-in-workflow/orca/run-view-model.mjs'
-import { draw, drawRuns, strip, TREE_HELP } from '../skills/engineering/implement-spec-in-workflow/orca/run-view/draw.mjs'
+import { draw, drawRuns, strip, TREE_HELP, marqueeOffset, NAME_W } from '../skills/engineering/implement-spec-in-workflow/orca/run-view/draw.mjs'
 import { EventEmitter } from 'events'
 
 const SCHEMA = {
@@ -343,11 +345,11 @@ const NO_DOCTOR = { doctorRounds: 0 }
 
 // Runs a script (one agent() by default) on the default settings table, each
 // worker played by `worker`.
-async function runOne(worker, { script = ONE, orcaPatch = {}, permissionMode = null, faults = {}, settings = {}, setupLeaves = [] } = {}) {
+async function runOne(worker, { script = ONE, orcaPatch = {}, permissionMode = null, faults = {}, settings = {}, setupLeaves = [], promptLoss } = {}) {
   const clock = fakeClock()
   const lines = []
   const stateDir = tmp()
-  const orca = Object.assign(fakeOrca({ worker: (w) => worker({ ...w, clock }), clock, faults, setupLeaves }), orcaPatch)
+  const orca = Object.assign(fakeOrca({ worker: (w) => worker({ ...w, clock }), clock, faults, setupLeaves, promptLoss }), orcaPatch)
   const result = await runScript(script, { orca, stateDir, out: (s) => lines.push(s), clock, permissionMode, settings, transcripts: fakeTranscripts(orca) })
   const of = (verb) => orca.calls.filter((c) => c.verb === verb)
   const log = readFileSync(join(stateDir, 'runner.log'), 'utf8').trimEnd().split('\n')
@@ -417,10 +419,17 @@ return await agent('Name a thing.', { label: 'finalize', phase: 'Finalize', sche
   assert.deepEqual([...new Set([...orca.dispatches.values()].map((d) => d.run))], ['run_fake1'])
 })
 
+// A run's end, or its halt (ADR-0016), whichever comes first: a halted run
+// waits on its held node, and never settles by itself.
+const haltsOrEnds = (start) => new Promise((resolve) => {
+  start((h) => resolve({ halted: h })).then((result) => resolve({ result }), (error) => resolve({ error }))
+})
+
 test('one run: the rendered workflow template names its spec in the Run objective', async () => {
   const text = readFileSync(TEMPLATE, 'utf8').replace(/__SPEC__/g, '227').replace(/__[A-Z_]+__/g, 'x')
   const orca = fakeOrca({ worker: async () => { throw new Error('agent died') } })
-  await runScript(text, { orca, stateDir: tmp(), out: () => {}, settings: FAST }).catch(() => {})
+  // Its graph node fails, is held, and the run halts: it never settles.
+  await haltsOrEnds((onHalt) => runScript(text, { orca, stateDir: tmp(), out: () => {}, settings: FAST, onHalt }))
   const creates = orca.calls.filter((c) => c.verb === 'runCreate')
   assert.equal(creates.length, 1)
   assert.match(creates[0].objective, /spec #227\b/)
@@ -430,7 +439,7 @@ test("doctor: the rendered template's recover row is the doctor's harness and mo
   const text = readFileSync(TEMPLATE, 'utf8').replace(/__RUNNER__/g, 'orca').replace(/__SPEC__/g, '227').replace(/__[A-Z_]+__/g, 'x')
   const clock = fakeClock()
   const orca = fakeOrca({ worker: withDoctor(diesPastCap), clock })
-  await runScript(text, { orca, stateDir: tmp(), out: () => {}, clock, transcripts: fakeTranscripts(orca) }).catch(() => {})
+  await haltsOrEnds((onHalt) => runScript(text, { orca, stateDir: tmp(), out: () => {}, clock, transcripts: fakeTranscripts(orca), onHalt }))
   const doctors = orca.calls.filter((c) => c.verb === 'workerStart' && c.title.includes('recover ->'))
   assert.equal(doctors.length, 3)
   for (const d of doctors) assert.deepEqual([d.title, d.harness, d.model], ['[Graph] recover -> graph:spec-227', 'claude', 'opus'])
@@ -761,7 +770,7 @@ test('agent(): an unknown harness, or a launch word a shell could misread, throw
 
 // The CLI adapter with Orca's process replaced: every argv it would run is
 // recorded, and each verb answers with the shape real Orca returns.
-function recordingCli(replies = {}, { git, clock, platform } = {}) {
+function recordingCli(replies = {}, { git, clock, platform, ...more } = {}) {
   const argvs = []
   const defaults = {
     'terminal create': { terminal: { handle: 'term_own' } },
@@ -774,7 +783,7 @@ function recordingCli(replies = {}, { git, clock, platform } = {}) {
     const reply = verb in replies ? replies[verb] : defaults[verb]
     return typeof reply === 'function' ? reply(args) : reply ?? {}
   }
-  return { argvs, orca: orcaCli({ call, git, clock, ...(platform ? { platform } : {}) }) }
+  return { argvs, orca: orcaCli({ call, git, clock, ...(platform ? { platform } : {}), ...more }) }
 }
 const flag = (argv, name) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined)
 const verbsOf = (argvs) => argvs.map((a) => a.slice(0, 2).join(' '))
@@ -2964,12 +2973,12 @@ test('registry: the fold gives each run its state, where its runner was last see
   assert.deepEqual(runs.map((r) => r.runId), ['run_a', 'run_b'])
   assert.deepEqual(runs[0], {
     runId: 'run_a', project: 'C:/repo', runDir: 'C:/a', spec: 's1', script: 'C:/notes/workflow.js', permissionMode: 'auto', armedAt: isoAt(0),
-    state: 'failed', endedAt: isoAt(2 * MIN), runner: { terminal: 'term_2', at: isoAt(MIN) },
+    state: 'failed', endedAt: isoAt(2 * MIN), runner: { terminal: 'term_2', at: isoAt(MIN) }, paused: null,
     reclaimed: true, reclaimedAt: isoAt(4 * MIN), reclaimedAgents: [{ agent: 'run_a-3', at: isoAt(3 * MIN) }],
   })
   assert.deepEqual(runs[1], {
     runId: 'run_b', project: 'C:/other', runDir: 'C:/b', spec: 's2', script: null, permissionMode: null, armedAt: isoAt(0),
-    state: 'running', endedAt: null, runner: null,
+    state: 'running', endedAt: null, runner: null, paused: null,
     reclaimed: false, reclaimedAt: null, reclaimedAgents: [{ agent: 'run_b-1', at: isoAt(5 * MIN) }],
   })
   assert.deepEqual(readRegistry(join(tmp(), 'none.jsonl')), [], 'no registry yet is no runs')
@@ -3675,7 +3684,7 @@ async function viewedRun(mode = 'attached') {
 viewTest('run view: the journal gives each agent its row, its state and its phase, phases in the order the run reached them', async (mode) => {
   const { view, agent } = await viewedRun(mode)
   const m = view.model
-  assert.deepEqual(m.header, { name: 'implement-spec-783', project: 'controlayer', runId: 'run_fake1', spec: '#783', alive: true, ended: false, elapsedMs: 30 * MIN, counts: { blocked: 0, 'needs you': 0, starting: 0, running: 1, continued: 1, stuck: 1, failed: 1, queued: 1, done: 2, reclaimed: 0 } })
+  assert.deepEqual(m.header, { name: 'implement-spec-783', project: 'controlayer', runId: 'run_fake1', spec: '#783', alive: true, ended: false, elapsedMs: 30 * MIN, counts: { blocked: 0, 'needs you': 0, starting: 0, running: 1, continued: 1, stuck: 1, failed: 1, queued: 1, done: 2, reclaimed: 0 }, outage: null, halted: null })
   assert.deepEqual(m.phases.map((p) => [p.name, p.agents.map((a) => a.n)]), [['Discover', [1]], ['Implement', [2, 3, 4, 5, 6]], ['Gate', [7]]])
   assert.deepEqual([1, 2, 3, 4, 5, 6, 7].map((n) => [agent(n).label, agent(n).state]), [
     ['discover', 'done'], ['impl:a', 'running'], ['impl:b', 'stuck'], ['impl:c', 'continued'], ['impl:d', 'queued'], ['impl:e', 'failed'], ['gate:a', 'done'],
@@ -5099,4 +5108,989 @@ test('run view: standalone with no terminal exits as unavailable, and with no mo
   assert.equal(alone.status, 3)
   assert.match(alone.stderr, /needs a terminal/)
   assert.equal(spawnSync(process.execPath, [VIEW_MJS], { encoding: 'utf8' }).status, 2)
+})
+
+// --- an Orca outage (ADR-0015) ------------------------------------------------
+
+// The three ways Orca was not there while it updated itself, as the adapter
+// builds them from what its CLI printed: the runtime's metadata gone (in
+// Orca's envelope, and as bare stderr), the CLI unable to start, and no orca
+// to spawn at all.
+const RUNTIME_GONE = new OrcaError('runtime_unavailable', 'Could not read Orca runtime metadata at C:\\Users\\o\\AppData\\Roaming\\orca\\orca-runtime.json. Start the Orca app first.', 'orchestration worker-show')
+const RUNTIME_GONE_BARE = new OrcaError('1', 'runtime_unavailable: Could not read Orca runtime metadata at C:\\Users\\o\\AppData\\Roaming\\orca\\orca-runtime.json. Start the Orca app first.', 'orchestration worker-show')
+const CLI_GONE = new OrcaError('1', 'Unable to start the Orca CLI: The system cannot find the file specified', 'orchestration worker-show')
+const SPAWN_GONE = new OrcaError('ENOENT', 'Error: spawn orca ENOENT', 'orchestration worker-show')
+const GONE_SAID = 'Orca unreachable — try again when it is back'
+const PAUSED_SAID = 'Orca unreachable for 10m: run paused; R to resume (or it resumes itself once Orca is back)'
+
+test('outage: only Orca not being there is an outage — its runtime gone, its CLI unable to start, no orca to spawn; a timeout, or an error from an Orca that answered, is not', async () => {
+  for (const e of [RUNTIME_GONE, RUNTIME_GONE_BARE, CLI_GONE, SPAWN_GONE]) assert.equal(orcaUnreachable(e), true, e.message)
+  // The adapter's own spawn of an orca that is not there.
+  const e = await orcaCli({ bin: join(tmp(), 'no-orca') }).terminalList().catch((x) => x)
+  assert.equal(orcaUnreachable(e), true, e.message)
+  for (const answered of [
+    new OrcaError('call_timeout', 'no answer within 120s', 'terminal list'), new OrcaError('timeout', 'tui-idle not reached', 'terminal wait'),
+    new OrcaError('terminal_exited', 'terminal_exited', 'terminal switch'), new OrcaError('runtime_error', "ENOENT: no such file or directory, open 'C:/x'", 'file open'),
+    new OrcaError('consumer_fenced', 'no longer bound', 'orchestration worker-start'), new Error('boom'), null, 'down',
+  ]) assert.equal(orcaUnreachable(answered), false, String(answered?.message ?? answered))
+})
+
+test('outage: every Orca call waits on the one outage and its one probe, every 5s doubling to 30s, and goes on once Orca answers', async () => {
+  const clock = fakeClock()
+  let down = true
+  const probes = []
+  const events = []
+  const outage = orcaOutage({ clock, limits: SETTINGS, probe: async () => { probes.push(clock.now()); if (down) throw CLI_GONE }, on: (e) => events.push(e) })
+  clock.at(100_000, () => { down = false })
+  const tries = { a: 0, b: 0 }
+  const call = (k) => outage.guard(async () => { tries[k]++; if (down) throw SPAWN_GONE; return k })
+  assert.deepEqual(await Promise.all([call('a'), call('b')]), ['a', 'b'])
+  assert.deepEqual(probes, [5, 15, 35, 65, 95, 125].map((s) => s * 1000), 'one probe for both callers')
+  assert.deepEqual(tries, { a: 2, b: 2 })
+  assert.deepEqual(events.map((e) => [e.phase, e.since]), [['start', 0], ['end', 0]])
+  assert.equal(events[1].ms, 125_000)
+  assert.equal(outage.lost(), 125_000, 'the time lost to it, which the runner takes off its clocks')
+  assert.equal(outage.state(), null)
+  // An error from an Orca that answered is the caller's, at once.
+  await assert.rejects(outage.guard(async () => { throw new OrcaError('terminal_exited', 'x', 'terminal send') }), /terminal_exited/)
+  assert.equal(probes.length, 6)
+  assert.deepEqual([1, 5, 6, 124, 125, 600, 719, 720].map((s) => probesBy(s * 1000, SETTINGS)), [0, 1, 1, 5, 6, 22, 22, 23], 'the probes a view counts by the time elapsed')
+})
+
+test('outage: past 10 minutes it pauses, never failing a caller, probes every 2 minutes, and resume() probes at once', async () => {
+  const clock = fakeClock()
+  let down = true
+  const probes = []
+  const events = []
+  const outage = orcaOutage({ clock, limits: SETTINGS, probe: async () => { probes.push(clock.now()); if (down) throw RUNTIME_GONE }, on: (e) => events.push(e) })
+  clock.at(15 * MIN, () => { down = false })
+  assert.equal(await outage.guard(async () => { if (down) throw RUNTIME_GONE; return 'ok' }), 'ok')
+  assert.deepEqual(events.map((e) => [e.phase, e.since]), [['start', 0], ['paused', 0], ['end', 0]])
+  assert.equal(events[1].at, 10 * MIN, 'paused at the probe at 10 minutes')
+  assert.deepEqual(probes.filter((t) => t >= 10 * MIN), [10, 12, 14, 16].map((m) => m * MIN))
+
+  // resume(): a probe at once, whatever the schedule. Orca still gone: paused still.
+  const again = fakeClock()
+  let gone = true
+  const at = []
+  const answers = []
+  const second = orcaOutage({
+    clock: again, limits: SETTINGS, probe: async () => { at.push(again.now()); if (gone) throw CLI_GONE },
+    on: (e) => {
+      if (e.phase !== 'paused') return
+      answers.push(second.resume().then(async (r) => {
+        assert.equal(second.state().phase, 'paused')
+        gone = false
+        return [r, await second.resume()]
+      }))
+    },
+  })
+  assert.equal(await second.guard(async () => { if (gone) throw CLI_GONE; return 'ok' }), 'ok')
+  assert.deepEqual((await Promise.all(answers)).flat().map((r) => r.back), [false, true])
+  assert.deepEqual(at.slice(-3), [10 * MIN, 10 * MIN, 10 * MIN], 'two probes at once, beside the scheduled one')
+  assert.equal(second.state(), null)
+  assert.deepEqual(await second.resume(), { back: true, outage: false }, 'nothing to resume with Orca there')
+})
+
+// A clock whose sleeps end only when the test moves it on.
+function manualClock() {
+  const sleepers = []
+  const wait = (ms) => {
+    const s = { due: c.t + ms }
+    s.promise = new Promise((r) => { s.r = r })
+    sleepers.push(s)
+    return s
+  }
+  const c = {
+    t: 0,
+    now: () => c.t,
+    sleep: (ms) => wait(ms).promise,
+    timer: (ms) => {
+      const s = wait(ms)
+      return { promise: s.promise, cancel: () => { if (sleepers.includes(s)) sleepers.splice(sleepers.indexOf(s), 1) } }
+    },
+    async to(t) {
+      c.t = t
+      for (const s of sleepers.filter((x) => x.due <= t)) {
+        sleepers.splice(sleepers.indexOf(s), 1)
+        s.r()
+      }
+      await turns(10)
+    },
+  }
+  return c
+}
+
+test("outage: a retry's backoff counts only the time Orca was there", async () => {
+  const clock = manualClock()
+  let down = false
+  const outage = orcaOutage({ clock, limits: SETTINGS, probe: async () => { if (down) throw CLI_GONE } })
+  let woke = null
+  outage.sleep(30_000).then(() => { woke = clock.now() })
+  await clock.to(10_000)
+  down = true
+  const call = outage.guard(async () => { if (down) throw CLI_GONE })
+  await clock.to(15_000)
+  down = false
+  await clock.to(25_000)
+  await call
+  await clock.to(30_000)
+  assert.equal(woke, null, '15 of those 30 seconds Orca was gone')
+  await clock.to(45_000)
+  assert.equal(woke, 45_000)
+})
+
+test('outage: the adapter waits it out call by call, so a start Orca drops out of half way goes on from the call that found it gone, and makes no second worktree', async () => {
+  const clock = fakeClock()
+  const down = () => clock.now() < 40_000
+  const { argvs, orca } = childCli({
+    'terminal create': () => { if (down()) throw CLI_GONE; return { terminal: { handle: 'term_own' } } },
+    'terminal list': () => { if (down()) throw SPAWN_GONE; return { terminals: [] } },
+  }, { clock })
+  orca.guardWith(orcaOutage({ clock, limits: SETTINGS, probe: () => orca.probe() }))
+  const w = await orca.workerStart({ ...START, child: CHILD })
+  assert.deepEqual([w.worktree, w.terminal], [CHILD_PATH, 'term_own'])
+  assert.deepEqual(verbsOf(argvs), ['worktree create', 'terminal close', 'worktree set', 'terminal create', 'terminal list', 'terminal list', 'terminal list', 'terminal list', 'terminal create', 'terminal wait', 'orchestration worker-start'])
+  assert.equal(clock.now(), 65_000)
+})
+
+// A run on the fake clock with its own registry, `down(orca, clock, { control,
+// registry })` taking Orca away and bringing it back; `control` is what the
+// entry point hands the attached view's R to.
+async function outageRun(worker, { script = ONE, settings = {}, down = () => {} } = {}) {
+  const clock = fakeClock()
+  const lines = []
+  const stateDir = tmp()
+  const registry = registryIn()
+  const control = {}
+  const orca = fakeOrca({ worker: (w) => worker({ ...w, clock }), clock })
+  down(orca, clock, { control, registry })
+  const result = await runScript(script, { orca, stateDir, out: (s) => lines.push(s), clock, settings: { ...NO_DOCTOR, ...settings }, transcripts: fakeTranscripts(orca), registry, project: 'C:/repo', control })
+  const of = (verb) => orca.calls.filter((c) => c.verb === verb)
+  return { result, lines, orca, clock, registry, stateDir, journal: journalOf(stateDir), nudges: of('terminalSend'), stops: of('workerStop'), probes: of('probe') }
+}
+const submitsAt = (ms) => ({ clock, ...w }) => { clock.at(ms, () => submitGood(w)) }
+const phasesOf = (journal) => ofType(journal, 'outage').map((e) => e.phase)
+
+test('outage: a worker Orca cannot be seen for two minutes is waited on, never failed: no watch error is spent, and the journal and log name the outage', async () => {
+  const r = await outageRun(submitsAt(5 * MIN), { down: (orca, clock) => {
+    clock.at(MIN, () => orca.down(CLI_GONE))
+    clock.at(3 * MIN, () => orca.up())
+  } })
+  assert.deepEqual(r.result, GOOD)
+  assert.deepEqual(r.stops, [], 'no worker is stopped')
+  assert.deepEqual(ofType(r.journal, 'failed'), [])
+  assert.ok(!r.lines.some((l) => /could not look at its worker/.test(l)), r.lines.join('\n'))
+  assertEntries(r.journal)
+  assert.deepEqual(phasesOf(r.journal), ['start', 'end'])
+  const [start, end] = ofType(r.journal, 'outage')
+  assert.deepEqual([start.at, start.since, end.at, end.since, end.ms], [isoAt(MIN), isoAt(MIN), isoAt(MIN + 125_000), isoAt(MIN), 125_000])
+  assert.ok(r.lines.some((l) => /^!! Orca unreachable \(.*Unable to start the Orca CLI.*\): every Orca call waits for it/.test(l)), r.lines.join('\n'))
+  assert.ok(r.lines.includes('>> Orca is back after 2.1 min: the run carries on'), r.lines.join('\n'))
+})
+
+test("outage: the runner's clocks stop for its length, so an outage longer than the stuck limit nudges nobody", async () => {
+  const settings = { stuckNudgeMs: 5 * MIN, stuckContinueMs: 10 * MIN }
+  const r = await outageRun(submitsAt(9 * MIN), { settings, down: (orca, clock) => {
+    clock.at(MIN, () => orca.down(SPAWN_GONE))
+    clock.at(7 * MIN, () => orca.up())
+  } })
+  assert.deepEqual(r.result, GOOD)
+  assert.deepEqual(r.nudges, [], 'watched for 3 minutes of Orca being there, under the 5 it takes')
+  assert.deepEqual(phasesOf(r.journal), ['start', 'end'])
+  // The same worker with Orca there throughout is nudged at 5 minutes.
+  const there = await outageRun(submitsAt(9 * MIN), { settings })
+  assert.equal(there.nudges.length, 1)
+})
+
+test('outage: a start and the Run it needs wait out an Orca gone from the first call, spending no attempt', async () => {
+  const r = await outageRun(submitsAt(5 * MIN), { script: oneOn('claude', ", isolation: 'worktree'"), down: (orca, clock) => {
+    orca.down(RUNTIME_GONE)
+    clock.at(40_000, () => orca.up())
+  } })
+  assert.deepEqual(r.result, GOOD)
+  assert.deepEqual(ofType(r.journal, 'retry'), [])
+  assert.deepEqual(phasesOf(r.journal), ['start', 'end'])
+  assert.deepEqual(r.probes.map((p) => p.at), [5_000, 15_000, 35_000, 65_000])
+  assert.equal(r.orca.calls.filter((c) => c.verb === 'worktreeCreate').length, 1)
+})
+
+test('outage: past 10 minutes the run pauses — journaled, logged, recorded in the registry — fails no agent, and carries on by itself once Orca is back', async () => {
+  let mid = null
+  const r = await outageRun(submitsAt(20 * MIN), { down: (orca, clock, { registry }) => {
+    clock.at(MIN, () => orca.down(RUNTIME_GONE))
+    clock.at(12 * MIN, () => { mid = readRegistry(registry).at(0)?.paused ?? 'none' })
+    clock.at(15 * MIN, () => orca.up())
+  } })
+  assert.deepEqual(r.result, GOOD)
+  assert.deepEqual(r.stops, [])
+  assert.deepEqual(ofType(r.journal, 'failed'), [])
+  assertEntries(r.journal)
+  assert.deepEqual(phasesOf(r.journal), ['start', 'paused', 'end'])
+  const [, paused, end] = ofType(r.journal, 'outage')
+  assert.deepEqual([paused.at, paused.since, end.at], [isoAt(11 * MIN), isoAt(MIN), isoAt(15 * MIN)])
+  assert.ok(r.lines.some((l) => l.endsWith(PAUSED_SAID)), r.lines.join('\n'))
+  assert.deepEqual(mid, { reason: 'orca outage', at: isoAt(11 * MIN) })
+  assert.equal(readRegistry(r.registry)[0].paused, null, 'unpaused once Orca is back')
+  assert.deepEqual(r.probes.map((p) => p.at).filter((t) => t > 11 * MIN), [13, 15].map((m) => m * MIN))
+})
+
+test('outage: R while the run is paused probes at once: with Orca still gone the run stays paused and says so; with it back the run carries on in the same process', async () => {
+  const said = []
+  const r = await outageRun(submitsAt(20 * MIN), { down: (orca, clock, { control }) => {
+    clock.at(MIN, () => orca.down(RUNTIME_GONE))
+    clock.at(12 * MIN, async () => {
+      said.push(await control.resumeOrca())
+      orca.up()
+      said.push(await control.resumeOrca())
+    })
+  } })
+  assert.deepEqual(r.result, GOOD)
+  assert.deepEqual(said.map((x) => x.back), [false, true])
+  assert.deepEqual(phasesOf(r.journal), ['start', 'paused', 'end'])
+  assert.equal(ofType(r.journal, 'outage')[2].at, isoAt(13 * MIN))
+  assert.ok(r.lines.includes('!! Orca is still unreachable: the run stays paused, and probes it again every 2 min'), r.lines.join('\n'))
+  assert.equal(readRegistry(r.registry)[0].paused, null)
+})
+
+test("journal: the fold names the run's outage: none, waiting since its start, paused since its start, and none once it ends", () => {
+  const o = (phase, min, more = {}) => ({ type: 'outage', at: at(min), phase, since: at(1), ...more })
+  assert.equal(foldJournal([]).outage, null)
+  assert.deepEqual(foldJournal([o('start', 1)]).outage, { phase: 'waiting', since: at(1) })
+  assert.deepEqual(foldJournal([o('start', 1), o('paused', 11)]).outage, { phase: 'paused', since: at(1) })
+  assert.equal(foldJournal([o('start', 1), o('paused', 11), o('end', 15, { ms: 14 * MIN })]).outage, null)
+})
+
+test('run view: R in the attached view reaches the runner, which probes Orca at once', async () => {
+  const clock = fakeClock()
+  const views = fakeViews(clock)
+  const asked = []
+  const view = attachView({ spawnView: views.spawn, tab: () => {}, log: () => {}, clock, resume: () => asked.push('resume') })
+  view.start()
+  views.last().emit('message', { type: 'resume' })
+  await turns()
+  assert.deepEqual(asked, ['resume'])
+})
+
+test('run view: while Orca is out the header says so and every agent keeps its state; Enter, l and r say Orca is unreachable and ask Orca nothing; R asks the runner to probe', async () => {
+  const clock = fakeClock()
+  clock.t = 3 * MIN
+  const orca = fakeOrca({ worker: () => new Promise(() => {}), clock })
+  await orca.workerStart({ run: 'run_fake1', prompt: 'p', title: 't1', sessionId: SID })
+  const stateDir = tmp()
+  const put = (entries) => writeFileSync(join(stateDir, 'journal.jsonl'), entries.map((e) => JSON.stringify(e) + '\n').join(''))
+  const journal = [startedJ(1, '[Implement] impl:a', 0, 'claude', 'sid-1'), { type: 'outage', at: at(1), phase: 'start', since: at(1) }]
+  put(journal)
+  writeFileSync(join(stateDir, 'runner.log'), '')
+  const asked = []
+  const view = runView({ stateDir, orca, clock, registry: null, transcripts: { usage: () => null }, alive: () => true, resumeOrca: () => asked.push(clock.now()) })
+  await view.refresh()
+  assert.deepEqual(view.model.header.outage, { phase: 'waiting', since: at(1), elapsedMs: 2 * MIN, probes: 5 })
+  assert.equal(view.model.phases[0].agents[0].state, 'running')
+  const header = () => draw(view.model, { width: 140, height: 30 }).lines.map(strip)[1]
+  assert.match(header(), /^ ⚠ Orca unreachable — waiting 2m00s \(probe 5\)/)
+  await view.key('DOWN')
+  assert.equal(view.model.pane.kind, 'agent')
+  const before = orca.calls.length
+  for (const k of ['ENTER', 'l', 'r']) {
+    assert.deepEqual(await view.key(k), { message: GONE_SAID }, k)
+    assert.equal(view.model.dialog, null)
+  }
+  assert.equal(orca.calls.length, before, 'Orca is asked nothing')
+
+  put([...journal, { type: 'outage', at: at(11), phase: 'paused', since: at(1) }])
+  clock.t = 12 * MIN
+  await view.refresh()
+  assert.equal(view.model.header.outage.phase, 'paused')
+  assert.match(header(), /^ ⏸ paused: Orca outage past 10m — R to resume/)
+  assert.equal(view.model.phases[0].agents[0].state, 'running')
+  assert.match((await view.key('R')).message, /asked the runner to probe Orca now/)
+  assert.deepEqual(asked, [12 * MIN])
+
+  put([...journal, { type: 'outage', at: at(13), phase: 'end', since: at(1), ms: 12 * MIN }])
+  await view.refresh()
+  assert.equal(view.model.header.outage, null)
+  assert.doesNotMatch(header(), /Orca/)
+  assert.match((await view.key('R')).message, /Orca is there/)
+  assert.deepEqual(asked, [12 * MIN], 'no probe asked with Orca there')
+  // Found gone by the view's own call, before the journal says so.
+  orca.down(SPAWN_GONE)
+  assert.deepEqual(await view.key('ENTER'), { message: GONE_SAID })
+})
+
+test('standalone: a run paused on an Orca outage is listed paused (Orca outage), not running, until Orca is back; an action that finds Orca gone says so and does nothing', async () => {
+  const clock = fakeClock()
+  clock.t = RUNS_AT
+  const registry = registryIn()
+  const w = runRegistry(registry, clock)
+  const dir = tmp()
+  w.armed({ runId: 'run_p', project: PROJECT, runDir: join(dir, 'p'), spec: 'implement-spec-801' })
+  w.runner({ runId: 'run_p', terminal: 'term_p' })
+  w.armed({ runId: 'run_d', project: PROJECT, runDir: join(dir, 'd'), spec: 'implement-spec-802' })
+  w.runner({ runId: 'run_d', terminal: 'term_d' })
+  w.paused({ runId: 'run_p', reason: 'orca outage' })
+  assert.deepEqual(readRegistry(registry).map((r) => r.paused), [{ reason: 'orca outage', at: isoAt(RUNS_AT) }, null])
+  const orca = fakeOrca({ clock, runWorktree: PROJECT })
+  const runs = runsView({ orca, clock, registry, transcripts: { usage: () => null }, alive: (d) => d === join(dir, 'p') })
+  await runs.refresh()
+  const lineOf = (id) => screenOf(runs.model).find((l) => l.includes(id))
+  assert.match(lineOf('run_p'), /run_p +#801 +paused \(Orca outage\) +● alive/)
+  assert.match(lineOf('run_d'), /run_d +#802 +unfinished +○ dead/)
+  orca.down(SPAWN_GONE)
+  assert.deepEqual(await runs.resume('run_d'), { message: GONE_SAID })
+  assert.deepEqual(orca.calls.filter((c) => c.verb === 'resumeRunner'), [])
+  orca.up()
+  w.unpaused({ runId: 'run_p' })
+  await runs.refresh()
+  assert.match(lineOf('run_p'), /run_p +#801 +running/)
+  // A new runner on the run, or its end, is no pause either.
+  for (const next of [() => w.runner({ runId: 'run_p', terminal: 'term_p2' }), () => w.ended({ runId: 'run_p', outcome: 'ok' })]) {
+    w.paused({ runId: 'run_p', reason: 'orca outage' })
+    next()
+    assert.equal(readRegistry(registry)[0].paused, null)
+  }
+})
+
+// --- a worker's prompt reaching its session ----------------------------------
+
+// A value that must never leave the operator's settings file: in a log line,
+// a warning, or the worktree's copy.
+const SECRET = 'sk-never-print-me'
+
+// fs as mcp-answers.mjs uses it, in memory, keyed by forward-slash path.
+function memFs(files = {}) {
+  const key = (p) => String(p).replace(/\\/g, '/')
+  const m = new Map(Object.entries(files).map(([k, v]) => [key(k), v]))
+  return {
+    files: m,
+    existsSync: (p) => m.has(key(p)),
+    readFileSync: (p) => {
+      if (!m.has(key(p))) throw new Error(`ENOENT: ${p}`)
+      return m.get(key(p))
+    },
+    writeFileSync: (p, text) => m.set(key(p), String(text)),
+    mkdirSync: () => {},
+  }
+}
+
+test("mcp answers: the source's answers replace the worktree's, every other key is kept, and a server they leave unanswered is disabled", () => {
+  const target = { permissions: { allow: ['Bash(ls)'] }, enabledMcpjsonServers: ['old'] }
+  const m = mergeMcpAnswers({ source: { enabledMcpjsonServers: ['docs'], disabledMcpjsonServers: ['db'], env: { TOKEN: SECRET } }, target, servers: ['docs', 'db', 'slint'] })
+  assert.deepEqual(m.settings, { permissions: { allow: ['Bash(ls)'] }, enabledMcpjsonServers: ['docs'], disabledMcpjsonServers: ['db', 'slint'] })
+  assert.deepEqual([m.changed, m.added], [true, ['slint']])
+  assert.equal(JSON.stringify(m.settings).includes(SECRET), false, 'only the three MCP keys are copied')
+
+  const all = mergeMcpAnswers({ source: { enableAllProjectMcpServers: true }, servers: ['docs', 'slint'] })
+  assert.deepEqual([all.settings, all.added], [{ enableAllProjectMcpServers: true }, []])
+  const none = mergeMcpAnswers({ source: {}, servers: ['slint'] })
+  assert.deepEqual(none.settings, { disabledMcpjsonServers: ['slint'] }, 'no answer at all: never turned on')
+  const same = mergeMcpAnswers({ source: { disabledMcpjsonServers: ['slint'] }, target: { disabledMcpjsonServers: ['slint'], x: 1 }, servers: ['slint'] })
+  assert.equal(same.changed, false)
+})
+
+test("mcp answers: copied into a worktree's .claude/settings.local.json only when its .mcp.json names a server, with a missing source file answering nothing", () => {
+  const project = tmp()
+  const wt = tmp()
+  const local = join(wt, '.claude', 'settings.local.json')
+  assert.deepEqual(copyMcpAnswers({ project, worktree: wt }), { written: false, added: [] })
+  assert.equal(existsSync(join(wt, '.claude')), false, 'no .mcp.json: nothing written')
+
+  writeFileSync(join(wt, '.mcp.json'), JSON.stringify({ mcpServers: { slint: { command: 'slint-lsp' } } }))
+  assert.deepEqual(copyMcpAnswers({ project, worktree: wt }), { written: true, added: ['slint'] })
+  assert.equal(readFileSync(local, 'utf8'), '{\n  "disabledMcpjsonServers": [\n    "slint"\n  ]\n}\n')
+  assert.deepEqual(copyMcpAnswers({ project, worktree: wt }), { written: false, added: [] }, 'already answered: not rewritten')
+
+  mkdirSync(join(project, '.claude'))
+  writeFileSync(join(project, '.claude', 'settings.local.json'), JSON.stringify({ env: { TOKEN: SECRET }, enabledMcpjsonServers: ['slint'] }))
+  writeFileSync(local, JSON.stringify({ permissions: { deny: ['x'] }, disabledMcpjsonServers: ['slint'] }))
+  assert.deepEqual(copyMcpAnswers({ project, worktree: wt }), { written: true, added: [] })
+  assert.deepEqual(JSON.parse(readFileSync(local, 'utf8')), { permissions: { deny: ['x'] }, disabledMcpjsonServers: ['slint'], enabledMcpjsonServers: ['slint'] })
+  assert.equal(readFileSync(local, 'utf8').includes(SECRET), false)
+})
+
+test("mcp answers: a source that is not JSON fails naming its path, never quoting what it holds", () => {
+  const project = tmp()
+  const wt = tmp()
+  mkdirSync(join(project, '.claude'))
+  writeFileSync(join(project, '.claude', 'settings.local.json'), `{ "env": { "TOKEN": "${SECRET}" }, oops`)
+  writeFileSync(join(wt, '.mcp.json'), JSON.stringify({ mcpServers: { slint: {} } }))
+  const e = (() => {
+    try {
+      copyMcpAnswers({ project, worktree: wt })
+    } catch (x) {
+      return x
+    }
+  })()
+  assert.match(e.message, /the project's .*settings\.local\.json is not valid JSON/)
+  assert.equal(e.message.includes(SECRET), false)
+})
+
+test("orca-cli: a child it creates gets the project's MCP answers before its baseline is taken; a failure to copy them is a warning, and the start goes on", async () => {
+  const LOCAL = `${CHILD_PATH}/.claude/settings.local.json`
+  const files = {
+    'C:/proj/.claude/settings.local.json': JSON.stringify({ env: { TOKEN: SECRET }, enabledMcpjsonServers: ['docs'] }),
+    [`${CHILD_PATH}/.mcp.json`]: JSON.stringify({ mcpServers: { docs: {}, slint: {} } }),
+    [LOCAL]: JSON.stringify({ permissions: { allow: ['y'] } }),
+  }
+  const fs = memFs(files)
+  let atBaseline = null
+  const git = async (cwd, args) => {
+    if (args[0] === 'status') atBaseline = fs.files.get(LOCAL)
+    return args[0] === 'status' ? ' M .claude/settings.local.json\n' : ''
+  }
+  const baselines = []
+  const { argvs, orca } = childCli({}, { git, project: 'C:/proj', fs })
+  const w = await orca.workerStart({ ...START, child: { ...CHILD, onBaseline: (b) => baselines.push(b.lines) } })
+  assert.deepEqual(JSON.parse(atBaseline), { permissions: { allow: ['y'] }, enabledMcpjsonServers: ['docs'], disabledMcpjsonServers: ['slint'] })
+  assert.deepEqual(baselines, [[' M .claude/settings.local.json']], 'the answers are part of the baseline')
+  assert.deepEqual(w.warnings, ['the project has no answer for MCP server(s) slint of .mcp.json, so its worktree disables them'])
+  assert.deepEqual(verbsOf(argvs), ['worktree create', 'terminal close', 'worktree set', 'terminal create', 'terminal wait', 'orchestration worker-start'])
+
+  const bad = memFs({ ...files, 'C:/proj/.claude/settings.local.json': `{"env":{"TOKEN":"${SECRET}"},` })
+  const b = childCli({}, { project: 'C:/proj', fs: bad })
+  const w2 = await b.orca.workerStart({ ...START, child: CHILD })
+  assert.equal(w2.worktree, CHILD_PATH)
+  assert.equal(w2.warnings.length, 1)
+  assert.match(w2.warnings[0], /^could not copy the project's MCP server answers into its worktree: the project's .* is not valid JSON$/)
+  assert.equal(w2.warnings[0].includes(SECRET), false)
+  assert.equal(bad.files.get(LOCAL), files[LOCAL], 'the worktree file is left as it was')
+})
+
+test("orca-cli: the delivery check's keys are a bare Enter, one Ctrl-U per line and never an interrupt, and the rendered screen's last lines", async () => {
+  const rows = Array.from({ length: 20 }, (_, i) => `row ${i}  `)
+  const asked = []
+  const { argvs, orca } = recordingCli({ 'terminal read': { terminal: { tail: rows } } }, { transcripts: { delivered: (q) => (asked.push(q), q.needle === 'Do a thing.') } })
+  await orca.terminalEnter({ terminal: 'term_1' })
+  await orca.terminalClearInput({ terminal: 'term_1', lines: 3 })
+  const screen = await orca.terminalScreen({ terminal: 'term_1', lines: 15 })
+  assert.deepEqual(argvs, [
+    ['terminal', 'send', '--terminal', 'term_1', '--enter'],
+    ['terminal', 'send', '--terminal', 'term_1', '--text', '\x15\x15\x15'],
+    ['terminal', 'read', '--terminal', 'term_1', '--screen'],
+  ])
+  assert.deepEqual(screen, rows.slice(5).map((r) => r.trimEnd()))
+  const q = { harness: 'claude', sessionId: SID, worktree: 'C:/wt', needle: 'Do a thing.' }
+  assert.equal(await orca.promptDelivered(q), true)
+  assert.equal(await orca.promptDelivered({ ...q, needle: 'other' }), false)
+  assert.deepEqual(asked[0], q)
+})
+
+test("transcripts: a prompt is delivered once a user message of the session carries it, whitespace collapsed; a meta line, a subagent's, or a tool result is none", () => {
+  const line = (e) => JSON.stringify(e)
+  const text = [
+    line({ type: 'user', isMeta: true, message: { role: 'user', content: 'Do a thing.' } }),
+    line({ type: 'user', isSidechain: true, message: { role: 'user', content: 'Do a thing.' } }),
+    line({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: 'Do a thing.' }] } }),
+  ].join('\n')
+  assert.equal(promptDelivered(text, 'Do a thing.'), false)
+  assert.equal(promptDelivered(`${text}\n${line({ type: 'user', message: { role: 'user', content: 'Orca preamble…\n\nDo  a\r\nthing. More.' } })}`, 'Do a thing.'), true)
+  assert.equal(promptDelivered(line({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'Do a thing.' }] } }), 'Do a thing.'), true)
+  assert.equal(promptDelivered(`not json\n${text}`, ''), false)
+
+  const home = tmp()
+  const wt = join(home, 'wt')
+  const t = sessionTranscripts({ home, env: {} })
+  const q = { harness: 'claude', sessionId: SID, worktree: wt, needle: 'Do a thing.' }
+  assert.equal(t.delivered(q), false, 'no transcript yet')
+  const dir = join(home, '.claude', 'projects', claudeSlug(wt))
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, `${SID}.jsonl`), `${line({ type: 'user', message: { role: 'user', content: 'Do a thing.' } })}\n`)
+  assert.equal(t.delivered(q), true)
+})
+
+const PROMPT_MS = RUNNER_SETTINGS.promptDeliveryMs
+const lossOnFirst = (how) => ({ count }) => (count === 1 ? how : null)
+const callsOf = (r, verb) => r.orca.calls.filter((c) => c.verb === verb)
+
+test('prompt delivery: a prompt a launch dialog left unsent is sent with an Enter, and the worker carries on', async () => {
+  const r = await runOne(submitGood, { promptLoss: lossOnFirst('dialog'), settings: NO_DOCTOR })
+  assert.deepEqual(r.result, GOOD)
+  const [enter] = callsOf(r, 'terminalEnter')
+  assert.equal(callsOf(r, 'terminalEnter').length, 1)
+  assert.equal(enter.at - r.start.at, PROMPT_MS, 'pressed once the prompt has been missing for promptDeliveryMs')
+  assert.deepEqual([callsOf(r, 'terminalClearInput').length, r.nudges.length, ofType(r.journal, 'retry').length], [0, 0, 0])
+  assert.ok(r.lines.some((l) => l === `!! [P] one: its prompt is not in its session 20s after worker-start; pressing Enter in its terminal term_fake1`), r.lines.join('\n'))
+  assert.ok(r.lines.includes('>> [P] one: its prompt reached its session after the Enter'), r.lines.join('\n'))
+})
+
+test('prompt delivery: a prompt lost altogether is typed again, after its input is emptied, with the IDs its preamble carried', async () => {
+  const r = await runOne(submitGood, { promptLoss: lossOnFirst('lost'), settings: NO_DOCTOR })
+  assert.deepEqual(r.result, GOOD)
+  const d = [...r.orca.dispatches.values()][0]
+  const steps = r.orca.calls.filter((c) => ['terminalEnter', 'terminalClearInput', 'terminalSend'].includes(c.verb))
+  assert.deepEqual(steps.map((c) => c.verb), ['terminalEnter', 'terminalClearInput', 'terminalSend'])
+  const [, clear, resend] = steps
+  assert.equal(resend.at - r.start.at, 2 * PROMPT_MS)
+  assert.ok(resend.text.endsWith(`---\n${d.prompt}`), 'the whole prompt worker-start sent')
+  for (const id of [`worker handle ${d.handle}`, `task id ${d.taskId}`, `dispatch id ${d.dispatchId}`, 'Leave out --dispatch-capability']) assert.ok(resend.text.includes(id), id)
+  assert.ok(clear.lines > resend.text.split('\n').length, 'a Ctrl-U for every line the input may hold, Orca preamble included')
+  assert.ok(r.lines.includes('>> [P] one: its prompt reached its session when typed again'), r.lines.join('\n'))
+  assert.deepEqual(ofType(r.journal, 'nudge'), [], 'typing it again is no nudge')
+})
+
+test("prompt delivery: a prompt that never arrives fails the start with its terminal's last lines, stops its worker and closes its tab; the retry takes the same worktree up", async () => {
+  const r = await runOne(submitGood, { script: ISOLATED, promptLoss: lossOnFirst('never'), settings: NO_DOCTOR })
+  assert.deepEqual(r.result, GOOD)
+  const [retry] = ofType(r.journal, 'retry')
+  assert.equal(ofType(r.journal, 'retry').length, 1)
+  assert.match(retry.reason, /^its worker did not start: its prompt never reached its session, after an Enter and a second typing; its terminal's last lines:\nNew MCP server found in this project: slint\n/)
+  assert.deepEqual(callsOf(r, 'workerStop').map((c) => c.dispatchId), ['ctx_fake1'])
+  assert.deepEqual(callsOf(r, 'terminalClose').map((c) => c.terminal), ['term_fake1'])
+  assert.deepEqual(callsOf(r, 'terminalScreen').map((c) => [c.dispatchId, c.lines]), [['ctx_fake1', 15]])
+  assert.equal(callsOf(r, 'worktreeCreate').length, 1)
+  assert.deepEqual(callsOf(r, 'worktreeReuse').map((c) => c.worktree), [callsOf(r, 'worktreeCreate')[0].worktree])
+  assert.deepEqual(ofType(r.journal, 'started').map((e) => e.dispatchId), ['ctx_fake2'])
+})
+
+test('prompt delivery: a prompt that never arrives on any attempt fails the call with the last attempt\'s screen', async () => {
+  const r = await runOne(submitGood, { promptLoss: () => 'never', settings: NO_DOCTOR })
+  assert.equal(r.result, null)
+  const [failed] = ofType(r.journal, 'failed')
+  assert.equal(failed.attempts, ATTEMPTS)
+  assert.match(failed.reason, /its prompt never reached its session.*\nEnter to confirm · Esc to cancel$/s)
+  assert.equal(callsOf(r, 'workerStop').length, ATTEMPTS)
+})
+
+test('prompt delivery: a pi worker is not checked, since pi writes no transcript before its first reply', async () => {
+  const r = await runOne(submitGood, { script: oneOn('pi'), promptLoss: lossOnFirst('lost'), settings: NO_DOCTOR })
+  assert.deepEqual(r.result, GOOD, 'its nudge delivered it')
+  assert.deepEqual([callsOf(r, 'terminalEnter').length, callsOf(r, 'terminalClearInput').length], [0, 0])
+})
+
+test('prompts: every worker, and every doctor, is told never to run orchestration ask', () => {
+  const p = workerPrompt('Do a thing.', { schemaPath: 's.json', resultPath: 'r.json', payloadPath: 'p.json' })
+  assert.ok(p.includes(NO_ASK))
+  assert.match(NO_ASK, /^Never run `orca orchestration ask`, and never wait on a reply from anyone/)
+  assert.match(NO_ASK, /`decisions_needed`.*then submit\.$/)
+  const d = doctorPrompt({ patient: { title: 't', prompt: 'p' }, reason: 'r', round: 1, rounds: 3, transcript: 'x', worktree: null, entries: [], log: [] })
+  assert.match(d, /Never run `orca orchestration ask`: nobody answers it\. A question only a human can answer goes in your escalation or your note/)
+})
+
+// --- the run view's phase order, name column, and stuck clearing ------------
+
+test('journal: the Run line names the phases the script declares, in its order, and a resume carries them forward', async () => {
+  const stateDir = tmp()
+  const meta = `export const meta = { name: 'x', phases: [{ title: 'Plan', detail: 'p' }, { title: 'Chain', detail: 'c' }] }\n`
+  const script = meta + chain('Build it.')
+  await runScript(script, { orca: answering(1), stateDir, out: () => {}, settings: FAST })
+  assert.deepEqual(ofType(journalOf(stateDir), 'run').map((e) => e.phases), [['Plan', 'Chain']])
+  assert.deepEqual(readJournal(join(stateDir, 'journal.jsonl')).phases, ['Plan', 'Chain'])
+  // Unchanged, it replays every call and takes no Run over: the carried line
+  // alone names them.
+  await runScript(script, { orca: answering(2), stateDir, out: () => {}, settings: FAST, resume: true })
+  const [carried] = ofType(journalOf(stateDir), 'run')
+  assert.deepEqual([carried.phases, carried.lastN], [['Plan', 'Chain'], 3])
+  assert.deepEqual(readJournal(join(stateDir, 'journal.jsonl')).phases, ['Plan', 'Chain'])
+  // A script that declares none names none.
+  const bare = tmp()
+  await runScript(chain('Build it.'), { orca: answering(1), stateDir: bare, out: () => {}, settings: FAST })
+  assert.equal(ofType(journalOf(bare), 'run')[0].phases, undefined)
+  assert.equal(readJournal(join(bare, 'journal.jsonl')).phases, null)
+})
+
+viewTest('run view: phases stand in the order the script declares them, however a resume\'s lines come; one it does not declare follows them, and rows go by call order', async (mode) => {
+  const orca = fakeOrca({ worker: () => new Promise(() => {}), clock: fakeClock() })
+  const stateDir = tmp()
+  const earlierJ = (n, title, state) => ({ type: 'earlier', at: at(0), n, title, run: 'run_fake1', dispatchId: `ctx_fake${n}`, harness: 'claude', sessionId: `sid-${n}`, terminal: `term_fake${n}`, worktree: wt(n), origin: n, state, reason: null })
+  // As a resume writes it: the carried Run, the mail and the earlier agents
+  // first, the replayed Graph call only once the script reaches it again.
+  const put = (...entries) => appendFileSync(join(stateDir, 'journal.jsonl'), entries.map((e) => JSON.stringify(e) + '\n').join(''))
+  put(
+    { type: 'run', at: at(0), runId: 'run_fake1', terminal: 'term_runner', lastN: 6, phases: ['Graph', 'Explore', 'Implement', 'Review'] },
+    { type: 'mail', at: at(0), messageId: 'msg_1', kind: 'worker_done', action: 'none' },
+    earlierJ(5, '[Review] review', 'done'),
+    earlierJ(4, '[Implement] impl:b', 'done'),
+    earlierJ(3, '[Implement] impl:a', 'failed'),
+    earlierJ(2, '[Odd] odd', 'done'),
+    J('result', 7, '[Graph] graph', 1, { result: GOOD, replayed: true, origin: 1 }),
+  )
+  const registry = registryIn()
+  runRegistry(registry, { now: () => 0 }).armed({ runId: 'run_fake1', project: 'C:/repos/x', runDir: stateDir, spec: 'implement-spec-1' })
+  const view = await treeIn(mode, { stateDir, orca, clock: fakeClock(), transcripts: { usage: () => null }, registry, alive: () => false })
+  assert.deepEqual(view.model.phases.map((p) => p.name), ['Graph', 'Implement', 'Review', 'Odd'])
+  assert.deepEqual(view.model.phases.find((p) => p.name === 'Implement').agents.map((a) => a.n), [3, 4])
+})
+
+test('run view: with no phases journaled, phases stand in the order their agents were called', async () => {
+  const stateDir = tmp()
+  writeFileSync(join(stateDir, 'journal.jsonl'), [J('result', 2, '[B] b', 0, { result: GOOD }), J('result', 1, '[A] a', 1, { result: GOOD })].map((e) => JSON.stringify(e)).join('\n'))
+  const view = runView({ stateDir, orca: fakeOrca(), clock: fakeClock(), transcripts: { usage: () => null }, registry: null, alive: () => false })
+  await view.refresh()
+  assert.deepEqual(view.model.phases.map((p) => p.name), ['A', 'B'])
+})
+
+test('run view: a name that overflows scrolls in place of being cut: its start for 3 s, left at 4 characters a second to its end, its end for 5 s, then over again', () => {
+  const at = (ms) => marqueeOffset(ms, 50, 34)
+  // Fits: never scrolls.
+  for (const ms of [0, 3000, 5000, 20_000]) assert.equal(marqueeOffset(ms, 34, 34), 0)
+  assert.equal(marqueeOffset(9000, 10, 34), 0)
+  // 16 characters over: 4 s of scrolling, between a 3 s and a 5 s hold.
+  assert.deepEqual([0, 2999, 3000, 3249, 3250, 4000, 5000, 6999, 7000, 11_999].map(at), [0, 0, 0, 0, 1, 4, 8, 15, 16, 16])
+  assert.deepEqual([12_000, 14_999, 15_250, 19_000, 24_000].map(at), [0, 0, 1, 16, 0])
+  assert.equal(NAME_W, 34)
+})
+
+test('run view: the name column is 34 wide: a name that fits is padded, one that overflows is cut with … on every row but the selected one, which scrolls from its start', async () => {
+  const clock = fakeClock()
+  const stateDir = tmp()
+  const long = 'impl:a-very-long-slice-label-that-goes-on-and-on' // 48 characters
+  writeFileSync(join(stateDir, 'journal.jsonl'), [
+    startedJ(1, `[Implement] ${long}`, 0, 'claude', 'sid-1'),
+    startedJ(2, `[Implement] ${long}-two`, 0, 'claude', 'sid-2'),
+    J('doctor', 1, `[Implement] ${long}`, 1, { origin: 1, round: 1, reason: 'r', doctor: 3 }),
+    { ...startedJ(3, `[Implement] recover -> ${long}`, 1, 'claude', 'sid-3'), key: null },
+    startedJ(4, '[Implement] short', 0, 'claude', 'sid-4'),
+  ].map((e) => JSON.stringify(e)).join('\n'))
+  const view = runView({ stateDir, orca: fakeOrca(), clock, transcripts: { usage: () => null }, registry: null, alive: () => false })
+  await view.refresh()
+  assert.deepEqual(view.model.rows.map((r) => r.key), ['phase:Implement', 'agent:1', 'agent:3', 'agent:2', 'agent:4'])
+  const screen = (now) => draw(view.model, { width: 160, height: 30, now })
+  const nameOf = (s, i) => strip(s.lines[4 + i]).slice(8, 8 + 34)
+  // The phase row is selected: nothing scrolls, and every long name is cut.
+  let s = screen(clock.now())
+  assert.equal(s.scrolling, false)
+  const cut = long.slice(0, 33) + '…'
+  assert.equal(nameOf(s, 1), cut)
+  assert.equal(nameOf(s, 2), '└ recover'.padEnd(34), 'a doctor keeps its └ and names its role')
+  assert.equal(nameOf(s, 4), 'short'.padEnd(34))
+  assert.match(strip(s.lines[4 + 1]), new RegExp(`^ +1 +${cut} ✗ failed`))
+
+  clock.t = 60_000
+  await view.key('DOWN')
+  assert.equal(view.model.selectedAt, 60_000)
+  const selectedName = (now) => nameOf(screen(now), 1)
+  assert.equal(screen(60_000).scrolling, true)
+  assert.equal(selectedName(60_000), long.slice(0, 34), 'its start, uncut')
+  assert.equal(selectedName(62_999), long.slice(0, 34))
+  assert.equal(selectedName(64_000), long.slice(4, 38))
+  assert.equal(selectedName(70_000), long.slice(14), 'its end, held')
+  assert.equal(selectedName(72_000), long.slice(0, 34), 'then its start again')
+  // A refresh keeps its loop going.
+  await view.refresh()
+  assert.equal(view.model.selectedAt, 60_000)
+  // Moving on: the row left is cut again, and the doctor's name fits, so
+  // nothing scrolls.
+  clock.t = 90_000
+  await view.key('DOWN')
+  s = screen(91_000)
+  assert.equal(s.scrolling, false)
+  assert.equal(nameOf(s, 1), cut)
+  // The next long row starts its own loop from its start.
+  clock.t = 100_000
+  await view.key('DOWN')
+  assert.equal(view.model.selectedAt, 100_000)
+  assert.equal(nameOf(screen(101_000), 3), `${long}-two`.slice(0, 34))
+  assert.equal(nameOf(screen(104_000), 3), `${long}-two`.slice(4, 38))
+  assert.equal(nameOf(screen(104_000), 1), cut)
+})
+
+test('journal: moving turns a stuck agent back to running, or continued once it was continued; it changes no other state', () => {
+  const nudge = J('nudge', 1, '[P] one', 20, { dispatchId: 'ctx_fake1', reason: 'no movement', attempt: 1 })
+  const moving = J('moving', 1, '[P] one', 25, { dispatchId: 'ctx_fake1' })
+  const start = startedJ(1, '[P] one', 0, 'claude', 'sid-1')
+  const stateOf = (...entries) => foldJournal(entries).agents[0].state
+  assert.equal(stateOf(start, nudge), 'stuck')
+  assert.equal(stateOf(start, nudge, moving), 'running')
+  assert.equal(foldJournal([start, nudge, moving]).agents[0].reason, null)
+  const cont = J('continued', 1, '[P] one', 10, { dispatchId: 'ctx_fake1', sessionId: 'sid-1', terminal: 'term_fake1', reason: 'it exited', attempt: 1, reopened: false })
+  assert.equal(stateOf(start, cont, nudge, moving), 'continued')
+  const blocked = J('blocked', 1, '[P] one', 21, { dispatchId: 'ctx_fake1', terminal: 'term_fake1', waiting: 'a question' })
+  assert.equal(stateOf(start, nudge, blocked, moving), 'blocked')
+  assert.equal(stateOf(start, moving), 'running')
+})
+
+test('liveness: a nudged worker that moves past its nudge\'s echo is journaled moving once, and is no longer stuck', async () => {
+  const r = await runOne(async (w) => {
+    // The nudge lands in the transcript: that is the nudge, not the worker.
+    w.state.onNudge = () => { w.state.transcript = (w.state.transcript ?? 0) + 120 }
+    w.clock.at(25 * MIN, () => { w.state.transcript = 5_000 })
+    w.clock.at(26 * MIN, () => { w.state.transcript = 6_000 })
+    w.clock.at(30 * MIN, () => submitGood(w))
+  })
+  assert.deepEqual(r.result, GOOD)
+  assertEntries(r.journal)
+  const [nudge] = ofType(r.journal, 'nudge')
+  const moving = ofType(r.journal, 'moving')
+  assert.equal(moving.length, 1, 'once: it was stuck only once')
+  assert.deepEqual([moving[0].key, moving[0].n, moving[0].title, moving[0].dispatchId], [nudge.key, nudge.n, nudge.title, nudge.dispatchId])
+  within(Date.parse(moving[0].at), 25 * MIN, 'moving')
+  const upTo = (e) => foldJournal(r.journal.slice(0, r.journal.indexOf(e) + 1)).agents[0].state
+  assert.equal(upTo(nudge), 'stuck')
+  assert.equal(upTo(moving[0]), 'running')
+})
+
+test('liveness: movement within its nudge\'s echo leaves a nudged worker stuck', async () => {
+  const r = await runOne(async (w) => {
+    w.state.onNudge = () => {
+      w.state.transcript = (w.state.transcript ?? 0) + 120
+      w.clock.at(w.clock.now() + 5_000, () => { w.state.transcript += 40 })
+    }
+    w.clock.at(30 * MIN, () => submitGood(w))
+  })
+  assert.deepEqual(r.result, GOOD)
+  assert.equal(ofType(r.journal, 'nudge').length, 1)
+  assert.deepEqual(ofType(r.journal, 'moving'), [])
+  assert.equal(foldJournal(r.journal.filter((e) => e.type !== 'result')).agents[0].state, 'stuck')
+})
+
+// --- a halted run, and a resume by node (ADR-0016) ---------------------------
+
+// A schema that holds decisions_needed, the convention a result needs the
+// operator by.
+const DSCHEMA = { ...SCHEMA, properties: { ...SCHEMA.properties, decisions_needed: { type: 'array', items: { type: 'string' } } } }
+const ASKS = { ...GOOD, decisions_needed: ['Keep the v1 key, or break it?'] }
+const ANSWERED = { ...GOOD, decisions_needed: [] }
+const nodeCall = (id, more = '') => `agent('Do ${id}.', { label: '${id}', phase: 'P', schema: ${JSON.stringify(DSCHEMA)}, node: 'n/${id}'${more} })`
+const submitsValue = (value) => async ({ prompt, preamble, orca }) => {
+  const argv = submitArgvIn(prompt, preamble)
+  writeFileSync(argv[argv.indexOf('--payload') + 1], JSON.stringify(value))
+  assert.equal((await runSubmit(argv, orca)).code, 0)
+}
+// Dies at once, its dispatch failed; a continuation of its session submits.
+const diesThenSubmitsOnContinue = async ({ state }) => {
+  state.onContinue = submitGood
+  throw new Error('agent died')
+}
+const until = async (pred, what) => {
+  for (let i = 0; i < 2000; i++) {
+    if (pred()) return
+    await new Promise((r) => setTimeout(r, 2))
+  }
+  assert.fail(`timed out waiting for ${what}`)
+}
+
+// One Orca and one state dir for every runner of a run, each runner in its
+// own terminal; workers played by their prompt's first line (`plays`), the
+// rest submitting GOOD. go() starts a runner and does not wait on it.
+function nodeRig(plays = {}, { faults = {} } = {}) {
+  const orca = fakeOrca({ worker: (w) => (plays[w.prompt.split('\n')[0]] ?? submitGood)(w), faults })
+  const stateDir = tmp()
+  const registry = join(stateDir, 'orca-runs.jsonl')
+  const lines = []
+  const halts = []
+  let runs = 0
+  const go = (script, { resume = false, settings = {} } = {}) => {
+    const from = orca.calls.length
+    const control = {}
+    const run = { control, settled: null, calls: () => orca.calls.slice(from) }
+    run.p = runScript(script, { orca: orca.as(`term_${++runs}`), stateDir, registry, out: (s) => lines.push(s), settings: { ...FAST, ...NO_DOCTOR, ...settings }, resume, control, onHalt: (h) => halts.push(h) })
+    run.p.then((v) => { run.settled = { value: v } }, (e) => { run.settled = { error: e } })
+    return run
+  }
+  const journal = () => journalOf(stateDir)
+  const started = (run) => run.calls().filter((c) => c.verb === 'workerStart').map((c) => c.title)
+  return { orca, stateDir, registry, lines, halts, go, journal, started }
+}
+
+test('resume by node: a finished node after a failed one is kept, not run again, and the failed node carries on in its own session', async () => {
+  const rig = nodeRig({ 'Do a.': diesThenSubmitsOnContinue })
+  const script = `return await parallel([() => ${nodeCall('a')}, () => ${nodeCall('b')}])`
+  const first = rig.go(script)
+  await until(() => rig.halts.length && ofType(rig.journal(), 'result').some((e) => e.node === 'n/b'), 'the halt, and b done')
+  assert.equal(first.settled, null, 'a halted run never settles by itself')
+  assert.equal(readRegistry(rig.registry)[0].state, 'halted')
+  // The runner died; a --resume rebuilds the run by node.
+  const second = rig.go(script, { resume: true })
+  const result = await second.p
+  assert.deepEqual(result, [GOOD, GOOD])
+  assert.deepEqual(rig.started(second), [], 'b is replayed; a carries on in its session, no worker started')
+  const [c] = second.calls().filter((x) => x.verb === 'workerContinue')
+  assert.match(c.text, /halted here, and the operator has resumed it/)
+  const j = rig.journal()
+  assertEntries(j)
+  assert.deepEqual(ofType(j, 'result').filter((e) => !e.carried).map((e) => [e.node, !!e.replayed]), [['n/b', true], ['n/a', false]])
+  assert.ok(ofType(j, 'failed').some((e) => e.node === 'n/a' && e.carried), 'the failed node was carried forward first')
+  assert.equal(readRegistry(rig.registry)[0].state, 'ok')
+})
+
+test('resume by node: a node whose key changed runs live and ends replay for every later call; an unchanged earlier node still replays', async () => {
+  const rig = nodeRig()
+  const seq = (b) => `const a = await ${nodeCall('a')}
+const b = await agent(${JSON.stringify(b)}, { label: 'b', phase: 'P', schema: ${JSON.stringify(DSCHEMA)}, node: 'n/b' })
+const c = await ${nodeCall('c')}
+return [a, b, c]`
+  await rig.go(seq('Do b.')).p
+  const edited = rig.go(seq('Do b twice.'), { resume: true })
+  assert.deepEqual(await edited.p, [GOOD, GOOD, GOOD])
+  assert.deepEqual(rig.started(edited), ['[P] b', '[P] c'], 'c is unchanged but follows a changed node')
+  assert.ok(rig.lines.some((l) => l.includes('node n/b changed since the last run')), rig.lines.join('\n'))
+  const same = rig.go(seq('Do b twice.'), { resume: true })
+  await same.p
+  assert.deepEqual(rig.started(same), [])
+})
+
+test('resume: calls with no node keep the prefix rule: a failed call returns null, and it and every call after it run live on a resume', async () => {
+  let dies = true
+  const rig = nodeRig({ 'Plan it.': async (w) => { if (dies) throw new Error('agent died'); return submitGood(w) } })
+  const script = `const a = await agent('Plan it.', { label: 'a', phase: 'P', schema: ${JSON.stringify(SCHEMA)} })
+const b = await agent('Build it.', { label: 'b', phase: 'P', schema: ${JSON.stringify(SCHEMA)} })
+return [a, b]`
+  assert.deepEqual(await rig.go(script).p, [null, GOOD])
+  assert.deepEqual(rig.halts, [], 'no node, no halt')
+  dies = false
+  const again = rig.go(script, { resume: true })
+  assert.deepEqual(await again.p, [GOOD, GOOD])
+  assert.deepEqual(rig.started(again), ['[P] a', '[P] b'])
+})
+
+// a fails; s runs on until the halt, then submits; c is a new call and is
+// held, d an in-flight one and runs.
+const HALTING = `return await parallel([
+  () => ${nodeCall('a')},
+  async () => {
+    const s = await ${nodeCall('s')}
+    return [s, ...(await parallel([() => ${nodeCall('c')}, () => ${nodeCall('d', ', inFlight: true')}]))]
+  },
+])`
+
+test('halt: a failed node is held and halts the run: a new call is held unstarted, an in-flight one runs; R carries the node on in its session, and the held call is released', async () => {
+  let halted
+  const haltSeen = new Promise((r) => { halted = r })
+  const rig = nodeRig({
+    'Do a.': diesThenSubmitsOnContinue,
+    'Do s.': async (w) => { await haltSeen; return submitGood(w) },
+  })
+  const run = rig.go(HALTING)
+  await until(() => rig.halts.length, 'the halt')
+  halted()
+  await until(() => ofType(rig.journal(), 'result').some((e) => e.node === 'n/d') && ofType(rig.journal(), 'held').length, 'd done and c held')
+  assert.equal(run.settled, null)
+  let j = rig.journal()
+  assert.deepEqual(ofType(j, 'held').map((e) => e.node), ['n/c'])
+  assert.ok(!rig.started(run).includes('[P] c'), 'c is not started while halted')
+  assert.ok(rig.started(run).includes('[P] d'), 'an in-flight call goes on')
+  assert.deepEqual(ofType(j, 'halted').map((e) => e.node), ['n/a'])
+  assert.ok(logged(rig.stateDir).some((l) => /HALTED: n\/a failed: .*; R to resume$/.test(l)), logged(rig.stateDir).join('\n'))
+  assert.equal(readRegistry(rig.registry)[0].state, 'halted')
+  const fold = foldJournal(j)
+  assert.deepEqual(fold.halted.nodes, ['n/a'])
+  assert.deepEqual(fold.agents.find((a) => a.node === 'n/c').state, 'queued')
+
+  assert.deepEqual(await run.control.resume({}), { resumed: ['n/a'] })
+  assert.deepEqual(await run.p, [GOOD, [GOOD, GOOD, GOOD]])
+  j = rig.journal()
+  assertEntries(j)
+  assert.equal(ofType(j, 'unhalted').length, 1)
+  assert.ok(indexOf(j, (e) => e.type === 'unhalted') < indexOf(j, (e) => e.type === 'starting' && e.node === 'n/c'), 'c starts only once the run leaves halted')
+  assert.equal(ofType(j, 'continued').find((e) => e.node === 'n/a').attempt, 0, 'its continuations count afresh')
+  assert.equal(readRegistry(rig.registry)[0].state, 'ok')
+})
+
+test('halt: R takes the result.json a failed node\'s worker submitted after the run gave up on it, re-validated, and runs nothing', async () => {
+  const rig = nodeRig({ 'Do a.': async ({ state }) => {
+    state.onContinue = async () => { throw new Error('died again') }
+    throw new Error('agent died')
+  } })
+  const run = rig.go(`return await ${nodeCall('a')}`)
+  await until(() => rig.halts.length, 'the halt')
+  const { dir } = ofType(rig.journal(), 'started')[0]
+  const at = join(rig.stateDir, dir, 'result.json')
+  writeFileSync(at, JSON.stringify(BAD))
+  const before = rig.orca.calls.length
+  // Invalid: never taken. Its session is continued instead, and fails again.
+  await run.control.resume({ node: 'n/a' })
+  await until(() => rig.halts.length === 2, 'the second halt')
+  writeFileSync(at, JSON.stringify(GOOD))
+  const mid = rig.orca.calls.length
+  await run.control.resume({ node: 'n/a' })
+  assert.deepEqual(await run.p, GOOD)
+  assert.ok(rig.orca.calls.slice(before, mid).some((c) => c.verb === 'workerContinue'))
+  assert.deepEqual(rig.orca.calls.slice(mid).filter((c) => ['workerStart', 'workerContinue'].includes(c.verb)), [])
+  assert.equal(ofType(rig.journal(), 'result').at(-1).resumedFrom, 'result.json')
+})
+
+test('halt: R starts a failed node afresh when its worker never started', async () => {
+  const rig = nodeRig({}, { faults: { workerStart: ({ count }) => (count === 1 ? new Error('boom') : null) } })
+  const run = rig.go(`return await ${nodeCall('a', ", isolation: 'worktree'")}`, { settings: { retryBackoffMs: [] } })
+  await until(() => rig.halts.length, 'the halt')
+  assert.deepEqual(rig.started(run), [])
+  await run.control.resume({})
+  assert.deepEqual(await run.p, GOOD)
+  assert.deepEqual(rig.started(run), ['[P] a'])
+  assert.ok(rig.lines.some((l) => l.endsWith('its worker never started, so it starts now')), rig.lines.join('\n'))
+})
+
+test('halt: a node whose result needs decisions is held as needs you with its questions; R tells its session the operator answered, and its answer is returned', async () => {
+  const rig = nodeRig({ 'Do a.': async (w) => { w.state.onContinue = submitsValue(ANSWERED); return submitsValue(ASKS)(w) } })
+  const run = rig.go(`return await ${nodeCall('a')}`)
+  await until(() => rig.halts.length, 'the halt')
+  const j = rig.journal()
+  assert.equal(ofType(j, 'result')[0].needsDecision, true)
+  const a = foldJournal(j).agents[0]
+  assert.equal(a.state, 'needs you')
+  assert.match(a.reason, /Keep the v1 key, or break it\?/)
+  assert.ok(logged(rig.stateDir).some((l) => /HALTED: n\/a needs decisions only you can make: Keep the v1 key/.test(l)))
+  const { dir } = ofType(j, 'started')[0]
+  assert.ok(existsSync(join(rig.stateDir, dir, 'result.needs-decision.json')), 'its result.json is set aside')
+  await run.control.resume({})
+  assert.deepEqual(await run.p, ANSWERED)
+  const [c] = rig.orca.calls.filter((x) => x.verb === 'workerContinue')
+  assert.match(c.text, /operator has answered them\. Re-read the ticket, its body and its comments/)
+  assert.equal(c.reopened, true, 'its dispatch settled, so it continues under a new one')
+})
+
+test('run view: on a halted run the header says so; R on a failed or needs-you node resumes that node, R elsewhere every held one; the view\'s R reaches the runner with its node', async () => {
+  const clock = fakeClock()
+  clock.t = 5 * MIN
+  const stateDir = tmp()
+  const nodeJ = (type, n, node, min, more = {}) => J(type, n, `[Implement] ${node}`, min, { node, ...more })
+  writeFileSync(join(stateDir, 'journal.jsonl'), [
+    startedJ(1, '[Implement] impl:a', 0, 'claude', 'sid-1'), nodeJ('failed', 1, 'n/a', 1, { reason: 'it died', attempts: 1 }),
+    nodeJ('result', 2, 'n/b', 2, { result: ASKS, needsDecision: true }),
+    nodeJ('result', 3, 'n/c', 2, { result: GOOD }),
+    { type: 'halted', at: at(1), node: 'n/a', reason: 'it died' },
+    nodeJ('held', 4, 'n/d', 3),
+  ].map((e) => JSON.stringify(e) + '\n').join(''))
+  writeFileSync(join(stateDir, 'runner.log'), '')
+  const asked = []
+  const view = runView({ stateDir, orca: fakeOrca({ clock }), clock, registry: null, transcripts: { usage: () => null }, alive: () => true, resumeOrca: () => asked.push('orca'), resumeHalted: (node) => asked.push(node) })
+  await view.refresh()
+  assert.deepEqual(view.model.header.halted, { since: at(1), nodes: ['n/a', 'n/b'] })
+  assert.match(draw(view.model, { width: 160, height: 30 }).lines.map(strip)[1], /^ ⏸ halted — 2 nodes need you · R to resume/)
+  const agents = view.model.phases.flatMap((p) => p.agents)
+  assert.deepEqual(agents.map((a) => [a.node, a.state]), [['n/a', 'failed'], ['n/b', 'needs you'], ['n/c', 'done'], ['n/d', 'queued']])
+  const select = async (n) => {
+    while (view.model.selected > 0) await view.key('UP')
+    while (view.model.rows[view.model.selected].agent?.n !== n) await view.key('DOWN')
+  }
+  await select(1)
+  assert.match((await view.key('R')).message, /resume n\/a$/)
+  await select(2)
+  await view.key('R')
+  await select(3)
+  await view.key('R')
+  while (view.model.selected > 0) await view.key('UP')
+  await view.key('R')
+  assert.deepEqual(asked, ['n/a', 'n/b', null, null])
+
+  const views = fakeViews(clock)
+  const got = []
+  attachView({ spawnView: views.spawn, tab: () => {}, log: () => {}, clock, resume: (m) => got.push(m) }).start()
+  views.last().emit('message', { type: 'resume', node: 'n/a' })
+  views.last().emit('message', { type: 'resume' })
+  await turns()
+  assert.deepEqual(got, [{ node: 'n/a' }, { node: null }])
+})
+
+test('standalone: a halted run is listed halted, is not ended while its runner lives, and R points at its tab', async () => {
+  const clock = fakeClock()
+  clock.t = RUNS_AT
+  const registry = registryIn()
+  const w = runRegistry(registry, clock)
+  const dir = tmp()
+  w.armed({ runId: 'run_h', project: PROJECT, runDir: dir, spec: 'implement-spec-901' })
+  w.runner({ runId: 'run_h', terminal: 'term_h' })
+  w.halted({ runId: 'run_h', node: 'ticket/12/impl/r1/s1', reason: 'it died' })
+  assert.equal(readRegistry(registry)[0].state, 'halted')
+  assert.equal(runEnded({ run: readRegistry(registry)[0], alive: true, stateDir: dir }), false)
+  const runs = runsView({ orca: fakeOrca({ clock, runWorktree: PROJECT }), clock, registry, transcripts: { usage: () => null }, alive: () => true })
+  await runs.refresh()
+  assert.match(screenOf(runs.model).find((l) => l.includes('run_h')), /run_h +#901 +halted +● alive/)
+  assert.match((await runs.resume('run_h')).message, /alive and halted, in tab term_h: R there resumes it/)
+  w.unhalted({ runId: 'run_h' })
+  assert.equal(readRegistry(registry)[0].state, 'running')
+})
+
+test('resume: inFlight is no part of a call\'s key', () => {
+  assert.equal(journalKey('p', { node: 'n/a', inFlight: true }), journalKey('p', { node: 'n/a' }))
 })

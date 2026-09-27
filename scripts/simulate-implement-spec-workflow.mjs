@@ -124,6 +124,7 @@ async function run(overrides = {}, { runner = 'workflow' } = {}) {
   // The Orca runner's own loader, so the script is loaded one way everywhere.
   const result = await loadScript(render(runner))(agent, parallel, phase, log, {})
   EVERY_CALL.push(...calls)
+  EVERY_RUN.push(calls)
   return { result, calls, logs }
 }
 
@@ -132,6 +133,8 @@ async function run(overrides = {}, { runner = 'workflow' } = {}) {
 // on some path (the integration fix dispatcher, say) is exactly where a
 // template hole hides.
 const EVERY_CALL = []
+const EVERY_RUN = []
+const nodesOf = (calls) => calls.map((c) => c.opts.node)
 const checks = []
 function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); if (!cond) process.exitCode = 1 }
 
@@ -148,7 +151,9 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('A: the lane pushes once, creating the ref', calls.find((c) => c.label === 'publish:#10').prompt.includes('git push origin ticket/10') && calls.find((c) => c.label === 'publish:#10').prompt.includes('CREATES the branch'), '')
   check('A: publish #10 needs no rebase (tip unmoved)', !calls.find((c) => c.label === 'publish:#10').prompt.includes('git rebase --onto'), '')
   check('A: complete state', result.state.startsWith('complete'), result.state)
-  check('A: no unmet', result.unmet.length === 0, JSON.stringify(result.unmet))
+  check('A: not halted, reviewed and finalized', result.halted === false && seq.includes('review:spec-224') && seq.includes('finalize'), seq.join(' | '))
+  check('A: nodes are named for what they are', ['graph', 'explore/area-a', 'ticket/10/dispatch', 'ticket/10/impl/r1/s1', 'ticket/10/gate/r1', 'ticket/10/publish', 'ticket/11/publish', 'review', 'finalize', 'retrospective'].every((n) => nodesOf(calls).includes(n)), nodesOf(calls).join(' | '))
+  check('A: no call is marked in flight when nothing halts', !calls.some((c) => c.opts.inFlight), '')
   check('A: explore effort low / dispatch high / publish low', calls.find((c) => c.label.startsWith('explore')).effort === 'low' && calls.find((c) => c.label === 'dispatch:#10').effort === 'high' && calls.find((c) => c.label === 'publish:#10').effort === 'low', '')
   check('A: slice effort taken from dispatcher verdict', calls.find((c) => c.label === 'impl:#10').effort === 'medium', '')
   check('A: an untouched harness table runs every agent on Claude opus', calls.every((c) => c.opts.harness === 'claude' && c.opts.model === 'opus'), JSON.stringify(calls.filter((c) => c.opts.harness !== 'claude' || c.opts.model !== 'opus').map((c) => c.label)))
@@ -175,7 +180,8 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('B: re-dispatch prompt names the remainder and not-started slice', calls.find((c) => c.label === 'dispatch:#10:re').prompt.includes('criterion Z') && calls.find((c) => c.label === 'dispatch:#10:re').prompt.includes('not started: part 2'), '')
   check('B: continuation slice detaches at the local ticket branch', calls.find((c) => c.label === 'impl:#10:r2').prompt.includes('git switch --detach ticket/10'), '')
   check('B: remainder slice gets dispatcher effort high', calls.find((c) => c.label === 'impl:#10:r2').effort === 'high', '')
-  check('B: run completes with no unmet', result.unmet.length === 0 && result.state.startsWith('complete'), result.state)
+  check('B: run completes, not halted', result.halted === false && result.state.startsWith('complete'), result.state)
+  check('B: a re-dispatch and its slices are nodes of their round', ['ticket/10/impl/r1/s1', 'ticket/10/dispatch/r2', 'ticket/10/impl/r2/s1'].every((n) => nodesOf(calls).includes(n)) && !nodesOf(calls).includes('ticket/10/impl/r1/s2'), nodesOf(calls).join(' | '))
 }
 
 // --- scenario B2: two independent tickets — the tip moves under the second --
@@ -201,19 +207,110 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('B2: both tickets stack', result.stack_bottom_to_top.length === 2, JSON.stringify(result.stack_bottom_to_top))
 }
 
-// --- scenario C: remainder survives every dispatch round --------------------
+// --- scenario C: remainder survives every dispatch round — the run halts ---
 {
   const { result, calls } = await run({
     graph: () => ({ tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }], start_ref: 'main', explorations: [] }),
     impl: () => ({ branch: 'ticket/10', summary: 'partial', tests_run: 'npm t', tests_green: true, unmet: ['criterion Z'] }),
   })
+  const seq = calls.map((c) => c.label)
   const rounds = calls.filter((c) => c.label.startsWith('impl:#10')).length
   check('C: exactly MAX_DISPATCH_ROUNDS slice rounds', rounds === 6, String(rounds))
-  check('C: unmet carried to the result', result.unmet.length === 1 && result.unmet[0].criteria.includes('criterion Z'), JSON.stringify(result.unmet))
-  check('C: run is partial, spec stays open', result.state.startsWith('partial'), result.state)
-  check('C: gate reviewer told not to re-litigate declared unmet', calls.find((c) => c.label === 'gate:#10:r1').prompt.includes('report it without re-litigating and do not block on it: criterion Z'), '')
-  check('C: local-only refs are named for recovery', result.local_only_branches === null || Array.isArray(result.local_only_branches.refs), JSON.stringify(result.local_only_branches))
-  check('C: finalize told what remains', calls.find((c) => c.label === 'finalize').prompt.includes('unmet criteria: criterion Z'), '')
+  check('C: unmet after the cap halts the run', result.halted === true && result.tickets.length === 1 && result.tickets[0].state === 'unmet' && result.tickets[0].detail.includes('criterion Z'), JSON.stringify(result.tickets))
+  check('C: an unmet ticket is neither gated nor published', !seq.some((l) => l.startsWith('gate') || l.startsWith('publish')), seq.join(' | '))
+  check('C: a halted run has no review and no finalize', !seq.some((l) => l.startsWith('review') || l === 'finalize' || l === 'reclaim' || l === 'retrospective'), seq.join(' | '))
+  check('C: the halted summary names its reason and what published', /#10/.test(result.reason) && Array.isArray(result.published) && result.published.length === 0, JSON.stringify(result))
+  check('C: local-only refs are named for recovery', result.local_only_branches && result.local_only_branches.refs.includes('ticket/10'), JSON.stringify(result.local_only_branches))
+}
+
+// --- scenario C2: the #1186 incident — a failed chain under a layer 0 ------
+// #1187 failed and #1188-#1190 wait on it. Layer 0 existed, so the old early
+// stop (nothing published AND no layer 0) did not fire and the run reviewed a
+// stack of pre-existing work. A halted run reviews nothing.
+{
+  const { result, calls } = await run({
+    graph: () => ({
+      tickets: [
+        { number: 1187, title: 'T1187', blocked_by: [], needs_human: false, human_reason: '' },
+        { number: 1188, title: 'T1188', blocked_by: [1187], needs_human: false, human_reason: '' },
+        { number: 1189, title: 'T1189', blocked_by: [1188], needs_human: false, human_reason: '' },
+        { number: 1190, title: 'T1190', blocked_by: [1189], needs_human: false, human_reason: '' },
+      ],
+      start_ref: 'feat/prior',
+      explorations: [],
+    }),
+    impl: () => null,
+  })
+  const seq = calls.map((c) => c.label)
+  const st = Object.fromEntries(result.tickets.map((x) => [x.ticket, x]))
+  check('C2: one failed ticket halts the run despite a layer 0', result.halted === true && !seq.some((l) => l.startsWith('review') || l === 'finalize'), seq.join(' | '))
+  check('C2: the failed ticket is failed, its chain not started', st[1187].state === 'failed' && ['1188', '1189', '1190'].every((n) => st[n].state === 'not started') && /#1187/.test(st[1188].detail), JSON.stringify(result.tickets))
+  check('C2: no agent ran for the chain', !seq.some((l) => /#11(88|89|90)/.test(l)), seq.join(' | '))
+  check('C2: layer 0 is the only thing published', result.published.length === 1 && /layer 0/.test(result.published[0]), JSON.stringify(result.published))
+}
+
+// --- scenario C3: a decision halts its ticket; blocked work is never re-dispatched
+// The observed slice returned decisions_needed AND put the blocked criterion
+// in unmet; the script re-dispatched it, and the new slice blocked on a reply.
+{
+  const { result, calls } = await run({
+    graph: () => ({ tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }, { number: 11, title: 'T11', blocked_by: [10], needs_human: false, human_reason: '' }], start_ref: 'main', explorations: [] }),
+    impl: (label) => label.includes('#10')
+      ? { branch: 'ticket/10', summary: 's', unmet: ['criterion Q'], decisions_needed: ['criterion Q: the ticket says keep X, ADR-0003 says drop it — which?'] }
+      : { branch: 'ticket/11', summary: 's', unmet: [] },
+  })
+  const seq = calls.map((c) => c.label)
+  const t10 = result.tickets.find((x) => x.ticket === 10)
+  check('C3: a decision ends the slice rounds — no re-dispatch', !seq.some((l) => l.startsWith('dispatch:#10:re')) && seq.filter((l) => l.startsWith('impl:#10')).length === 1, seq.join(' | '))
+  check('C3: the ticket needs a decision, with the question', t10 && t10.state === 'needs decision' && /ADR-0003/.test(t10.detail) && t10.questions.length === 1, JSON.stringify(result.tickets))
+  check('C3: a ticket needing a decision is not gated or published, and halts the run', result.halted === true && !seq.some((l) => l.startsWith('gate') || l.startsWith('publish') || l.startsWith('review')), seq.join(' | '))
+  check('C3: the slice prompt says when to decide and when to halt', /decide it yourself/.test(calls.find((c) => c.label === 'impl:#10').prompt) && /never in `unmet`/.test(calls.find((c) => c.label === 'impl:#10').prompt), '')
+}
+
+// --- scenario C4: halting starts nothing new; a single-slice ticket finishes -
+// #10 fails. #11, independent and dispatched as one slice, is mid-slice: it
+// finishes its slice, gate and publish, each call marked inFlight. #13, also
+// independent but dispatched as two slices, makes no call after the one it is
+// in. #12 waits on #11 and never starts, though #11 published.
+{
+  const later = (ms, v) => new Promise((res) => setTimeout(() => res(v), ms))
+  const { result, calls } = await run({
+    graph: () => ({
+      tickets: [
+        { number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' },
+        { number: 11, title: 'T11', blocked_by: [], needs_human: false, human_reason: '' },
+        { number: 12, title: 'T12', blocked_by: [11], needs_human: false, human_reason: '' },
+        { number: 13, title: 'T13', blocked_by: [], needs_human: false, human_reason: '' },
+      ],
+      start_ref: 'main',
+      explorations: [],
+    }),
+    dispatch: (label) => label.includes('#13')
+      ? { ticket_brief: 'b', slices: [{ title: 'p1', brief: 'x', effort: 'medium' }, { title: 'p2', brief: 'y', effort: 'medium' }] }
+      : { ticket_brief: 'b', slices: [{ title: 'all', brief: 'x', effort: 'medium' }] },
+    impl: (label) => {
+      const n = label.match(/#(\d+)/)[1]
+      if (n === '10') return null
+      return later(20, { branch: 'ticket/' + n, summary: 's', unmet: [] })
+    },
+  })
+  const seq = calls.map((c) => c.label)
+  const st = Object.fromEntries(result.tickets.map((x) => [x.ticket, x]))
+  check('C4: the in-flight single-slice ticket is gated and published', seq.includes('gate:#11:r1') && seq.includes('publish:#11') && result.published.some((p) => p.startsWith('#11')), seq.join(' | '))
+  check('C4: its calls after the halt are marked inFlight', calls.find((c) => c.label === 'gate:#11:r1').opts.inFlight === true && calls.find((c) => c.label === 'publish:#11').opts.inFlight === true, '')
+  check('C4: a multi-slice ticket makes no new call once halting', !seq.includes('impl:#13:s2') && !seq.includes('gate:#13:r1') && st[13] && st[13].state === 'stopped', seq.join(' | ') + ' ' + JSON.stringify(result.tickets))
+  check('C4: no ticket starts after the halt', !seq.some((l) => l.includes('#12')) && st[12].state === 'not started', seq.join(' | '))
+  check('C4: the run halts on the failure, not on the in-flight ticket', result.halted === true && st[10].state === 'failed' && !st[11] && /#10/.test(result.reason) && !seq.some((l) => l.startsWith('review') || l === 'finalize'), JSON.stringify(result))
+}
+
+// --- scenario C5: a contradiction closed inside the ticket reaches the PR ----
+{
+  const { calls } = await run({
+    graph: () => ({ tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }], start_ref: 'main', explorations: [] }),
+    impl: () => ({ branch: 'ticket/10', summary: 's', unmet: [], decided: ['criterion 2 and 3 disagree on the flag name; kept `--dry`, which the ticket leaves open'] }),
+  })
+  check('C5: a decision the implementer made is put on its PR', /kept `--dry`/.test(calls.find((c) => c.label === 'publish:#10').prompt), '')
+  check('C5: the gate reviewer sees the decision', /kept `--dry`/.test(calls.find((c) => c.label === 'gate:#10:r1').prompt), '')
 }
 
 // --- scenario D: every gate fix goes through the dispatcher -----------------
@@ -242,6 +339,7 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('D: slice fixer reads only its brief', calls.find((c) => c.label === 'gate-fix:#10:r1:s1').prompt.includes('run no `gh issue view`'), '')
   check('D: rejection reaches the next reviewer', calls.find((c) => c.label === 'gate:#10:r2').prompt.includes('b.js:2 is generated code'), '')
   check('D: gate converges', gateRound === 2 && result.gate_unfixed.length === 0, '')
+  check('D: gate fixes are nodes of their gate round', ['ticket/10/gate/r1', 'ticket/10/gate/r1/fix/dispatch', 'ticket/10/gate/r1/fix/s1', 'ticket/10/gate/r1/fix/s2', 'ticket/10/gate/r2'].every((n) => nodesOf(calls).includes(n)), nodesOf(calls).join(' | '))
 }
 
 // --- scenario E: a dropped finding is reconciled, not assumed fixed ---------
@@ -279,6 +377,9 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('F: the publisher is told to change no code', calls.find((c) => c.label === 'publish:integration').prompt.includes('Change no code'), '')
   check('F: the publisher runs after the fixes', seq.indexOf('integration') < seq.indexOf('publish:integration'), seq.join(' | '))
   check('F: integration PR becomes the stack top', result.stack_bottom_to_top.some((l) => l.startsWith('integration')), JSON.stringify(result.stack_bottom_to_top))
+  check('F: review fixes are nodes of the review', ['review', 'review/fix/dispatch', 'review/fix/s1', 'review/publish', 'finalize'].every((n) => nodesOf(calls).includes(n)), nodesOf(calls).join(' | '))
+  const again = await run({ review: () => ({ findings: [{ severity: 'major', location: 'c.js:3', issue: 'two helpers', fix: 'merge them' }] }) })
+  check('F: a re-run with the same results names the same nodes', JSON.stringify(nodesOf(again.calls).slice().sort()) === JSON.stringify(nodesOf(calls).slice().sort()), '')
 }
 
 // --- scenario G: no fix lands, so no integration PR is opened ---------------
@@ -450,12 +551,12 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('R: an Orca agent is told its worktree is a child of the run\'s', /an Orca child worktree of this run's worktree/.test(onOrca.calls.find((c) => c.label === 'impl:#10').prompt), '')
   check('R: no Orca prompt guesses strays from harness paths', !onOrca.calls.some((c) => /not in the ledger/.test(c.prompt)), '')
   check('R: the Orca run completes', onOrca.result.state.startsWith('complete'), onOrca.result.state)
-  // Nothing published: the Workflow runner spends a reclaim agent, the Orca runner none.
+  // A publish that fails halts the run: nothing is reclaimed on either runner.
   const unpublished = { publish: () => ({ published: false, note: 'push rejected', worktree: '/wt/publish-10', worktrees_removed: 0, worktrees_kept: [] }) }
   const wfNone = await onRunner('workflow', unpublished)
   const orcaNone = await onRunner('orca', unpublished)
-  check('R: with nothing published the Workflow runner still reclaims', wfNone.calls.some((c) => c.label === 'reclaim' && /\/wt\/impl:#10 → ticket\/10/.test(c.prompt)), wfNone.calls.map((c) => c.label).join(' | '))
-  check('R: with nothing published the Orca runner starts no reclaim agent', !orcaNone.calls.some((c) => c.label === 'reclaim') && orcaNone.result.error === 'no ticket was published', orcaNone.calls.map((c) => c.label).join(' | '))
+  check('R: a failed publish halts the run on either runner', wfNone.result.halted === true && orcaNone.result.halted === true && wfNone.result.tickets.find((x) => x.ticket === 10).state === 'failed', JSON.stringify(wfNone.result.tickets))
+  check('R: a halted run starts no reclaim agent on either runner — a resume carries its worktrees on', ![...wfNone.calls, ...orcaNone.calls].some((c) => c.label === 'reclaim'), wfNone.calls.map((c) => c.label).join(' | '))
   // One template, one rendering: the runner value is the only difference.
   const diff = render('workflow').split('\n').filter((l, i) => l !== render('orca').split('\n')[i])
   check('R: the rendered script differs between runners only in RUNNER', diff.length === 1 && /^const RUNNER = 'workflow'/.test(diff[0]), diff.join(' | '))
@@ -477,6 +578,10 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   // invocation with branch arguments from a backticked mention.
   const realLink = /gh stack link [a-z]/
   check('ALL: no prompt names a branch to link without its PR existing', !EVERY_CALL.some((c) => realLink.test(c.prompt) && !/already has its PR|PR you have not just confirmed exists/.test(c.prompt)), offenders(realLink))
+  const unnamed = EVERY_RUN.flatMap((calls) => calls.filter((c) => typeof c.opts.node !== 'string' || !c.opts.node)).map((c) => c.label)
+  check('ALL: every agent() call names its node', !unnamed.length, [...new Set(unnamed)].join(' | '))
+  const dupes = EVERY_RUN.flatMap((calls) => nodesOf(calls).filter((n, i, a) => n && a.indexOf(n) !== i))
+  check('ALL: node names are unique within a run', !dupes.length, [...new Set(dupes)].join(' | '))
   check('ALL: every scenario contributed prompts', EVERY_CALL.length > 60, String(EVERY_CALL.length))
 }
 

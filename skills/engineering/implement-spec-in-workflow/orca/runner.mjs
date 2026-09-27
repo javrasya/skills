@@ -12,7 +12,14 @@
 // not reach) as failed, with no result. --resume replays the unchanged prefix
 // of agent() calls from that journal without launching anything; the first
 // call not in it or journaled as failed, and every call after it, runs live.
-// The Workflow runner's resumeFromRunId promises the same. A resume, from any
+// The Workflow runner's resumeFromRunId promises the same. A call that names
+// its node (opts.node, ADR-0016) is found by its node instead, wherever it
+// falls: its result replays while its key is unchanged, whatever failed
+// before it, and a failed or needs-decision node is carried on (resumeNode);
+// a node whose key changed runs live, and ends replay for every later call.
+// Such a call is never handed null: a node that fails, or whose result needs
+// decisions only the operator can make, is held, and the run halts (halt.mjs)
+// until R carries it on, in this process. A resume, from any
 // terminal, takes the journaled Run over (run-use) before it starts a worker,
 // and takes up each worker the last run left out: watched again if Orca still
 // shows it live, its session continued if it died. A patient whose agent()
@@ -37,6 +44,12 @@
 // with ok, partial or failed when the script settles, and `reclaimed` for what
 // the operator reclaims from the run view.
 //
+// An Orca outage, Orca itself not there, as while it updates, is waited out
+// by every Orca call and charged to no agent (ADR-0015, outage.mjs): it is
+// journaled (`outage`), and one past its limit pauses the run, recorded in
+// the registry as `paused` until Orca answers again. The runner stays in its
+// tab meanwhile, and R in the attached view has it probe Orca at once.
+//
 // No change to this directory is done until the runner contract test passes
 // under both runners (README.md). The offline tests do not replace it.
 import { mkdirSync, writeFileSync, readFileSync, rmSync, appendFileSync, realpathSync } from 'fs'
@@ -47,7 +60,9 @@ import { fileURLToPath } from 'url'
 import { checkSchema } from './schema.mjs'
 import { orcaCli, launchCommand, HARNESSES, realTimer } from './orca-cli.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
-import { agentLifecycle } from './lifecycle.mjs'
+import { agentLifecycle, readResult, decisionsNeeded, setAside } from './lifecycle.mjs'
+import { orcaOutage } from './outage.mjs'
+import { runHalt } from './halt.mjs'
 import { JOURNAL_ENTRIES, readJournal, madeByRun, journalLines } from './journal.mjs'
 import { runRegistry, REGISTRY_PATH } from './registry.mjs'
 import { sessionTranscripts } from './transcript.mjs'
@@ -69,6 +84,13 @@ export function loadScript(text) {
   return new Function('agent', 'parallel', 'phase', 'log', '__meta', 'return (async () => {' + body + '\n})()')
 }
 
+// The titles of the phases a script's meta declares, in its order, for the
+// run view to draw its phases by, or null when it declares none.
+export function phaseTitles(meta) {
+  const titles = (Array.isArray(meta?.phases) ? meta.phases : []).map((p) => (typeof p === 'string' ? p : p?.title)).filter((t) => typeof t === 'string' && t)
+  return titles.length ? titles : null
+}
+
 export const objectiveOf = (meta, fallback) => [meta?.name, meta?.description].filter(Boolean).join(': ') || fallback
 
 // Keys sorted, so a call hashes the same whatever order its options were
@@ -79,7 +101,10 @@ function canonical(v) {
   return v
 }
 
-export const journalKey = (prompt, opts = {}) =>
+// `inFlight` is left out: it says only whether the call was made while the
+// run was halting (ADR-0016), never what the call is, so a resume that makes
+// the same call without it still finds its node's result.
+export const journalKey = (prompt, { inFlight, ...opts } = {}) =>
   'v1:' + createHash('sha256').update(JSON.stringify([prompt, canonical(opts)])).digest('hex')
 
 // The journal's entry types and its one fold live in journal.mjs.
@@ -88,6 +113,7 @@ export { JOURNAL_ENTRIES, readJournal }
 export const realClock = { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)), timer: realTimer }
 
 const iso = (clock) => new Date(clock.now()).toISOString()
+const took = (ms) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms / 6_000) / 10} min`)
 
 // print, but every line also appended to <stateDir>/runner.log first, so the
 // log holds what the operator saw even once the runner's tab is gone. The log
@@ -111,7 +137,11 @@ export function runnerLog(stateDir, print, clock = realClock) {
 // registry: the run registry's path, or null to record nothing there; project:
 // the repo the run works in, and script the rendered script's path, recorded
 // beside it with permissionMode, so the standalone run view can resume the run.
-export async function runScript(text, { orca = orcaCli(), stateDir, out: print = (s) => console.log(s), settings = {}, clock = realClock, transcripts = sessionTranscripts(), fallbackObjective = 'workflow run', resume = false, permissionMode = null, registry = null, project = process.cwd(), script: scriptPath = null }) {
+// control: filled in with resumeOrca(), which probes Orca at once during an
+// outage, and resume({ node }), the attached view's R: resumeOrca while an
+// outage is on, else the halted run's node, or with none every held node.
+// onHalt({ node, nodes }): told each time a node is held and the run halts.
+export async function runScript(text, { orca = orcaCli(), stateDir, out: print = (s) => console.log(s), settings = {}, clock = realClock, transcripts = sessionTranscripts(), fallbackObjective = 'workflow run', resume = false, permissionMode = null, registry = null, project = process.cwd(), script: scriptPath = null, control = {}, onHalt = () => {} }) {
   const limits = { ...SETTINGS, ...settings }
   const out = runnerLog(stateDir, print, clock)
   const script = loadScript(text)
@@ -119,7 +149,7 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   let currentPhase = null
 
   const journalPath = join(stateDir, 'journal.jsonl')
-  const earlier = resume ? readJournal(journalPath) : { calls: new Map(), retained: [], run: null, lastN: 0, agents: [], mail: [] }
+  const earlier = resume ? readJournal(journalPath) : { calls: new Map(), nodes: new Map(), retained: [], run: null, lastN: 0, phases: null, agents: [], mail: [] }
   const journaled = earlier.calls
   // A resume numbers its calls on from the last run's: the Run it takes over
   // already holds a `<runId>-<n>` child worktree for each n used, and Orca
@@ -131,10 +161,11 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   // carried forward below, as `earlier` or `outstanding` lines.
   writeFileSync(journalPath, '')
   // An agent() that returned null makes a run that returns partial, not ok.
-  // A doctor that fails is no agent() call.
+  // A doctor that fails is no agent() call, and a node's failure is held, never
+  // returned; a carried line is an earlier run's.
   let failures = 0
   const journal = (entry) => {
-    if (entry.type === 'failed' && entry.patient == null) failures++
+    if (entry.type === 'failed' && entry.patient == null && !entry.node && !entry.carried) failures++
     appendFileSync(journalPath, JSON.stringify({ type: entry.type, at: iso(clock), ...entry }) + '\n')
   }
   // The registry is bookkeeping for the operator: a write it refuses is
@@ -150,16 +181,52 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   }
   // Called once, when Orca creates the Run, or hands the journaled one over to
   // a resume: that Run was armed by the runner that created it, and gains
-  // this runner's terminal.
+  // this runner's terminal. The script has run by then, so its meta names
+  // its phases.
   const onRun = ({ runId, terminal, takenOver = false }) => {
     armed = runId
-    journal({ type: 'run', runId, terminal })
+    const phases = phaseTitles(meta.value) ?? earlier.phases
+    journal({ type: 'run', runId, terminal, ...(phases && { phases }) })
     if (!takenOver) record('armed', { runId, project, runDir: stateDir, spec: meta.value?.name ?? fallbackObjective, script: scriptPath, permissionMode })
     record('runner', { runId, terminal })
   }
+  // The run's one Orca outage (ADR-0015): every Orca call waits on it, so no
+  // agent is charged for it. It is journaled and logged as it starts, pauses
+  // and ends, and a pause is recorded in the registry until Orca is back.
+  // A resume's Run is paused under its id before its takeover lands.
+  const runIdNow = () => armed ?? earlier.run?.runId ?? null
+  const outage = orcaOutage({
+    clock, limits, probe: () => orca.probe(),
+    on: ({ phase, since, ms, reason, paused }) => {
+      journal({ type: 'outage', phase, since: new Date(since).toISOString(), ...(reason && { reason }), ...(ms != null && { ms }) })
+      if (phase === 'start') out(`!! Orca unreachable (${reason}): every Orca call waits for it, and no agent is charged for it; probing it for up to ${took(limits.outageLimitMs)} before the run pauses`)
+      if (phase === 'paused') {
+        out(`!!!!!!!! Orca unreachable for ${Math.round(limits.outageLimitMs / 60_000)}m: run paused; R to resume (or it resumes itself once Orca is back)`)
+        if (runIdNow()) record('paused', { runId: runIdNow(), reason: 'orca outage' })
+      }
+      if (phase === 'end') {
+        out(`>> Orca is back after ${took(ms)}: the run carries on`)
+        if (paused && runIdNow()) record('unpaused', { runId: runIdNow() })
+      }
+    },
+  })
+  orca.guardWith?.(outage)
+  control.resumeOrca = async () => {
+    const was = outage.state()
+    const r = await outage.resume()
+    if (!r.outage) out('>> Orca is there: nothing is waiting on it')
+    else if (!r.back) out(was?.phase === 'paused' ? `!! Orca is still unreachable: the run stays paused, and probes it again every ${took(limits.pausedProbeMs)}` : '!! Orca is still unreachable: every Orca call still waits for it')
+    return r
+  }
+  // The run's halt (ADR-0016). R in the attached view reaches resume(): an
+  // outage's R takes precedence while one is on.
+  const halt = runHalt({ journal, out, record, runId: runIdNow, onHalt })
+  control.resume = async ({ node = null } = {}) => (outage.state() ? control.resumeOrca() : halt.resume(node))
   // How many calls with each key this run has made.
   const seen = new Map()
   let replaying = resume
+  // Replay by node: on until a node's key is found changed.
+  let nodeReplay = resume
   // A dead agent never names its worktree to the script, so the script can
   // never reclaim it; the runner created it and names it instead. A resume
   // re-runs the dead agent in a new worktree, so the one it left in the
@@ -172,7 +239,7 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   // A worker the last run left out stays journaled until a call takes it up,
   // so a resume that stops, or cannot take the Run over, before then never
   // loses it, and the next resume never starts a second one for its call.
-  const outstanding = [...journaled].flatMap(([key, entries]) => entries.filter((e) => e.worker).map((e) => ({ key, ...e.worker })))
+  const outstanding = [...journaled].flatMap(([key, entries]) => entries.filter((e) => e.worker).map((e) => ({ key, ...(e.node && { node: e.node }), ...e.worker })))
   // A worktree retained while its worker was still out is named by that
   // worker until its call takes it up; one no call takes up is named at the end.
   const held = new Set(outstanding.map((w) => w.worktree).filter(Boolean))
@@ -186,7 +253,7 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
     aside.clear()
   }
   // So a resume that makes no live call still leaves the Run to the next one.
-  if (earlier.run) journal({ type: 'run', ...earlier.run, lastN: earlier.lastN })
+  if (earlier.run) journal({ type: 'run', ...earlier.run, lastN: earlier.lastN, ...(earlier.phases && { phases: earlier.phases }) })
   // Every Run mailbox message an earlier runner acted on, as it journaled it:
   // Orca delivers a batch again until it is acknowledged, and it is never
   // acted on twice.
@@ -200,10 +267,19 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
     const { n, title, runId: run, dispatchId, harness, sessionId, terminal, worktree, origin, state, reason, continuations, workerLeft, patient, round, rounds } = a
     journal({ type: 'earlier', n, title, run, dispatchId, harness, sessionId, terminal, worktree, origin, state, reason, ...(continuations && { continuations }), ...(workerLeft && { workerLeft }), ...(patient != null && { patient }), ...(rounds.length && { round, rounds }) })
   }
-  for (const { key, n, title, run, dispatchId, harness, sessionId, terminal, worktree, dir, origin, continuations } of outstanding) {
+  for (const { key, node, n, title, run, dispatchId, harness, sessionId, terminal, worktree, dir, origin, continuations } of outstanding) {
     // A patient's rounds ride along: a resume goes on from them.
     const rounds = earlier.agents.find((a) => a.origin === origin)?.rounds ?? []
-    journal({ type: 'outstanding', key, n, title, run, dispatchId, harness, sessionId, terminal, worktree, dir, origin, ...(continuations && { continuations }), ...(rounds.length && { round: rounds.at(-1).round, rounds }) })
+    journal({ type: 'outstanding', key, n, ...(node && { node }), title, run, dispatchId, harness, sessionId, terminal, worktree, dir, origin, ...(continuations && { continuations }), ...(rounds.length && { round: rounds.at(-1).round, rounds }) })
+  }
+  // Every node an earlier run halted on, failed or needing decisions, as its
+  // failed or result line, so a resume that stops before its call is made
+  // still leaves it to the next one to carry on.
+  for (const e of earlier.nodes.values()) {
+    if (!e.failed && !e.needsDecision) continue
+    const origin = e.last?.origin ?? e.origin
+    const carried = { key: e.key, n: e.n, node: e.node, title: e.title, carried: true, ...(Number.isInteger(origin) && { origin }), ...(e.last && { worker: e.last }) }
+    journal(e.failed ? { type: 'failed', ...carried, reason: e.reason ?? 'failed in an earlier run', attempts: 0 } : { type: 'result', ...carried, result: e.result, needsDecision: true })
   }
   // A patient's lines are the ones of its call or of its agent; its log lines
   // the ones the runner printed under its title, in this run or an earlier one.
@@ -222,7 +298,7 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   const doctorLaunch = () => (recover ??= launchOf(meta.value?.roles?.recover ?? {}, permissionMode, 'the role table\'s recover row'))
   const life = agentLifecycle({
     orca, clock, limits, out, stateDir, objective: () => objectiveOf(meta.value, fallbackObjective), journal, retainWorktree, onRun, takeOver: earlier.run?.runId ?? null, transcripts,
-    nextN: () => ++count, doctorLaunch, history, mailHandled: earlier.mail.map((m) => m.messageId),
+    nextN: () => ++count, doctorLaunch, history, outage, mailHandled: earlier.mail.map((m) => m.messageId),
     mailPending: earlier.mail.filter((m) => m.action === 'pending').map((m) => ({ id: m.messageId, type: m.kind, dispatchId: m.dispatchId, outcome: m.outcome ?? null, subject: m.subject, body: m.body })),
   })
 
@@ -247,39 +323,113 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
     const phaseName = opts.phase ?? currentPhase ?? 'Run'
     const title = `[${phaseName}] ${label}`
     const key = journalKey(prompt, opts)
-
-    // The k-th call with a key is the k-th journaled under it, so identical
-    // calls each get their own; a failed entry keeps its place. One miss ends
-    // the prefix for good: what follows a changed or failed call may depend
-    // on it, however unchanged it reads. A call the last run left unsettled
-    // gave the script nothing to depend on, so it leaves the prefix standing.
-    const k = seen.get(key) ?? 0
-    seen.set(key, k + 1)
-    const cached = journaled.get(key)
-    const entry = cached && k < cached.length ? cached[k] : null
-    if (replaying && entry && 'result' in entry) {
+    const node = typeof opts.node === 'string' && opts.node ? opts.node : null
+    const replayed = (entry) => {
       // Its origin makes it the agent the journal already names, not another.
-      journal({ type: 'result', key, n, title, result: entry.result, replayed: true, ...(entry.origin != null && { origin: entry.origin }) })
+      journal({ type: 'result', key, n, ...(node && { node }), title, result: entry.result, replayed: true, ...(entry.origin != null && { origin: entry.origin }) })
       out(`<< ${title}: replayed from the journal`)
       return entry.result
     }
-    const unsettled = !!(entry?.worker || entry?.unsettled)
-    if (replaying && !unsettled) {
-      out(`>> ${title}: ${entry ? 'failed in the last run' : 'not in the journal'}; this call and every one after it run live`)
-      replaying = false
+
+    let entry = null
+    // A failed or needs-decision node of an earlier run, carried on.
+    let carried = null
+    if (node) {
+      // By node (ADR-0016): a finished node replays wherever it falls. One
+      // whose key changed runs live and ends replay for every later call, as
+      // the prefix rule would.
+      const e = earlier.nodes.get(node) ?? null
+      if (e && e.key !== key) {
+        if (nodeReplay) out(`>> ${title}: node ${node} changed since the last run; this call and every one after it run live`)
+        nodeReplay = replaying = false
+      } else if (e && nodeReplay && 'result' in e && !e.needsDecision) return replayed(e)
+      else if (e && nodeReplay && (e.failed || e.needsDecision)) carried = e
+      else if (e && (e.worker || nodeReplay)) entry = e
+      else if (resume && nodeReplay) out(`>> ${title}: node ${node} is not in the journal; it runs live`)
+    } else {
+      // The k-th call with a key is the k-th journaled under it, so identical
+      // calls each get their own; a failed entry keeps its place. One miss ends
+      // the prefix for good: what follows a changed or failed call may depend
+      // on it, however unchanged it reads. A call the last run left unsettled
+      // gave the script nothing to depend on, so it leaves the prefix standing.
+      const k = seen.get(key) ?? 0
+      seen.set(key, k + 1)
+      const cached = journaled.get(key)
+      entry = cached && k < cached.length ? cached[k] : null
+      if (replaying && entry && 'result' in entry) return replayed(entry)
+      const unsettled = !!(entry?.worker || entry?.unsettled)
+      if (replaying && !unsettled) {
+        out(`>> ${title}: ${entry ? 'failed in the last run' : 'not in the journal'}; this call and every one after it run live`)
+        replaying = false
+      }
     }
     if (entry?.unsettled && !entry.held) out(`>> ${title}: its worker never started in the last run; it starts now`)
 
-    const call = { prompt, schema: opts.schema, isolated: opts.isolation === 'worktree', launch, key, n, label, title, phaseName }
+    const call = { prompt, schema: opts.schema, isolated: opts.isolation === 'worktree', launch, key, n, label, title, phaseName, ...(node && { node }) }
     // A patient's doctor rounds so far, and, while its agent() waited on
     // them, the round the resume goes on with: it is not started again.
     const treated = entry?.rounds ? { rounds: entry.rounds, ...(entry.held && { held: entry.held, origin: entry.held.origin }) } : {}
-    // Its worker is its own whatever came before it: it runs this very call.
+    // Its worker is its own whatever came before it: it runs this very call,
+    // halted or not.
     if (entry?.worker) {
       aside.delete(entry.worker.worktree)
-      return life({ ...call, ...treated, adopt: entry.worker })
+      return settle(call, await life({ ...call, ...treated, adopt: entry.worker }))
     }
-    return life({ ...call, ...treated })
+    // While the run is halted, a new call waits, unless it is in flight.
+    if (!opts.inFlight) await halt.gate(call)
+    return settle(call, await (carried ? resumeNode(call, carried) : life({ ...call, ...treated })))
+  }
+
+  // What a call returns to the script. A node that failed, or whose result
+  // needs decisions only the operator can make, is held instead, and the run
+  // halts, until R carries it on (resumeNode); it returns once it succeeds.
+  async function settle(call, value) {
+    if (!call.node) return value
+    let v = value
+    let wasHeld = false
+    for (;;) {
+      const questions = v === null ? null : decisionsNeeded(v)
+      if (v !== null && !questions) break
+      wasHeld = true
+      const reason = questions ? questions.join(' · ') : readJournal(journalPath).nodes.get(call.node)?.reason ?? 'it failed'
+      await halt.hold({ node: call.node, title: call.title, needsDecision: !!questions, reason })
+      v = await resumeNode(call, readJournal(journalPath).nodes.get(call.node) ?? {})
+    }
+    if (wasHeld) {
+      // The worktree its failure retained is its agent's own again, reported.
+      const worktree = readJournal(journalPath).nodes.get(call.node)?.last?.worktree
+      const at = retained.findIndex((k) => k.path === worktree)
+      if (at >= 0) retained.splice(at, 1)
+      halt.settle(call.node)
+    }
+    return v
+  }
+
+  // A held node carried on (ADR-0016), as the journal names it (the fold's
+  // nodes entry): the result.json its worker submitted after the run gave up
+  // on it, validated again; else its session continued in its own worktree
+  // and tab (carryHalted); else, if its worker never started, a fresh start.
+  // A worker still out is taken up as a resume takes one up.
+  async function resumeNode(call, e) {
+    const { key, n, node, title, schema } = call
+    if (e.worker) {
+      aside.delete(e.worker.worktree)
+      return life({ ...call, adopt: e.worker })
+    }
+    const last = e.last ?? null
+    if (last?.dir) {
+      const got = readResult(join(stateDir, last.dir, 'result.json'), schema)
+      if (!got.error) {
+        const questions = decisionsNeeded(got.value)
+        if (questions) setAside(join(stateDir, last.dir, 'result.json'))
+        journal({ type: 'result', key, n, node, title, result: got.value, ...(questions && { needsDecision: true }), ...(Number.isInteger(last.origin) && { origin: last.origin }), resumedFrom: 'result.json' })
+        out(`<< ${title}: resuming node ${node}: took the result its worker submitted after the run gave up on it`)
+        return got.value
+      }
+    }
+    if (last?.sessionId && last.dispatchId) return life({ ...call, adopt: last, halted: { needsDecision: !!e.needsDecision } })
+    out(`>> ${title}: resuming node ${node}: its worker never started, so it starts now`)
+    return life({ ...call, startAgain: { made: [], dispatched: false, baseline: null } })
   }
 
   try {
@@ -365,10 +515,13 @@ export function finish({ stateDir, summary, out }) {
 //   guard(on)    ignores a Ctrl-C that reaches the runner while a view lives:
 //                one that dies outside raw mode lets Ctrl-C reach every
 //                process on the console
+//   resume(m)    the view's R, sent as {type: 'resume', node?}: probe Orca
+//                now during an outage, else resume the halted run's node, or
+//                every held one (runScript's control.resume)
 // Returns { start(), gate(print), closed, crashes() }. gate wraps a print so
 // it reaches the tab only once no view is attached. closed resolves once no
 // view is attached.
-export function attachView({ spawnView, tab, log, tail = () => [], clock = realClock, limits = SETTINGS, restore = () => {}, guard = () => {} }) {
+export function attachView({ spawnView, tab, log, tail = () => [], clock = realClock, limits = SETTINGS, restore = () => {}, guard = () => {}, resume = () => {} }) {
   let attached = true
   let crashes = 0
   let child = null
@@ -410,6 +563,7 @@ export function attachView({ spawnView, tab, log, tail = () => [], clock = realC
     }
     c.on('message', (m) => {
       if (m?.type === 'detach') detached = true
+      if (m?.type === 'resume') Promise.resolve().then(() => resume({ node: typeof m.node === 'string' ? m.node : null })).catch((e) => log(`!! R: could not resume: ${e?.message ?? e}`))
     })
     c.on('exit', ended)
     c.on('error', (e) => {
@@ -485,6 +639,7 @@ if (isMain) {
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, 'runner.pid'), String(process.pid))
   const ignore = () => {}
+  const control = {}
   // With no terminal (the offline tests, a redirected launch) there is no view,
   // and the runner prints as it always did.
   const view = process.stdout.isTTY && process.stdin.isTTY
@@ -495,6 +650,7 @@ if (isMain) {
       tail: () => logTail(dir),
       restore: restoreTab,
       guard: (on) => (on ? process.on('SIGINT', ignore) : process.off('SIGINT', ignore)),
+      resume: (m) => control.resume?.(m),
     })
     : null
   const gate = view ? view.gate : (print) => print
@@ -502,9 +658,16 @@ if (isMain) {
   const sayError = runnerLog(dir, gate((s) => console.error(s)))
   view?.start()
   const orca = orcaCli()
+  // A halted run waits on its held promises alone, which keep no process
+  // alive: this does, so the runner stays in its tab, halted, as the registry
+  // says (ADR-0016).
+  let halted = null
   let summary
   try {
     const result = await runScript(readFileSync(path, 'utf8'), {
+      onHalt: () => {
+        halted ??= setInterval(() => {}, 60_000)
+      },
       orca,
       stateDir: dir,
       out: gate((s) => console.log(s)),
@@ -513,6 +676,7 @@ if (isMain) {
       permissionMode,
       registry: REGISTRY_PATH,
       script: path,
+      control,
     })
     summary = { runner: 'orca', ok: true, result }
   } catch (e) {
@@ -520,6 +684,7 @@ if (isMain) {
     process.exitCode = 1
     summary = failureSummary(e)
   }
+  clearInterval(halted)
   try {
     finish({ stateDir: dir, summary, out: say })
   } catch (e) {

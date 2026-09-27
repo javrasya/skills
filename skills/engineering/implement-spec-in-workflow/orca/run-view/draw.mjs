@@ -4,6 +4,7 @@
 // lines and hands a click's row back through rowAt.
 import { STATES, bandOf } from '../run-view-model.mjs'
 import { worktreeName } from '../orca-cli.mjs'
+import { RUNNER_SETTINGS } from '../settings.mjs'
 
 const E = '\x1b['
 const c = (code, s) => `${E}${code}m${s}${E}0m`
@@ -77,18 +78,57 @@ function headerLines(h, W) {
     `runner ${h.alive === true ? c('32', '● alive') : h.alive === false ? c('31', '○ gone') : grey('? unknown')}`, duration(h.elapsedMs),
   ].filter(Boolean).join(dot)
   const counts = COUNTED.filter((s) => h.counts?.[s]).map((s) => c(COLOUR[s], `${GLYPH[s]} ${h.counts[s]} ${s}`)).join('  ')
-  return [fit(' ' + run, W), fit(' ' + counts, W)]
+  const halted = h.halted ? c('1;33', `⏸ halted — ${h.halted.nodes.length} node${h.halted.nodes.length === 1 ? '' : 's'} need${h.halted.nodes.length === 1 ? 's' : ''} you · R to resume`) : null
+  const lead = [h.outage && outageOf(h.outage), halted].filter(Boolean)
+  return [fit(' ' + run, W), fit(' ' + (lead.length ? lead.join(dot) + dot + counts : counts), W)]
 }
+
+// An Orca outage is the run's, not an agent's (ADR-0015): it heads the counts,
+// and every agent keeps its own state.
+const outageOf = (o) => c('1;33', o.phase === 'paused'
+  ? `⏸ paused: Orca outage past ${Math.round(RUNNER_SETTINGS.outageLimitMs / 60_000)}m — R to resume`
+  : `⚠ Orca unreachable — waiting ${duration(o.elapsedMs)} (probe ${o.probes})`)
 
 function phaseLine(p) {
   const peak = p.folded && p.peakContext != null ? grey('   peak ctx ') + banded({ band: bandOf(p.peakContext) }, size(p.peakContext)) : ''
   return ` ${p.folded ? '▸' : '▾'} ${bold(p.name.padEnd(10))} ${grey(`${p.done}/${p.total} done`.padEnd(10))}  ${mixOf(p.mix)}${peak}`
 }
 
-// A doctor's row, under its patient's, names only its role: its label is
-// `recover -> <the patient's label>`, the row above.
-const agentLine = (a, depth = 0) =>
-  `  ${String(a.n).padStart(3)}   ${(depth ? `${'  '.repeat(depth - 1)}└ ${a.label.split(' -> ')[0]}` : a.label).padEnd(22)} ${fit(stateOf(a), STATE_W)} ${contextCell(a)}   ${grey(size(a.tokens).padStart(6))}   ${duration(a.elapsedMs).padStart(7)}`
+// The name column's width. A name that overflows it is cut, ending in …, on
+// every row but the selected one, where it scrolls (marqueeOffset).
+export const NAME_W = 34
+const MARQUEE = { holdStartMs: 3000, holdEndMs: 5000, msPerChar: 250 }
+
+// How many characters a selected name of `length` scrolls left by, `elapsedMs`
+// after its row was selected, in a column `width` wide: 0 while it fits.
+// Otherwise it shows its start for 3 s, scrolls left at 4 characters a
+// second until its end is in view, holds its end for 5 s, and snaps back to
+// its start, over and over.
+export function marqueeOffset(elapsedMs, length, width) {
+  const max = length - width
+  if (max <= 0) return 0
+  const scrollMs = max * MARQUEE.msPerChar
+  const t = Math.max(0, elapsedMs) % (MARQUEE.holdStartMs + scrollMs + MARQUEE.holdEndMs)
+  return t < MARQUEE.holdStartMs ? 0 : Math.min(max, Math.floor((t - MARQUEE.holdStartMs) / MARQUEE.msPerChar))
+}
+
+// A row's name, NAME_W wide. A doctor's row, under its patient's, names only
+// its role, after its └: its label is `recover -> <the patient's label>`, the
+// row above. `elapsed`, on the selected row only, is how long it has been
+// selected, and scrolls a name that overflows; else that name is cut.
+// overflows: whether it does.
+function nameCell(a, depth, elapsed) {
+  const prefix = depth ? `${'  '.repeat(depth - 1)}└ ` : ''
+  const chars = [...(depth ? a.label.split(' -> ')[0] : a.label)]
+  const w = NAME_W - prefix.length
+  if (chars.length <= w) return { text: (prefix + chars.join('')).padEnd(NAME_W), overflows: false }
+  if (elapsed == null) return { text: prefix + chars.slice(0, w - 1).join('') + '…', overflows: true }
+  const at = marqueeOffset(elapsed, chars.length, w)
+  return { text: prefix + chars.slice(at, at + w).join(''), overflows: true }
+}
+
+const agentLine = (a, depth = 0, elapsed = null) =>
+  `  ${String(a.n).padStart(3)}   ${nameCell(a, depth, elapsed).text} ${fit(stateOf(a), STATE_W)} ${contextCell(a)}   ${grey(size(a.tokens).padStart(6))}   ${duration(a.elapsedMs).padStart(7)}`
 
 const PANE = 4
 
@@ -136,18 +176,26 @@ function dialogBox(d, mw) {
 // line's text (an action's outcome, or the latest event); alert: a blocked
 // agent's line, drawn loud in its place when there is no flash. help: the key
 // line, for a tree the standalone view opened.
+// now: the time the selected row's name scrolls to, measured from
+// model.selectedAt, when that row was selected; without one it shows its start.
 // Returns the screen's lines, height of them; rowAt(y), the index in
-// model.rows of the row drawn on terminal line y (1-based), or null; and
-// optionAt(y), the index of the dialog's option drawn there, or null.
-export function draw(model, { width: W = 140, height: H = 40, flash = null, alert = null, help = HELP } = {}) {
+// model.rows of the row drawn on terminal line y (1-based), or null;
+// optionAt(y), the index of the dialog's option drawn there, or null; and
+// scrolling, whether the selected row's name overflows, and so scrolls: the
+// screen changes with `now` alone only then.
+export function draw(model, { width: W = 140, height: H = 40, flash = null, alert = null, help = HELP, now = null } = {}) {
   const rows = model?.rows ?? []
   const selected = model?.selected ?? 0
   const body = Math.max(1, H - TOP - 1 - PANE - 2)
   const top = Math.max(0, Math.min(selected - body + 1, rows.length - body))
-  const lines = [...headerLines(model?.header, W), fit(grey('─'.repeat(W)), W), fit(grey('   #   AGENT                    STATE              CONTEXT           TOKENS   ELAPSED'), W)]
+  const lines = [...headerLines(model?.header, W), fit(grey('─'.repeat(W)), W), fit(grey(`   #   ${'AGENT'.padEnd(NAME_W + 1)}  STATE              CONTEXT           TOKENS   ELAPSED`), W)]
+  const since = model?.selectedAt ?? null
+  const elapsed = now === null || since === null ? 0 : now - since
+  const chosen = rows[selected]
+  const scrolling = chosen?.kind === 'agent' && nameCell(chosen.agent, chosen.depth, elapsed).overflows
   for (let i = top; i < Math.min(rows.length, top + body); i++) {
     const r = rows[i]
-    const line = r.kind === 'phase' ? phaseLine(r.phase) : agentLine(r.agent, r.depth)
+    const line = r.kind === 'phase' ? phaseLine(r.phase) : agentLine(r.agent, r.depth, i === selected ? elapsed : null)
     lines.push(i === selected ? c('7', fit(strip(line), W)) : fit(line, W))
   }
   while (lines.length < TOP + body) lines.push(fit('', W))
@@ -172,6 +220,7 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
   }
   return {
     lines: lines.slice(0, H),
+    scrolling,
     rowAt: (y) => {
       const i = top + (y - TOP - 1)
       // The dialog takes every click: the tree behind it takes none.
@@ -199,13 +248,14 @@ export function age(ms) {
   return `${Math.floor(h / 24)}d${String(h % 24).padStart(2, '0')}h`
 }
 
-const OUTCOME = { ok: '32', partial: '33', failed: '31' }
-const outcomeOf = (r) => (r.outcome ? c(OUTCOME[r.outcome], r.outcome) : r.alive ? c('36', 'running') : grey('unfinished'))
+const OUTCOME = { ok: '32', partial: '33', failed: '31', halted: '1;33' }
+// A run its live runner paused on an Orca outage is not running (ADR-0015).
+const outcomeOf = (r) => (r.outcome ? c(OUTCOME[r.outcome], r.outcome) : r.paused && r.alive !== false ? c('33', 'paused (Orca outage)') : r.alive ? c('36', 'running') : grey('unfinished'))
 const runnerOf = (r) => (r.alive === true ? c('32', '● alive') : r.alive === false ? c('31', '○ dead') : grey('? unknown'))
 
 const projectLine = (p) => ` ${p.folded ? '▸' : '▾'} ${bold(p.name)}  ${grey(p.path ?? '')}  ${grey(`${p.runs.length} run${p.runs.length === 1 ? '' : 's'}`)}`
 const runLine = (r) =>
-  `   ${r.runId.padEnd(20)} ${(r.spec ?? r.name ?? '—').padEnd(8)} ${fit(outcomeOf(r), 11)} ${fit(runnerOf(r), 10)} ${String(r.kept).padStart(4)}   ${age(r.ageMs).padStart(7)}${r.reclaimed ? grey('   reclaimed') : ''}`
+  `   ${r.runId.padEnd(20)} ${(r.spec ?? r.name ?? '—').padEnd(8)} ${fit(outcomeOf(r), 20)} ${fit(runnerOf(r), 10)} ${String(r.kept).padStart(4)}   ${age(r.ageMs).padStart(7)}${r.reclaimed ? grey('   reclaimed') : ''}`
 
 function runPane(r) {
   // The tab outlives its runner, so whether it is open says nothing of the runner.
@@ -233,7 +283,7 @@ export function drawRuns(model, { width: W = 140, height: H = 40, flash = null }
     fit(` ${bold('Orca runs')}${dot}${count(all.length, 'run')}${dot}${count(projects.length, 'project')}`, W),
     fit(` ${c('32', `● ${all.filter((r) => r.alive === true).length} alive`)}  ${c('31', `○ ${all.filter((r) => r.alive === false).length} dead`)}  ${grey(`${all.filter((r) => r.reclaimed).length} reclaimed`)}`, W),
     fit(grey('─'.repeat(W)), W),
-    fit(grey('   RUN                  SPEC     OUTCOME     RUNNER     KEPT       AGE'), W),
+    fit(grey('   RUN                  SPEC     OUTCOME              RUNNER     KEPT       AGE'), W),
   ]
   for (let i = top; i < Math.min(rows.length, top + body); i++) {
     const r = rows[i]

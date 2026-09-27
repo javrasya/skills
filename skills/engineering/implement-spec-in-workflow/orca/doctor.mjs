@@ -66,7 +66,7 @@ export function doctorPrompt({ patient, reason, round, rounds, transcript, workt
 
 Change nothing. Edit, create or delete no file, in any worktree; change no environment, configuration or installed tool; log in to or out of nothing. Read only. Your only output is the note.
 
-When only a human can clear the failure (a login, credentials, a sandbox permission), state the situation and what the human must do or decide, plainly. Do not question them: they handle it their own way.
+When only a human can clear the failure (a login, credentials, a sandbox permission), state the situation and what the human must do or decide, plainly. Do not question them: they handle it their own way. Never run \`orca orchestration ask\`: nobody answers it. A question only a human can answer goes in your escalation or your note, as below.
 
 Report over Orca mail to your Run's mailbox, with the IDs from your Orca preamble:
 - the note: orchestration send --type handoff --subject note --body "<the note>", then worker_done --outcome succeeded. Your first handoff is this round's note: the runner carries the patient on with it at once, and takes no later handoff or escalation from you, so send it only once you are done, then worker_done;

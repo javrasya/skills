@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-09-24. Extends ADR-0011. Amended by #74 and #75 (spec #67): a failed agent, whether dead past its cap, blocked past the limit or never started, gets its doctor rounds before null (ADR-0014), and a reused worktree is judged against its baseline (#70). Applies to the **Orca runner only**; the Workflow runner, and the shared workflow script, are unchanged.
+Accepted — 2026-09-24. Extends ADR-0011. Extended by ADR-0015 (an Orca outage pauses the run and fails no agent). Amended by #74 and #75 (spec #67): a failed agent, whether dead past its cap, blocked past the limit or never started, gets its doctor rounds before null (ADR-0014), and a reused worktree is judged against its baseline (#70). Applies to the **Orca runner only**; the Workflow runner, and the shared workflow script, are unchanged.
 
 ## Context
 
