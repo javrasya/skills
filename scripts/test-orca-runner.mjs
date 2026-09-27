@@ -6091,6 +6091,89 @@ test('standalone: a halted run is listed halted, is not ended while its runner l
   assert.equal(readRegistry(registry)[0].state, 'running')
 })
 
+test('halt: halted.json tells the arming session: removed at start, written on the halt, rewritten with a new at when a second node is held and when one of them is carried on, removed once the run leaves halted', async () => {
+  let aHeld
+  const aSeen = new Promise((r) => { aHeld = r })
+  const rig = nodeRig({
+    'Do a.': diesThenSubmitsOnContinue,
+    'Do b.': async (w) => { await aSeen; w.state.onContinue = submitsValue(ANSWERED); return submitsValue(ASKS)(w) },
+  })
+  const at = join(rig.stateDir, 'halted.json')
+  writeFileSync(at, JSON.stringify({ at: 'stale', nodes: [] }))
+  const run = rig.go(`return await parallel([() => ${nodeCall('a')}, () => ${nodeCall('b')}])`)
+  assert.equal(existsSync(at), false, 'a stale halted.json is removed as the runner starts')
+  const notice = () => (existsSync(at) ? JSON.parse(readFileSync(at, 'utf8')) : null)
+  await until(() => rig.halts.length === 1, 'the first halt')
+  const first = notice()
+  const j = rig.journal()
+  const tabOf = (node) => ofType(j, 'started').find((e) => e.node === node).terminal
+  assert.equal(first.terminal, 'term_1', "the runner's tab")
+  assert.equal(first.runId, ofType(j, 'run')[0].runId)
+  assert.deepEqual(first.nodes.map(({ node, title, tab }) => ({ node, title, tab })), [{ node: 'n/a', title: '[P] a', tab: tabOf('n/a') }])
+  assert.match(first.nodes[0].reason, /./)
+  assert.equal('questions' in first.nodes[0], false)
+  aHeld()
+  await until(() => rig.halts.length === 2, 'the second halt')
+  const second = notice()
+  assert.notEqual(second.at, first.at)
+  assert.deepEqual(second.nodes.map((x) => x.node), ['n/a', 'n/b'])
+  assert.deepEqual(second.nodes[1], { node: 'n/b', title: '[P] b', reason: 'Keep the v1 key, or break it?', questions: ['Keep the v1 key, or break it?'], tab: ofType(rig.journal(), 'started').find((e) => e.node === 'n/b').terminal })
+  await run.control.resume({ node: 'n/b' })
+  await until(() => notice()?.nodes.length === 1, 'b carried on')
+  const third = notice()
+  assert.notEqual(third.at, second.at)
+  assert.deepEqual(third.nodes.map((x) => x.node), ['n/a'])
+  await run.control.resume({})
+  assert.deepEqual(await run.p, [GOOD, ANSWERED])
+  assert.equal(existsSync(at), false, 'removed once the run leaves halted')
+})
+
+test('halt: while an Orca outage is on, R probes Orca and resumes no held node; once Orca is back, R resumes the held node', async () => {
+  let release
+  const released = new Promise((r) => { release = r })
+  const rig = nodeRig({
+    'Do a.': diesThenSubmitsOnContinue,
+    'Do s.': async (w) => { await released; return submitGood(w) },
+  })
+  const run = rig.go(`return await parallel([() => ${nodeCall('a')}, () => ${nodeCall('s')}])`)
+  await until(() => rig.halts.length, 'the halt')
+  rig.orca.down(RUNTIME_GONE)
+  await until(() => ofType(rig.journal(), 'outage').some((e) => e.phase === 'start'), "s's watch meeting the outage")
+  const continued = () => rig.orca.calls.filter((c) => c.verb === 'workerContinue').length
+  assert.deepEqual(await run.control.resume({}), { back: false, outage: true })
+  assert.equal(continued(), 0, 'no held node is resumed during the outage')
+  assert.ok(!rig.lines.some((l) => l.startsWith('>> R: resuming')), rig.lines.join('\n'))
+  assert.ok(rig.lines.includes('!! Orca is still unreachable: every Orca call still waits for it'), rig.lines.join('\n'))
+  rig.orca.up()
+  assert.deepEqual(await run.control.resume({}), { back: true, outage: true }, 'this R ends the outage, and still resumes nothing')
+  assert.equal(continued(), 0)
+  release()
+  assert.deepEqual(await run.control.resume({}), { resumed: ['n/a'] })
+  assert.deepEqual(await run.p, [GOOD, GOOD])
+  assert.equal(continued(), 1)
+  assert.deepEqual(phasesOf(rig.journal()), ['start', 'end'])
+})
+
+test('resume by node: a failed node a dead runner\'s --resume starts afresh is one row in the fold and the view, its latest attempt, not the superseded failed one', async () => {
+  const rig = nodeRig({}, { faults: { workerStart: ({ count }) => (count === 1 ? new Error('boom') : null) } })
+  const script = `return await ${nodeCall('a', ", isolation: 'worktree'")}`
+  rig.go(script, { settings: { retryBackoffMs: [] } })
+  await until(() => rig.halts.length, 'the halt')
+  // The runner died; a --resume starts the node afresh (its worker never started).
+  const second = rig.go(script, { resume: true, settings: { retryBackoffMs: [] } })
+  const { worktrees_kept: kept, ...value } = await second.p
+  assert.deepEqual(value, GOOD)
+  assert.equal(kept.length, 1, 'the worktree its failed start was given')
+  assert.deepEqual(rig.started(second), ['[P] a'])
+  const fold = readJournal(join(rig.stateDir, 'journal.jsonl'))
+  // The failed attempt stays an agent of the Run, for its worktree's reclaim.
+  assert.deepEqual(fold.agents.filter((a) => a.node === 'n/a').map((a) => [a.state, !!a.superseded, !!a.worktree]), [['failed', true, true], ['done', false, true]])
+  const clock = fakeClock()
+  const view = runView({ stateDir: rig.stateDir, orca: rig.orca, clock, registry: null, transcripts: { usage: () => null }, alive: () => false })
+  await view.refresh()
+  assert.deepEqual(view.model.phases.flatMap((p) => p.agents).map((a) => [a.node, a.state]), [['n/a', 'done']])
+})
+
 test('resume: inFlight is no part of a call\'s key', () => {
   assert.equal(journalKey('p', { node: 'n/a', inFlight: true }), journalKey('p', { node: 'n/a' }))
 })

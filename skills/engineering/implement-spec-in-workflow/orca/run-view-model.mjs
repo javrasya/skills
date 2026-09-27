@@ -40,7 +40,9 @@ const TITLE = /^\[([^\]]*)\] ([\s\S]*)$/
 // Every agent the journal names, by the fold reclaim and the runner's resume
 // share (journal.mjs): one row per agent, its state its latest lifecycle
 // entry's. An agent a resume carried forward or took up again is the one row,
-// never a second one under the resumed run's call number.
+// never a second one under the resumed run's call number. A failed attempt
+// of a node that a later one superseded (journal.mjs) is no row either, but
+// Reclaim All still takes it, with any worktree it was given.
 const agentsIn = (fold) => fold.agents.map((a) => {
   const [, phase, label] = TITLE.exec(a.title ?? '') ?? [null, 'Run', a.title ?? `agent-${a.n}`]
   return { ...a, phase, label }
@@ -208,6 +210,8 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   // name -> folded, only for phases the operator folded or unfolded.
   const folds = new Map()
   let phases = []
+  // The superseded attempts: no row, but Reclaim All's.
+  let superseded = []
   let header = null
   let selectedKey = null
   let selected = 0
@@ -278,10 +282,11 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     const entries = journalLines(journalPath)
     latest = latestEvent(join(stateDir, 'runner.log'))
     const fold = foldJournal(entries)
-    const agents = agentsIn(fold)
+    const every = agentsIn(fold)
+    const agents = every.filter((a) => !a.superseded)
     const now = clock.now()
     let open = null
-    if (agents.some((a) => a.terminal)) {
+    if (every.some((a) => a.terminal)) {
       try {
         open = new Set(await orca.terminalList())
       } catch {}
@@ -296,7 +301,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
       } catch {}
     }
     const reclaimedNames = new Set(run?.reclaimedAgents?.map((r) => r.agent) ?? [])
-    for (const a of agents) {
+    for (const a of every) {
       const usage = a.sessionId ? transcripts.usage({ harness: a.harness, sessionId: a.sessionId, worktree: a.worktree }) : null
       const reclaimed = !!a.runId && (run?.reclaimed === true || reclaimedNames.has(agentName(a)))
       Object.assign(a, {
@@ -312,6 +317,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
       })
     }
 
+    superseded = every.filter((a) => a.superseded)
     const blocked = agents.filter((a) => a.state === 'blocked')
     const needed = agents.filter((a) => a.state === 'needs you')
     alert = [
@@ -451,7 +457,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
       if (row?.kind !== 'agent') return say('select an agent to reclaim')
       a = row.agent
     } else {
-      a = agentsNow().find((x) => x.n === n)
+      a = [...agentsNow(), ...superseded].find((x) => x.n === n)
       if (!a) return say(`no agent ${n} in this run to reclaim`)
     }
     a = withPatient(a)
@@ -496,7 +502,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   // The agents an option names, none already reclaimed, and no doctor whose
   // patient is not: its patient's reclaim takes it.
   function chosen(id, row) {
-    const list = id === 'selected' ? (row.kind === 'agent' ? [withPatient(row.agent)] : row.phase.agents) : id === 'successful' ? agentsNow().filter((a) => a.state === 'done') : agentsNow()
+    const list = id === 'selected' ? (row.kind === 'agent' ? [withPatient(row.agent)] : row.phase.agents) : id === 'successful' ? agentsNow().filter((a) => a.state === 'done') : [...agentsNow(), ...superseded]
     return list.filter((a) => !a.reclaimed && withPatient(a) === a)
   }
 

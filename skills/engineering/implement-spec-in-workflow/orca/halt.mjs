@@ -9,10 +9,14 @@
 //
 // journal(entry) appends a journal line; out(s) logs; record(what, entry)
 // writes the run registry; runId() is the Run's id, or null before there is
-// one; onHalt({ node, nodes }) is told each time a node is held.
+// one; onHalt({ node, nodes }) is told each time a node is held, and
+// onChange(held) each time the set of held nodes changes or a node is held
+// again, with every held node, in the order held, as { node, title, reason,
+// questions? }: none once the run leaves halted.
 // Returns {
 //   on()             whether the run is halted
-//   hold(node)       holds a node: { node, title, needsDecision, reason };
+//   hold(node)       holds a node: { node, title, needsDecision, reason,
+//                    questions? };
 //                    resolves once R resumes it, which the caller then does
 //   settle(node)     a held node succeeded: the run leaves halted once none
 //                    is left, and every held call goes on
@@ -22,16 +26,18 @@
 //                    already being resumed; { resumed: [node…] }
 //   nodes()          every held node's name, in the order they were held
 // }
-export function runHalt({ journal, out, record = () => {}, runId = () => null, onHalt = () => {} }) {
-  // node -> { node, title, needsDecision, reason, go, resuming }
+export function runHalt({ journal, out, record = () => {}, runId = () => null, onHalt = () => {}, onChange = () => {} }) {
+  // node -> { node, title, needsDecision, reason, questions, go, resuming }
   const held = new Map()
   // The calls held while halted, each its release, in call order.
   const waiting = []
   let on = false
 
-  function hold({ node, title, needsDecision = false, reason }) {
+  const changed = () => onChange([...held.values()].map(({ node, title, reason, questions }) => ({ node, title, reason, ...(questions && { questions }) })))
+
+  function hold({ node, title, needsDecision = false, reason, questions = null }) {
     return new Promise((go) => {
-      held.set(node, { node, title, needsDecision, reason, go, resuming: false })
+      held.set(node, { node, title, needsDecision, reason, questions, go, resuming: false })
       if (!on) {
         on = true
         journal({ type: 'halted', node, reason })
@@ -39,11 +45,14 @@ export function runHalt({ journal, out, record = () => {}, runId = () => null, o
       }
       out(`!!!!!!!! HALTED: ${node} ${needsDecision ? 'needs decisions only you can make' : 'failed'}: ${reason}; R to resume`)
       onHalt({ node, nodes: [...held.keys()] })
+      changed()
     })
   }
 
   function settle(node) {
-    if (!held.delete(node) || !on || held.size) return
+    if (!held.delete(node) || !on) return
+    changed()
+    if (held.size) return
     on = false
     journal({ type: 'unhalted' })
     if (runId()) record('unhalted', { runId: runId() })

@@ -19,7 +19,8 @@
 // a node whose key changed runs live, and ends replay for every later call.
 // Such a call is never handed null: a node that fails, or whose result needs
 // decisions only the operator can make, is held, and the run halts (halt.mjs)
-// until R carries it on, in this process. A resume, from any
+// until R carries it on, in this process; halted.json in the state dir names
+// the held nodes for the arming session meanwhile. A resume, from any
 // terminal, takes the journaled Run over (run-use) before it starts a worker,
 // and takes up each worker the last run left out: watched again if Orca still
 // shows it live, its session continued if it died. A patient whose agent()
@@ -160,6 +161,29 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   // still names every agent of the Run: the ones earlier runners made are
   // carried forward below, as `earlier` or `outstanding` lines.
   writeFileSync(journalPath, '')
+  // halted.json is the arming session's notice of a halt (SKILL.md step 4): a
+  // halted run writes no summary.json, since its script has not ended, and the
+  // session waits on files, never on this tab. { at, runId, terminal (this
+  // runner's tab), nodes: [{ node, title, reason, questions?, tab (its
+  // worker's) }] }, rewritten with a new `at` whenever the held nodes change,
+  // so the session reports each change once, and removed once the run leaves
+  // halted. A stale one from an earlier run must never pass for this run's.
+  const noticePath = join(stateDir, 'halted.json')
+  rmSync(noticePath, { force: true })
+  let noticeAt = 0
+  const haltNotice = (held) => {
+    try {
+      if (!held.length) return rmSync(noticePath, { force: true })
+      // Strictly later than the last, so two holds in one millisecond are two notices.
+      noticeAt = Math.max(clock.now(), noticeAt + 1)
+      const fold = readJournal(journalPath)
+      const terminal = [...journalLines(journalPath)].reverse().find((e) => e.type === 'run' && e.terminal)?.terminal ?? null
+      const tabOf = (node) => fold.nodes.get(node)?.last?.terminal ?? fold.agents.filter((a) => a.node === node).at(-1)?.terminal ?? null
+      writeFileSync(noticePath, JSON.stringify({ at: new Date(noticeAt).toISOString(), runId: runIdNow(), terminal, nodes: held.map((h) => ({ ...h, tab: tabOf(h.node) })) }, null, 2))
+    } catch (e) {
+      out(`!! could not write halted.json: ${e?.message ?? e}`)
+    }
+  }
   // An agent() that returned null makes a run that returns partial, not ok.
   // A doctor that fails is no agent() call, and a node's failure is held, never
   // returned; a carried line is an earlier run's.
@@ -220,7 +244,7 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   }
   // The run's halt (ADR-0016). R in the attached view reaches resume(): an
   // outage's R takes precedence while one is on.
-  const halt = runHalt({ journal, out, record, runId: runIdNow, onHalt })
+  const halt = runHalt({ journal, out, record, runId: runIdNow, onHalt, onChange: haltNotice })
   control.resume = async ({ node = null } = {}) => (outage.state() ? control.resumeOrca() : halt.resume(node))
   // How many calls with each key this run has made.
   const seen = new Map()
@@ -392,7 +416,7 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
       if (v !== null && !questions) break
       wasHeld = true
       const reason = questions ? questions.join(' · ') : readJournal(journalPath).nodes.get(call.node)?.reason ?? 'it failed'
-      await halt.hold({ node: call.node, title: call.title, needsDecision: !!questions, reason })
+      await halt.hold({ node: call.node, title: call.title, needsDecision: !!questions, reason, ...(questions && { questions }) })
       v = await resumeNode(call, readJournal(journalPath).nodes.get(call.node) ?? {})
     }
     if (wasHeld) {

@@ -256,6 +256,8 @@ export const readJournal = (path) => foldJournal(journalLines(path))
 // being every node still failed or needing decisions. An agent of a node has
 // `node`; a needs-decision one is `needs you`, its reason its questions, which
 // it also holds as `decisions`; a held call is queued, its reason saying so.
+// A failed agent of a node that a later agent of the same node carried on
+// has `superseded: true`: the run view draws the node's latest attempt alone.
 export function foldJournal(entries) {
   const calls = new Map()
   const nodes = new Map()
@@ -507,6 +509,13 @@ export function foldJournal(entries) {
       })
     }
   }
+  // A failed node a later call of the same node carried on under a new n (a
+  // dead runner's --resume starting it afresh) is superseded: the node's
+  // latest attempt is its row. It stays an agent of the Run, since a
+  // worktree it was given is still the operator's to reclaim.
+  const latestOfNode = new Map()
+  for (const a of agents.values()) if (a.node && a.patient == null && (latestOfNode.get(a.node)?.n ?? -Infinity) < a.n) latestOfNode.set(a.node, a)
+  for (const a of agents.values()) if (a.node && a.patient == null && a.state === 'failed' && latestOfNode.get(a.node) !== a) a.superseded = true
   const outstandingNodes = [...nodes.values()].filter((x) => x.failed || x.needsDecision).map((x) => x.node)
   return { calls, nodes, retained, run, lastN, phases, agents: [...agents.values()].sort((x, y) => x.n - y.n), mail: [...mail.values()], outage, halted: halted && { ...halted, nodes: outstandingNodes } }
 }
