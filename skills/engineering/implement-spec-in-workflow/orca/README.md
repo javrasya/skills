@@ -309,6 +309,8 @@ Both checks must hold, on the fresh run and on the resume:
 
 ### Pass notes
 
+**Not yet passed on Orca: the #67 integration review's fixes** (offline tests only). Decided there, for ADR-0014: a round's first handoff is its only remedy (a later handoff or escalation from that doctor acts on nothing), and a Run mailbox message read before its doctor's box is open is held by its dispatch (`mail` `action: pending`) and applied once that box claims it, never left unacknowledged. A patient's `agent()` returns once its own result is in, and its remedy is applied once it holds a live slot again; see [Doctors](#doctors).
+
 `contract:needs-you` (#76) was passed on Orca at 952ed89, before it was replayed onto #74's doctor rounds, `contract:never-started` (#75) at a2cbd0d, before it was replayed onto #76's escalations, and #77's trail at 3d54973, before it was replayed onto #75's never-started and blocked doctors. #78's pass below is the first on the combined runner, with all three.
 
 Last pass: 2026-09-27 (#78), Orca 1.4.212 and Claude Code 2.1.283 on macOS, with the runner as of 26dba44 (#78's resume mid-recovery on top of every other #67 ticket), driven by an agent with the steps above, `orca terminal` verbs and the state dir's files only, launched with the preload, `<worktree>` the main checkout, beside the two-runner contract's Orca leg (above), each run in its own state dir. **The Orca-only contract holds, fresh and resumed** (Run `run_27e41603e541`). Every kill was done by a script reading the journal, each 10 s after that session's transcript showed a new `Bash` call of the wait; the same script played the human for `contract:needs-you`.
