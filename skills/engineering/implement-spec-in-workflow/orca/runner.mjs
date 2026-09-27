@@ -15,7 +15,10 @@
 // The Workflow runner's resumeFromRunId promises the same. A resume, from any
 // terminal, takes the journaled Run over (run-use) before it starts a worker,
 // and takes up each worker the last run left out: watched again if Orca still
-// shows it live, its session continued if it died. When the script settles the
+// shows it live, its session continued if it died. A patient whose agent()
+// waited on its doctor stays pending: its round goes on, its doctor taken up
+// like any worker, never a second one started, and a handoff journaled but not
+// yet applied is applied once. When the script settles the
 // runner writes summary.json to the state dir: {runner, ok, result | error},
 // and on a failure also worktrees_kept, the worktrees it retained because
 // their agent died or never started. Every line
@@ -24,32 +27,30 @@
 // and writes to runner.log alone while the view lives (attachView).
 //
 // Nothing is reclaimed during a run (ADR-0012): no worker is released, no tab
-// closed, no worktree removed. Only after summary.json is written does the
-// runner ask the operator what to reclaim (reclaim.mjs); once answered it
-// writes what was reclaimed and what kept to reclaim.json beside it, and exits.
+// closed, no worktree removed. The runner reclaims nothing at the end either:
+// it writes summary.json and stays in its tab until the operator quits the run
+// view, whose reclaim dialog is the only place an agent is reclaimed.
 //
 // The run itself is recorded in the machine-wide run registry (registry.mjs,
 // orca-runs.jsonl in the Claude directory): `armed` and the runner's terminal when the Run
 // is created, the new runner's terminal when a resume takes it over, `ended`
 // with ok, partial or failed when the script settles, and `reclaimed` for what
-// the operator reclaims at the end.
+// the operator reclaims from the run view.
 //
 // No change to this directory is done until the runner contract test passes
 // under both runners (README.md). The offline tests do not replace it.
 import { mkdirSync, writeFileSync, readFileSync, rmSync, appendFileSync, realpathSync } from 'fs'
-import { createInterface } from 'readline'
 import { spawn } from 'child_process'
 import { createHash } from 'crypto'
 import { basename, dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { checkSchema } from './schema.mjs'
-import { orcaCli, launchCommand, HARNESSES, realTimer, worktreeUnpushed } from './orca-cli.mjs'
+import { orcaCli, launchCommand, HARNESSES, realTimer } from './orca-cli.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { agentLifecycle } from './lifecycle.mjs'
-import { JOURNAL_ENTRIES, readJournal, madeByRun } from './journal.mjs'
-import { runRegistry, readRegistry, REGISTRY_PATH } from './registry.mjs'
+import { JOURNAL_ENTRIES, readJournal, madeByRun, journalLines } from './journal.mjs'
+import { runRegistry, REGISTRY_PATH } from './registry.mjs'
 import { sessionTranscripts } from './transcript.mjs'
-import { agentsOf, endOfRunPrompt } from './reclaim.mjs'
 import { VIEW_EXIT } from './run-view/exit-codes.mjs'
 
 export { SUBMIT, workerPrompt } from './lifecycle.mjs'
@@ -118,7 +119,7 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   let currentPhase = null
 
   const journalPath = join(stateDir, 'journal.jsonl')
-  const earlier = resume ? readJournal(journalPath) : { calls: new Map(), retained: [], run: null, lastN: 0, agents: [] }
+  const earlier = resume ? readJournal(journalPath) : { calls: new Map(), retained: [], run: null, lastN: 0, agents: [], mail: [] }
   const journaled = earlier.calls
   // A resume numbers its calls on from the last run's: the Run it takes over
   // already holds a `<runId>-<n>` child worktree for each n used, and Orca
@@ -130,9 +131,10 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   // carried forward below, as `earlier` or `outstanding` lines.
   writeFileSync(journalPath, '')
   // An agent() that returned null makes a run that returns partial, not ok.
+  // A doctor that fails is no agent() call.
   let failures = 0
   const journal = (entry) => {
-    if (entry.type === 'failed') failures++
+    if (entry.type === 'failed' && entry.patient == null) failures++
     appendFileSync(journalPath, JSON.stringify({ type: entry.type, at: iso(clock), ...entry }) + '\n')
   }
   // The registry is bookkeeping for the operator: a write it refuses is
@@ -185,19 +187,44 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   }
   // So a resume that makes no live call still leaves the Run to the next one.
   if (earlier.run) journal({ type: 'run', ...earlier.run, lastN: earlier.lastN })
+  // Every Run mailbox message an earlier runner acted on, as it journaled it:
+  // Orca delivers a batch again until it is acknowledged, and it is never
+  // acted on twice.
+  for (const m of earlier.mail) journal(m)
   // Every other agent an earlier runner of this Run made: it launched
   // nothing in this run, but its tab and `<runId>-<n>` worktree stay the Run's
   // until the operator reclaims them, so this run's journal still names it.
   const stillOut = new Set(outstanding.map((w) => w.origin))
   for (const a of earlier.agents) {
     if (!madeByRun(a) || stillOut.has(a.origin)) continue
-    const { n, title, runId: run, dispatchId, harness, sessionId, terminal, worktree, origin, state, reason, continuations, workerLeft } = a
-    journal({ type: 'earlier', n, title, run, dispatchId, harness, sessionId, terminal, worktree, origin, state, reason, ...(continuations && { continuations }), ...(workerLeft && { workerLeft }) })
+    const { n, title, runId: run, dispatchId, harness, sessionId, terminal, worktree, origin, state, reason, continuations, workerLeft, patient, round, rounds } = a
+    journal({ type: 'earlier', n, title, run, dispatchId, harness, sessionId, terminal, worktree, origin, state, reason, ...(continuations && { continuations }), ...(workerLeft && { workerLeft }), ...(patient != null && { patient }), ...(rounds.length && { round, rounds }) })
   }
   for (const { key, n, title, run, dispatchId, harness, sessionId, terminal, worktree, dir, origin, continuations } of outstanding) {
-    journal({ type: 'outstanding', key, n, title, run, dispatchId, harness, sessionId, terminal, worktree, dir, origin, ...(continuations && { continuations }) })
+    // A patient's rounds ride along: a resume goes on from them.
+    const rounds = earlier.agents.find((a) => a.origin === origin)?.rounds ?? []
+    journal({ type: 'outstanding', key, n, title, run, dispatchId, harness, sessionId, terminal, worktree, dir, origin, ...(continuations && { continuations }), ...(rounds.length && { round: rounds.at(-1).round, rounds }) })
   }
-  const life = agentLifecycle({ orca, clock, limits, out, stateDir, objective: () => objectiveOf(meta.value, fallbackObjective), journal, retainWorktree, onRun, takeOver: earlier.run?.runId ?? null, transcripts })
+  // A patient's lines are the ones of its call or of its agent; its log lines
+  // the ones the runner printed under its title, in this run or an earlier one.
+  const history = ({ n, origin, title }) => {
+    let log = []
+    try {
+      log = readFileSync(join(stateDir, 'runner.log'), 'utf8').split('\n').filter((l) => l.includes(` ${title}:`) || l.includes(` ${title} `))
+    } catch {}
+    return { entries: journalLines(journalPath).filter((e) => e.n === n || e.origin === origin), log }
+  }
+  // The script's role table, when it hands one over (meta.roles): a doctor is
+  // started by the runner, not by an agent() call, so its role is read here,
+  // and checked at the first agent(), before any worker, as agent() checks
+  // its own launch: a bad row is refused up front, never at the first doctor.
+  let recover = null
+  const doctorLaunch = () => (recover ??= launchOf(meta.value?.roles?.recover ?? {}, permissionMode, 'the role table\'s recover row'))
+  const life = agentLifecycle({
+    orca, clock, limits, out, stateDir, objective: () => objectiveOf(meta.value, fallbackObjective), journal, retainWorktree, onRun, takeOver: earlier.run?.runId ?? null, transcripts,
+    nextN: () => ++count, doctorLaunch, history, mailHandled: earlier.mail.map((m) => m.messageId),
+    mailPending: earlier.mail.filter((m) => m.action === 'pending').map((m) => ({ id: m.messageId, type: m.kind, dispatchId: m.dispatchId, outcome: m.outcome ?? null, subject: m.subject, body: m.body })),
+  })
 
   const phase = (title) => {
     currentPhase = title
@@ -211,14 +238,10 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
 
   async function agent(prompt, opts = {}) {
     if (opts.schema) checkSchema(opts.schema)
-    const harness = opts.harness ?? 'claude'
-    if (!HARNESSES.includes(harness)) throw new Error(`agent(): unknown harness "${harness}": expected one of ${HARNESSES.join(', ')}`)
-    // A pi worker's model is `piModel`, never `model`: `model` stays a Claude
-    // model the Workflow runner can take, since it ignores the harness and runs
-    // every role on Claude. Both are in the call's journal key, as every option is.
-    const launch = { harness, model: harness === 'pi' ? opts.piModel : opts.model, effort: opts.effort, permissionMode: harness === 'claude' ? permissionMode : null }
-    // Refused here, before any worker, like an unsatisfiable schema.
-    launchCommand(launch)
+    // Refused here, before any worker, like an unsatisfiable schema; so is a
+    // bad recover row, when the run has doctor rounds.
+    const launch = launchOf(opts, permissionMode)
+    if (limits.doctorRounds) doctorLaunch()
     const n = ++count
     const label = opts.label || `agent-${n}`
     const phaseName = opts.phase ?? currentPhase ?? 'Run'
@@ -245,24 +268,30 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
       out(`>> ${title}: ${entry ? 'failed in the last run' : 'not in the journal'}; this call and every one after it run live`)
       replaying = false
     }
-    if (entry?.unsettled) out(`>> ${title}: its worker never started in the last run; it starts now`)
+    if (entry?.unsettled && !entry.held) out(`>> ${title}: its worker never started in the last run; it starts now`)
 
     const call = { prompt, schema: opts.schema, isolated: opts.isolation === 'worktree', launch, key, n, label, title, phaseName }
+    // A patient's doctor rounds so far, and, while its agent() waited on
+    // them, the round the resume goes on with: it is not started again.
+    const treated = entry?.rounds ? { rounds: entry.rounds, ...(entry.held && { held: entry.held, origin: entry.held.origin }) } : {}
     // Its worker is its own whatever came before it: it runs this very call.
     if (entry?.worker) {
       aside.delete(entry.worker.worktree)
-      return life({ ...call, adopt: entry.worker })
+      return life({ ...call, ...treated, adopt: entry.worker })
     }
-    return life(call)
+    return life({ ...call, ...treated })
   }
 
   try {
     const value = await script(agent, parallel, phase, log, meta)
+    // A doctor still out after its note carried its patient on ends first.
+    await life.doctors()
     unclaimed()
     const result = withRetained(value, retained)
     if (armed) record('ended', { runId: armed, outcome: failures ? 'partial' : 'ok' })
     return result
   } catch (e) {
+    await life.doctors().catch(() => {})
     unclaimed()
     if (armed) record('ended', { runId: armed, outcome: 'failed' })
     // A run that throws still names what it kept: summary.json carries it.
@@ -274,10 +303,26 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   }
 }
 
+// A role's launch, from an agent() call's options or a role table row. A pi
+// worker's model is `piModel`, never `model`: `model` stays a Claude model the
+// Workflow runner can take, since it ignores the harness and runs every role
+// on Claude. Both are in the call's journal key, as every option is. Throws
+// for a harness or launch no worker can start with, naming `who`.
+function launchOf(opts, permissionMode, who = 'agent()') {
+  const harness = opts.harness ?? 'claude'
+  if (!HARNESSES.includes(harness)) throw new Error(`${who}: unknown harness "${harness}": expected one of ${HARNESSES.join(', ')}`)
+  const launch = { harness, model: harness === 'pi' ? opts.piModel : opts.model, effort: opts.effort, permissionMode: harness === 'claude' ? permissionMode : null }
+  try {
+    launchCommand(launch)
+  } catch (e) {
+    throw new Error(`${who}: ${e.message}`)
+  }
+  return launch
+}
+
 // summary.json for a run that threw: the error, and every worktree the runner
 // retained because its agent died or never started, since the arming session
-// reads this file and not the log. What the operator then keeps of every
-// agent is reclaim.json's (finish).
+// reads this file and not the log.
 export const failureSummary = (e) => ({ runner: 'orca', ok: false, error: e?.stack ?? String(e), worktrees_kept: Array.isArray(e?.worktrees_kept) ? e.worktrees_kept : [] })
 
 // The run's result names each worktree retained because its agent died or
@@ -291,50 +336,16 @@ function withRetained(result, retained) {
   return { ...result, worktrees_kept: [...kept, ...retained.filter((k) => !named.has(k.path))] }
 }
 
-// The end of a run: summary.json first, since the arming session waits for it
-// and not for this tab, then the result, then the end-of-run prompt over the
-// agents this run's journal names: every agent of its Run, the ones earlier
-// runners of it made included, except those the registry already records
-// reclaimed. `ask(question)` resolves to the operator's answer, or null once
-// none can come; `registry` is a runRegistry writer, or null; `unpushed(path)`
-// counts a worktree's unpushed commits. Once the prompt is answered (or there
-// was none to ask), reclaim.json beside summary.json records the outcome:
-//   { choice, answered, reclaimed: [agent], kept: [agent + reason] }
-// with choice null and both lists empty when no agent was left to ask about,
-// and each agent as { name, title, worktree, terminal }. It is the prompt's
-// answer only: a later reclaim from the run view is the registry's.
-export async function finish({ stateDir, summary, orca, ask, out, registry = null, unpushed = worktreeUnpushed }) {
+// The end of a run: summary.json, since the arming session waits for it and
+// not for this tab, then the result in the log. Nothing is asked and nothing
+// reclaimed: the operator reclaims from the run view (ADR-0012).
+export function finish({ stateDir, summary, out }) {
   mkdirSync(stateDir, { recursive: true })
   writeFileSync(join(stateDir, 'summary.json'), JSON.stringify(summary, null, 2))
   if (summary.ok) {
     out('== Result')
     out(JSON.stringify(summary.result, null, 2))
   }
-  let agents = agentsOf(join(stateDir, 'journal.jsonl'))
-  if (registry?.path) {
-    try {
-      const runs = readRegistry(registry.path).filter((r) => agents.some((a) => a.runId === r.runId))
-      // A name is `<runId>-<n>`, so it names one agent across runs.
-      const done = new Set(runs.flatMap((r) => r.reclaimedAgents.map((x) => x.agent)))
-      agents = agents.filter((a) => !done.has(a.name))
-    } catch (e) {
-      out(`!! run registry: could not read what is already reclaimed: ${e?.message ?? e}`)
-    }
-  }
-  const outcome = await endOfRunPrompt({ agents, ask, out, orca, unpushed, registry })
-  const named = ({ name, title, worktree, terminal }) => ({ name, title, worktree: worktree ?? null, terminal: terminal ?? null })
-  const record = {
-    choice: outcome?.choice ?? null,
-    answered: outcome?.answered ?? false,
-    reclaimed: (outcome?.reclaimed ?? []).map(named),
-    kept: (outcome?.kept ?? []).map(({ agent, reason }) => ({ ...named(agent), reason })),
-  }
-  try {
-    writeFileSync(join(stateDir, 'reclaim.json'), JSON.stringify(record, null, 2))
-  } catch (e) {
-    out(`!! could not write reclaim.json: ${e?.message ?? e}`)
-  }
-  return outcome
 }
 
 // The run view attached to the runner's tab (D5 on #43): a child process that
@@ -349,33 +360,22 @@ export async function finish({ stateDir, summary, orca, ask, out, registry = nul
 //                'error' with no pid
 //   tab(s)       prints to the tab; log(s) appends to runner.log, and prints
 //                to the tab too once no view is attached
-//   ask(q)       the end-of-run question on the tab's own stdin, for when no
-//                view is left to ask it in
 //   tail()       runner.log's last lines
 //   restore()    puts the tab back after a view exits, as a crashed one cannot
 //   guard(on)    ignores a Ctrl-C that reaches the runner while a view lives:
 //                one that dies outside raw mode lets Ctrl-C reach every
 //                process on the console
-// Returns { start(), gate(print), ask(question, prompt), closed, crashes() }.
-// gate wraps a print so it reaches the tab only once no view is attached. ask
-// puts the end-of-run prompt ({ title, lines }, from endOfRunPrompt) in the
-// view as its modal, again in each view restarted before it is answered.
-// closed resolves once no view is attached.
-export function attachView({ spawnView, tab, log, ask: askTab, tail = () => [], clock = realClock, limits = SETTINGS, restore = () => {}, guard = () => {} }) {
+// Returns { start(), gate(print), closed, crashes() }. gate wraps a print so
+// it reaches the tab only once no view is attached. closed resolves once no
+// view is attached.
+export function attachView({ spawnView, tab, log, tail = () => [], clock = realClock, limits = SETTINGS, restore = () => {}, guard = () => {} }) {
   let attached = true
   let crashes = 0
-  let pending = null
   let child = null
   let close
   const closed = new Promise((r) => {
     close = r
   })
-  const send = (m) => {
-    try {
-      child?.send(m)
-    } catch {}
-  }
-
   function fallBack(why) {
     attached = false
     child = null
@@ -383,11 +383,6 @@ export function attachView({ spawnView, tab, log, ask: askTab, tail = () => [], 
     for (const line of tail()) tab(line)
     log(`!! ${why}; the runner prints its log in this tab again`)
     close()
-    if (pending) {
-      const p = pending
-      pending = null
-      askTab(p.question).then(p.resolve, () => p.resolve(null))
-    }
   }
 
   function start() {
@@ -415,18 +410,12 @@ export function attachView({ spawnView, tab, log, ask: askTab, tail = () => [], 
     }
     c.on('message', (m) => {
       if (m?.type === 'detach') detached = true
-      if (m?.type === 'endChoice' && pending) {
-        const p = pending
-        pending = null
-        p.resolve(m.answer ?? '')
-      }
     })
     c.on('exit', ended)
     c.on('error', (e) => {
       log(`!! the run view: ${e?.message ?? e}`)
       if (c.pid === undefined) ended(null, null)
     })
-    if (pending) send(pending.prompt)
   }
 
   return {
@@ -436,13 +425,6 @@ export function attachView({ spawnView, tab, log, ask: askTab, tail = () => [], 
     },
     gate: (print) => (s) => {
       if (!attached) print(s)
-    },
-    ask(question, prompt = {}) {
-      if (!attached) return askTab(question)
-      return new Promise((resolve) => {
-        pending = { question, resolve, prompt: { type: 'endPrompt', title: prompt.title ?? 'The run ended', lines: prompt.lines ?? [], question } }
-        send(pending.prompt)
-      })
     },
     closed,
     crashes: () => crashes,
@@ -466,21 +448,6 @@ function logTail(stateDir, n = 20) {
     return readFileSync(join(stateDir, 'runner.log'), 'utf8').trimEnd().split('\n').slice(-n)
   } catch {
     return []
-  }
-}
-
-// One question at a time on this tab's stdin. Once stdin ends, every question
-// is answered null.
-function stdinAsker() {
-  const rl = createInterface({ input: process.stdin, output: process.stdout })
-  let closed = false
-  rl.on('close', () => { closed = true })
-  return {
-    ask: (question) => (closed ? Promise.resolve(null) : new Promise((r) => {
-      rl.once('close', () => r(null))
-      rl.question(question, r)
-    })),
-    close: () => rl.close(),
   }
 }
 
@@ -512,16 +479,11 @@ if (isMain) {
   // step 4); a stale one from an earlier run must never pass for this run's.
   // The session clears it before launch too; this is defence in depth.
   rmSync(join(dir, 'summary.json'), { force: true })
-  rmSync(join(dir, 'reclaim.json'), { force: true })
   // runner.pid lets the arming session tell a runner that died before writing
   // summary.json (killed, OOM) from one still running: the tab outlives the
   // runner, so the tab cannot say. Written before anything else can fail.
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, 'runner.pid'), String(process.pid))
-  // The tab's stdin is the view's while one is attached, so it is read only
-  // once a question has to be asked there.
-  let asker = null
-  const askTab = (question) => (asker ??= stdinAsker()).ask(question)
   const ignore = () => {}
   // With no terminal (the offline tests, a redirected launch) there is no view,
   // and the runner prints as it always did.
@@ -530,7 +492,6 @@ if (isMain) {
       spawnView: () => spawn(process.execPath, [VIEW, '--attached', dir], { stdio: ['inherit', 'inherit', 'inherit', 'ipc'] }),
       tab: (s) => console.log(s),
       log: (s) => say(s),
-      ask: askTab,
       tail: () => logTail(dir),
       restore: restoreTab,
       guard: (on) => (on ? process.on('SIGINT', ignore) : process.off('SIGINT', ignore)),
@@ -560,12 +521,11 @@ if (isMain) {
     summary = failureSummary(e)
   }
   try {
-    await finish({ stateDir: dir, summary, orca, ask: view ? view.ask : askTab, out: say, registry: runRegistry(REGISTRY_PATH) })
-    // The view stays on the ended run until the operator quits it.
-    await view?.closed
+    finish({ stateDir: dir, summary, out: say })
   } catch (e) {
-    sayError(`!! reclaim: ${e?.stack ?? e}`)
-  } finally {
-    asker?.close()
+    sayError(`!! could not write summary.json: ${e?.stack ?? e}`)
   }
+  // The view stays on the ended run until the operator quits it: its reclaim
+  // dialog is where the operator reclaims.
+  await view?.closed
 }

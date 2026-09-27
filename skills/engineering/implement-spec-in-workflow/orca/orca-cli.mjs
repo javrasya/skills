@@ -72,11 +72,47 @@ export function gitIn(cwd, args, { git = execGit, clock = { timer: realTimer }, 
   return withTimeout(clock, ms, git(cwd, args, ms), `git ${args[0]}`)
 }
 
+// `git status --porcelain` as its lines, each kept whole: a line's leading
+// space is its index column, so the output is never trimmed.
+export const porcelainLines = (text) => String(text ?? '').split('\n').map((l) => l.replace(/\r$/, '')).filter(Boolean)
+
+// Whether a worktree's porcelain lines are its baseline's, in any order.
+export const sameLines = (lines, baseline) => lines.length === baseline.length && [...lines].sort().join('\n') === [...baseline].sort().join('\n')
+
 // Commits on a worktree's branch that no other branch and no remote holds:
 // work of its own, which a retry never takes a worktree over with.
 export async function worktreeOwnCommits(path, branch, bound) {
   const b = String(branch ?? '').replace(/^refs\/heads\//, '')
   return Number((await gitIn(path, ['rev-list', '--count', 'HEAD', '--not', `--exclude=${b}`, '--branches', '--remotes'], bound)).trim())
+}
+
+// Whether a retry takes up the worktree at `path` an earlier attempt of its
+// start made: its path, or a refusal naming it. One an agent still runs in
+// (held()) is refused for this attempt only. Until an attempt has reached
+// worker-start (`dispatched`), whatever it holds is Orca's own making, such
+// as a setup hook's untracked output, so it is taken up as it is; after that,
+// one that holds work is refused for good (`final`). Work is what it holds
+// beyond its `baseline`, the porcelain lines it was made with (lines()): with
+// none (a create that timed out), any line is work; and any commit of its own
+// (commits()). The adapter and the fake Orca both decide by this one rule,
+// each reading the worktree its own way, and only as far as the rule needs.
+export async function reuseWorktree(path, { dispatched, baseline }, { held, lines, commits }) {
+  const refuse = (code, why, final) => Object.assign(new OrcaError(code, `${path} ${why}`, 'worktree reuse'), { worktree: path, final })
+  if (await held()) throw refuse('worktree_held', 'still has an agent running in it', false)
+  if (!dispatched) return path
+  if (!sameLines(await lines(), baseline ?? [])) throw refuse('worktree_dirty', baseline?.length ? 'has changed since it was made' : 'has uncommitted changes', true)
+  const own = await commits()
+  if (own > 0) throw refuse('worktree_has_commits', `has ${own} commit(s) of its own`, true)
+  return path
+}
+
+// A create Orca finishes after its answer timed out still leaves the
+// worktree: `path`, what a lookup by its name found, is where the worker
+// starts, with a warning; with none, the timeout `e` stands.
+export function afterCreateTimeout(e, path, warnings) {
+  if (!path) throw e
+  warnings.push(`${e.message}, but Orca had made ${path}, so it starts there`)
+  return path
 }
 
 // Commits reachable from a worktree's HEAD that no remote-tracking ref holds
@@ -166,11 +202,16 @@ export function workerStatus(r) {
   // agentWait: an object is a wait only a human can answer; null means
   // Orca looked and found none; absent means it never looked.
   const wait = r.observation?.agentWait ?? r.terminal?.agentWait ?? null
-  // A worker never given a terminal is not one whose terminal is gone.
-  const gone = Boolean(handle) && (!r.terminal || r.terminal.orphaned === true)
-  // About 5 s after a worker's tab closes, Orca fails its dispatch itself
-  // (stage process_exited; live, Orca 1.4.209). That is a death whose session
-  // the runner continues, not a worker that settled without a result.
+  // A worker never given a terminal is not one whose terminal is gone. Orca
+  // 1.4.212 fails the dispatch of a closed tab at once (terminationReason
+  // operator_close), and worker-show can answer so before it reads the terminal
+  // orphaned: a runner that polled in between read a killed worker as settled
+  // (live, #72).
+  const closed = r.dispatch?.terminationReason === 'operator_close'
+  const gone = Boolean(handle) && (!r.terminal || r.terminal.orphaned === true || closed)
+  // Orca fails a closed tab's dispatch itself (stage process_exited; about 5 s
+  // after the close on Orca 1.4.209). That is a death whose session the runner
+  // continues, not a worker that settled without a result.
   const failedByClose = gone && r.dispatch?.status === 'failed'
   return {
     settled: !failedByClose && (r.worker?.stage === 'settled' || SETTLED_DISPATCH.has(r.dispatch?.status)),
@@ -198,9 +239,10 @@ const WORKTREE_LIST_LIMIT = 10000
 const TAB_GONE = new Set(['terminal_not_writable', 'terminal_exited', 'terminal_handle_stale'])
 
 // call(args, timeoutMs) and git(cwd, args, timeoutMs) run one Orca or git
-// command; clock.timer bounds every call at callMs, plus any wait it asks for.
-// `platform` is the host's, which picks the shell `logTail` types into.
-export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(bin), git = execGit, clock = { timer: realTimer }, callMs = RUNNER_SETTINGS.orcaCallMs, platform = process.platform } = {}) {
+// command; clock.timer bounds every call at callMs, plus any wait it asks for,
+// and a worktree create at createMs. `platform` is the host's, which picks the
+// shell `logTail` types into.
+export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(bin), git = execGit, clock = { timer: realTimer }, callMs = RUNNER_SETTINGS.orcaCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, platform = process.platform } = {}) {
   const orca = (args, waitMs = 0) => withTimeout(clock, callMs + waitMs, call(args, callMs + waitMs), args.slice(0, 2).join(' '))
   const bound = { git, clock, ms: callMs }
 
@@ -229,29 +271,29 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
     return pathOf(w.id)
   }
 
-  // The worktree an earlier attempt of this start made, if there is one to
-  // take up: Orca answers a second `worktree create --name` with a new
-  // <name>-2, never an error, so a retry looks its name up first. One that
-  // holds work is refused for good, named on the error; one an agent still
-  // runs in is refused for this attempt only.
+  // The worktree Orca holds under this name, or null.
   // Orca pages the list at 200 rows across every repo on the machine, and
   // ADR-0012 keeps every worktree until the operator reclaims it, so the list
   // asks for as many as Orca's own UI does. A page still truncated cannot rule
   // the name out: that attempt fails, retryable, rather than make a <name>-2.
-  async function earlierWorktree(name) {
+  async function findWorktree(name) {
     const r = await orca(['worktree', 'list', '--limit', String(WORKTREE_LIST_LIMIT)])
     if (r?.truncated) throw new OrcaError('worktree_list_truncated', `the list stopped at ${(r.worktrees ?? []).length} worktrees, so an earlier ${name} could not be ruled out`, 'worktree list')
-    const row = (r?.worktrees ?? []).find((w) => typeof w.path === 'string' && worktreeName(w.path) === name)
+    return (r?.worktrees ?? []).find((w) => typeof w.path === 'string' && worktreeName(w.path) === name) ?? null
+  }
+
+  // The worktree an earlier attempt of this start made, if there is one to
+  // take up (reuseWorktree): Orca answers a second `worktree create --name`
+  // with a new <name>-2, never an error, so a retry looks its name up first.
+  // terminal list leaves closed tabs out, and agentIdentity marks an agent's pane.
+  async function earlierWorktree(name, dispatched, baseline) {
+    const row = await findWorktree(name)
     if (!row) return null
-    const path = row.path
-    const refuse = (code, why, final) => Object.assign(new OrcaError(code, `${path} ${why}`, 'worktree reuse'), { worktree: path, final })
-    // terminal list leaves closed tabs out, and agentIdentity marks an agent's pane.
-    const t = await orca(['terminal', 'list', '--worktree', `path:${path}`])
-    if ((t?.terminals ?? []).some((x) => x.agentIdentity && !x.orphaned)) throw refuse('worktree_held', 'still has an agent running in it', false)
-    if ((await gitIn(path, ['status', '--porcelain'], bound)).trim()) throw refuse('worktree_dirty', 'has uncommitted changes', true)
-    const own = await worktreeOwnCommits(path, row.branch, bound)
-    if (own > 0) throw refuse('worktree_has_commits', `has ${own} commit(s) of its own`, true)
-    return path
+    return reuseWorktree(row.path, { dispatched, baseline }, {
+      held: async () => ((await orca(['terminal', 'list', '--worktree', `path:${row.path}`]))?.terminals ?? []).some((x) => x.agentIdentity && !x.orphaned),
+      lines: async () => porcelainLines(await gitIn(row.path, ['status', '--porcelain'], bound)),
+      commits: () => worktreeOwnCommits(row.path, row.branch, bound),
+    })
   }
 
   async function workerShow({ dispatch }) {
@@ -274,7 +316,13 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
     // the handle of the tab the runner made for it, and `warnings` what went
     // wrong without stopping the start. A failure after the child exists
     // names it as the error's `worktree`, and `worktrees` lists every one it
-    // leaves when there are more; `final` marks one a retry cannot mend.
+    // leaves when there are more; `final` marks one a retry cannot mend, and
+    // `dispatched` one whose worker-start was sent, which may have put a
+    // worker in the child. `child.dispatched`: an earlier attempt's was;
+    // `child.baseline`: the porcelain lines an earlier attempt's create left,
+    // or null. A child this attempt creates has its own taken before its
+    // terminal opens, and handed to `child.onBaseline({ worktree, lines })`.
+    // `prompt` may be a function of the child's baseline (null without one).
     async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null }) {
       if (!sessionId) throw new Error(`workerStart: ${title} has no session id; the runner assigns one to every worker`)
       const command = launchCommand({ harness, model, effort, permissionMode, sessionId })
@@ -288,10 +336,22 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       let place = ['--worktree', 'current']
       let terminalIn = []
       const warnings = []
+      let c = null
       if (child) {
-        worktree = child.retry ? await earlierWorktree(child.name) : null
+        worktree = child.retry ? await earlierWorktree(child.name, child.dispatched, child.baseline ?? null) : null
         if (!worktree) {
-          const c = await orca(['worktree', 'create', '--name', child.name, '--parent-worktree', 'current'])
+          // A create Orca finishes after its answer timed out still leaves the
+          // worktree, and a retry would find it; looked up now, it costs no attempt.
+          // `setup: 'skip'` skips the repo's setup hook (a doctor's worktree);
+          // without it Orca follows the repo's setup policy.
+          try {
+            c = await orca(['worktree', 'create', '--name', child.name, '--parent-worktree', 'current', ...(child.setup ? ['--setup', child.setup] : [])], Math.max(0, createMs - callMs))
+          } catch (e) {
+            if (e?.code !== 'call_timeout') throw e
+            worktree = afterCreateTimeout(e, (await findWorktree(child.name).catch(() => null))?.path ?? null, warnings)
+          }
+        }
+        if (c) {
           worktree = createdPath(c)
           if (!worktree) throw new OrcaError('bad_output', `worktree create named no path for ${child.name}`, 'worktree create')
           // Orca opens a plain shell in a new worktree; the agent gets its own.
@@ -314,17 +374,27 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
         }
       }
       let handle = null
+      let dispatching = false
+      let baseline = child?.baseline ?? null
       try {
+        // Only a create answered in time: one looked up after its timeout may
+        // still be running its setup, so its lines are no baseline.
+        if (c) {
+          baseline = porcelainLines(await gitIn(worktree, ['status', '--porcelain'], bound))
+          await child.onBaseline?.({ worktree, lines: baseline })
+        }
         const t = await orca(['terminal', 'create', ...terminalIn, '--title', title, '--command', command])
         handle = t.terminal.handle
         await waitIdle(handle, command)
-        const r = await orca(workerStartArgs({ run, prompt, title, place, terminal: handle }))
+        dispatching = true
+        const r = await orca(workerStartArgs({ run, prompt: typeof prompt === 'function' ? prompt(baseline) : prompt, title, place, terminal: handle }))
         const effect = (r.effects || []).find((e) => e.kind === 'worktree')?.id
         return { dispatchId: r.dispatchId, taskId: r.taskId, terminal: handle, worktree: worktree ?? pathOf(effect) ?? pathOf(t.terminal.worktreeId), warnings }
       } catch (e) {
         if (handle) await closeQuietly(handle)
         // The caller names a worktree made for a worker that never started.
         if (worktree && e instanceof Object) e.worktree = worktree
+        if (dispatching && e instanceof Object) e.dispatched = true
         throw e
       }
     },
@@ -489,5 +559,33 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       if (capability) args.push('--dispatch-capability', capability)
       await orca(args)
     },
+
+    // The runner's Run mailbox, read from its own terminal, which Orca binds
+    // the Run to: a consuming check. Orca hands the same batch back, marked
+    // replayed, until it is acknowledged, and a batch is frozen once issued.
+    // `ack` acknowledges one, and the answer is the next batch: read it, never
+    // drop it. deliveryId is null once the mailbox is empty. A message's
+    // payload is a JSON string, which ties it to the dispatch that sent it; a
+    // row Orca wrote itself (a rejected escalation) has no dispatch.
+    async mailCheck({ ack = null } = {}) {
+      const r = await orca(['orchestration', 'check', ...(ack ? ['--ack', ack] : [])])
+      return { deliveryId: r?.deliveryId ?? null, acknowledged: r?.acknowledged ?? null, replayed: r?.replayed === true, messages: (r?.messages ?? []).map(mailRow) }
+    },
+  }
+}
+
+function mailRow(row) {
+  let payload = row?.payload
+  if (typeof payload === 'string') {
+    try {
+      payload = JSON.parse(payload)
+    } catch {
+      payload = null
+    }
+  }
+  if (!payload || typeof payload !== 'object') payload = {}
+  return {
+    id: row?.id ?? null, type: row?.type ?? null, from: row?.from_handle ?? null, subject: row?.subject ?? null, body: row?.body ?? null,
+    taskId: payload.taskId ?? null, dispatchId: payload.dispatchId ?? null, outcome: payload.outcome ?? null, createdAt: row?.created_at ?? null,
   }
 }

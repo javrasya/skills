@@ -5,7 +5,7 @@
 // standalone mode, every run the registry knows, each opened into a runView.
 // The model is read from the run's journal, its agents' session transcripts,
 // Orca's terminal list and the run registry; the actions go to Orca, and a
-// reclaim goes through reclaim.mjs, so the view keeps the end-of-run rules.
+// reclaim goes through reclaim.mjs, so the view keeps its rules.
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from 'fs'
 import { basename, dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
@@ -19,11 +19,11 @@ export const RUNNER_PATH = fileURLToPath(new URL('./runner.mjs', import.meta.url
 
 // In the order a phase row lists its mix. An agent's state is the journal
 // fold's (journal.mjs), except reclaimed: one the registry records reclaimed.
-export const STATES = Object.freeze(['blocked', 'starting', 'running', 'continued', 'stuck', 'failed', 'queued', 'done', 'reclaimed'])
+export const STATES = Object.freeze(['blocked', 'needs you', 'starting', 'running', 'continued', 'stuck', 'failed', 'queued', 'done', 'reclaimed'])
 
-// The problems a phase's pane lists, in row order: blocked first, since a
-// human can answer it, then failed and stuck.
-const problemsOf = (agents) => [...agents.filter((a) => a.state === 'blocked'), ...agents.filter((a) => a.state === 'failed' || a.state === 'stuck')]
+// The problems a phase's pane lists, in row order: blocked and needs you
+// first, since a human can answer them, then failed and stuck.
+const problemsOf = (agents) => [...agents.filter((a) => a.state === 'blocked' || a.state === 'needs you'), ...agents.filter((a) => a.state === 'failed' || a.state === 'stuck')]
 
 // Context size bands: green below 200k, yellow from 200k to 350k, red above.
 export const bandOf = (context) => (context == null ? null : context < 200_000 ? 'green' : context <= 350_000 ? 'yellow' : 'red')
@@ -38,6 +38,20 @@ const agentsIn = (fold) => fold.agents.map((a) => {
   const [, phase, label] = TITLE.exec(a.title ?? '') ?? [null, 'Run', a.title ?? `agent-${a.n}`]
   return { ...a, phase, label }
 })
+
+// A phase's agents in row order: each doctor right under its patient, in
+// round order, though its n comes later; one whose patient is not in the
+// phase stands on its own.
+function treeOf(agents) {
+  const byOrigin = new Map(agents.map((a) => [a.origin, a]))
+  const rows = []
+  const put = (agent, depth) => {
+    rows.push({ agent, depth })
+    for (const d of agent.doctors ?? []) if (byOrigin.get(d)?.patient === agent.origin) put(byOrigin.get(d), depth + 1)
+  }
+  for (const a of agents) if (a.patient == null || !byOrigin.has(a.patient)) put(a, 0)
+  return rows
+}
 
 // The pid a run dir's runner.pid names; null with no such file, undefined when
 // it could not be read.
@@ -67,6 +81,24 @@ export function runnerAlive(stateDir) {
   } catch (e) {
     return e?.code === 'EPERM' ? true : e?.code === 'ESRCH' ? false : null
   }
+}
+
+// Whether a run has ended, which is not whether its runner lives: once the
+// script ends the runner writes summary.json and waits on its attached view
+// until the operator quits it (runner.mjs), live all the while. `run` is its
+// registry run, or null; `alive` its runner's liveness. It has ended when the
+// registry records `ended` with no resume after (state is not 'running'),
+// when its runner is gone (nothing runs the script), or when a live runner has
+// written summary.json: the runner removes a stale one before it writes the
+// runner.pid that names it live, so that one is this run's. A live runner with
+// no summary.json is still running the script. null when it cannot be told:
+// the runner's liveness unknown and no `ended` recorded, since a summary.json
+// then may be an earlier run's.
+export function runEnded({ run, alive, stateDir }) {
+  if (run && run.state !== 'running') return true
+  if (alive === false) return true
+  if (alive === true) return existsSync(join(stateDir, 'summary.json'))
+  return null
 }
 
 // What an injected liveness answered, as true, false or null (does not know).
@@ -109,22 +141,33 @@ function latestEvent(path) {
 
 // view = runView({ stateDir, orca, … }); await view.refresh() reads the run
 // again, and view.model is then:
-//   header  { name, project, runId, spec, alive, elapsedMs, counts: {state: n} }
+//   header  { name, project, runId, spec, alive, ended, elapsedMs, counts: {state: n} },
+//           ended being whether the run has ended (runEnded), null when it
+//           cannot be told
 //   phases  [{ name, folded, done, total, mix: {state: n}, peakContext, agents }]
-//   rows    [{ kind: 'phase', key, phase } | { kind: 'agent', key, agent, phase }],
+//   rows    [{ kind: 'phase', key, phase } | { kind: 'agent', key, agent, phase, depth }],
 //           the phases in the order the run reached them, each unfolded one
-//           followed by its agents
+//           followed by its agents, a doctor's row under its patient's at
+//           depth 1 (else 0)
 //   selected  the index of the selected row
 //   pane    { kind: 'agent', agent } | { kind: 'phase', phase, problems: [{ agent, reason }] },
-//           a phase's problems being its blocked, failed and stuck agents
+//           a phase's problems being its blocked, needs-you, failed and stuck agents
 //   message the latest action's outcome, for the flash line, or null
 //   latest  the last line of runner.log, the run's latest event, or null
-//   alert   while any agent is blocked on a human, the line naming each one,
-//           its tab and what it waits on, which the flash line keeps over
+//   alert   while any agent is blocked on a human, or a doctor needs you,
+//           the line naming each one, its tab and what it waits on (a
+//           doctor's escalation, its reason), which the flash line keeps over
 //           `latest` until it is answered; else null
+//   dialog  null, or what `r` opened, which takes every key and click until it
+//           closes (the tree keeps refreshing behind it):
+//           { kind: 'choose', title, options: [{ id, label, detail, disabled, reason }], highlight }
+//             the reclaim dialog, its options in RECLAIM_OPTIONS order and
+//             highlight the index of the one Enter takes
+//           { kind: 'confirm', title, lines }
+//             a reclaim refused until the operator confirms it with `f`
 // An agent is { n, origin, label, title, phase, state, continuations, reason,
 // replayed, launched, runId, dispatchId, harness, sessionId, worktree, terminal,
-// waiting, nextAt, workerLeft, tabOpen, reclaimed, context, band, tokens,
+// waiting, nextAt, workerLeft, patient, round, doctors, tabOpen, reclaimed, context, band, tokens,
 // elapsedMs, transcript }. state is one of STATES: reclaimed once the registry
 // records it so, whatever it was before. worktree
 // is only ever one named `<runId>-<n>`: any other, the run's own checkout
@@ -152,14 +195,50 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   let latest = null
   let alert = null
   let logTab = null
-  const view = { model: null, refresh, key, click, focus, reclaim, openLog }
+  // null, { kind: 'choose', highlight }, or { kind: 'confirm', n, title,
+  // lines, confirm, queue }: queue holds the confirmations still to ask after
+  // this one, each a reclaim's answer.
+  let dialog = null
+  const view = { model: null, refresh, key, click, highlight, focus, reclaim, openLog }
+
+  const agentsNow = () => phases.flatMap((p) => p.agents)
+  // A doctor is reclaimed with its patient, and never on its own (#77): a
+  // reclaim that names a doctor reclaims its patient, then its doctors, and
+  // one on its own only once its patient is reclaimed.
+  const patientOf = (a) => (a.patient == null ? null : agentsNow().find((p) => p.origin === a.patient) ?? null)
+  const doctorsOf = (a) => agentsNow().filter((d) => d.patient === a.origin && !d.reclaimed)
+  const withPatient = (a) => {
+    const p = patientOf(a)
+    return p && !p.reclaimed ? p : a
+  }
+  const withDoctors = (n) => (n ? `, with ${n === 1 ? 'its doctor' : `its ${n} doctors`}` : '')
+  function optionsFor(row) {
+    const done = chosen('successful', row)
+    const ended = header?.ended
+    const one = row?.kind === 'agent' ? withPatient(row.agent) : null
+    return [
+      { id: 'selected', label: 'Reclaim Selected', detail: !row ? 'nothing is selected' : one ? `${one.title}${withDoctors(doctorsOf(one).length)}` : `every agent of ${row.phase.name}`, disabled: false, reason: null },
+      { id: 'successful', label: 'Reclaim Successful Ones', detail: `the ${done.length} done${done.some((a) => doctorsOf(a).length) ? ', with their doctors' : ''}`, disabled: false, reason: null },
+      { id: 'all', label: 'Reclaim All', detail: 'every agent of the run', disabled: ended !== true, reason: ended === true ? null : ended === false ? 'the run is still going' : 'whether the run has ended cannot be told' },
+    ]
+  }
+  // What view.model.dialog is, with a highlight on a disabled option moved
+  // to the first one enabled: Reclaim All disables itself until the run has
+  // ended.
+  function dialogModel(row) {
+    if (!dialog) return null
+    if (dialog.kind === 'confirm') return { kind: 'confirm', title: dialog.title, lines: dialog.lines }
+    const options = optionsFor(row)
+    if (options[dialog.highlight]?.disabled !== false) dialog.highlight = Math.max(0, options.findIndex((o) => !o.disabled))
+    return { kind: 'choose', title: 'Reclaim', options, highlight: dialog.highlight }
+  }
 
   function layout() {
     const rows = []
     for (const phase of phases) {
       phase.folded = folds.get(phase.name) ?? (phase.total > 0 && phase.agents.every((a) => a.state === 'done' || a.state === 'reclaimed'))
       rows.push({ kind: 'phase', key: `phase:${phase.name}`, phase })
-      if (!phase.folded) for (const agent of phase.agents) rows.push({ kind: 'agent', key: `agent:${agent.n}`, agent, phase })
+      if (!phase.folded) for (const { agent, depth } of treeOf(phase.agents)) rows.push({ kind: 'agent', key: `agent:${agent.n}`, agent, phase, depth })
     }
     const at = rows.findIndex((r) => r.key === selectedKey)
     selected = at >= 0 ? at : Math.max(0, Math.min(selected, rows.length - 1))
@@ -168,7 +247,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     const pane = !row ? null
       : row.kind === 'agent' ? { kind: 'agent', agent: row.agent }
       : { kind: 'phase', phase: row.phase, problems: problemsOf(row.phase.agents).map((agent) => ({ agent, reason: agent.reason })) }
-    view.model = { header, phases, rows, selected, pane, message, latest, alert }
+    view.model = { header, phases, rows, selected, pane, message, latest, alert, dialog: dialogModel(row) }
     return view.model
   }
 
@@ -211,9 +290,11 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     }
 
     const blocked = agents.filter((a) => a.state === 'blocked')
-    alert = blocked.length
-      ? `BLOCKED ON A HUMAN: ${blocked.map((a) => `${a.title} in tab ${a.terminal ?? '—'} waits on ${a.waiting ?? 'an answer'}`).join(' · ')}`
-      : null
+    const needed = agents.filter((a) => a.state === 'needs you')
+    alert = [
+      blocked.length && `BLOCKED ON A HUMAN: ${blocked.map((a) => `${a.title} in tab ${a.terminal ?? '—'} waits on ${a.waiting ?? 'an answer'}`).join(' · ')}`,
+      needed.length && `NEEDS YOU: ${needed.map((a) => `${a.title} in tab ${a.terminal ?? '—'}: ${a.reason ?? 'no reason given'}`).join(' · ')}`,
+    ].filter(Boolean).join(' · ') || null
 
     const byPhase = new Map()
     for (const a of agents) {
@@ -241,6 +322,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
       runId: runId ?? run?.runId ?? null,
       spec: number ? `#${number}` : null,
       alive: isAlive,
+      ended: runEnded({ run, alive: isAlive, stateDir }),
       elapsedMs: start === null ? null : Math.max(0, end - start),
       counts: countOf(agents),
     }
@@ -275,14 +357,53 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
 
   const activate = (row) => (!row ? {} : row.kind === 'phase' ? toggle(row.phase) : focus(row.agent))
 
-  // Reclaims agent `n`, or with no `n` the selected one, through reclaim.mjs,
-  // as the journal names it for reclaim: refused while it is live, or while
-  // its worktree holds unpushed commits unless `force`. One that failed and
-  // was kept with its worker running is refused as `stoppable` unless `stop`,
-  // which stops that worker first: both are the operator's confirmed `f`
-  // (view.mjs), never the plain `r`. A reclaim is recorded
-  // in the registry. What it answers names the agent as `agent: { n, title }`,
-  // so a forced retry goes to the agent refused, never to whatever row the
+  // One agent's reclaim through reclaim.mjs, as the journal names it for
+  // reclaim, recorded in the registry once done: reclaimAgent's answer, or
+  // null for an agent that launched nothing in this run.
+  async function attempt(a, { force = false, stop = false } = {}) {
+    const agent = agentsOf(journalPath).find((x) => x.origin === a.origin)
+    if (!agent) return null
+    let r
+    try {
+      r = await reclaimAgent(agent, { orca, unpushed, force, stop })
+    } catch (e) {
+      r = { reclaimed: false, reason: e?.message ?? String(e) }
+    }
+    if (r.reclaimed && registry) {
+      try {
+        runRegistry(registry, clock).reclaimed({ runId: agent.runId, agent: agent.name })
+      } catch (e) {
+        r.notes.push(`the run registry did not record it: ${e?.message ?? e}`)
+      }
+    }
+    return r
+  }
+
+  // `a`'s reclaim, then, once it is reclaimed or had nothing to reclaim, each
+  // of its doctors': { r, doctors: { reclaimed, kept } }, each doctor as
+  // { agent: { n, title }, reclaim }. Its doctors are kept while it is.
+  async function withItsDoctors(a, opts = {}) {
+    const r = await attempt(a, opts)
+    const doctors = { reclaimed: [], kept: [] }
+    for (const d of doctorsOf(a)) {
+      const target = { n: d.n, title: d.title }
+      if (r && !r.reclaimed) {
+        doctors.kept.push({ agent: target, reclaim: { reclaimed: false, reason: `its patient ${a.title} was kept` } })
+        continue
+      }
+      const dr = await attempt(d)
+      if (dr) (dr.reclaimed ? doctors.reclaimed : doctors.kept).push({ agent: target, reclaim: dr })
+    }
+    return { r, doctors }
+  }
+
+  // Reclaims agent `n`, or with no `n` the selected one, by the reclaim rules:
+  // refused while it is live, or while its worktree holds unpushed commits
+  // unless `force`. One that failed and was kept with its worker running is
+  // refused as `stoppable` unless `stop`, which stops that worker first: both
+  // are what the operator confirms with `f` in the dialog, never the choice
+  // alone. What it answers names the agent as `agent: { n, title }`, so a
+  // confirmed retry goes to the agent refused, never to whatever row the
   // selection sits on by then: a refresh that folds its phase moves it.
   async function reclaim({ n, force = false, stop = false } = {}) {
     let a
@@ -291,29 +412,147 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
       if (row?.kind !== 'agent') return say('select an agent to reclaim')
       a = row.agent
     } else {
-      a = phases.flatMap((p) => p.agents).find((x) => x.n === n)
+      a = agentsNow().find((x) => x.n === n)
       if (!a) return say(`no agent ${n} in this run to reclaim`)
     }
+    a = withPatient(a)
     const target = { n: a.n, title: a.title }
-    const agent = agentsOf(journalPath).find((x) => x.origin === a.origin)
-    if (!agent) return { ...say(`${a.title} has nothing to reclaim: it launched nothing in this run`), agent: target }
-    let r
-    try {
-      r = await reclaimAgent(agent, { orca, unpushed, force, stop })
-    } catch (e) {
-      r = { reclaimed: false, reason: e?.message ?? String(e) }
+    const family = doctorsOf(a).length > 0
+    const { r, doctors } = await withItsDoctors(a, { force, stop })
+    const also = family ? { doctors: { reclaimed: doctors.reclaimed.map((d) => d.agent), kept: doctors.kept } } : {}
+    if (r && !r.reclaimed) return { ...say(`kept ${a.title}: ${r.reason}`), reclaim: r, agent: target, ...also }
+    if (!r && !doctors.reclaimed.length && !doctors.kept.length) return { ...say(`${a.title} has nothing to reclaim: it launched nothing in this run`), agent: target }
+    if (r || doctors.reclaimed.length) await refresh()
+    const notes = [
+      ...(r?.notes ?? []),
+      ...doctors.reclaimed.flatMap(({ agent, reclaim: dr }) => dr.notes.map((note) => `${agent.title}: ${note}`)),
+      ...doctors.kept.map(({ agent, reclaim: dr }) => `kept ${agent.title}: ${dr.reason}`),
+    ]
+    const what = r ? a.title : `${a.title}'s doctors`
+    return { ...say(`reclaimed ${what}${withDoctors(r ? doctors.reclaimed.length : 0)}${notes.length ? `; ${notes.join('; ')}` : ''}`), reclaim: r, agent: target, ...also }
+  }
+
+  // The confirmation a refused reclaim `res` asks for, as the dialog, or null:
+  // `f` stops the worker of an agent kept running when it failed (stop), or
+  // removes a worktree that holds unpushed commits (force). `confirmed` is
+  // what `f` already confirmed for this agent, so a stopped agent whose
+  // worktree is then refused for its commits asks again, for that.
+  function confirmationOf(res, confirmed = {}) {
+    const r = res?.reclaim
+    if (!res?.agent || !r || r.reclaimed) return null
+    const about = { kind: 'confirm', n: res.agent.n, title: `Reclaim ${res.agent.title}?` }
+    if (r.stoppable && !confirmed.stop) return { ...about, confirm: { ...confirmed, stop: true }, lines: [r.reason, '', 'f = stop its worker, then reclaim it · any other key cancels'] }
+    if (r.unpushed > 0 && !confirmed.force) return { ...about, confirm: { ...confirmed, force: true }, lines: [r.reason, '', 'f = force the reclaim, and those commits are lost · any other key cancels'] }
+    return null
+  }
+  // The first of `queue` that asks for a confirmation, holding the rest.
+  function nextConfirmation(queue) {
+    for (let i = 0; i < queue.length; i++) {
+      const d = confirmationOf(queue[i])
+      if (d) return { ...d, queue: queue.slice(i + 1) }
     }
-    if (!r.reclaimed) return { ...say(`kept ${a.title}: ${r.reason}`), reclaim: r, agent: target }
-    let note = r.notes.length ? `; ${r.notes.join('; ')}` : ''
-    if (registry) {
-      try {
-        runRegistry(registry, clock).reclaimed({ runId: agent.runId, agent: agent.name })
-      } catch (e) {
-        note += `; the run registry did not record it: ${e?.message ?? e}`
+    return null
+  }
+
+  // The agents an option names, none already reclaimed, and no doctor whose
+  // patient is not: its patient's reclaim takes it.
+  function chosen(id, row) {
+    const list = id === 'selected' ? (row.kind === 'agent' ? [withPatient(row.agent)] : row.phase.agents) : id === 'successful' ? agentsNow().filter((a) => a.state === 'done') : agentsNow()
+    return list.filter((a) => !a.reclaimed && withPatient(a) === a)
+  }
+
+  // Enter in the reclaim dialog: every agent the highlighted option names, one
+  // at a time, by the reclaim rules; each one refused for a reason the
+  // operator may confirm is then asked about, one confirmation at a time.
+  async function accept() {
+    const row = current()
+    const option = optionsFor(row)[dialog.highlight]
+    dialog = null
+    if (option.disabled) return say(`${option.label} is not available: ${option.reason}`)
+    if (option.id === 'selected' && !row) return say('select an agent or a phase to reclaim')
+    const what = option.id === 'selected' ? (row.kind === 'agent' ? row.agent.title : row.phase.name) : option.id === 'successful' ? 'the done agents' : 'the run'
+    if (option.id === 'selected' && row.kind === 'agent') {
+      const res = await reclaim({ n: row.agent.n })
+      dialog = nextConfirmation([res, ...(res.doctors?.kept ?? [])])
+      layout()
+      return { ...res, option: option.id }
+    }
+    const list = chosen(option.id, row)
+    if (!list.length) return { ...say(`${what}: no agent left to reclaim`), option: option.id, reclaimed: [], kept: [] }
+    const total = list.reduce((n, a) => n + 1 + doctorsOf(a).length, 0)
+    const reclaimed = []
+    const kept = []
+    const notes = []
+    const put = (target, r) => {
+      if (r.reclaimed) {
+        reclaimed.push(target)
+        for (const note of r.notes) notes.push(`${target.title}: ${note}`)
+      } else kept.push({ agent: target, reclaim: r })
+    }
+    for (const a of list) {
+      const { r, doctors } = await withItsDoctors(a)
+      if (r) put({ n: a.n, title: a.title }, r)
+      for (const { agent, reclaim: dr } of [...doctors.reclaimed, ...doctors.kept]) put(agent, dr)
+    }
+    if (reclaimed.length) await refresh()
+    dialog = nextConfirmation(kept)
+    const asked = kept.filter((k) => confirmationOf(k)).length
+    const text = [
+      `reclaimed ${reclaimed.length} of ${total} agent${total === 1 ? '' : 's'} of ${what}`,
+      ...kept.filter((k) => !confirmationOf(k)).map(({ agent, reclaim: r }) => `kept ${agent.title}: ${r.reason}`),
+      ...(asked ? [`${asked} to confirm`] : []),
+      ...notes,
+    ].join('; ')
+    return { ...say(text), option: option.id, reclaimed, kept: kept.map(({ agent, reclaim: r }) => ({ agent, reason: r.reason })) }
+  }
+
+  // A key while the dialog is open: the tree takes none.
+  async function dialogKey(name) {
+    if (dialog.kind === 'confirm') {
+      const { n, confirm, queue, title } = dialog
+      dialog = null
+      if (name !== 'f') {
+        dialog = nextConfirmation(queue)
+        return say(`${title.replace(/^Reclaim (.*)\?$/, '$1')}: reclaim cancelled`)
       }
+      const res = await reclaim({ n, ...confirm })
+      const again = confirmationOf(res, confirm)
+      dialog = again ? { ...again, queue: [...(res.doctors?.kept ?? []), ...queue] } : nextConfirmation([...(res.doctors?.kept ?? []), ...queue])
+      layout()
+      return res
     }
-    await refresh()
-    return { ...say(`reclaimed ${a.title}${note}`), reclaim: r, agent: target }
+    const options = optionsFor(current())
+    switch (name) {
+      case 'UP':
+      case 'DOWN': {
+        const step = name === 'UP' ? -1 : 1
+        for (let i = dialog.highlight + step; i >= 0 && i < options.length; i += step) {
+          if (!options[i].disabled) {
+            dialog.highlight = i
+            break
+          }
+        }
+        layout()
+        return {}
+      }
+      case 'ENTER':
+        return accept()
+      case 'ESCAPE':
+        dialog = null
+        return say('nothing reclaimed')
+      default:
+        return {}
+    }
+  }
+
+  // The mouse on option `index` of the reclaim dialog, hovering or clicking:
+  // it moves the highlight there, unless that option is disabled. Only Enter
+  // accepts.
+  function highlight(index) {
+    if (dialog?.kind !== 'choose') return {}
+    if (optionsFor(current())[index]?.disabled === false) dialog.highlight = index
+    layout()
+    return {}
   }
 
   // runner.log in a tab of its own that follows it (orca.logTail): Orca's
@@ -339,8 +578,10 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   }
 
   // Key names as terminal-kit gives them. Returns what the key did: { quit }
-  // for q, which ends the view only, never the run.
+  // for q, which ends the view only, never the run. While the dialog is open
+  // every key is its.
   async function key(name) {
+    if (dialog) return dialogKey(name)
     const rows = view.model?.rows ?? []
     switch (name) {
       case 'UP':
@@ -357,7 +598,9 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
       case 'RIGHT':
         return current()?.kind === 'phase' ? toggle(current().phase) : {}
       case 'r':
-        return reclaim()
+        dialog = { kind: 'choose', highlight: 0 }
+        layout()
+        return {}
       case 'l':
         return openLog()
       case 'q':
@@ -367,8 +610,10 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     }
   }
 
-  // A click on row `index` selects it and does what Enter would.
+  // A click on row `index` selects it and does what Enter would; none while
+  // the dialog is open.
   async function click(index) {
+    if (dialog) return {}
     const row = view.model?.rows[index]
     if (!row) return {}
     selected = index
@@ -529,7 +774,7 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
   const openBecause = (run) => (run.alive === true ? 'its runner is alive' : run.alive === null ? 'whether its runner is alive cannot be told' : null)
 
   // Every agent of the run the registry does not already record reclaimed,
-  // by the reclaim rules, as the end-of-run prompt's `a` does. The run is
+  // by the reclaim rules, as the tree's Reclaim All does. The run is
   // recorded reclaimed once none of its agents is left, but only when it is
   // closable: a run whose runner is alive, or may be, stays open, so the
   // agents it starts later are kept and listed (ADR-0012); one whose runner
@@ -593,10 +838,11 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
   const activate = (row) => (!row ? {} : row.kind === 'project' ? toggle(row.project) : open(row.run.runId))
 
   // Key names as terminal-kit gives them. With a run open its tree takes the
-  // keys, except R, and q or Escape, which go back to the list; q on the
-  // list returns { quit }.
+  // keys, except R, and q or Escape, which go back to the list, unless its
+  // dialog is open, which takes every key; q on the list returns { quit }.
   async function key(name) {
     if (opened) {
+      if (opened.view.model?.dialog) return opened.view.key(name)
       if (name === 'q' || name === 'ESCAPE') return close()
       if (name === 'R') return resume()
       return opened.view.key(name)

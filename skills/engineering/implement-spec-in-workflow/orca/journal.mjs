@@ -5,6 +5,7 @@
 // carry a worker, or about which agents the Run holds.
 import { existsSync, readFileSync } from 'fs'
 import { agentDir } from './lifecycle.mjs'
+import { foldMail, heldRounds, mailSupersedes } from './doctor.mjs'
 
 // Every journal entry type and the fields it always carries, beside `type`.
 // `at` is an ISO timestamp from the runner's clock; `run` is the Orca Run the
@@ -20,6 +21,10 @@ import { agentDir } from './lifecycle.mjs'
 // slot and its worker is being started. retry: a call's start, or its Run's
 // creation, failed and is tried again: journaled before the backoff's wait,
 // with why the last attempt failed and `nextAt`, when the next one begins.
+// baseline: a child worktree was made for a call's worker, before its
+// terminal opens: `lines`, its `git status --porcelain` lines then (none when
+// clean), are what it held before any agent touched it. A create that timed
+// out has none.
 // blocked: its worker waits on a human, with what it waits on (`waiting`);
 // unblocked: it no longer does. warning: something that went wrong without
 // failing the call. A nudge's
@@ -27,21 +32,61 @@ import { agentDir } from './lifecycle.mjs'
 // continuation's is its number, up to the cap. `origin` names an agent across
 // resumes: the n of the call that started its worker, which its `<runId>-<n>`
 // worktree is named by — a resume numbers its calls on, but never renames an
-// agent. reattached: a resumed runner taking up a worker an earlier one
+// agent; a `started` line carries it when a resume retries a held patient's
+// start. reattached: a resumed runner taking up a worker an earlier one
 // started, journaled when its call is made, which it then watches, or
 // continues first if it died; it also carries `continuations` when that
-// worker's session was already continued. outstanding: a worker the last run
+// worker's session was already continued, and a doctor's its `patient`, its
+// `round` and, while it needs you, `needsYou`, what the human must do.
+// outstanding: a worker the last run
 // left out, carried forward by a resume before any call, so it stays journaled
-// until a call takes it up; it carries `continuations` as reattached does.
+// until a call takes it up; it carries `continuations` as reattached does, and
+// a patient's its `round` and `rounds` as earlier does.
 // earlier: an agent of the Run that an earlier runner of it made and that
 // settled (or never started a worker, but left a worktree), carried forward
 // by a resume before any call, so reclaim and the run view still name it;
 // `state` and `reason` are as the fold left them, and it carries
-// `continuations` as reattached does. It has no key: it is no call, and a
+// `continuations` as reattached does, a doctor its `patient`, since its
+// patient's doctor lines are not carried, and a patient its `round` and
+// `rounds`, as the fold left them. It has no key: it is no call, and a
 // resume replays nothing from it. run: the Run every worker is dispatched into
 // and the runner terminal it is bound to, when it is created or taken over; a
 // resume carries the last one forward first, with `lastN`, the highest call
 // number that Run has used. queued: a call waiting for a live slot.
+// doctor: a doctor round starts for a patient, an agent whose session died
+// past its continuation cap or was blocked on a human past the blocked limit,
+// or whose start failed through every retry: about the patient, with its `origin`, the
+// `round` (1 to 3), the failure `reason` it answers, and `doctor`, the n its
+// doctor is started under. The patient's call is not settled: its agent()
+// waits. A doctor's own lines are those of any agent, under its own n, with
+// key null, since it is no agent() call; its failed line also names its
+// `patient`, by origin, and fails no call. settled: a doctor's worker settled,
+// with its `outcome` (and, when failed, a `reason`: it gave up), a doctor
+// submitting no result; one that settled failed folds to failed, never done.
+// gaveUp: a doctor round ended without a remedy, about the patient, with the
+// `round`, the `doctor` and why;
+// after the last one the patient's failed line follows. mail: the runner read
+// a message from its Run mailbox: its `messageId`, its `kind` (Orca's type:
+// handoff, worker_done…) and the `action` the runner took on it — remedy (a
+// doctor's note carried its patient on), needsYou (its doctor escalated: it
+// needs a human, its body what they must do or decide), gaveUp (its doctor
+// gave up: a worker_done failed), ended (its doctor's worker_done succeeded),
+// none (it came from no doctor out, or asked for nothing) or pending (no box
+// had claimed its dispatch yet: held with its `dispatchId`, `subject` and
+// `body`, and journaled again once acted on; the fold keeps the acting line
+// over the pending one). It is journaled before the
+// runner acts on it and acknowledges it, so a message Orca delivers again is
+// never acted on twice; a doctor's also carries its `doctor` (n), `patient`
+// (origin) and `round`, and its `body` (the note, or why it gave up), and a
+// worker_done its `outcome`. It has no n: it is about no agent's lifecycle.
+// A resume carries each one forward before any call. remedy: a doctor's
+// handoff carried its patient on, about the patient, with the `round`, the
+// `doctor`, `how` (continue: its session continued with the note; restart:
+// its worker never started, and its start is retried with the note in its
+// worker's prompt, `dispatchId` and `terminal` null until it starts), the
+// `messageId` of the handoff, and the `dispatchId` and `terminal` it now runs
+// under, `reopened` as a continuation's. It starts the patient's count of
+// continuations afresh: its next `continued` line is attempt 1.
 export const JOURNAL_ENTRIES = Object.freeze({
   queued: ['at', 'key', 'n', 'title'],
   starting: ['at', 'key', 'n', 'title', 'run'],
@@ -50,6 +95,7 @@ export const JOURNAL_ENTRIES = Object.freeze({
   failed: ['at', 'key', 'n', 'title', 'reason', 'attempts'],
   retained: ['at', 'retained'],
   retry: ['at', 'key', 'n', 'title', 'attempt', 'reason', 'nextAt'],
+  baseline: ['at', 'key', 'n', 'title', 'worktree', 'lines'],
   warning: ['at', 'key', 'n', 'title', 'reason'],
   nudge: ['at', 'key', 'n', 'title', 'dispatchId', 'reason', 'attempt'],
   blocked: ['at', 'key', 'n', 'title', 'dispatchId', 'terminal', 'waiting'],
@@ -59,6 +105,11 @@ export const JOURNAL_ENTRIES = Object.freeze({
   outstanding: ['at', 'key', 'n', 'title', 'run', 'dispatchId', 'harness', 'sessionId', 'terminal', 'worktree', 'dir', 'origin'],
   earlier: ['at', 'n', 'title', 'run', 'dispatchId', 'harness', 'sessionId', 'terminal', 'worktree', 'origin', 'state', 'reason'],
   run: ['at', 'runId', 'terminal'],
+  doctor: ['at', 'key', 'n', 'title', 'origin', 'round', 'reason', 'doctor'],
+  settled: ['at', 'key', 'n', 'title', 'dispatchId', 'outcome'],
+  gaveUp: ['at', 'key', 'n', 'title', 'origin', 'round', 'doctor', 'reason'],
+  mail: ['at', 'messageId', 'kind', 'action'],
+  remedy: ['at', 'key', 'n', 'title', 'origin', 'round', 'doctor', 'how', 'messageId', 'dispatchId', 'terminal', 'reopened'],
 })
 
 // The lines that name a call's worker.
@@ -89,7 +140,7 @@ export const madeByRun = (a) => !!a.runId && (a.launched || !!a.worktree)
 
 export const readJournal = (path) => foldJournal(journalLines(path))
 
-// The fold of a journal's entries: { calls, retained, run, lastN, agents }.
+// The fold of a journal's entries: { calls, retained, run, lastN, agents, mail }.
 //
 // calls, what a resume replays and takes up: key -> what each call made under
 // it, in call order — { result } for a call that returned a value (with
@@ -110,12 +161,41 @@ export const readJournal = (path) => foldJournal(journalLines(path))
 // worker line without a `dir` as named by that line's n and title. An
 // `outstanding` line is its call's place until a `reattached` line for its
 // dispatch takes it over; one still standing is a call that run never made,
-// so it follows every call that run made under its key.
+// so it follows every call that run made under its key. An unsettled entry of
+// a patient also has `rounds`, { round, trail }: its latest round, and each
+// ended round as the doctor prompt names it, { round, note, outcome }. One
+// whose latest round gave no remedy that carried it on is `held`: its agent()
+// waits on its doctors, so a resume answers it with its next round, or, when
+// that round is `open` (its doctor not yet ended), goes on with it: held is
+// { origin, round, reason, open, doctor, worker, unlaunched, remedy,
+// needsYou, gaveUp, ended, restart }, where doctor is that round's doctor, by
+// origin, worker its worker, in a call's worker's shape, while it is still
+// out, unlaunched, for a doctor whose worker never launched and that neither
+// failed nor said anything (its runner died while it was queued for a live
+// slot, or starting), { made, baseline }: the worktree an attempt of its start
+// left, as journaled, and that worktree's baseline, so the round is started
+// afresh rather than spent; remedy { id, body } the handoff journaled as
+// mail that no remedy line applied, needsYou what its doctor needs a human
+// for, gaveUp the body of a worker_done failed, ended { outcome } a
+// worker_done succeeded, and restart, for a patient whose worker never
+// started, { made, baseline }: the worktree its start left and its baseline.
 //
 // agents, every agent the journal names, one per `origin`, by the n of its
 // latest line: { origin, n, title, state, reason, continuations, replayed,
 // launched, runId, dispatchId, harness, sessionId, worktree, terminal, from,
-// to, waiting, nextAt, workerLeft }. The journal of a resumed run holds every agent of its Run, the ones
+// to, waiting, nextAt, workerLeft, baseline, patient, round, doctors, rounds, failures,
+// attempt }. patient: a
+// doctor's patient, by origin, or null; round: a patient's latest doctor
+// round, or 0; doctors: the origins of its doctors, in round order; rounds:
+// each of its rounds, { round, doctor (origin), reason (the failure it
+// answered), outcome, note, why }, where outcome is remedy (its doctor's note,
+// `note`, carried it on), gaveUp (it ended without one, `why`) or null while
+// it runs. A round after a remedy is that remedy failing: its continuations
+// count afresh from it. failures: how many of its failures a doctor answered,
+// a round after one that gave up answering the same failure; attempt: the
+// attempt it is on, 1 + its remedies, each remedy carrying it into the next.
+// A patient is failed while a round answers its failure, and continued once a
+// remedy carries it on, until it settles. The journal of a resumed run holds every agent of its Run, the ones
 // earlier runners made included: a resume carries each forward (`earlier`,
 // `outstanding`), and a line of the call that takes one up again
 // (`reattached`, or a replayed `result` with its `origin`) is that same agent,
@@ -124,15 +204,20 @@ export const readJournal = (path) => foldJournal(journalLines(path))
 // entry's: queued, starting once it has its slot or while its start is
 // retried (reason: why the last attempt failed; nextAt: when the next begins),
 // running once started, carried or taken up, blocked while it waits on a human
-// (waiting: on what), stuck once nudged, continued after a continuation, done
+// (waiting: on what), needs you once a doctor escalated, until its next
+// handoff, escalation or worker_done (reason: what the human must do; a
+// second escalation replaces it), stuck once nudged, continued after a continuation, done
 // or failed once settled. A nudge journals no answer, so an agent stays stuck
 // until its next continuation or settlement; blocked lasts until unblocked or
-// settled. workerLeft: it failed with its worker's process left running. launched: a worker was started for it,
+// settled. workerLeft: it failed with its worker's process left running.
+// baseline: the porcelain lines its worktree was made with, or null. launched: a worker was started for it,
 // whatever its dispatch now reads. from and to are when it began and settled
 // here, or null: a replayed result or a carried agent launched nothing here.
+// mail: every `mail` line, one per message id, the first kept, in order.
 export function foldJournal(entries) {
   const calls = new Map()
   const retained = []
+  const mail = new Map()
   let run = null
   let lastN = 0
   // One per call, by its n: a call's lines share it, and no two calls do.
@@ -144,6 +229,24 @@ export function foldJournal(entries) {
   const agents = new Map()
   const agentOfCall = new Map()
   const byDispatch = new Map()
+
+  // A patient's record of the round a line names, made at its first line.
+  function roundOf(a, e) {
+    let r = a.rounds.find((x) => x.round === e.round)
+    if (!r) {
+      r = { round: e.round ?? a.rounds.length + 1, doctor: Number.isInteger(e.doctor) ? e.doctor : null, reason: null, outcome: null, note: null, why: null }
+      a.rounds.push(r)
+    }
+    return r
+  }
+
+  // A patient's rounds, as a carried line names them.
+  function carryRounds(a, e) {
+    if (!Array.isArray(e.rounds)) return
+    a.rounds = e.rounds.map((r) => ({ ...r }))
+    a.round = Number.isInteger(e.round) ? e.round : a.rounds.length
+    a.doctors = a.rounds.map((r) => r.doctor).filter(Number.isInteger)
+  }
 
   // Folds one line into its agent's record, and returns that agent's origin.
   function agent(e) {
@@ -158,7 +261,7 @@ export function foldJournal(entries) {
       a = {
         origin: id, n: e.n, title: null, state: 'queued', continuations: 0, reason: null, replayed: false, launched: false,
         runId: null, dispatchId: null, harness: null, sessionId: null, worktree: null, terminal: null, from: null, to: null,
-        waiting: null, nextAt: null, workerLeft: false,
+        waiting: null, nextAt: null, workerLeft: false, baseline: null, patient: null, round: 0, doctors: [], rounds: [], failures: 0, attempt: 1,
       }
       agents.set(id, a)
     }
@@ -174,6 +277,9 @@ export function foldJournal(entries) {
         a.from ??= at
         Object.assign(a, { state: 'starting', reason: e.reason ?? null, nextAt: e.nextAt ?? null })
         break
+      case 'baseline':
+        Object.assign(a, { worktree: e.worktree ?? a.worktree, baseline: Array.isArray(e.lines) ? e.lines : a.baseline })
+        break
       case 'started':
       case 'reattached':
       case 'outstanding': {
@@ -183,6 +289,11 @@ export function foldJournal(entries) {
           state: continuations ? 'continued' : 'running', continuations, launched: true, reason: null, waiting: null, nextAt: null, runId: e.run ?? a.runId, dispatchId: e.dispatchId ?? a.dispatchId,
           harness: e.harness ?? a.harness, sessionId: e.sessionId ?? a.sessionId, worktree: e.worktree ?? a.worktree, terminal: e.terminal ?? a.terminal,
         })
+        if (typeof e.needsYou === 'string') Object.assign(a, { state: 'needs you', reason: e.needsYou })
+        carryRounds(a, e)
+        // A patient carried while a round answers its failure.
+        const last = e.type === 'outstanding' ? a.rounds.at(-1) : null
+        if (last && last.outcome !== 'remedy') Object.assign(a, { state: 'failed', reason: last.reason ?? null })
         break
       }
       case 'earlier':
@@ -191,6 +302,8 @@ export function foldJournal(entries) {
           launched: a.launched || !!e.dispatchId, runId: e.run ?? a.runId, dispatchId: e.dispatchId ?? a.dispatchId, harness: e.harness ?? a.harness,
           sessionId: e.sessionId ?? a.sessionId, worktree: e.worktree ?? a.worktree, terminal: e.terminal ?? a.terminal,
         })
+        if (e.patient != null) a.patient = e.patient
+        carryRounds(a, e)
         break
       case 'nudge':
         if (a.state === 'running' || a.state === 'continued' || a.state === 'stuck') Object.assign(a, { state: 'stuck', reason: e.reason ?? null })
@@ -201,15 +314,37 @@ export function foldJournal(entries) {
         }
         break
       case 'unblocked':
-        if (a.state === 'blocked') Object.assign(a, { state: a.continuations ? 'continued' : 'running', waiting: null, reason: null })
+        if (a.state === 'blocked') Object.assign(a, { state: a.continuations || a.rounds.at(-1)?.outcome === 'remedy' ? 'continued' : 'running', waiting: null, reason: null })
         break
+      case 'remedy':
+        // Its start retried: nothing runs until its worker starts.
+        if (e.how === 'restart') {
+          Object.assign(a, { state: 'starting', reason: null, waiting: null, nextAt: null })
+          break
+        }
+      // falls through
       case 'continued':
         // A continued session may run under a new dispatch in a new tab: that
-        // is the worker a reclaim releases and the tab it closes.
+        // is the worker a reclaim releases and the tab it closes. A remedy
+        // starts a fresh count against the cap.
         Object.assign(a, {
-          state: 'continued', reason: null, waiting: null, continuations: e.attempt ?? a.continuations + 1,
+          state: 'continued', reason: null, waiting: null, continuations: e.type === 'remedy' ? 0 : e.attempt ?? a.continuations + 1,
           dispatchId: e.dispatchId ?? a.dispatchId, terminal: e.terminal ?? a.terminal, sessionId: e.sessionId ?? a.sessionId,
         })
+        if (e.type === 'remedy') Object.assign(roundOf(a, e), { outcome: 'remedy', note: mail.get(e.messageId)?.body ?? null })
+        break
+      case 'doctor':
+        Object.assign(a, { state: 'failed', reason: e.reason ?? null, waiting: null, round: e.round ?? a.round })
+        if (Number.isInteger(e.doctor) && !a.doctors.includes(e.doctor)) a.doctors.push(e.doctor)
+        roundOf(a, e).reason = e.reason ?? null
+        break
+      case 'gaveUp':
+        Object.assign(roundOf(a, e), { outcome: 'gaveUp', why: e.reason ?? null })
+        break
+      case 'settled':
+        // A doctor that gave up (worker_done --outcome failed) is no done row.
+        if (e.outcome === 'failed') Object.assign(a, { state: 'failed', reason: e.reason ?? 'it gave up', waiting: null, to: at })
+        else Object.assign(a, { state: 'done', reason: null, waiting: null, to: at })
         break
       case 'result':
         Object.assign(a, { state: 'done', reason: null, waiting: null, to: at, replayed: e.replayed === true })
@@ -229,12 +364,17 @@ export function foldJournal(entries) {
     if (e.retained?.path && !retained.some((k) => k.path === e.retained.path)) retained.push(e.retained)
     for (const n of [e.n, e.lastN]) if (Number.isInteger(n)) lastN = Math.max(lastN, n)
     if (e.type === 'run' && typeof e.runId === 'string') run = { runId: e.runId, terminal: e.terminal ?? null }
+    // Read as the runner acted on it (doctor.mjs).
+    if (e.type === 'mail' && typeof e.messageId === 'string' && mailSupersedes(e, mail.get(e.messageId))) {
+      mail.set(e.messageId, e)
+      foldMail(Number.isInteger(e.doctor) ? agents.get(agentOfCall.get(e.doctor) ?? e.doctor) : null, e)
+    }
     const numbered = Number.isInteger(e.n)
     const id = numbered && JOURNAL_ENTRIES[e.type] && e.type !== 'run' && e.type !== 'retained' ? agent(e) : null
     if (typeof e.key !== 'string') continue
     if (!numbered && e.type !== 'result' && e.type !== 'failed') continue
     const callId = numbered ? e.n : `line ${i}`
-    if (!byCall.has(callId)) byCall.set(callId, { key: e.key, order: numbered ? e.n : i, carried: false, worker: null, settled: null, origin: null })
+    if (!byCall.has(callId)) byCall.set(callId, { key: e.key, n: numbered ? e.n : null, order: numbered ? e.n : i, carried: false, worker: null, settled: null, origin: null })
     const c = byCall.get(callId)
     if (e.type === 'result') {
       c.settled = { result: e.result }
@@ -258,12 +398,30 @@ export function foldJournal(entries) {
       }
     } else if (e.type === 'continued' && c.worker && e.dispatchId) {
       c.worker = { ...c.worker, dispatchId: e.dispatchId, terminal: e.terminal ?? c.worker.terminal, continuations: Number.isInteger(e.attempt) ? e.attempt : c.worker.continuations + 1 }
+    } else if (e.type === 'remedy' && c.worker && e.dispatchId) {
+      c.worker = { ...c.worker, dispatchId: e.dispatchId, terminal: e.terminal ?? c.worker.terminal, continuations: 0 }
     }
+  }
+  // A patient's doctor line names the n its doctor was started under; the
+  // doctor is the agent that n's lines made.
+  for (const a of agents.values()) {
+    a.doctors = a.doctors.map((d) => agentOfCall.get(d) ?? d)
+    for (const r of a.rounds) if (r.doctor != null) r.doctor = agentOfCall.get(r.doctor) ?? r.doctor
+    for (const d of a.doctors) if (agents.has(d)) agents.get(d).patient = a.origin
+    a.failures = a.rounds.filter((r, i) => i === 0 || a.rounds[i - 1].outcome === 'remedy').length
+    a.attempt = 1 + a.rounds.filter((r) => r.outcome === 'remedy').length
+  }
+  // A doctor an earlier runner started is carried forward with its patient,
+  // whose doctor lines are not.
+  for (const d of agents.values()) {
+    const p = d.patient != null ? agents.get(d.patient) : null
+    if (p && !p.doctors.includes(d.origin)) p.doctors.push(d.origin)
   }
   for (const c of [...byCall.values()].sort((a, b) => a.carried - b.carried || a.order - b.order)) {
     if (!calls.has(c.key)) calls.set(c.key, [])
     const settled = c.settled && 'result' in c.settled && c.origin !== null ? { ...c.settled, origin: c.origin } : c.settled
-    calls.get(c.key).push(settled ?? (c.worker ? { worker: c.worker } : { unsettled: true }))
+    const p = settled ? null : agents.get(c.origin ?? agentOfCall.get(c.n) ?? c.n)
+    calls.get(c.key).push(settled ?? { ...(c.worker ? { worker: c.worker } : { unsettled: true }), ...(p?.rounds.length && heldRounds(p, { agents, mail, agentDir })) })
   }
-  return { calls, retained, run, lastN, agents: [...agents.values()].sort((x, y) => x.n - y.n) }
+  return { calls, retained, run, lastN, agents: [...agents.values()].sort((x, y) => x.n - y.n), mail: [...mail.values()] }
 }

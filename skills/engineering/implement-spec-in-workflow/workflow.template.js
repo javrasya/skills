@@ -38,6 +38,7 @@ const ROLES = {
   reclaim: CLAUDE,       // Finalize: reclaim worktrees when nothing was published
   finalize: CLAUDE,      // Finalize: reconcile and ready the stack
   retrospective: CLAUDE, // Finalize: the validation report
+  recover: CLAUDE,       // any phase: a doctor for an agent that failed (Orca runner only)
 }
 
 // ---- interpolated by the skill ------------------------------------------
@@ -108,6 +109,9 @@ const mirror = (branches) => `\`git fetch origin\`, then mirror origin into the 
 // (ADR-0012). The reclaim steps below therefore hand an Orca run no path, and
 // the rendered script stays the same under both runners but for RUNNER.
 const ON_ORCA = RUNNER === 'orca'
+// The Orca runner starts each doctor itself, with no agent() call to spread a
+// row into, so it reads the recover row from meta (ADR-0014).
+if (ON_ORCA) meta.roles = ROLES
 const WORKTREE = ON_ORCA
   ? `Your worktree is an Orca child worktree of this run's worktree, per agent. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. Never remove it: the operator decides at the end of the run whether it is reclaimed.`
   : `Your worktree is throwaway and per agent. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. This run reclaims it — uncommitted leftovers included — once the work it holds is published.`

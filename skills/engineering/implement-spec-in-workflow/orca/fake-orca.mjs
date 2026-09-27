@@ -8,18 +8,23 @@
 // records every Orca call in order, stamped with `clock`'s time when one is
 // given, so a test can assert on the sequence and its timing. `worktrees`
 // holds every worktree Orca knows, the run's own included, by path, with the
-// board `status` last set on it, the `dirty` and `commits` a retried start
-// checks before taking it up, and `unpushed`, the commits a test says its
+// board `status` last set on it, the `porcelain` lines `git status
+// --porcelain` gives in it and the `commits` a retried start checks before
+// taking it up, and `unpushed`, the commits a test says its
 // HEAD holds that no remote-tracking ref contains (git's side, not Orca's:
-// `unpushedOf` answers for it). Every worker's terminal is one the runner
+// `unpushedOf` answers for it), and the `setup` policy it was created with
+// (`'skip'` for a doctor's, else null). Every worker's terminal is one the runner
 // launched, so, as in real Orca, its `terminalState` is `retained` for good;
-// whether its tab is open is `terminalList`'s to say.
+// whether its tab is open is `terminalList`'s to say. `setupLeaves` is the
+// porcelain every child worktree is born with, as a setup hook's output.
 //
 // `faults` fails a step the way real Orca can: step -> ({ count, ...ctx }) =>
 // an error to throw, 'hang' for a call Orca never answers (it fails as the
-// adapter's call timeout does, on `clock`), or nothing. count is how many
+// adapter's call timeout does, on `clock`), or nothing. On worktreeCreate,
+// 'hang-after' is a create Orca finishes but never answers: the worktree
+// exists, and the call times out at `createMs`. count is how many
 // times that step has run, and orca this fake, so a fault can also change
-// what Orca holds, a worktree's `dirty` for one. Steps: runCreate, worktreeStatus, and a start's
+// what Orca holds, a worktree's `porcelain` for one. Steps: runCreate, worktreeStatus, and a start's
 // worktreeCreate, worktreeSet, terminalCreate, waitIdle and workerStart, the
 // order the adapter runs them in, and runUse.
 //
@@ -38,20 +43,31 @@
 // answers dispatch `failed` on an orphaned terminal. The fake fails it at once,
 // so the runner never sees the window before, and reads worker-show through
 // the adapter's own workerStatus.
+//
+// Each Run has a mailbox, as real Orca's (1.4.209): what its workers send
+// (mailSend, a worker's `orchestration send`; workerDone's worker_done too)
+// waits there until its coordinator checks it (mailCheck). A check freezes
+// every waiting message into a batch, and hands that same batch back, marked
+// replayed, until it is acknowledged; `ack` names the batch, and the answer is
+// the next one. runUse re-batches an unacknowledged batch under a new
+// delivery id, its messages' ids kept. A worker_done settles the dispatch
+// that sent it. `mailCheck` is a step too, handed { ack, batch }: the batch's
+// messages before the ack applies, so a fault can fail an ack.
 import { existsSync } from 'fs'
-import { OrcaError, launchCommand, resumeCommand, resumeRunnerCommand, tailCommand, workerStartArgs, withTimeout, workerStatus } from './orca-cli.mjs'
+import { OrcaError, reuseWorktree, afterCreateTimeout, launchCommand, resumeCommand, resumeRunnerCommand, tailCommand, workerStartArgs, withTimeout, workerStatus } from './orca-cli.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 
 // The runner's transcript reader, over the fake's sessions: a session's size
 // is its latest dispatch's `transcript`, which a continuation carries over.
 export const fakeTranscripts = (orca) => ({
   size: ({ sessionId }) => [...orca.dispatches.values()].filter((d) => d.sessionId === sessionId).at(-1)?.transcript ?? null,
+  path: ({ sessionId }) => `C:/fake/transcripts/${sessionId}.jsonl`,
 })
 
-export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run', runPrefix = 'run_fake', coordinator = 'term_runner', tabs = [], faults = {}, callMs = RUNNER_SETTINGS.orcaCallMs } = {}) {
+export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run', runPrefix = 'run_fake', coordinator = 'term_runner', tabs = [], faults = {}, callMs = RUNNER_SETTINGS.orcaCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, setupLeaves = [] } = {}) {
   const calls = []
   const dispatches = new Map()
-  const worktrees = new Map([[runWorktree, { parent: null, name: null, displayName: null, removed: false, status: null, dirty: false, commits: 0, unpushed: 0 }]])
+  const worktrees = new Map([[runWorktree, { parent: null, name: null, displayName: null, removed: false, status: null, porcelain: [], commits: 0, unpushed: 0 }]])
   // handle -> { path, title, open }: the tabs logTail opened.
   const logTabs = new Map()
   const counts = {}
@@ -61,15 +77,27 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
   const openTabs = new Set(tabs)
   let resumes = 0
   let seq = 0
+  // runId -> { pending, batch: { id, messages } | null, acked }
+  const mailboxes = new Map()
+  let messages = 0
+  let deliveries = 0
+  const mailOf = (run) => {
+    if (!mailboxes.has(run)) mailboxes.set(run, { pending: [], batch: null, acked: new Set() })
+    return mailboxes.get(run)
+  }
   const record = (c) => calls.push(clock ? { ...c, at: clock.now() } : c)
 
-  async function step(name, ctx = {}) {
+  async function hang(name, ms) {
+    if (!clock) throw new Error(`fake orca: ${name} hangs, but no clock was given to time it out`)
+    await withTimeout(clock, ms, new Promise(() => {}), name)
+  }
+
+  // Resolves 'hang-after' for its caller to act on; throws every other fault.
+  async function step(name, ctx = {}, ms = callMs) {
     counts[name] = (counts[name] ?? 0) + 1
     const f = faults[name]?.({ ...ctx, count: counts[name], orca })
-    if (f === 'hang') {
-      if (!clock) throw new Error(`fake orca: ${name} hangs, but no clock was given to time it out`)
-      await withTimeout(clock, callMs, new Promise(() => {}), name)
-    }
+    if (f === 'hang') await hang(name, ms)
+    if (f === 'hang-after') return f
     if (f) throw f
   }
 
@@ -99,15 +127,23 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     if (r && r.coordinator !== caller) throw new OrcaError('consumer_fenced', `This coordinator terminal is no longer bound to Run ${run}`, verb)
   }
 
-  // As the real adapter decides it: the worktree a retry takes up, by name.
-  function earlierWorktree(name) {
-    const found = [...worktrees].find(([, w]) => w.name === name && !w.removed)
+  // The worktree list, looked up by name as the adapter does.
+  function findWorktree(name) {
+    record({ verb: 'worktreeList', name })
+    return [...worktrees].find(([, w]) => w.name === name && !w.removed) ?? null
+  }
+
+  // The worktree a retry takes up, by name, decided by the adapter's own
+  // rule (reuseWorktree) on what this Orca holds.
+  async function earlierWorktree(name, dispatched, baseline) {
+    const found = findWorktree(name)
     if (!found) return null
     const [path, w] = found
-    const refuse = (code, why, final) => Object.assign(new OrcaError(code, `${path} ${why}`, 'worktree reuse'), { worktree: path, final })
-    if ([...dispatches.values()].some((d) => d.worktree === path && !d.released)) throw refuse('worktree_held', 'still has an agent running in it', false)
-    if (w.dirty) throw refuse('worktree_dirty', 'has uncommitted changes', true)
-    if (w.commits > 0) throw refuse('worktree_has_commits', `has ${w.commits} commit(s) of its own`, true)
+    await reuseWorktree(path, { dispatched, baseline }, {
+      held: () => [...dispatches.values()].some((d) => d.worktree === path && !d.released),
+      lines: () => w.porcelain,
+      commits: () => w.commits,
+    })
     record({ verb: 'worktreeReuse', worktree: path })
     return path
   }
@@ -141,6 +177,22 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
   }
   const live = (name) => worktrees.has(name) && !worktrees.get(name).removed
 
+  // Only the exact pane and IDs Orca issued a dispatch send as it.
+  function sender({ from, capability, taskId, dispatchId }) {
+    const d = dispatch(dispatchId, 'orchestration send')
+    if (d.taskId !== taskId || d.handle !== from || d.capability !== capability) {
+      throw new OrcaError('consumer_fenced', `a message from ${dispatchId} does not match its preamble`, 'orchestration send')
+    }
+    return d
+  }
+
+  function post(d, { type, subject = '', body = '', outcome = null }) {
+    const m = { id: `msg_fake${++messages}`, type, from: d.handle, subject, body, taskId: d.taskId, dispatchId: d.dispatchId, outcome, createdAt: clock ? clock.now() : null }
+    mailOf(d.run).pending.push(m)
+    if (type === 'worker_done' && !d.settled) Object.assign(d, { settled: true, outcome: outcome ?? 'succeeded' })
+    return m
+  }
+
   const as = (caller) => ({
     calls,
     dispatches,
@@ -163,6 +215,11 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       const r = runs.get(runId)
       if (!r) throw new OrcaError('run_not_found', `Run ${runId} not found or is inspect-only`, 'orchestration run-use')
       Object.assign(r, { coordinator: caller, generation: r.generation + 1 })
+      const box = mailboxes.get(runId)
+      if (box?.batch) {
+        box.pending.unshift(...box.batch.messages)
+        box.batch = null
+      }
       record({ verb: 'runUse', runId, terminal: caller })
       return { runId, terminal: caller }
     },
@@ -178,21 +235,37 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       const warnings = []
       let worktree = runWorktree
       let made = null
+      let created = false
       if (child) {
-        made = child.retry ? earlierWorktree(child.name) : null
+        made = child.retry ? await earlierWorktree(child.name, child.dispatched, child.baseline ?? null) : null
+        let timedOut = null
+        let late = null
         if (!made) {
-          await step('worktreeCreate', { name: child.name })
+          try {
+            late = await step('worktreeCreate', { name: child.name }, createMs)
+          } catch (e) {
+            if (e?.code !== 'call_timeout') throw e
+            timedOut = e
+          }
+        }
+        if (!made && !timedOut) {
           // Real Orca never refuses a taken name: it makes <name>-2, which
           // the adapter refuses for good, naming both.
           let name = child.name
           for (let i = 2; live(`C:/fake/worktrees/${name}`); i++) name = `${child.name}-${i}`
           made = `C:/fake/worktrees/${name}`
-          worktrees.set(made, { parent: runWorktree, name, displayName: name, removed: false, status: null, dirty: false, commits: 0, unpushed: 0 })
-          record({ verb: 'worktreeCreate', name: child.name, worktree: made })
+          // A child made with setup skipped runs no setup hook, so it is born clean.
+          worktrees.set(made, { parent: runWorktree, name, displayName: name, removed: false, status: null, porcelain: child.setup === 'skip' ? [] : [...setupLeaves], commits: 0, unpushed: 0, setup: child.setup ?? null })
+          created = !late
+          record({ verb: 'worktreeCreate', name: child.name, worktree: made, setup: child.setup ?? null })
           if (name !== child.name) {
             const earlier = `C:/fake/worktrees/${child.name}`
             throw Object.assign(new OrcaError('worktree_name_taken', `asked for ${child.name}, Orca made ${name}: a worktree named ${child.name} already exists`, 'worktree create'), { worktree: made, worktrees: [made, earlier], final: true })
           }
+          if (late) timedOut = await hang('worktreeCreate', createMs).catch((e) => e)
+        }
+        if (timedOut) {
+          made = afterCreateTimeout(timedOut, findWorktree(child.name)?.[0] ?? null, warnings)
         }
         worktree = made
         try {
@@ -203,26 +276,35 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
         }
       }
       let opened = false
+      let dispatching = false
+      let baseline = child?.baseline ?? null
       try {
+        if (created) {
+          baseline = [...worktrees.get(made).porcelain]
+          await child.onBaseline?.({ worktree: made, lines: baseline })
+        }
         await step('terminalCreate', { title, worktree: made })
         opened = true
         await step('waitIdle', { title, worktree: made })
+        dispatching = true
         fence(caller, run, 'orchestration worker-start')
         await step('workerStart', { title, worktree: made })
       } catch (e) {
         if (opened) record({ verb: 'terminalClose', terminal: preamble.handle })
         if (made && e instanceof Object) e.worktree = made
+        if (dispatching && e instanceof Object) e.dispatched = true
         throw e
       }
-      const argv = workerStartArgs({ run, prompt, title, place: ['--worktree', child ? `path:${worktree}` : 'current'], terminal: preamble.handle })
+      const text = typeof prompt === 'function' ? prompt(baseline) : prompt
+      const argv = workerStartArgs({ run, prompt: text, title, place: ['--worktree', child ? `path:${worktree}` : 'current'], terminal: preamble.handle })
       if (argv.includes('--agent')) throw new Error(`fake orca: worker-start for ${title} was called with --agent`)
       // Like Claude Code, the agent titles its own tab from its prompt.
       const d = {
-        ...preamble, run, title, ...launch, sessionId, command, prompt, worktree, tabTitle: prompt.slice(0, 30), ...fresh(), transcript: null, onNudge: null, onContinue: null, terminalState: 'retained',
+        ...preamble, run, title, ...launch, sessionId, command, prompt: text, worktree, tabTitle: text.slice(0, 30), ...fresh(), transcript: null, onNudge: null, onContinue: null, terminalState: 'retained',
       }
       dispatches.set(d.dispatchId, d)
       record({ verb: 'workerStart', dispatchId: d.dispatchId, title, ...launch, sessionId, command, argv, placement: child ? 'new-child' : 'current', worktree })
-      play(d, () => worker({ prompt, preamble, worktree, orca, state: d }))
+      play(d, () => worker({ prompt: text, preamble, worktree, orca, state: d }))
       return { dispatchId: d.dispatchId, taskId: d.taskId, terminal: d.handle, worktree, warnings }
     },
 
@@ -296,12 +378,39 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
 
     // Real Orca settles a Dispatch only for the exact pane and IDs it issued.
     async workerDone({ from, capability, taskId, dispatchId, subject, body }) {
-      const d = dispatch(dispatchId, 'orchestration send')
-      if (d.taskId !== taskId || d.handle !== from || d.capability !== capability) {
-        throw new OrcaError('consumer_fenced', `worker_done for ${dispatchId} does not match its preamble`, 'orchestration send')
-      }
+      const d = sender({ from, capability, taskId, dispatchId })
       record({ verb: 'workerDone', dispatchId, subject, body })
+      post(d, { type: 'worker_done', outcome: 'succeeded', subject, body })
       Object.assign(d, { settled: true, outcome: 'succeeded' })
+    },
+
+    // Not the runner's: a worker's `orchestration send` to its Run's mailbox,
+    // with the IDs from its preamble. Returns the message's id.
+    async mailSend({ from, capability, taskId, dispatchId, type, subject, body, outcome = null }) {
+      const d = sender({ from, capability, taskId, dispatchId })
+      const m = post(d, { type, subject, body, outcome: type === 'worker_done' ? outcome ?? 'succeeded' : null })
+      record({ verb: 'mailSend', id: m.id, type, dispatchId, outcome: m.outcome, body })
+      return { id: m.id }
+    },
+
+    // The mailbox of the Run bound to this terminal; none for any other.
+    async mailCheck({ ack = null } = {}) {
+      from(caller, 'orchestration check')
+      const run = [...runs].reverse().find(([, r]) => r.coordinator === caller)?.[0] ?? null
+      const box = run ? mailOf(run) : null
+      await step('mailCheck', { ack, batch: box?.batch?.messages.map((m) => ({ ...m })) ?? null })
+      let acknowledged = null
+      if (box && ack) {
+        if (box.batch?.id !== ack && !box.acked.has(ack)) throw new OrcaError('stale_delivery', '--ack requires a delivery_* ID returned by orchestration check', 'orchestration check')
+        if (box.batch?.id === ack) box.batch = null
+        box.acked.add(ack)
+        acknowledged = ack
+      }
+      const replayed = !!box?.batch
+      if (box && !box.batch && box.pending.length) box.batch = { id: `delivery_fake${++deliveries}`, messages: box.pending.splice(0) }
+      const b = box?.batch ?? null
+      record({ verb: 'mailCheck', ack, deliveryId: b?.id ?? null, ids: b ? b.messages.map((m) => m.id) : [], replayed })
+      return { deliveryId: b?.id ?? null, acknowledged, replayed, messages: b ? b.messages.map((m) => ({ ...m })) : [] }
     },
 
     async worktreeStatus({ worktree, status }) {

@@ -33,6 +33,9 @@ export const RUNNER_SETTINGS = Object.freeze({
   // Sessions continued per agent; the next death fails it, and its tab and
   // worktree are kept.
   maxContinuations: 3,
+  // Doctors per agent dead past that cap, one after another (ADR-0014): once
+  // every round has ended without a remedy, it is failed and kept.
+  doctorRounds: 3,
   // Blocked on something only a human can answer: logged loudly on entry,
   // failed and kept if nobody answers within this. Never continued:
   // continuing does not answer the question it waits on.
@@ -43,6 +46,10 @@ export const RUNNER_SETTINGS = Object.freeze({
   // One Orca call, beyond any wait it asks Orca for: one that has not
   // answered by then is killed and counts as failed.
   orcaCallMs: 2 * MIN,
+  // A `worktree create`, which Orca may take far longer over than one call:
+  // it has been seen to finish past orcaCallMs. One that runs out is looked
+  // up by name before its attempt counts as failed.
+  worktreeCreateMs: 10 * MIN,
   // A worker start, or the Run's creation, that fails is tried again after
   // each of these waits in turn; once they are spent, agent() is null. So it
   // is attempted at most four times: the first attempt, then one after each

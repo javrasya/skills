@@ -7,7 +7,7 @@ The reference design for the Orca runner's [run view](../../CONTEXT.md) (spec #4
 ## Check your work against this
 
 - **Layout:**
-  - A header: the run's name, project, Run id, spec, whether the runner is alive, and elapsed time. Under it, the number of agents in each state, blocked first.
+  - A header: the run's name, project, Run id, spec, whether the runner is alive, and elapsed time. Under it, the number of agents in each state, blocked and needs you first.
   - One row per phase. When the phase is unfolded, one row per agent sits under it.
   - A bottom pane that describes the selected row.
   - A key-help line.
@@ -17,17 +17,21 @@ The reference design for the Orca runner's [run view](../../CONTEXT.md) (spec #4
   - When folded, also `peak ctx` for the phase.
   - Clicking the row, pressing Enter, or using ←/→ folds and unfolds it.
 - **Agent row:**
-  - The agent's number, its label, and its state as a glyph and a word (`· queued`, `◌ starting`, `● running`, `! blocked`, `◐ stuck`, `↻ continued ×N`, `✓ done`, `✗ failed`, `○ reclaimed`). `starting` covers a start being retried; `reclaimed` replaces whatever it was once the registry records it reclaimed.
+  - The agent's number, its label, and its state as a glyph and a word (`· queued`, `◌ starting`, `● running`, `! blocked`, `? needs you` (bold yellow), `◐ stuck`, `↻ continued`, `✓ done`, `✗ failed`, `○ reclaimed`). `starting` covers a start being retried; `reclaimed` replaces whatever it was once the registry records it reclaimed. `needs you` is a doctor that escalated: it waits on a human for as long as it takes, until its next handoff, escalation or `worker_done`. The runner's own continuations of a session are not in it: the pane names them (#77).
+  - A doctor's patient shows its trail (#77): one `✗` for each failure a doctor answered, then its glyph and state, a remedy's `continued` drawn `●`, and its attempt after the state: `✗ failed`, `✗● continued`, `✗✗ failed ×2`, `✗✗● continued ×2`, `✗✗✓ done ×3`. While it is failed its last `✗` is its glyph; `continued ×N` counts the doctors' continuations of it. A round after one that gave up answers the same failure, and adds no `✗`.
   - A context bar with the context size.
   - Cumulative tokens, and elapsed time.
   - An agent that never started shows `—` for context and tokens.
+  - A doctor's row sits right under its patient's, indented, one per round (`└ recover`); its pane gives its whole title, `[Phase] recover -> <patient label>`.
 - **Bottom pane for a selected agent:**
   - `[Phase] label`, then its state, context, total tokens and elapsed time.
-  - `worktree`, `tab` and `session` (`—` when there is none).
-  - `reason` when the agent failed, is stuck or blocked, or its start is being retried (with when the next attempt begins).
+  - `worktree`, `tab` and `session` (`—` when there is none), then `the runner continued it N times` once the runner has continued its session since it started or a doctor's remedy carried it on.
+  - `reason` when the agent failed, is stuck or blocked, needs you (what the human must do or decide), or its start is being retried (with when the next attempt begins).
   - The transcript path.
-- **Bottom pane for a selected phase:** its blocked agents first, then its failed and stuck ones, each with its reason.
-- **Flash line:** while any agent is blocked on a human, it names each one, its tab and what it waits on, in place of the run's latest event, until it is answered.
+- **Header counts and phase mixes** count each doctor as a row of its own.
+- **Bottom pane for a selected phase:** its blocked and needs-you agents first, then its failed and stuck ones, each with its reason.
+- **Flash line:** while any agent is blocked on a human or needs you, it names each one, its tab and what it waits on (a doctor's escalation, its reason), in place of the run's latest event, until it is answered.
+- **Reclaim dialog** (`r`, #71): a box over the middle of the tree, titled `Reclaim`, with its options in this order: `Reclaim Selected` (naming the agent, or `every agent of <phase>`), `Reclaim Successful Ones` and `Reclaim All`. Under every option a doctor is reclaimed with its patient, right after it, and never on its own: Selected on a doctor's row reclaims its patient; a doctor whose patient is kept is kept too; Successful Ones takes a done patient's doctors, never a done doctor of a patient that is not. The highlighted option is inverted with a `▸`; a disabled one, Reclaim All while the run is still going, is grey and gives its reason; once the run has ended it is offered, even while its runner waits on the view. Its hint line reads `↑↓ or the mouse moves · Enter reclaims · Esc closes`. A confirmation that follows it (`f`) is the same box with the reason and its `f =` line. The tree keeps redrawing behind either.
 
 ## What the image does not decide
 
@@ -37,7 +41,7 @@ The reference design for the Orca runner's [run view](../../CONTEXT.md) (spec #4
   - Context size and its bar are coloured by band: green below 200k, yellow from 200k to 350k, red above 350k.
   - States have their own colours. Cumulative tokens are grey. The selected row is shown inverted.
 - **Exact spacing and column widths** are a guide, not a contract.
-- **The key-help line** lists the view's own keys (#51): `l` opens the log in a tab of its own that follows it; `R` resume, `e` end-of-run and `s` all runs were the prototype's.
+- **The key-help line** lists the view's own keys (#51): `l` opens the log in a tab of its own that follows it; `R` resume, `e` and `s` all runs were the prototype's.
 
 ## Last design check
 
@@ -84,5 +88,5 @@ The same screen with colour removed, from the prototype at 140 columns. The stat
  reason worker did not start: orca worktree create timed out after 60s (3/3 attempts)
  transcript ~/.claude/projects/…-run-55d94954c294-17/(none).jsonl
 
- ↑↓ move · ←→ / click a phase to fold · ⏎/click focus tab · r reclaim · R resume · e end-of-run · s all runs · q quit
+ ↑↓ move · ←→ / click a phase to fold · ⏎/click focus tab · r reclaim · R resume · s all runs · q quit
 ```

@@ -31,11 +31,11 @@ function fit(s, w) {
   return out + ' '.repeat(Math.max(0, w - n)) + `${E}0m`
 }
 
-const GLYPH = { queued: '·', starting: '◌', running: '●', blocked: '!', stuck: '◐', continued: '↻', done: '✓', failed: '✗', reclaimed: '○' }
-const COLOUR = { queued: '90', starting: '34', running: '36', blocked: '1;91', stuck: '33', continued: '35', done: '32', failed: '31', reclaimed: '2' }
-// The design's order for the header counts, blocked first; a phase row lists
+const GLYPH = { queued: '·', starting: '◌', running: '●', blocked: '!', 'needs you': '?', stuck: '◐', continued: '↻', done: '✓', failed: '✗', reclaimed: '○' }
+const COLOUR = { queued: '90', starting: '34', running: '36', blocked: '1;91', 'needs you': '1;33', stuck: '33', continued: '35', done: '32', failed: '31', reclaimed: '2' }
+// The design's order for the header counts, the states a human answers first; a phase row lists
 // its mix in STATES order.
-const COUNTED = ['blocked', 'starting', 'running', 'continued', 'stuck', 'queued', 'done', 'failed', 'reclaimed']
+const COUNTED = ['blocked', 'needs you', 'starting', 'running', 'continued', 'stuck', 'queued', 'done', 'failed', 'reclaimed']
 const BAND = { green: '32', yellow: '33', red: '31' }
 const BAR = 10
 const BAR_FULL = 500_000
@@ -48,7 +48,19 @@ export function duration(ms) {
   const m = Math.floor((s % 3600) / 60)
   return h ? `${h}h${String(m).padStart(2, '0')}m` : `${m}m${String(s % 60).padStart(2, '0')}s`
 }
-const stateOf = (a) => c(COLOUR[a.state], `${GLYPH[a.state]} ${a.state}${a.state === 'continued' && a.continuations ? ` ×${a.continuations}` : ''}`)
+// A patient's STATE is its trail: one ✗ per failure a doctor answered, then
+// its glyph and state, the last ✗ its glyph while it is failed, a remedy's
+// continued drawn ● to tell it from the runner's own ↻. The count is its
+// attempt, but continued counts the doctors' continuations, so that
+// `continued ×n` means one thing (#77): `✗✗● continued ×2` is on attempt 3.
+// The runner's own continuations are the pane's, never the label's.
+function stateOf(a) {
+  if (!a.failures) return c(COLOUR[a.state], `${GLYPH[a.state]} ${a.state}`)
+  const count = a.state === 'continued' ? a.attempt - 1 : a.attempt
+  const glyph = a.state === 'failed' ? '' : a.state === 'continued' ? GLYPH.running : GLYPH[a.state]
+  return c(COLOUR.failed, '✗'.repeat(a.failures)) + c(COLOUR[a.state], `${glyph} ${a.state}${count > 1 ? ` ×${count}` : ''}`)
+}
+const STATE_W = 18
 const banded = (a, s) => (a.band ? c(BAND[a.band], s) : s)
 function contextCell(a) {
   if (a.context == null) return grey('░'.repeat(BAR)) + ' ' + '—'.padStart(4)
@@ -73,8 +85,10 @@ function phaseLine(p) {
   return ` ${p.folded ? '▸' : '▾'} ${bold(p.name.padEnd(10))} ${grey(`${p.done}/${p.total} done`.padEnd(10))}  ${mixOf(p.mix)}${peak}`
 }
 
-const agentLine = (a) =>
-  `  ${String(a.n).padStart(3)}   ${a.label.padEnd(22)} ${fit(stateOf(a), 16)} ${contextCell(a)}   ${grey(size(a.tokens).padStart(6))}   ${duration(a.elapsedMs).padStart(7)}`
+// A doctor's row, under its patient's, names only its role: its label is
+// `recover -> <the patient's label>`, the row above.
+const agentLine = (a, depth = 0) =>
+  `  ${String(a.n).padStart(3)}   ${(depth ? `${'  '.repeat(depth - 1)}└ ${a.label.split(' -> ')[0]}` : a.label).padEnd(22)} ${fit(stateOf(a), STATE_W)} ${contextCell(a)}   ${grey(size(a.tokens).padStart(6))}   ${duration(a.elapsedMs).padStart(7)}`
 
 const PANE = 4
 
@@ -86,7 +100,7 @@ function agentPane(a) {
   const tab = a.terminal ? `${cyan(shortHandle(a.terminal))}${a.tabOpen === true ? grey(' (open)') : a.tabOpen === false ? grey(' (closed)') : ''}` : grey('—')
   return [
     ` ${bold(a.title ?? `[${a.phase}] ${a.label}`)}  ${stateOf(a)}  ctx ${a.context == null ? '—' : banded(a, size(a.context))}  total ${grey(size(a.tokens))}  ${duration(a.elapsedMs)}`,
-    ` worktree ${a.worktree ? cyan(worktreeName(a.worktree)) : grey('—')}   tab ${tab}   session ${grey(a.sessionId ?? '—')}`,
+    ` worktree ${a.worktree ? cyan(worktreeName(a.worktree)) : grey('—')}   tab ${tab}   session ${grey(a.sessionId ?? '—')}${a.continuations ? `   ${c(COLOUR.continued, `the runner continued it ${a.continuations} time${a.continuations === 1 ? '' : 's'}`)}` : ''}`,
     a.reason ? ` ${c(a.state === 'failed' || a.state === 'blocked' ? '31' : '33', 'reason')} ${a.reason}${a.state === 'starting' && a.nextAt ? grey(`; next attempt at ${a.nextAt.slice(11, 19)}`) : ''}` : '',
     grey(` transcript ${a.transcript ?? '—'}`),
   ]
@@ -105,21 +119,35 @@ function phasePane(p, problems) {
 const HELP = ' ↑↓ move · ←→ / click a phase to fold · ⏎/click focus tab · r reclaim · l log · q quit'
 const TOP = 4
 
-// model: runView's model. flash: the flash line's text (an action's outcome,
-// or the latest event); alert: a blocked agent's line, drawn loud in its place
-// when there is no flash. modal: { title, lines } drawn over the middle. help:
-// the key line, for a tree the standalone view opened.
-// Returns the screen's lines, height of them, and rowAt(y), the index in
-// model.rows of the row drawn on terminal line y (1-based), or null.
-export function draw(model, { width: W = 140, height: H = 40, flash = null, alert = null, modal = null, help = HELP } = {}) {
+// The dialog's box lines, each already fitted to mw and coloured, and the
+// index among them of its first option.
+function dialogBox(d, mw) {
+  const plain = (l) => c('100', fit(' ' + l, mw))
+  const head = c('7', fit(' ' + d.title, mw))
+  if (d.kind === 'confirm') return { box: [head, ...d.lines.map(plain), plain('')], first: null }
+  const options = d.options.map((o, i) =>
+    o.disabled ? c('100;90', fit(`   ${o.label} — ${o.reason}`, mw))
+      : i === d.highlight ? c('7', fit(` ▸ ${o.label} — ${o.detail}`, mw))
+      : plain(`  ${o.label} — ${o.detail}`))
+  return { box: [head, ...options, plain(''), plain('↑↓ or the mouse moves · Enter reclaims · Esc closes'), plain('')], first: 1 }
+}
+
+// model: runView's model, its dialog drawn over the middle. flash: the flash
+// line's text (an action's outcome, or the latest event); alert: a blocked
+// agent's line, drawn loud in its place when there is no flash. help: the key
+// line, for a tree the standalone view opened.
+// Returns the screen's lines, height of them; rowAt(y), the index in
+// model.rows of the row drawn on terminal line y (1-based), or null; and
+// optionAt(y), the index of the dialog's option drawn there, or null.
+export function draw(model, { width: W = 140, height: H = 40, flash = null, alert = null, help = HELP } = {}) {
   const rows = model?.rows ?? []
   const selected = model?.selected ?? 0
   const body = Math.max(1, H - TOP - 1 - PANE - 2)
   const top = Math.max(0, Math.min(selected - body + 1, rows.length - body))
-  const lines = [...headerLines(model?.header, W), fit(grey('─'.repeat(W)), W), fit(grey('   #   AGENT                    STATE            CONTEXT           TOKENS   ELAPSED'), W)]
+  const lines = [...headerLines(model?.header, W), fit(grey('─'.repeat(W)), W), fit(grey('   #   AGENT                    STATE              CONTEXT           TOKENS   ELAPSED'), W)]
   for (let i = top; i < Math.min(rows.length, top + body); i++) {
     const r = rows[i]
-    const line = r.kind === 'phase' ? phaseLine(r.phase) : agentLine(r.agent)
+    const line = r.kind === 'phase' ? phaseLine(r.phase) : agentLine(r.agent, r.depth)
     lines.push(i === selected ? c('7', fit(strip(line), W)) : fit(line, W))
   }
   while (lines.length < TOP + body) lines.push(fit('', W))
@@ -127,20 +155,17 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
   const pane = model?.pane
   const paneLines = !pane ? [grey(' no agent has started yet')] : pane.kind === 'agent' ? agentPane(pane.agent) : phasePane(pane.phase, pane.problems)
   for (let i = 0; i < PANE; i++) lines.push(fit(paneLines[i] ?? '', W))
-  lines.push(fit(flash ? ' ' + c('1;36', flash) : alert ? ' ' + c(COLOUR.blocked, alert) : '', W))
+  lines.push(fit(flash ? ' ' + c('1;36', flash) : alert ? ' ' + c(COLOUR[alert.startsWith('NEEDS YOU') ? 'needs you' : 'blocked'], alert) : '', W))
   lines.push(fit(grey(help), W))
 
-  // The modal's terminal rows, so rowAt can keep the rows it does not cover
-  // clickable while the end prompt is up.
-  let modalTop = 0
-  let modalBottom = 0
-  if (modal) {
+  const dialog = model?.dialog ?? null
+  let optionsAt = null
+  if (dialog) {
     const mw = Math.min(W - 4, 100)
     const left = Math.max(0, Math.floor((W - mw) / 2))
-    const box = [c('7', fit(' ' + modal.title, mw)), ...modal.lines.map((l) => c('100', fit(' ' + l, mw))), c('100', fit('', mw))]
+    const { box, first } = dialogBox(dialog, mw)
     const at = Math.max(0, Math.floor((H - box.length) / 2))
-    modalTop = at
-    modalBottom = at + box.length
+    if (first !== null) optionsAt = at + first + 1
     box.forEach((b, i) => {
       if (at + i < lines.length) lines[at + i] = fit(' '.repeat(left) + b, W)
     })
@@ -149,12 +174,12 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
     lines: lines.slice(0, H),
     rowAt: (y) => {
       const i = top + (y - TOP - 1)
-      if (!(y > TOP && y <= TOP + body && i < rows.length)) return null
-      // A confirmation takes every click; the end prompt only hides the rows
-      // its box covers — the rest of the tree stays clickable.
-      if (modal?.confirm) return null
-      if (y >= modalTop && y < modalBottom) return null
-      return i
+      // The dialog takes every click: the tree behind it takes none.
+      return !dialog && y > TOP && y <= TOP + body && i < rows.length ? i : null
+    },
+    optionAt: (y) => {
+      const k = optionsAt === null ? -1 : y - optionsAt
+      return k >= 0 && k < dialog.options.length ? k : null
     },
   }
 }
