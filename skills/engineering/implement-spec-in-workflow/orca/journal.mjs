@@ -5,6 +5,7 @@
 // carry a worker, or about which agents the Run holds.
 import { existsSync, readFileSync } from 'fs'
 import { agentDir } from './lifecycle.mjs'
+import { foldMail, heldRounds, mailSupersedes } from './doctor.mjs'
 
 // Every journal entry type and the fields it always carries, beside `type`.
 // `at` is an ISO timestamp from the runner's clock; `run` is the Orca Run the
@@ -113,9 +114,6 @@ export const JOURNAL_ENTRIES = Object.freeze({
 
 // The lines that name a call's worker.
 const WORKER_LINES = ['started', 'reattached', 'outstanding']
-
-// The mail kinds that end a doctor's needs you, as the runner's own list does.
-const ANSWERS = ['handoff', 'escalation', 'worker_done']
 
 // Every entry of a journal, in order. A line that does not parse is skipped:
 // a torn last line is one the runner was killed while writing.
@@ -366,14 +364,10 @@ export function foldJournal(entries) {
     if (e.retained?.path && !retained.some((k) => k.path === e.retained.path)) retained.push(e.retained)
     for (const n of [e.n, e.lastN]) if (Number.isInteger(n)) lastN = Math.max(lastN, n)
     if (e.type === 'run' && typeof e.runId === 'string') run = { runId: e.runId, terminal: e.terminal ?? null }
-    // A message held `pending` gives way to the line that acted on it.
-    if (e.type === 'mail' && typeof e.messageId === 'string' && (!mail.has(e.messageId) || (mail.get(e.messageId).action === 'pending' && e.action !== 'pending'))) {
+    // Read as the runner acted on it (doctor.mjs).
+    if (e.type === 'mail' && typeof e.messageId === 'string' && mailSupersedes(e, mail.get(e.messageId))) {
       mail.set(e.messageId, e)
-      const d = Number.isInteger(e.doctor) ? agents.get(agentOfCall.get(e.doctor) ?? e.doctor) : null
-      if (d && d.state !== 'done' && d.state !== 'failed' && ANSWERS.includes(e.kind)) {
-        if (e.action === 'needsYou') Object.assign(d, { state: 'needs you', reason: e.body ?? null })
-        else if (d.state === 'needs you') Object.assign(d, { state: d.continuations ? 'continued' : 'running', reason: null })
-      }
+      foldMail(Number.isInteger(e.doctor) ? agents.get(agentOfCall.get(e.doctor) ?? e.doctor) : null, e)
     }
     const numbered = Number.isInteger(e.n)
     const id = numbered && JOURNAL_ENTRIES[e.type] && e.type !== 'run' && e.type !== 'retained' ? agent(e) : null
@@ -427,45 +421,7 @@ export function foldJournal(entries) {
     if (!calls.has(c.key)) calls.set(c.key, [])
     const settled = c.settled && 'result' in c.settled && c.origin !== null ? { ...c.settled, origin: c.origin } : c.settled
     const p = settled ? null : agents.get(c.origin ?? agentOfCall.get(c.n) ?? c.n)
-    calls.get(c.key).push(settled ?? { ...(c.worker ? { worker: c.worker } : { unsettled: true }), ...(p?.rounds.length && treatment(p)) })
+    calls.get(c.key).push(settled ?? { ...(c.worker ? { worker: c.worker } : { unsettled: true }), ...(p?.rounds.length && heldRounds(p, { agents, mail, agentDir })) })
   }
   return { calls, retained, run, lastN, agents: [...agents.values()].sort((x, y) => x.n - y.n), mail: [...mail.values()] }
-
-  // An unsettled patient's rounds, and, while its agent() waits on them, where
-  // they stand.
-  function treatment(p) {
-    const { rounds } = p
-    const trail = rounds.flatMap((r, i) => (r.outcome === 'remedy'
-      ? [{ round: r.round, note: r.note, outcome: rounds[i + 1] ? `its note carried the patient on, and it failed again: ${rounds[i + 1].reason}` : null }]
-      : r.outcome === 'gaveUp' ? [{ round: r.round, note: null, outcome: `no remedy: ${r.why}` }] : []))
-    const last = rounds.at(-1)
-    if (last.outcome === 'remedy') return { rounds: { round: p.round, trail } }
-    const open = last.outcome === null
-    const d = open && last.doctor != null ? agents.get(last.doctor) : null
-    const out = !!d && d.launched && !!d.dispatchId && !!d.sessionId && d.state !== 'done' && d.state !== 'failed'
-    const said = open ? [...mail.values()].filter((m) => m.patient === p.origin && m.round === last.round) : []
-    const remedy = said.find((m) => m.action === 'remedy')
-    const gaveUp = said.find((m) => m.action === 'gaveUp')
-    const ended = said.find((m) => m.action === 'ended')
-    // Nothing ran for the round: its doctor was queued, or starting, when its
-    // runner died. One that failed its start, or said anything, has ended.
-    const unlaunched = open && !remedy && !gaveUp && !ended && (!d || (!d.launched && d.state !== 'done' && d.state !== 'failed'))
-    return {
-      rounds: { round: p.round, trail },
-      held: {
-        origin: p.origin, round: last.round, reason: last.reason, open,
-        doctor: last.doctor ?? null,
-        worker: out ? {
-          n: d.n, title: d.title, dir: agentDir(d.origin, d.title?.replace(/^\[[^\]]*\] /, '') || `agent-${d.origin}`), run: d.runId, dispatchId: d.dispatchId, harness: d.harness,
-          sessionId: d.sessionId, terminal: d.terminal, worktree: d.worktree, continuations: d.continuations, origin: d.origin,
-        } : null,
-        unlaunched: unlaunched ? { made: d?.worktree ? [d.worktree] : [], baseline: d?.baseline ?? null } : null,
-        remedy: remedy ? { id: remedy.messageId, body: remedy.body ?? '' } : null,
-        needsYou: out && d.state === 'needs you' ? d.reason : null,
-        gaveUp: gaveUp ? gaveUp.body ?? '' : null,
-        ended: ended ? { outcome: ended.outcome ?? 'succeeded' } : null,
-        restart: p.launched ? null : { made: p.worktree ? [p.worktree] : [], baseline: p.baseline },
-      },
-    }
-  }
 }

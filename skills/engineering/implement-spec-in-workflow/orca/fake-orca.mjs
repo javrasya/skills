@@ -54,7 +54,7 @@
 // that sent it. `mailCheck` is a step too, handed { ack, batch }: the batch's
 // messages before the ack applies, so a fault can fail an ack.
 import { existsSync } from 'fs'
-import { OrcaError, sameLines, launchCommand, resumeCommand, resumeRunnerCommand, tailCommand, workerStartArgs, withTimeout, workerStatus } from './orca-cli.mjs'
+import { OrcaError, reuseWorktree, afterCreateTimeout, launchCommand, resumeCommand, resumeRunnerCommand, tailCommand, workerStartArgs, withTimeout, workerStatus } from './orca-cli.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 
 // The runner's transcript reader, over the fake's sessions: a session's size
@@ -133,19 +133,17 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     return [...worktrees].find(([, w]) => w.name === name && !w.removed) ?? null
   }
 
-  // As the real adapter decides it: the worktree a retry takes up, by name.
-  function earlierWorktree(name, dispatched, baseline) {
+  // The worktree a retry takes up, by name, decided by the adapter's own
+  // rule (reuseWorktree) on what this Orca holds.
+  async function earlierWorktree(name, dispatched, baseline) {
     const found = findWorktree(name)
     if (!found) return null
     const [path, w] = found
-    const refuse = (code, why, final) => Object.assign(new OrcaError(code, `${path} ${why}`, 'worktree reuse'), { worktree: path, final })
-    if ([...dispatches.values()].some((d) => d.worktree === path && !d.released)) throw refuse('worktree_held', 'still has an agent running in it', false)
-    if (!dispatched) {
-      record({ verb: 'worktreeReuse', worktree: path })
-      return path
-    }
-    if (!sameLines(w.porcelain, baseline ?? [])) throw refuse('worktree_dirty', baseline?.length ? 'has changed since it was made' : 'has uncommitted changes', true)
-    if (w.commits > 0) throw refuse('worktree_has_commits', `has ${w.commits} commit(s) of its own`, true)
+    await reuseWorktree(path, { dispatched, baseline }, {
+      held: () => [...dispatches.values()].some((d) => d.worktree === path && !d.released),
+      lines: () => w.porcelain,
+      commits: () => w.commits,
+    })
     record({ verb: 'worktreeReuse', worktree: path })
     return path
   }
@@ -239,7 +237,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       let made = null
       let created = false
       if (child) {
-        made = child.retry ? earlierWorktree(child.name, child.dispatched, child.baseline ?? null) : null
+        made = child.retry ? await earlierWorktree(child.name, child.dispatched, child.baseline ?? null) : null
         let timedOut = null
         let late = null
         if (!made) {
@@ -267,9 +265,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
           if (late) timedOut = await hang('worktreeCreate', createMs).catch((e) => e)
         }
         if (timedOut) {
-          made = findWorktree(child.name)?.[0] ?? null
-          if (!made) throw timedOut
-          warnings.push(`${timedOut.message}, but Orca had made ${made}, so it starts there`)
+          made = afterCreateTimeout(timedOut, findWorktree(child.name)?.[0] ?? null, warnings)
         }
         worktree = made
         try {

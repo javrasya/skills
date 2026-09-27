@@ -86,6 +86,35 @@ export async function worktreeOwnCommits(path, branch, bound) {
   return Number((await gitIn(path, ['rev-list', '--count', 'HEAD', '--not', `--exclude=${b}`, '--branches', '--remotes'], bound)).trim())
 }
 
+// Whether a retry takes up the worktree at `path` an earlier attempt of its
+// start made: its path, or a refusal naming it. One an agent still runs in
+// (held()) is refused for this attempt only. Until an attempt has reached
+// worker-start (`dispatched`), whatever it holds is Orca's own making, such
+// as a setup hook's untracked output, so it is taken up as it is; after that,
+// one that holds work is refused for good (`final`). Work is what it holds
+// beyond its `baseline`, the porcelain lines it was made with (lines()): with
+// none (a create that timed out), any line is work; and any commit of its own
+// (commits()). The adapter and the fake Orca both decide by this one rule,
+// each reading the worktree its own way, and only as far as the rule needs.
+export async function reuseWorktree(path, { dispatched, baseline }, { held, lines, commits }) {
+  const refuse = (code, why, final) => Object.assign(new OrcaError(code, `${path} ${why}`, 'worktree reuse'), { worktree: path, final })
+  if (await held()) throw refuse('worktree_held', 'still has an agent running in it', false)
+  if (!dispatched) return path
+  if (!sameLines(await lines(), baseline ?? [])) throw refuse('worktree_dirty', baseline?.length ? 'has changed since it was made' : 'has uncommitted changes', true)
+  const own = await commits()
+  if (own > 0) throw refuse('worktree_has_commits', `has ${own} commit(s) of its own`, true)
+  return path
+}
+
+// A create Orca finishes after its answer timed out still leaves the
+// worktree: `path`, what a lookup by its name found, is where the worker
+// starts, with a warning; with none, the timeout `e` stands.
+export function afterCreateTimeout(e, path, warnings) {
+  if (!path) throw e
+  warnings.push(`${e.message}, but Orca had made ${path}, so it starts there`)
+  return path
+}
+
 // Commits reachable from a worktree's HEAD that no remote-tracking ref holds
 // (D6 on #43): what a reclaim refuses to remove unless forced. Uncommitted
 // files do not count. A worktree already gone from disk holds none.
@@ -254,28 +283,17 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
   }
 
   // The worktree an earlier attempt of this start made, if there is one to
-  // take up: Orca answers a second `worktree create --name` with a new
-  // <name>-2, never an error, so a retry looks its name up first. One an
-  // agent still runs in is refused for this attempt only. Until an attempt
-  // has reached worker-start (`dispatched`), whatever it holds is Orca's own
-  // making, such as a setup hook's untracked output, so it is taken up as it
-  // is; after that, one that holds work is refused for good, named on the
-  // error. Work is what it holds beyond its `baseline`, the porcelain lines it
-  // was made with: with none (a create that timed out), any line is work.
+  // take up (reuseWorktree): Orca answers a second `worktree create --name`
+  // with a new <name>-2, never an error, so a retry looks its name up first.
+  // terminal list leaves closed tabs out, and agentIdentity marks an agent's pane.
   async function earlierWorktree(name, dispatched, baseline) {
     const row = await findWorktree(name)
     if (!row) return null
-    const path = row.path
-    const refuse = (code, why, final) => Object.assign(new OrcaError(code, `${path} ${why}`, 'worktree reuse'), { worktree: path, final })
-    // terminal list leaves closed tabs out, and agentIdentity marks an agent's pane.
-    const t = await orca(['terminal', 'list', '--worktree', `path:${path}`])
-    if ((t?.terminals ?? []).some((x) => x.agentIdentity && !x.orphaned)) throw refuse('worktree_held', 'still has an agent running in it', false)
-    if (!dispatched) return path
-    const lines = porcelainLines(await gitIn(path, ['status', '--porcelain'], bound))
-    if (!sameLines(lines, baseline ?? [])) throw refuse('worktree_dirty', baseline?.length ? 'has changed since it was made' : 'has uncommitted changes', true)
-    const own = await worktreeOwnCommits(path, row.branch, bound)
-    if (own > 0) throw refuse('worktree_has_commits', `has ${own} commit(s) of its own`, true)
-    return path
+    return reuseWorktree(row.path, { dispatched, baseline }, {
+      held: async () => ((await orca(['terminal', 'list', '--worktree', `path:${row.path}`]))?.terminals ?? []).some((x) => x.agentIdentity && !x.orphaned),
+      lines: async () => porcelainLines(await gitIn(row.path, ['status', '--porcelain'], bound)),
+      commits: () => worktreeOwnCommits(row.path, row.branch, bound),
+    })
   }
 
   async function workerShow({ dispatch }) {
@@ -330,9 +348,7 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
             c = await orca(['worktree', 'create', '--name', child.name, '--parent-worktree', 'current', ...(child.setup ? ['--setup', child.setup] : [])], Math.max(0, createMs - callMs))
           } catch (e) {
             if (e?.code !== 'call_timeout') throw e
-            worktree = (await findWorktree(child.name).catch(() => null))?.path ?? null
-            if (!worktree) throw e
-            warnings.push(`${e.message}, but Orca had made ${worktree}, so it starts there`)
+            worktree = afterCreateTimeout(e, (await findWorktree(child.name).catch(() => null))?.path ?? null, warnings)
           }
         }
         if (c) {

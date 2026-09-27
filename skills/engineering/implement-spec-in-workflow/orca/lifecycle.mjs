@@ -6,12 +6,18 @@
 // decides which calls reach here (replay does not) and names each one.
 // Nothing is reclaimed here (ADR-0012): a settled worker is never released, and
 // its tab and worktree stay until the operator reclaims them (reclaim.mjs).
+// A patient, one whose session died past its cap or blocked past the limit,
+// or whose start's retries are spent, is handed to its doctor rounds
+// (doctor.mjs), which also hold the Run mailbox its doctors report over.
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
 import { randomUUID } from 'crypto'
 import { validate } from './schema.mjs'
 import { sessionTranscripts } from './transcript.mjs'
+import { DOCTOR_NUDGE, doctorContinuePrompt, notePrompt, runMailbox, doctorRounds } from './doctor.mjs'
+
+export { doctorPrompt, notePrompt } from './doctor.mjs'
 
 export const SUBMIT = fileURLToPath(new URL('./submit.mjs', import.meta.url))
 
@@ -84,73 +90,14 @@ export const agentDir = (n, label) => `agents/${String(n).padStart(3, '0')}-${sl
 // script value can be mistaken for.
 const SICK = Symbol('needs a doctor')
 
-// The messages a doctor that needs you can follow its escalation with; any
-// other kind (a heartbeat, a status) leaves it needing you.
-const ANSWERS = ['handoff', 'escalation', 'worker_done']
-
 const mins = (ms) => Math.round(ms / 60_000)
 const wait = (ms) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms / 6_000) / 10} min`)
 
 const NUDGE = 'The workflow has not received your result: your final message is not read. Finish the task, then run the submit command from your instructions until it exits 0.'
 
-// How a doctor reports, as its brief says: it has no submit command, so its
-// nudge and continuation prompt never name one.
-const REPORT = 'report over Orca mail as your instructions say: send your note as a handoff, then worker_done; escalate if only a human can clear the failure; or give up with worker_done --outcome failed. If you already sent your note, send worker_done'
-const DOCTOR_NUDGE = `The workflow has not received your report: your final message is not read. Finish your diagnosis, then ${REPORT}.`
-
-// The doctor's whole brief: it gets no submit command, since its only output
-// is a note, sent as Orca mail (ADR-0014).
-// earlier: each earlier round of this patient, { round, note, outcome }, so
-// that no doctor hands it a note that already failed.
-const earlierRounds = (earlier) => (earlier.length ? `
-
-## Earlier doctor rounds
-Each earlier round's note, and how that round ended. None of them cured the patient: never hand it a note that already failed.
-${earlier.map(({ round, note, outcome }) => `
-### Round ${round}
-Note: ${note ?? 'none'}
-Outcome: ${outcome}`).join('\n')}` : '')
-
-export function doctorPrompt({ patient, reason, round, rounds, transcript, worktree, entries, log, earlier = [] }) {
-  return `You are a doctor in a workflow run. One of its agents, the patient, failed, and its agent() call waits on you: its dependents wait with it. Work out why it failed, and write a note: guidance that lets the patient avoid that failure when it carries on. This is doctor round ${round} of ${rounds}.
-
-Change nothing. Edit, create or delete no file, in any worktree; change no environment, configuration or installed tool; log in to or out of nothing. Read only. Your only output is the note.
-
-When only a human can clear the failure (a login, credentials, a sandbox permission), state the situation and what the human must do or decide, plainly. Do not question them: they handle it their own way.
-
-Report over Orca mail to your Run's mailbox, with the IDs from your Orca preamble:
-- the note: orchestration send --type handoff --subject note --body "<the note>", then worker_done --outcome succeeded. Your first handoff is this round's note: the runner carries the patient on with it at once, and takes no later handoff or escalation from you, so send it only once you are done, then worker_done;
-- a human is needed: orchestration send --type escalation --subject "Blocked: <what>" --body "<what the human must do or decide>", then wait for as long as it takes: nobody hurries you. Once the human tells you in your tab that they did their part, send your note as above, or escalate again if something is still needed;
-- you give up: worker_done --outcome failed, with why in the body.
-
-## The patient
-Title: ${patient.title}
-Failure reason: ${reason}
-Transcript: ${transcript}
-Worktree: ${worktree ?? 'none: it ran in the run\'s own worktree'}${earlierRounds(earlier)}
-
-## Its prompt
-${patient.prompt}
-
-## Its journal entries
-${entries.map((e) => JSON.stringify(e)).join('\n') || '(none)'}
-
-## Its runner log lines
-${log.join('\n') || '(none)'}`
-}
-
 // Typed after the resume, or handed as the spec of the dispatch that adopts a
 // new terminal, whose preamble then carries new IDs.
 const continuePrompt = (why) => `You were interrupted: the workflow runner stopped this session and resumed it (${why}). Carry on where you left off and finish the task, then run the submit command from your instructions until it exits 0. If an Orca preamble came with this message, take the four IDs for submit from it, not from an earlier one.`
-
-// A doctor's, which has no submit command.
-const doctorContinuePrompt = (why) => `You were interrupted: the workflow runner stopped this session and resumed it (${why}). Carry on with your diagnosis where you left off, then ${REPORT}. If an Orca preamble came with this message, take the IDs for Orca mail from it, not from an earlier one.`
-
-// A doctor's remedy: the patient's session carries on with its note.
-export const notePrompt = (note) => `You were stopped: this session failed, and the workflow runner resumed it once a doctor, an agent that read your transcript, had worked out why. Its note follows. Carry on where you left off, with the note in mind, and finish the task, then run the submit command from your instructions until it exits 0. If an Orca preamble came with this message, take the four IDs for submit from it, not from an earlier one.
-
-## The doctor's note
-${note}`
 
 // Re-reads what submit recorded: the script is handed a value only if it is
 // valid now, whatever the worker claimed when it settled.
@@ -258,100 +205,10 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     return { ...w, dispatchId: next.dispatchId, terminal: next.terminal, worktree: next.worktree ?? w.worktree }
   }
 
-  // The Run mailbox, read from the runner's own terminal while a doctor is
-  // out. Orca hands a batch back until it is acknowledged, and a resume's
-  // run-use re-batches it under a new delivery id, so a message is acted on
-  // once by its id: journaled as `mail` with what the runner did, acted on,
-  // and only then acknowledged. mailboxes: a doctor's box, by each dispatch
-  // it ran under; agentsOut: each dispatch an agent() call's worker ran under,
-  // whose mail (its submit's worker_done) asks for nothing. A message from a
-  // dispatch neither claims yet is held, never dropped: journaled `pending`
-  // with the whole message, and acted on in order once a box claims its
-  // dispatch (claim). Every doctor's messages are then applied, whichever
-  // doctor's watch drained them: one a doctor sends before its worker-start
-  // returns, or one another doctor's watch reads first on a resume. A resume
-  // holds each pending message again (mailPending).
-  // An escalation marks its doctor needs you (box.needsYou, what the human
-  // must do) until its next handoff, escalation or worker_done, in order.
-  // A round's first handoff is its remedy, and ends the doctor's part: a
-  // later handoff or escalation from it is journaled and acts on nothing, so
-  // only its worker_done, or its lifecycle, ends it. Its prompt says so.
-  const handled = new Set(mailHandled)
-  // Every doctor still out once its note carried its patient on, whichever
-  // patient's: life.doctors() awaits them.
-  const doctorsOut = new Set()
-  const track = (p) => {
-    doctorsOut.add(p)
-    p.then(() => doctorsOut.delete(p), () => {})
-  }
-  const mailboxes = new Map()
-  const agentsOut = new Set()
-  const held = new Map()
-  const hold = (m) => held.set(m.dispatchId, [...(held.get(m.dispatchId) ?? []), m])
-  for (const m of mailPending) if (m?.id && m.dispatchId) hold(m)
-  let reading = Promise.resolve()
-  // One read at a time, each after the last: a doctor that saw its worker
-  // settle reads again, and gets what was sent before the settle.
-  const readMail = () => {
-    const r = reading.then(drain)
-    reading = r.catch(() => {})
-    return r
-  }
-  async function drain() {
-    for (let r = await orca.mailCheck(); r.deliveryId; r = await orca.mailCheck({ ack: r.deliveryId })) {
-      for (const m of r.messages) await take(m)
-    }
-  }
-  // A dispatch's box, or null for an agent() call's worker, claims what was
-  // held for it: applied before any later read, so in order.
-  function claim(dispatchId, box) {
-    if (box) mailboxes.set(dispatchId, box)
-    else agentsOut.add(dispatchId)
-    const mine = held.get(dispatchId)
-    if (!mine) return
-    held.delete(dispatchId)
-    const r = reading.then(async () => {
-      for (const m of mine) await act(m, box)
-    })
-    reading = r.catch((e) => out(`!! could not act on held Run mail: ${e?.message ?? e}`))
-  }
-  async function take(m) {
-    if (!m?.id || handled.has(m.id)) return
-    handled.add(m.id)
-    const box = mailboxes.get(m.dispatchId) ?? null
-    if (!box && m.dispatchId && !agentsOut.has(m.dispatchId)) {
-      hold(m)
-      journal({
-        type: 'mail', messageId: m.id, kind: m.type ?? null, action: 'pending', dispatchId: m.dispatchId, ...(m.outcome && { outcome: m.outcome }),
-        ...(m.subject != null && { subject: m.subject }), ...(m.body != null && { body: m.body }),
-      })
-      return
-    }
-    await act(m, box)
-  }
-  async function act(m, box) {
-    const open = !!box && !box.closed
-    const action = !open ? 'none'
-      : m.type === 'escalation' ? (box.remedied ? 'none' : 'needsYou')
-      : m.type === 'handoff' ? (box.remedied ? 'none' : 'remedy')
-      : m.type === 'worker_done' ? (m.outcome === 'failed' ? 'gaveUp' : 'ended')
-      : 'none'
-    journal({
-      type: 'mail', messageId: m.id, kind: m.type ?? null, action, ...(m.outcome && { outcome: m.outcome }),
-      ...(box && { doctor: box.doctor, patient: box.patient, round: box.round }), ...(open && m.body != null && { body: m.body }),
-    })
-    if (open && ANSWERS.includes(m.type)) box.needsYou = action === 'needsYou' ? (m.body || m.subject || 'no reason given') : null
-    if (action === 'needsYou') {
-      out(`!!!!!!!! ${box.title} NEEDS YOU: ${box.needsYou}`)
-      out(`!!!!!!!! ${box.title}: do it, then tell it so in its tab ${box.terminal ?? '—'}; it waits for as long as it takes`)
-    } else if (action === 'remedy') {
-      box.remedied = true
-      await box.handoff(m)
-    } else if (action === 'gaveUp') {
-      box.gaveUp = m.body ?? ''
-      box.ended = { outcome: 'failed' }
-    } else if (action === 'ended') box.ended = { outcome: m.outcome ?? 'succeeded' }
-  }
+  // The Run mailbox a doctor reports over, and a patient's doctor rounds,
+  // which its life() hands its failure to (doctor.mjs).
+  const mailbox = runMailbox({ orca, journal, out, handled: mailHandled, pending: mailPending })
+  const doctors = doctorRounds({ limits, journal, out, life, failAgent, nextN, doctorLaunch, history, transcripts })
 
   // Runs attempt(1), attempt(2)… until one returns, one throws an error
   // marked `final`, or the settings table's backoff is spent. The last error
@@ -659,10 +516,10 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     let { w, end = null, continued } = got
     const post = () => {
       if (box) box.terminal = w.terminal
-      claim(w.dispatchId, box)
+      mailbox.claim(w.dispatchId, box)
     }
     post()
-    const mail = box ? async () => (await readMail(), box.ended) : null
+    const mail = box ? mailbox.ends(box) : null
 
     let delivered = false
     // A patient handed to its doctors: its worktree is retained only if
@@ -704,7 +561,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
         end = null
       }
       // A doctor's last messages can land after its worker settled or died.
-      if (box) await readMail().catch((e) => out(`!! ${title}: could not read the Run's mailbox: ${e.message}`))
+      if (box) await mailbox.read().catch((e) => out(`!! ${title}: could not read the Run's mailbox: ${e.message}`))
       // A doctor submits nothing: its worker_done, or its worker settling, is
       // its end. One that gave up (worker_done --outcome failed) says why.
       if (patient != null && !end.dead) {
@@ -801,11 +658,10 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     // the run, so its tab stays open, but a settled worker no longer works.
     // Journaled so the run view can show a call that waits here: nothing
     // else about it is written until its worker starts.
-    // A patient's doctor rounds so far, each one's note and outcome (trail).
-    // A doctor whose note carried it on goes on in the background (doctorsOut):
-    // its agent() returns once its own result is in. A held patient's open
-    // round is counted again as treat goes on with it.
-    const rounds = { round: (call.rounds?.round ?? 0) - (held?.open ? 1 : 0), trail: (call.rounds?.trail ?? []).map((t) => ({ ...t })) }
+    // A patient's doctor rounds so far (doctor.mjs). A doctor whose note
+    // carried it on goes on in the background: its agent() returns once its
+    // own result is in.
+    const rounds = doctors.roundsOf(call)
     let from = null
     let got
     let failure = held ? await heldFailure(call, runId) : null
@@ -831,7 +687,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
         if (!got?.[SICK]) break
         failure = got[SICK]
       }
-      from = await treat(call, failure, rounds, again)
+      from = await doctors.treat(call, failure, rounds, again)
       failure = again = null
       if (!from) {
         got = null
@@ -863,104 +719,6 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     }
   }
 
-  // A patient, a session dead past its cap or blocked past the limit, or a
-  // start whose retries are spent: up to limits.doctorRounds doctors, one after
-  // another, while its agent() stays pending (ADR-0014). A doctor's handoff
-  // is its remedy, taken as its message is read: treat then resolves to
-  // what supervise carries the patient on from, once the patient holds a
-  // live slot again, or null once every round is spent. A
-  // doctor that ends without one, by giving up, settling or failing itself,
-  // spends its round; once every round is spent, the call is failed and
-  // kept, as without a doctor. rounds: the call's rounds so far. Each round
-  // builds on the ones before it: its doctor is handed their notes and
-  // outcomes, and a remedy carries the patient on with a fresh count of
-  // continuations. again: a held patient's open round, as the fold names it,
-  // which a resume goes on with: its doctor taken up, never a second started,
-  // and a handoff journaled but not yet applied applied now, once. A doctor
-  // that never launched (queued or starting when its runner died) spent
-  // nothing: that round's doctor is started afresh, in the same round.
-  async function treat(call, failure, rounds, again = null) {
-    const { key, n, title, label, phaseName, prompt } = call
-    const origin = call.adopt?.origin ?? call.origin ?? n
-    const max = limits.doctorRounds
-    // Back here after a remedy: that round's note carried it on, and it died again.
-    const last = rounds.trail.at(-1)
-    if (last && last.outcome === null) last.outcome = `its note carried the patient on, and it failed again: ${failure.reason}`
-    const transcript = failure.sessionId == null ? 'none: its worker never started'
-      : transcripts.path?.({ harness: failure.harness, sessionId: failure.sessionId, worktree: failure.worktree }) ?? `none found for ${failure.harness} session ${failure.sessionId}`
-    while (rounds.round < max) {
-      const round = ++rounds.round
-      // A doctor taken up runs under a new n, as a resumed call does; one that
-      // ended keeps its own, and so does one that never launched, whose start
-      // then asks for the `<runId>-<n>` worktree an earlier attempt made.
-      const doctor = again && !again.worker && again.doctor != null ? again.doctor : nextN()
-      const dLabel = `recover -> ${label}`
-      const dTitle = `[${phaseName}] ${dLabel}`
-      journal({ type: 'doctor', key, n, title, origin, round, reason: failure.reason, doctor })
-      out(again
-        ? `>> ${title}: doctor round ${round} of ${max} goes on after the resume: ${dTitle} ${again.worker ? 'is taken up' : again.unlaunched ? 'never launched, so it starts now' : 'ended while no runner watched it'}, and its agent() waits`
-        : `>> ${title}: ${failure.reason}; doctor round ${round} of ${max}: ${dTitle} diagnoses it, and its agent() waits`)
-      let handed
-      const handoff = new Promise((r) => { handed = r })
-      const box = {
-        doctor, patient: origin, round, title: dTitle, terminal: null, ended: again?.gaveUp != null ? { outcome: 'failed' } : again?.ended ?? null, gaveUp: again?.gaveUp ?? null,
-        remedied: !!again?.remedy, closed: false, needsYou: again?.needsYou ?? null,
-        handoff: async (m) => {
-          rounds.trail.push({ round, note: m.body ?? '', outcome: null })
-          handed(await remedy(call, failure, { round, doctor, message: m }))
-        },
-      }
-      const dCall = { schema: null, isolated: true, setup: 'skip', launch: doctorLaunch(), key: null, n: doctor, label: dLabel, title: dTitle, phaseName, patient: origin, patientTitle: title, round, box }
-      let doctoring
-      if (!again || again.unlaunched) {
-        const { entries, log } = history({ n, origin, title })
-        // Its worker may have been sent its start before its runner died: a
-        // worktree it left is judged against its baseline.
-        const startAgain = again?.unlaunched ? { ...again.unlaunched, dispatched: true } : null
-        doctoring = life({ ...dCall, prompt: doctorPrompt({ patient: { title, prompt }, reason: failure.reason, round, rounds: max, transcript, worktree: failure.worktree, entries, log, earlier: rounds.trail.map((t) => ({ ...t })) }), ...(startAgain && { startAgain }) })
-      } else doctoring = again.worker ? life({ ...dCall, adopt: again.worker }) : Promise.resolve(undefined)
-      const ended = doctoring.then((end) => {
-        box.closed = true
-        return end
-      })
-      if (again?.remedy) await box.handoff({ id: again.remedy.id, body: again.remedy.body })
-      again = null
-      // A handoff is taken before its doctor's life resolves: that life reads
-      // the mailbox one last time before it ends.
-      const first = await Promise.race([handoff, ended.then((end) => ({ end }))])
-      if (!('end' in first)) {
-        track(ended)
-        return first.from
-      }
-      const { end } = first
-      const why = box.gaveUp !== null ? `it gave up: ${box.gaveUp}` : end ? `its worker settled ${end.outcome} with no remedy` : end === undefined ? 'it ended while no runner watched it' : 'it failed itself'
-      rounds.trail.push({ round, note: null, outcome: `no remedy: ${why}` })
-      journal({ type: 'gaveUp', key, n, title, origin, round, doctor, reason: why })
-      out(`!! ${title}: doctor round ${round} of ${max} ended without a remedy: ${why}`)
-    }
-    return failAgent(call, { ...failure, ...failure.keep() }, { said: `, after ${max} doctor rounds without a remedy` })
-  }
-
-  // A doctor's handoff: the patient's session carries on in its own session
-  // and worktree, in its own tab, or a new one in its worktree once that tab
-  // is gone, with the note in its continuation prompt (carryOn). A patient
-  // whose worker never started has its start retried instead, with the note
-  // in its worker's prompt. Either is applied once the patient has a live
-  // slot again, by supervise, under the same call, so its journal key stays
-  // the original call's. It resolves to what supervise carries the patient
-  // on from. A new round starts a new count of continuations: one carried on
-  // past its cap would otherwise die past it again at its first death.
-  async function remedy(call, failure, { round, doctor, message }) {
-    const { key, n, title } = call
-    const origin = call.adopt?.origin ?? call.origin ?? n
-    if (failure.restart) {
-      out(`>> ${title}: doctor round ${round} handed off a note; retrying its start with it`)
-      journal({ type: 'remedy', key, n, title, origin, round, doctor, how: 'restart', messageId: message.id, dispatchId: null, terminal: null, reopened: false })
-      return { from: { restart: { ...failure.restart, note: message.body ?? '' } } }
-    }
-    return { from: { carry: { failure, round, doctor, messageId: message.id, note: message.body ?? '' } } }
-  }
-
   // A remedy's continuation, applied once the patient holds its live slot:
   // what supervise watches, or null once a continuation that failed has
   // failed the call.
@@ -979,8 +737,6 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     return { w: await moveTo(title, w, next), sessionId, attempts: failure.attempts, continued: 0 }
   }
 
-  life.doctors = async () => {
-    while (doctorsOut.size) await Promise.all([...doctorsOut])
-  }
+  life.doctors = doctors.settled
   return life
 }

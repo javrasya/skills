@@ -9,12 +9,13 @@ The second runner for `workflow.template.js` (ADR-0011): a Node script, launched
 | `registry.mjs` | the machine-wide run registry: its writer and the fold that reads each run's current state |
 | `reclaim.mjs` | reclaiming an agent or a whole run, by one set of rules; the run view reclaims through it |
 | `lifecycle.mjs` | one live agent's life: the run's Run, the live cap, its worker's start, liveness, nudges and session continuation, its result, its board status |
+| `doctor.mjs` | a patient's doctors, in one place: the doctor's brief, nudge and continuation, the Run mailbox and what the runner does with each message (`mailAction`), the doctor rounds (`treat`) and their remedy, and the journal fold's reading of them (`foldMail`, `heldRounds`), so the runner and the fold share one set of round and mail rules; the lifecycle hands it a patient at its failure point |
 | `run-view-model.mjs` | the run view's model, with no terminal: one run's tree (header, phase and agent rows, the bottom pane), every run in the registry for standalone mode, and what each key and click does |
 | `run-view/` | the run view's terminal: `view.mjs`, the entry the runner starts in its tab and the `orca-runs` skill opens standalone, `draw.mjs`, the screen drawn from the model, and `package.json` for terminal-kit (below) |
 | `transcript.mjs` | where a Claude or pi session writes its transcript, found from its session id, how big it is, and its context size and tokens |
 | `submit.mjs` | the worker's end of `agent()`: validates the payload, records it, sends `worker_done` |
 | `orca-cli.mjs` | the one place anything talks to Orca |
-| `fake-orca.mjs` | an in-memory Orca behind the same methods, for the offline tests |
+| `fake-orca.mjs` | an in-memory Orca behind the same methods, for the offline tests; it decides a retry's worktree reuse, and a timed-out create's lookup, by the adapter's own rules (`reuseWorktree`, `afterCreateTimeout`) |
 | `schema.mjs` | the JSON Schema subset the template's schemas use |
 | `settings.mjs` | every limit the runner enforces, in one table |
 
