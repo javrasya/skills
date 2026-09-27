@@ -60,15 +60,20 @@ import { agentDir } from './lifecycle.mjs'
 // waits. A doctor's own lines are those of any agent, under its own n, with
 // key null, since it is no agent() call; its failed line also names its
 // `patient`, by origin, and fails no call. settled: a doctor's worker settled,
-// with its `outcome`: a doctor submits no result. gaveUp: a doctor round ended
-// without a remedy, about the patient, with the `round`, the `doctor` and why;
+// with its `outcome` (and, when failed, a `reason`: it gave up), a doctor
+// submitting no result; one that settled failed folds to failed, never done.
+// gaveUp: a doctor round ended without a remedy, about the patient, with the
+// `round`, the `doctor` and why;
 // after the last one the patient's failed line follows. mail: the runner read
 // a message from its Run mailbox: its `messageId`, its `kind` (Orca's type:
 // handoff, worker_done…) and the `action` the runner took on it — remedy (a
 // doctor's note carried its patient on), needsYou (its doctor escalated: it
 // needs a human, its body what they must do or decide), gaveUp (its doctor
-// gave up: a worker_done failed), ended (its doctor's worker_done succeeded) or none (it
-// came from no doctor out, or asked for nothing). It is journaled before the
+// gave up: a worker_done failed), ended (its doctor's worker_done succeeded),
+// none (it came from no doctor out, or asked for nothing) or pending (no box
+// had claimed its dispatch yet: held with its `dispatchId`, `subject` and
+// `body`, and journaled again once acted on; the fold keeps the acting line
+// over the pending one). It is journaled before the
 // runner acts on it and acknowledges it, so a message Orca delivers again is
 // never acted on twice; a doctor's also carries its `doctor` (n), `patient`
 // (origin) and `round`, and its `body` (the note, or why it gave up), and a
@@ -339,7 +344,9 @@ export function foldJournal(entries) {
         Object.assign(roundOf(a, e), { outcome: 'gaveUp', why: e.reason ?? null })
         break
       case 'settled':
-        Object.assign(a, { state: 'done', reason: null, waiting: null, to: at })
+        // A doctor that gave up (worker_done --outcome failed) is no done row.
+        if (e.outcome === 'failed') Object.assign(a, { state: 'failed', reason: e.reason ?? 'it gave up', waiting: null, to: at })
+        else Object.assign(a, { state: 'done', reason: null, waiting: null, to: at })
         break
       case 'result':
         Object.assign(a, { state: 'done', reason: null, waiting: null, to: at, replayed: e.replayed === true })
@@ -359,7 +366,8 @@ export function foldJournal(entries) {
     if (e.retained?.path && !retained.some((k) => k.path === e.retained.path)) retained.push(e.retained)
     for (const n of [e.n, e.lastN]) if (Number.isInteger(n)) lastN = Math.max(lastN, n)
     if (e.type === 'run' && typeof e.runId === 'string') run = { runId: e.runId, terminal: e.terminal ?? null }
-    if (e.type === 'mail' && typeof e.messageId === 'string' && !mail.has(e.messageId)) {
+    // A message held `pending` gives way to the line that acted on it.
+    if (e.type === 'mail' && typeof e.messageId === 'string' && (!mail.has(e.messageId) || (mail.get(e.messageId).action === 'pending' && e.action !== 'pending'))) {
       mail.set(e.messageId, e)
       const d = Number.isInteger(e.doctor) ? agents.get(agentOfCall.get(e.doctor) ?? e.doctor) : null
       if (d && d.state !== 'done' && d.state !== 'failed' && ANSWERS.includes(e.kind)) {

@@ -1996,9 +1996,8 @@ test('doctor: the fold links every doctor to its patient across rounds, and a re
   linked(resumed)
   const view = runView({ stateDir, orca, clock, transcripts: sessionTranscripts({ home: tmp(), env: {} }), registry: null, alive: () => false })
   await view.refresh()
-  // Every agent is done, so its phase is folded until it is opened.
-  await view.key('ENTER')
-  assert.deepEqual(view.model.rows.slice(1).map((row) => [row.depth, row.agent.origin]), [[0, 1], [1, 2], [1, 3], [1, 4]])
+  // Its round-two doctor gave up, so the phase is not all done, and stays open.
+  assert.deepEqual(view.model.rows.slice(1).map((row) => [row.depth, row.agent.origin, row.agent.state]), [[0, 1, 'done'], [1, 2, 'done'], [1, 3, 'failed'], [1, 4, 'done']])
   const [p] = agentsOf(join(stateDir, 'journal.jsonl')).filter((a) => a.origin === 1)
   assert.equal(p.state, 'ok')
 })
@@ -2068,7 +2067,11 @@ test('doctor: a runner that dies after journaling a handoff and before acknowled
   assert.equal(orca.calls.filter((c) => c.verb === 'workerContinue' && c.text.includes(NOTE2)).length, 1)
   assert.deepEqual(ofType(journal, 'remedy').map((e) => e.messageId), [sentWith(orca, NOTE2).id])
   const mail = ofType(journal, 'mail')
-  assert.equal(new Set(mail.map((e) => e.messageId)).size, mail.length, 'one mail line per message, the carried ones included')
+  // A message from a dispatch nothing claimed yet is journaled pending, then
+  // once more when it is acted on: one acting line per message.
+  const acted = mail.filter((e) => e.action !== 'pending')
+  assert.equal(new Set(acted.map((e) => e.messageId)).size, acted.length, 'one acting mail line per message, the carried ones included')
+  for (const e of mail.filter((x) => x.action === 'pending')) assert.ok(acted.some((x) => x.messageId === e.messageId), `${e.messageId} acted on once claimed`)
   assert.deepEqual(mail.filter((e) => e.messageId === handoff.id).map((e) => e.action), ['remedy'])
 })
 
@@ -2149,6 +2152,155 @@ test('needs you: an escalation then another updates the reason, messages taken i
   assert.deepEqual(r.journal.filter((e) => e.n === doctor.n && ['nudge', 'continued', 'failed'].includes(e.type)), [])
   assert.equal(ofType(r.journal, 'remedy').length, 1)
   assert.deepEqual(foldJournal(r.journal).agents.map((a) => [a.origin, a.state]), [[1, 'done'], [2, 'done']])
+})
+
+// --- review fixes: the doctor's texts, its round's end, its patient's slot ------
+
+const NOTE_TWO = 'Pin the registry mirror: the default one is down.'
+// A doctor that goes idle in every session, never reporting.
+const idlesOn = (w) => {
+  w.state.idle = true
+  w.state.onContinue = idlesOn
+}
+
+test('doctor: a hand-off, an escalation, then a second hand-off: only the first note carries the patient on; the escalation and the second note act on nothing, and hold nothing', async () => {
+  const doctor = async (w) => {
+    const { orca, preamble, clock } = w
+    await orca.mailSend({ ...idsOf(preamble), type: 'handoff', subject: 'note', body: NOTE })
+    const t0 = clock.now()
+    clock.at(t0 + 5 * MIN, () => orca.mailSend({ ...idsOf(preamble), type: 'escalation', subject: 'Blocked: a login', body: ASK }))
+    clock.at(t0 + 10 * MIN, () => handsOff(NOTE_TWO)(w))
+  }
+  const r = await runOne(withDoctor(curedBy(NOTE, 'stuck'), doctor), { script: ISOLATED })
+  assert.deepEqual(r.result, GOOD)
+  assertEntries(r.journal)
+  const d = doctorOf(r.journal)
+  const mail = ofType(r.journal, 'mail').filter((e) => e.doctor === d.n)
+  assert.deepEqual(mail.map((e) => [e.kind, e.action]), [['handoff', 'remedy'], ['escalation', 'none'], ['handoff', 'none'], ['worker_done', 'ended']])
+  assert.deepEqual(ofType(r.journal, 'remedy').map((e) => e.messageId), [mail[0].messageId])
+  assert.deepEqual(r.continues.filter((c) => c.text.includes(NOTE) || c.text.includes(NOTE_TWO)).map((c) => c.text), [notePrompt(NOTE)])
+  assert.notEqual(upTo(r.journal, mail[1]).find((a) => a.n === d.n).state, 'needs you')
+  assert.equal(r.lines.some((l) => l.includes('NEEDS YOU')), false, r.lines.join('\n'))
+  // Its prompt says only its first handoff counts.
+  assert.ok(doctorPrompts(r.orca)[0].includes("Your first handoff is this round's note"), doctorPrompts(r.orca)[0])
+})
+
+test('doctor: a stalled doctor is nudged and continued with texts of its own: none of them names a submit command it does not have', async () => {
+  const doctor = (w) => {
+    w.state.idle = true
+    w.state.onContinue = handsOff(NOTE)
+  }
+  const r = await runOne(withDoctor(curedBy(NOTE, 'stuck'), doctor), { script: ISOLATED })
+  assert.deepEqual(r.result, GOOD)
+  const d = doctorOf(r.journal)
+  const nudges = r.nudges.filter((c) => c.dispatchId === d.dispatchId)
+  const continues = r.continues.filter((c) => (c.from ?? c.dispatchId) === d.dispatchId)
+  assert.equal(nudges.length, RUNNER_SETTINGS.idleNudges)
+  assert.equal(continues.length, 1)
+  for (const text of [...nudges, ...continues].map((c) => c.text)) {
+    assert.doesNotMatch(text, /submit/i)
+    assert.match(text, /handoff, then worker_done/)
+  }
+  // An agent() call's worker is still told to submit.
+  assert.ok(r.nudges.filter((c) => c.dispatchId !== d.dispatchId).every((c) => /submit command/.test(c.text)))
+})
+
+test("doctor: its patient's agent() returns as soon as its own result is in; a doctor that never sends worker_done is watched to its end in the background, before the run ends, its worktree never retained", async () => {
+  const script = `const S = ${JSON.stringify(SCHEMA)}
+const one = await agent('Do a thing.', { label: 'one', phase: 'P', schema: S, isolation: 'worktree' })
+const next = await agent('Then.', { label: 'next', phase: 'P', schema: S })
+return { one, next }`
+  const doctor = async (w) => {
+    await w.orca.mailSend({ ...idsOf(w.preamble), type: 'handoff', subject: 'note', body: NOTE })
+    idlesOn(w)
+  }
+  const r = await runOne(withDoctor((w) => (w.prompt.startsWith('Then.') ? submitGood(w) : curedBy(NOTE, 'stuck')(w)), doctor), { script })
+  assert.deepEqual(r.result, { one: GOOD, next: GOOD }, 'no worktrees_kept: the doctor changed nothing')
+  assertEntries(r.journal)
+  const d = doctorOf(r.journal)
+  const at = (pred) => indexOf(r.journal, pred)
+  const doctorFailed = at((e) => e.type === 'failed' && e.n === d.n)
+  assert.ok(doctorFailed > 0, 'the doctor ends, past its cap')
+  assert.ok(at((e) => e.type === 'result' && e.title === '[P] one') < doctorFailed)
+  assert.ok(at((e) => e.type === 'started' && e.title === '[P] next') < doctorFailed, 'its dependent never waits on the doctor')
+  assert.equal(r.journal[doctorFailed].retained, undefined)
+  assert.ok(r.lines.some((l) => l.includes(`${d.title}: `) && l.endsWith('; its doctor round for [P] one is spent')), r.lines.join('\n'))
+  assert.equal(r.lines.some((l) => l.startsWith(`!! ${d.title}:`) && l.includes('agent() returns null')), false, r.lines.join('\n'))
+})
+
+test("doctor: at a cap of one, a note carries its patient on only once the patient holds the slot again, after its doctor's", async () => {
+  const doctor = async (w) => {
+    await w.orca.mailSend({ ...idsOf(w.preamble), type: 'handoff', subject: 'note', body: NOTE })
+    w.clock.at(w.clock.now() + 10 * MIN, () => w.orca.mailSend({ ...idsOf(w.preamble), type: 'worker_done', outcome: 'succeeded', subject: 'done', body: 'handed off' }))
+  }
+  const r = await runOne(withDoctor(curedBy(NOTE, 'stuck'), doctor), { script: ISOLATED, settings: { MAX_LIVE: 1 } })
+  assert.deepEqual(r.result, GOOD)
+  assertEntries(r.journal)
+  const d = doctorOf(r.journal)
+  const settled = indexOf(r.journal, (e) => e.type === 'settled' && e.n === d.n)
+  const [remedy] = ofType(r.journal, 'remedy')
+  assert.ok(settled > 0 && r.journal.indexOf(remedy) > settled, 'continued only once the doctor freed its slot')
+  assert.ok(indexOf(r.journal, (e) => e.type === 'queued' && e.n === 1) < r.journal.indexOf(remedy))
+  const noted = r.orca.calls.findIndex((c) => c.verb === 'workerContinue' && c.text.includes(NOTE))
+  const done = r.orca.calls.findIndex((c) => c.verb === 'mailSend' && c.type === 'worker_done' && c.dispatchId === d.dispatchId)
+  assert.ok(done >= 0 && noted > done)
+})
+
+test("doctor: a bad recover row in the role table is refused at the first agent(), before any worker, in the role table's words", async () => {
+  const script = `export const meta = { name: 'x', roles: { recover: { harness: 'codex' } } }
+return await agent('Do a thing.', { label: 'one', phase: 'P' })`
+  const orca = fakeOrca({ worker: submitGood })
+  await assert.rejects(runScript(script, { orca, stateDir: tmp(), out: () => {} }), /^Error: the role table's recover row: unknown harness "codex"/)
+  assert.equal(orca.calls.some((c) => c.verb === 'workerStart'), false)
+  // With no doctor rounds, no doctor is ever started, so the row is not read.
+  assert.deepEqual(await runScript(script.replace("label: 'one', phase: 'P'", "label: 'one', phase: 'P', schema: " + JSON.stringify(SCHEMA)), { orca, stateDir: tmp(), out: () => {}, settings: NO_DOCTOR }), GOOD)
+})
+
+test('resume: two held patients whose doctors each handed off while no runner ran each get their own note; neither is drained and lost by the other doctor', async () => {
+  const script = `const S = ${JSON.stringify(SCHEMA)}
+return await parallel(['one', 'two'].map((label) => () => agent('Do ' + label + '.', { label, phase: 'P', schema: S, isolation: 'worktree' })))`
+  const noteOf = (text) => (text.includes('[P] one') || text.startsWith('Do one.') ? NOTE : NOTE_TWO)
+  const clock = fakeClock()
+  const stateDir = tmp()
+  const first = mortalOn(clock)
+  const doctors = []
+  const orca = fakeOrca({
+    clock,
+    worker: (w) => withDoctor((p) => curedBy(noteOf(p.prompt), 'gone')(p), (d) => {
+      doctors.push(d)
+      if (doctors.length === 2) first.dead = true
+    })({ ...w, clock }),
+  })
+  const opts = { stateDir, out: () => {}, transcripts: fakeTranscripts(orca) }
+  runScript(script, { ...opts, orca: orca.as('term_runner'), clock: first }).catch(() => {})
+  await first.hung
+  const died = journalOf(stateDir)
+  assert.equal(ofType(died, 'doctor').length, 2)
+  // While no runner runs, each doctor hands off its patient's note.
+  for (const d of doctors) await handsOff(noteOf(d.prompt))(d)
+  // The resume takes doctor two up last, so doctor one's watch drains both
+  // doctors' mail before doctor two's box is open.
+  const two = ofType(died, 'started').find((e) => e.title === '[P] recover -> two').dispatchId
+  const resumed = orca.as('term_2')
+  const show = resumed.workerShow
+  let slowed = 0
+  resumed.workerShow = async (a) => {
+    if (a.dispatch === two && !slowed++) await new Promise((r) => setTimeout(r, 50))
+    return show.call(resumed, a)
+  }
+  const result = await runScript(script, { ...opts, orca: resumed, clock, resume: true })
+  assert.equal(slowed > 0, true)
+  assert.deepEqual(result, [GOOD, GOOD])
+  const journal = journalOf(stateDir)
+  assertEntries(journal)
+  // Doctor two's messages were read before its box was open: held, then applied.
+  assert.ok(ofType(journal, 'mail').some((e) => e.action === 'pending' && e.dispatchId === two && e.kind === 'handoff'))
+  assert.deepEqual(ofType(journal, 'remedy').map((e) => [e.title, e.how]).sort(), [['[P] one', 'continue'], ['[P] two', 'continue']])
+  const noted = orca.calls.filter((c) => c.verb === 'workerContinue' && (c.text.includes(NOTE) || c.text.includes(NOTE_TWO))).map((c) => c.text).sort()
+  assert.deepEqual(noted, [notePrompt(NOTE), notePrompt(NOTE_TWO)].sort())
+  const handoffs = ofType(journal, 'mail').filter((e) => e.kind === 'handoff' && e.action !== 'pending')
+  assert.deepEqual(handoffs.map((e) => e.action), ['remedy', 'remedy'])
+  assert.deepEqual(ofType(journal, 'gaveUp'), [])
 })
 
 // --- a doctor for a never-started agent and a blocked one ---------------------
@@ -3653,19 +3805,21 @@ viewTest('run view: a doctor\'s row is indented under its patient\'s, in round o
   ])
   const row = (n) => view.model.rows.find((r) => r.key === `agent:${n}`).agent
   assert.deepEqual([row(3).patient, row(4).patient, row(1).doctors, row(1).round], [1, 1, [3, 4], 2])
-  assert.deepEqual([row(3).state, row(4).state], ['done', 'running'])
-  // Each doctor is a row of its own, in the header's counts and its phase's mix.
-  const counts = { blocked: 0, 'needs you': 0, starting: 0, running: 2, continued: 0, stuck: 0, failed: 1, queued: 1, done: 1, reclaimed: 0 }
+  assert.deepEqual([row(3).state, row(4).state], ['failed', 'running'])
+  assert.equal(row(3).reason, 'it gave up')
+  // Each doctor is a row of its own, in the header's counts and its phase's
+  // mix, by what it is: one that gave up is failed, never done.
+  const counts = { blocked: 0, 'needs you': 0, starting: 0, running: 2, continued: 0, stuck: 0, failed: 2, queued: 1, done: 0, reclaimed: 0 }
   assert.deepEqual(view.model.header.counts, counts)
   const [implement] = view.model.phases
-  assert.deepEqual([implement.total, implement.done, implement.mix], [5, 1, counts])
+  assert.deepEqual([implement.total, implement.done, implement.mix], [5, 0, counts])
 
   const lines = () => draw(view.model, { width: 140, height: 30 }).lines.map(strip)
-  assert.match(lines()[1], /● 2 running {2}· 1 queued {2}✓ 1 done {2}✗ 1 failed/)
-  assert.match(lines()[4], /^ ▾ Implement +1\/5 done +●2 ✗1 ·1 ✓1 *$/)
+  assert.match(lines()[1], /● 2 running {2}· 1 queued {2}✗ 2 failed/)
+  assert.match(lines()[4], /^ ▾ Implement +0\/5 done +●2 ✗2 ·1 *$/)
   // A round that gave up answered the same failure the next one answers.
   assert.match(lines()[5], /^ +1 +impl:a +✗ failed /)
-  assert.match(lines()[6], /^ +3 +└ recover +✓ done /, 'under its patient, named by its role')
+  assert.match(lines()[6], /^ +3 +└ recover +✗ failed /, 'under its patient, named by its role')
   assert.match(lines()[7], /^ +4 +└ recover +● running /)
   assert.match(lines()[8], /^ +2 +impl:b /)
   // Selected, its pane has its whole title.

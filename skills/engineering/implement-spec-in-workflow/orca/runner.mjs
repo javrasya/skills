@@ -215,11 +215,15 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
     return { entries: journalLines(journalPath).filter((e) => e.n === n || e.origin === origin), log }
   }
   // The script's role table, when it hands one over (meta.roles): a doctor is
-  // started by the runner, not by an agent() call, so its role is read here.
-  const doctorLaunch = () => launchOf(meta.value?.roles?.recover ?? {}, permissionMode)
+  // started by the runner, not by an agent() call, so its role is read here,
+  // and checked at the first agent(), before any worker, as agent() checks
+  // its own launch: a bad row is refused up front, never at the first doctor.
+  let recover = null
+  const doctorLaunch = () => (recover ??= launchOf(meta.value?.roles?.recover ?? {}, permissionMode, 'the role table\'s recover row'))
   const life = agentLifecycle({
     orca, clock, limits, out, stateDir, objective: () => objectiveOf(meta.value, fallbackObjective), journal, retainWorktree, onRun, takeOver: earlier.run?.runId ?? null, transcripts,
     nextN: () => ++count, doctorLaunch, history, mailHandled: earlier.mail.map((m) => m.messageId),
+    mailPending: earlier.mail.filter((m) => m.action === 'pending').map((m) => ({ id: m.messageId, type: m.kind, dispatchId: m.dispatchId, outcome: m.outcome ?? null, subject: m.subject, body: m.body })),
   })
 
   const phase = (title) => {
@@ -234,8 +238,10 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
 
   async function agent(prompt, opts = {}) {
     if (opts.schema) checkSchema(opts.schema)
-    // Refused here, before any worker, like an unsatisfiable schema.
+    // Refused here, before any worker, like an unsatisfiable schema; so is a
+    // bad recover row, when the run has doctor rounds.
     const launch = launchOf(opts, permissionMode)
+    if (limits.doctorRounds) doctorLaunch()
     const n = ++count
     const label = opts.label || `agent-${n}`
     const phaseName = opts.phase ?? currentPhase ?? 'Run'
@@ -278,11 +284,14 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
 
   try {
     const value = await script(agent, parallel, phase, log, meta)
+    // A doctor still out after its note carried its patient on ends first.
+    await life.doctors()
     unclaimed()
     const result = withRetained(value, retained)
     if (armed) record('ended', { runId: armed, outcome: failures ? 'partial' : 'ok' })
     return result
   } catch (e) {
+    await life.doctors().catch(() => {})
     unclaimed()
     if (armed) record('ended', { runId: armed, outcome: 'failed' })
     // A run that throws still names what it kept: summary.json carries it.
@@ -298,12 +307,16 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
 // worker's model is `piModel`, never `model`: `model` stays a Claude model the
 // Workflow runner can take, since it ignores the harness and runs every role
 // on Claude. Both are in the call's journal key, as every option is. Throws
-// for a harness or launch no worker can start with.
-function launchOf(opts, permissionMode) {
+// for a harness or launch no worker can start with, naming `who`.
+function launchOf(opts, permissionMode, who = 'agent()') {
   const harness = opts.harness ?? 'claude'
-  if (!HARNESSES.includes(harness)) throw new Error(`agent(): unknown harness "${harness}": expected one of ${HARNESSES.join(', ')}`)
+  if (!HARNESSES.includes(harness)) throw new Error(`${who}: unknown harness "${harness}": expected one of ${HARNESSES.join(', ')}`)
   const launch = { harness, model: harness === 'pi' ? opts.piModel : opts.model, effort: opts.effort, permissionMode: harness === 'claude' ? permissionMode : null }
-  launchCommand(launch)
+  try {
+    launchCommand(launch)
+  } catch (e) {
+    throw new Error(`${who}: ${e.message}`)
+  }
   return launch
 }
 
