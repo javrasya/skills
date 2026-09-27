@@ -164,9 +164,14 @@ export const readJournal = (path) => foldJournal(journalLines(path))
 // whose latest round gave no remedy that carried it on is `held`: its agent()
 // waits on its doctors, so a resume answers it with its next round, or, when
 // that round is `open` (its doctor not yet ended), goes on with it: held is
-// { origin, round, reason, open, doctor, worker, remedy, needsYou, gaveUp,
-// ended, restart }, where doctor is that round's doctor, by origin, worker
-// its worker, in a call's worker's shape, while it is still out, remedy { id, body } the handoff journaled as
+// { origin, round, reason, open, doctor, worker, unlaunched, remedy,
+// needsYou, gaveUp, ended, restart }, where doctor is that round's doctor, by
+// origin, worker its worker, in a call's worker's shape, while it is still
+// out, unlaunched, for a doctor whose worker never launched and that neither
+// failed nor said anything (its runner died while it was queued for a live
+// slot, or starting), { made, baseline }: the worktree an attempt of its start
+// left, as journaled, and that worktree's baseline, so the round is started
+// afresh rather than spent; remedy { id, body } the handoff journaled as
 // mail that no remedy line applied, needsYou what its doctor needs a human
 // for, gaveUp the body of a worker_done failed, ended { outcome } a
 // worker_done succeeded, and restart, for a patient whose worker never
@@ -434,6 +439,9 @@ export function foldJournal(entries) {
     const remedy = said.find((m) => m.action === 'remedy')
     const gaveUp = said.find((m) => m.action === 'gaveUp')
     const ended = said.find((m) => m.action === 'ended')
+    // Nothing ran for the round: its doctor was queued, or starting, when its
+    // runner died. One that failed its start, or said anything, has ended.
+    const unlaunched = open && !remedy && !gaveUp && !ended && (!d || (!d.launched && d.state !== 'done' && d.state !== 'failed'))
     return {
       rounds: { round: p.round, trail },
       held: {
@@ -443,6 +451,7 @@ export function foldJournal(entries) {
           n: d.n, title: d.title, dir: agentDir(d.origin, d.title?.replace(/^\[[^\]]*\] /, '') || `agent-${d.origin}`), run: d.runId, dispatchId: d.dispatchId, harness: d.harness,
           sessionId: d.sessionId, terminal: d.terminal, worktree: d.worktree, continuations: d.continuations, origin: d.origin,
         } : null,
+        unlaunched: unlaunched ? { made: d?.worktree ? [d.worktree] : [], baseline: d?.baseline ?? null } : null,
         remedy: remedy ? { id: remedy.messageId, body: remedy.body ?? '' } : null,
         needsYou: out && d.state === 'needs you' ? d.reason : null,
         gaveUp: gaveUp ? gaveUp.body ?? '' : null,

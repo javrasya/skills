@@ -579,6 +579,10 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   // attempts, continued }, watched again without a start, or { restart }, the
   // start of a patient whose worker never started, retried with the note.
   // call.box: a doctor's mailbox, which take() fills from its messages.
+  // call.startAgain: a doctor whose worker never launched before its runner
+  // died, started afresh under its own n: { made, dispatched, baseline }, as
+  // start's `again`, so it takes up the `<runId>-<n>` worktree an earlier
+  // attempt of its start made rather than orphan it.
   async function supervise(runId, call) {
     const { schema, isolated, launch, key, n, title, resultPath, patient = null, box = null } = call
     if (launch.harness === 'claude' && !launch.permissionMode && !toldNoMode) {
@@ -586,7 +590,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       out("!! no --permission-mode given: Claude workers start in Claude's own default permission mode, not in the orchestrator's.")
     }
     const { from = null } = call
-    const got = from?.restart ? await start(runId, call, from.restart) : from ?? (call.adopt ? await takeUp(call) : await start(runId, call))
+    const got = from?.restart ? await start(runId, call, from.restart) : from ?? (call.adopt ? await takeUp(call) : await start(runId, call, call.startAgain ?? null))
     if (!got || got[SICK]) return got
     const { sessionId, attempts } = got
     let { w, end = null, continued } = got
@@ -806,7 +810,9 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   // outcomes, and a remedy carries the patient on with a fresh count of
   // continuations. again: a held patient's open round, as the fold names it,
   // which a resume goes on with: its doctor taken up, never a second started,
-  // and a handoff journaled but not yet applied applied now, once.
+  // and a handoff journaled but not yet applied applied now, once. A doctor
+  // that never launched (queued or starting when its runner died) spent
+  // nothing: that round's doctor is started afresh, in the same round.
   async function treat(call, failure, rounds, again = null) {
     const { key, n, title, label, phaseName, prompt } = call
     const origin = call.adopt?.origin ?? call.origin ?? n
@@ -819,13 +825,14 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     while (rounds.round < max) {
       const round = ++rounds.round
       // A doctor taken up runs under a new n, as a resumed call does; one that
-      // ended keeps its own.
+      // ended keeps its own, and so does one that never launched, whose start
+      // then asks for the `<runId>-<n>` worktree an earlier attempt made.
       const doctor = again && !again.worker && again.doctor != null ? again.doctor : nextN()
       const dLabel = `recover -> ${label}`
       const dTitle = `[${phaseName}] ${dLabel}`
       journal({ type: 'doctor', key, n, title, origin, round, reason: failure.reason, doctor })
       out(again
-        ? `>> ${title}: doctor round ${round} of ${max} goes on after the resume: ${dTitle} ${again.worker ? 'is taken up' : 'ended while no runner watched it'}, and its agent() waits`
+        ? `>> ${title}: doctor round ${round} of ${max} goes on after the resume: ${dTitle} ${again.worker ? 'is taken up' : again.unlaunched ? 'never launched, so it starts now' : 'ended while no runner watched it'}, and its agent() waits`
         : `>> ${title}: ${failure.reason}; doctor round ${round} of ${max}: ${dTitle} diagnoses it, and its agent() waits`)
       let handed
       const handoff = new Promise((r) => { handed = r })
@@ -839,9 +846,12 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       }
       const dCall = { schema: null, isolated: true, setup: 'skip', launch: doctorLaunch(), key: null, n: doctor, label: dLabel, title: dTitle, phaseName, patient: origin, round, box }
       let doctoring
-      if (!again) {
+      if (!again || again.unlaunched) {
         const { entries, log } = history({ n, origin, title })
-        doctoring = life({ ...dCall, prompt: doctorPrompt({ patient: { title, prompt }, reason: failure.reason, round, rounds: max, transcript, worktree: failure.worktree, entries, log, earlier: rounds.trail.map((t) => ({ ...t })) }) })
+        // Its worker may have been sent its start before its runner died: a
+        // worktree it left is judged against its baseline.
+        const startAgain = again?.unlaunched ? { ...again.unlaunched, dispatched: true } : null
+        doctoring = life({ ...dCall, prompt: doctorPrompt({ patient: { title, prompt }, reason: failure.reason, round, rounds: max, transcript, worktree: failure.worktree, entries, log, earlier: rounds.trail.map((t) => ({ ...t })) }), ...(startAgain && { startAgain }) })
       } else doctoring = again.worker ? life({ ...dCall, adopt: again.worker }) : Promise.resolve(undefined)
       const ended = doctoring.then((end) => {
         box.closed = true

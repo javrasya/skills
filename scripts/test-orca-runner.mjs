@@ -2286,18 +2286,19 @@ test("fake orca: a Run's mailbox holds what its workers send, hands its coordina
 
 // A runner of ISOLATED that dies mid-round: `play(first)` is the worker, which
 // kills `first`, the runner's mortal clock, when the test says; `faults(first)`
-// and `patch(first, orca)` too. The resume runs to its end from term_2.
-async function midRound(play, { faults = () => ({}), patch = () => ({}) } = {}) {
+// and `patch(first, orca)` too; `script` and `settings` are both runners'.
+// The resume runs to its end from term_2.
+async function midRound(play, { faults = () => ({}), patch = () => ({}), script = ISOLATED, settings = {} } = {}) {
   const clock = fakeClock()
   const stateDir = tmp()
   const first = mortalOn(clock)
   const orca = fakeOrca({ clock, faults: faults(first), worker: (w) => play(first)({ ...w, clock }) })
-  const opts = { stateDir, out: () => {}, transcripts: fakeTranscripts(orca) }
-  runScript(ISOLATED, { ...opts, orca: Object.assign(orca.as('term_runner'), patch(first, orca)), clock: first }).catch(() => {})
+  const opts = { stateDir, out: () => {}, transcripts: fakeTranscripts(orca), settings }
+  runScript(script, { ...opts, orca: Object.assign(orca.as('term_runner'), patch(first, orca)), clock: first }).catch(() => {})
   await first.hung
   const died = journalOf(stateDir)
   const before = orca.calls.length
-  const result = await runScript(ISOLATED, { ...opts, orca: orca.as('term_2'), clock, resume: true })
+  const result = await runScript(script, { ...opts, orca: orca.as('term_2'), clock, resume: true })
   const journal = journalOf(stateDir)
   const after = orca.calls.slice(before)
   const of = (verb) => after.filter((c) => c.verb === verb)
@@ -2410,6 +2411,86 @@ test("resume: a held patient whose worker never started stays pending, and its l
   assert.deepEqual([remedy.origin, remedy.how, remedy.round], [1, 'restart', 1])
   const agents = foldJournal(r.journal).agents
   assert.deepEqual(agents.map((a) => [a.origin, a.state, a.patient]), [[1, 'done', null], [2, 'done', 1]])
+})
+
+// The patient `one`, and `two`, which holds the one live slot from when the
+// patient's doctor queues for it.
+const HOLDS_SLOT = `const S = ${JSON.stringify(SCHEMA)}
+phase('P')
+return await parallel([() => agent('Do a thing.', { label: 'one', schema: S, isolation: 'worktree' }), () => agent('Hold the slot.', { label: 'two', schema: S })])`
+
+// A resumed round whose doctor never launched: started afresh in the same
+// round, with the doctor prompt, and never spent.
+function assertFreshRound(r, doctorN) {
+  assert.deepEqual(ofType(r.journal, 'gaveUp'), [], 'nothing spent')
+  assert.deepEqual(ofType(r.journal, 'doctor').map((e) => [e.n, e.round, e.doctor]), [[ofType(r.journal, 'reattached').find((e) => e.origin === 1).n, 1, doctorN]], 'the same round, the same doctor')
+  const [start, ...more] = r.of('workerStart').filter((c) => c.title === '[P] recover -> one')
+  assert.deepEqual(more, [])
+  assert.ok(IS_DOCTOR.test(r.orca.dispatches.get(ofType(r.journal, 'started').find((e) => e.n === doctorN).dispatchId).prompt), 'the doctor prompt')
+  assert.ok(start)
+  assert.deepEqual(ofType(r.journal, 'remedy').map((e) => [e.round, e.doctor, e.how]), [[1, doctorN, 'continue']])
+  assert.deepEqual(r.of('workerContinue').filter((c) => c.text.includes(NOTE)).map((c) => c.text), [notePrompt(NOTE)])
+  const patient = foldJournal(r.journal).agents.find((a) => a.origin === 1)
+  assert.deepEqual([patient.state, patient.round, patient.rounds.map((x) => [x.round, x.doctor, x.outcome])], ['done', 1, [[1, doctorN, 'remedy']]])
+}
+
+test('resume: a doctor queued for a live slot when its runner died is started afresh in the same round, never counted as spent', async () => {
+  const r = await midRound((first) => (w) => {
+    if (w.prompt.startsWith('Hold the slot.')) {
+      first.dead = true
+      w.clock.at(w.clock.now() + 5 * MIN, () => submitGood(w))
+      return
+    }
+    return withDoctor(curedBy(NOTE, 'gone'), handsOff(NOTE))(w)
+  }, { script: HOLDS_SLOT, settings: { MAX_LIVE: 1 } })
+  const [round] = ofType(r.died, 'doctor')
+  assert.deepEqual([round.round, ofType(r.died, 'queued').some((e) => e.n === round.doctor)], [1, true], 'its doctor queued')
+  assert.deepEqual(r.died.filter((e) => e.n === round.doctor && e.type !== 'queued'), [], 'and never launched')
+  assert.deepEqual(r.result, [GOOD, GOOD])
+  assertEntries(r.journal)
+  assertFreshRound(r, round.doctor)
+})
+
+test('resume: a doctor whose start was being retried when its runner died is started afresh in the same round, in the worktree its start made', async () => {
+  let fails = 0
+  const r = await midRound(() => withDoctor(curedBy(NOTE, 'gone'), handsOff(NOTE)), {
+    faults: (first) => ({
+      terminalCreate: ({ title }) => {
+        if (!title.includes('recover ->') || ++fails > 1) return null
+        first.dead = true
+        return new OrcaError('runtime_unavailable', 'no terminal', 'terminal create')
+      },
+    }),
+  })
+  const [round] = ofType(r.died, 'doctor')
+  const baseline = ofType(r.died, 'baseline').find((e) => e.n === round.doctor)
+  assert.ok(baseline, 'its start made a worktree')
+  assert.deepEqual(r.died.filter((e) => e.n === round.doctor).map((e) => e.type), ['starting', 'baseline', 'retry'])
+  assert.deepEqual(r.result, GOOD)
+  assertEntries(r.journal)
+  assertFreshRound(r, round.doctor)
+  assert.deepEqual(r.of('worktreeCreate'), [], 'no second worktree')
+  assert.equal(ofType(r.journal, 'started').find((e) => e.n === round.doctor).worktree, baseline.worktree)
+})
+
+test('fold: an open round whose doctor never launched is to be started afresh; one whose doctor launched and ended while no runner watched it is not', () => {
+  const at = new Date(0).toISOString()
+  const patient = [
+    { type: 'starting', at, key: 'k', n: 1, title: '[P] one', run: 'run_1' },
+    { type: 'started', at, key: 'k', n: 1, title: '[P] one', run: 'run_1', dispatchId: 'd1', harness: 'claude', sessionId: 's1', worktree: 'W-1', terminal: 't1', dir: 'agents/001-one' },
+    { type: 'doctor', at, key: 'k', n: 1, title: '[P] one', origin: 1, round: 1, reason: 'dead', doctor: 2 },
+  ]
+  const dTitle = '[P] recover -> one'
+  const heldOf = (doctor) => foldJournal([...patient, ...doctor]).calls.get('k')[0].held
+  assert.deepEqual(heldOf([]).unlaunched, { made: [], baseline: null })
+  assert.deepEqual(heldOf([{ type: 'queued', at, key: null, n: 2, title: dTitle }]).unlaunched, { made: [], baseline: null })
+  const starting = [{ type: 'starting', at, key: null, n: 2, title: dTitle, run: 'run_1' }, { type: 'baseline', at, key: null, n: 2, title: dTitle, worktree: 'W-2', lines: [] }]
+  assert.deepEqual(heldOf(starting).unlaunched, { made: ['W-2'], baseline: [] })
+  assert.equal(heldOf([...starting, { type: 'failed', at, key: null, n: 2, title: dTitle, reason: 'no start', attempts: 4, patient: 1 }]).unlaunched, null, 'its start failed: spent')
+  const ran = [...starting, { type: 'started', at, key: null, n: 2, title: dTitle, run: 'run_1', dispatchId: 'd2', harness: 'claude', sessionId: 's2', worktree: 'W-2', terminal: 't2', dir: 'agents/002-x' }]
+  const settled = heldOf([...ran, { type: 'settled', at, key: null, n: 2, title: dTitle, dispatchId: 'd2', outcome: 'succeeded' }])
+  assert.deepEqual([settled.unlaunched, settled.worker], [null, null], 'it ended while no runner watched it: spent')
+  assert.equal(heldOf(ran).unlaunched, null, 'still out: taken up')
 })
 
 // --- a start that fails is retried --------------------------------------------
