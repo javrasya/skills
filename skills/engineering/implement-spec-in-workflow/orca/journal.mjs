@@ -26,7 +26,8 @@ import { foldMail, heldRounds, mailSupersedes } from './doctor.mjs'
 // clean), are what it held before any agent touched it. A create that timed
 // out has none.
 // blocked: its worker waits on a human, with what it waits on (`waiting`);
-// unblocked: it no longer does. warning: something that went wrong without
+// unblocked: it no longer does. moving: a worker nudged since it last moved
+// moves again, past its nudge's echo, so it is no longer stuck. warning: something that went wrong without
 // failing the call. A nudge's
 // `attempt` is its number since the session started or was last continued; a
 // continuation's is its number, up to the cap. `origin` names an agent across
@@ -52,7 +53,9 @@ import { foldMail, heldRounds, mailSupersedes } from './doctor.mjs'
 // resume replays nothing from it. run: the Run every worker is dispatched into
 // and the runner terminal it is bound to, when it is created or taken over; a
 // resume carries the last one forward first, with `lastN`, the highest call
-// number that Run has used. queued: a call waiting for a live slot.
+// number that Run has used; a line also carries `phases`, the titles of the
+// phases the script's meta declares, in its order, when it declares any, and
+// the carried line the last ones journaled. queued: a call waiting for a live slot.
 // doctor: a doctor round starts for a patient, an agent whose session died
 // past its continuation cap or was blocked on a human past the blocked limit,
 // or whose start failed through every retry: about the patient, with its `origin`, the
@@ -86,7 +89,23 @@ import { foldMail, heldRounds, mailSupersedes } from './doctor.mjs'
 // worker's prompt, `dispatchId` and `terminal` null until it starts), the
 // `messageId` of the handoff, and the `dispatchId` and `terminal` it now runs
 // under, `reopened` as a continuation's. It starts the patient's count of
-// continuations afresh: its next `continued` line is attempt 1.
+// continuations afresh: its next `continued` line is attempt 1. outage: Orca
+// itself was not there (ADR-0015), a `phase` of the run's, not of any agent:
+// start (every Orca call now waits on it; with `reason`, the error that found
+// it), paused (still going at the outage limit: the run is paused, and fails
+// no agent) and end (Orca answered again; with `ms`, its length); `since` is
+// when it began. It has no n, and a resume carries none forward.
+// node (ADR-0016): a call's lines carry its `node`, the stable name the script
+// gives it (opts.node), when it names one: starting, started, reattached,
+// outstanding, continued, result, failed and held. A node's result that needs
+// the operator (a non-empty `decisions_needed`) carries `needsDecision: true`:
+// it was held, never handed to the script. A resume carries each failed or
+// needs-decision node forward as its failed or result line, with `carried:
+// true`, `origin` and `worker`, the worker it last ran, so the next resume
+// still carries it on. halted: the run halted on `node`, failed or needing
+// decisions, with its `reason`; unhalted: no failed or needs-decision node is
+// left, and every held call goes on. held: a new call made while the run was
+// halted, not started until it is released. halted and unhalted have no n.
 export const JOURNAL_ENTRIES = Object.freeze({
   queued: ['at', 'key', 'n', 'title'],
   starting: ['at', 'key', 'n', 'title', 'run'],
@@ -100,6 +119,7 @@ export const JOURNAL_ENTRIES = Object.freeze({
   nudge: ['at', 'key', 'n', 'title', 'dispatchId', 'reason', 'attempt'],
   blocked: ['at', 'key', 'n', 'title', 'dispatchId', 'terminal', 'waiting'],
   unblocked: ['at', 'key', 'n', 'title', 'dispatchId'],
+  moving: ['at', 'key', 'n', 'title', 'dispatchId'],
   continued: ['at', 'key', 'n', 'title', 'dispatchId', 'sessionId', 'terminal', 'reason', 'attempt', 'reopened'],
   reattached: ['at', 'key', 'n', 'title', 'run', 'dispatchId', 'harness', 'sessionId', 'terminal', 'worktree', 'dir', 'origin'],
   outstanding: ['at', 'key', 'n', 'title', 'run', 'dispatchId', 'harness', 'sessionId', 'terminal', 'worktree', 'dir', 'origin'],
@@ -110,7 +130,14 @@ export const JOURNAL_ENTRIES = Object.freeze({
   gaveUp: ['at', 'key', 'n', 'title', 'origin', 'round', 'doctor', 'reason'],
   mail: ['at', 'messageId', 'kind', 'action'],
   remedy: ['at', 'key', 'n', 'title', 'origin', 'round', 'doctor', 'how', 'messageId', 'dispatchId', 'terminal', 'reopened'],
+  outage: ['at', 'phase', 'since'],
+  halted: ['at', 'node', 'reason'],
+  unhalted: ['at'],
+  held: ['at', 'key', 'n', 'node', 'title'],
 })
+
+// A needs-decision result's questions, for the run view.
+const questionsOf = (result) => (Array.isArray(result?.decisions_needed) ? result.decisions_needed.map((q) => (typeof q === 'string' ? q : JSON.stringify(q))) : [])
 
 // The lines that name a call's worker.
 const WORKER_LINES = ['started', 'reattached', 'outstanding']
@@ -140,7 +167,7 @@ export const madeByRun = (a) => !!a.runId && (a.launched || !!a.worktree)
 
 export const readJournal = (path) => foldJournal(journalLines(path))
 
-// The fold of a journal's entries: { calls, retained, run, lastN, agents, mail }.
+// The fold of a journal's entries: { calls, retained, run, lastN, phases, agents, mail, outage }.
 //
 // calls, what a resume replays and takes up: key -> what each call made under
 // it, in call order — { result } for a call that returned a value (with
@@ -155,7 +182,8 @@ export const readJournal = (path) => foldJournal(journalLines(path))
 // agent it journaled as failed. retained: every worktree a dead agent left,
 // from its failed entry or from a `retained` line an earlier resume carried
 // forward. run: the last Run journaled, { runId, terminal }, or null; lastN:
-// the highest call number the journal holds. A journal written before entries
+// the highest call number the journal holds; phases: the phase titles the
+// last `run` line that names any declares, in the script's order, or null. A journal written before entries
 // carried timestamps and launch fields resumes the same way, its `started`
 // lines without a dispatch or session as calls with no worker out, and a
 // worker line without a `dir` as named by that line's n and title. An
@@ -207,19 +235,39 @@ export const readJournal = (path) => foldJournal(journalLines(path))
 // (waiting: on what), needs you once a doctor escalated, until its next
 // handoff, escalation or worker_done (reason: what the human must do; a
 // second escalation replaces it), stuck once nudged, continued after a continuation, done
-// or failed once settled. A nudge journals no answer, so an agent stays stuck
-// until its next continuation or settlement; blocked lasts until unblocked or
-// settled. workerLeft: it failed with its worker's process left running.
+// or failed once settled. An agent stays stuck until its worker moves again
+// (`moving`: running, or continued once it has continuations or a remedy, as
+// unblocked picks), or its next continuation or settlement; blocked lasts
+// until unblocked or settled. workerLeft: it failed with its worker's process left running.
 // baseline: the porcelain lines its worktree was made with, or null. launched: a worker was started for it,
 // whatever its dispatch now reads. from and to are when it began and settled
 // here, or null: a replayed result or a carried agent launched nothing here.
 // mail: every `mail` line, one per message id, the first kept, in order.
+// outage: the Orca outage under way at the journal's end, or null: { phase:
+// 'waiting' | 'paused', since }. No agent's state is changed by it.
+//
+// nodes (ADR-0016): node -> its call's entry as `calls` holds it, the latest
+// call to name that node winning, with `key`, `node`, `n` and `title`; a failed
+// one also `reason`, and a settled one `last`, the worker it last ran, in a
+// call's worker's shape. A needs-decision result also has `needsDecision`. A
+// call's `starting`, `started` or `reattached` after its failed line makes it
+// live again: a halted node resumed in the same run. halted: the run's halt
+// under way at the journal's end, or null: { since, node, reason, nodes }, nodes
+// being every node still failed or needing decisions. An agent of a node has
+// `node`; a needs-decision one is `needs you`, its reason its questions, which
+// it also holds as `decisions`; a held call is queued, its reason saying so.
+// A failed agent of a node that a later agent of the same node carried on
+// has `superseded: true`: the run view draws the node's latest attempt alone.
 export function foldJournal(entries) {
   const calls = new Map()
+  const nodes = new Map()
   const retained = []
   const mail = new Map()
   let run = null
   let lastN = 0
+  let phases = null
+  let outage = null
+  let halted = null
   // One per call, by its n: a call's lines share it, and no two calls do.
   const byCall = new Map()
   // The call id of each outstanding line, by its dispatch.
@@ -248,6 +296,10 @@ export function foldJournal(entries) {
     a.doctors = a.rounds.map((r) => r.doctor).filter(Number.isInteger)
   }
 
+  // What a worker that runs again is: continued once its session was, or a
+  // remedy carried it on; else running.
+  const carriedOn = (a) => (a.continuations || a.rounds.at(-1)?.outcome === 'remedy' ? 'continued' : 'running')
+
   // Folds one line into its agent's record, and returns that agent's origin.
   function agent(e) {
     const worker = WORKER_LINES.includes(e.type) || e.type === 'earlier'
@@ -267,11 +319,16 @@ export function foldJournal(entries) {
     }
     a.n = e.n
     if (typeof e.title === 'string') a.title = e.title
+    if (typeof e.node === 'string') a.node = e.node
     const at = timeOf(e)
     switch (e.type) {
+      case 'held':
+        Object.assign(a, { state: 'queued', reason: 'held: the run is halted' })
+        break
       case 'starting':
         a.from ??= at
-        Object.assign(a, { state: 'starting', runId: e.run ?? a.runId })
+        // A held call released, or a halted node started afresh.
+        Object.assign(a, { state: 'starting', runId: e.run ?? a.runId, ...((a.state === 'queued' || a.state === 'failed') && { reason: null }) })
         break
       case 'retry':
         a.from ??= at
@@ -314,7 +371,10 @@ export function foldJournal(entries) {
         }
         break
       case 'unblocked':
-        if (a.state === 'blocked') Object.assign(a, { state: a.continuations || a.rounds.at(-1)?.outcome === 'remedy' ? 'continued' : 'running', waiting: null, reason: null })
+        if (a.state === 'blocked') Object.assign(a, { state: carriedOn(a), waiting: null, reason: null })
+        break
+      case 'moving':
+        if (a.state === 'stuck') Object.assign(a, { state: carriedOn(a), reason: null })
         break
       case 'remedy':
         // Its start retried: nothing runs until its worker starts.
@@ -347,6 +407,12 @@ export function foldJournal(entries) {
         else Object.assign(a, { state: 'done', reason: null, waiting: null, to: at })
         break
       case 'result':
+        if (e.needsDecision === true) {
+          const decisions = questionsOf(e.result)
+          Object.assign(a, { state: 'needs you', reason: `decisions needed: ${decisions.join(' · ') || 'none named'}`, decisions, waiting: null, to: at })
+          if (Number.isInteger(e.worker?.continuations)) a.continuations = e.worker.continuations
+          break
+        }
         Object.assign(a, { state: 'done', reason: null, waiting: null, to: at, replayed: e.replayed === true })
         break
       case 'failed':
@@ -364,6 +430,10 @@ export function foldJournal(entries) {
     if (e.retained?.path && !retained.some((k) => k.path === e.retained.path)) retained.push(e.retained)
     for (const n of [e.n, e.lastN]) if (Number.isInteger(n)) lastN = Math.max(lastN, n)
     if (e.type === 'run' && typeof e.runId === 'string') run = { runId: e.runId, terminal: e.terminal ?? null }
+    if (e.type === 'run' && Array.isArray(e.phases) && e.phases.length) phases = e.phases.filter((p) => typeof p === 'string')
+    if (e.type === 'outage') outage = e.phase === 'end' ? null : { phase: e.phase === 'paused' ? 'paused' : 'waiting', since: e.since ?? e.at ?? null }
+    if (e.type === 'halted') halted = { since: e.at ?? null, node: e.node ?? null, reason: e.reason ?? null }
+    if (e.type === 'unhalted') halted = null
     // Read as the runner acted on it (doctor.mjs).
     if (e.type === 'mail' && typeof e.messageId === 'string' && mailSupersedes(e, mail.get(e.messageId))) {
       mail.set(e.messageId, e)
@@ -374,14 +444,23 @@ export function foldJournal(entries) {
     if (typeof e.key !== 'string') continue
     if (!numbered && e.type !== 'result' && e.type !== 'failed') continue
     const callId = numbered ? e.n : `line ${i}`
-    if (!byCall.has(callId)) byCall.set(callId, { key: e.key, n: numbered ? e.n : null, order: numbered ? e.n : i, carried: false, worker: null, settled: null, origin: null })
+    if (!byCall.has(callId)) byCall.set(callId, { key: e.key, n: numbered ? e.n : null, order: numbered ? e.n : i, carried: false, worker: null, settled: null, origin: null, node: null, title: null, reason: null })
     const c = byCall.get(callId)
+    if (typeof e.node === 'string') c.node = e.node
+    if (typeof e.title === 'string') c.title = e.title
+    // A carried failed or needs-decision node names the worker it last ran.
+    if ((e.type === 'result' || e.type === 'failed') && e.worker && typeof e.worker === 'object' && typeof e.worker.dispatchId === 'string') c.worker ??= { ...e.worker }
     if (e.type === 'result') {
-      c.settled = { result: e.result }
+      c.settled = { result: e.result, ...(e.needsDecision === true && { needsDecision: true }) }
       if (Number.isInteger(e.origin)) c.origin = e.origin
     } else if (e.type === 'failed') {
       if (!e.workerOut) c.settled = { failed: true }
+      c.reason = e.reason ?? null
+      if (Number.isInteger(e.origin)) c.origin = e.origin
+    } else if (e.type === 'starting') {
+      c.settled = null
     } else if (WORKER_LINES.includes(e.type) && e.dispatchId && e.sessionId) {
+      if (e.type !== 'outstanding') c.settled = null
       const title = typeof e.title === 'string' ? e.title : null
       const dir = typeof e.dir === 'string' ? e.dir : agentDir(e.n, title?.replace(/^\[[^\]]*\] /, '') || `agent-${e.n}`)
       c.origin = id
@@ -421,7 +500,22 @@ export function foldJournal(entries) {
     if (!calls.has(c.key)) calls.set(c.key, [])
     const settled = c.settled && 'result' in c.settled && c.origin !== null ? { ...c.settled, origin: c.origin } : c.settled
     const p = settled ? null : agents.get(c.origin ?? agentOfCall.get(c.n) ?? c.n)
-    calls.get(c.key).push(settled ?? { ...(c.worker ? { worker: c.worker } : { unsettled: true }), ...(p?.rounds.length && heldRounds(p, { agents, mail, agentDir })) })
+    const entry = settled ?? { ...(c.worker ? { worker: c.worker } : { unsettled: true }), ...(p?.rounds.length && heldRounds(p, { agents, mail, agentDir })) }
+    calls.get(c.key).push(c.node ? { ...entry, node: c.node } : entry)
+    if (c.node) {
+      nodes.set(c.node, {
+        ...entry, key: c.key, node: c.node, n: c.n, title: c.title, ...(c.origin !== null && { origin: c.origin }),
+        ...(settled?.failed && { reason: c.reason }), ...(settled && c.worker && { last: c.worker }),
+      })
+    }
   }
-  return { calls, retained, run, lastN, agents: [...agents.values()].sort((x, y) => x.n - y.n), mail: [...mail.values()] }
+  // A failed node a later call of the same node carried on under a new n (a
+  // dead runner's --resume starting it afresh) is superseded: the node's
+  // latest attempt is its row. It stays an agent of the Run, since a
+  // worktree it was given is still the operator's to reclaim.
+  const latestOfNode = new Map()
+  for (const a of agents.values()) if (a.node && a.patient == null && (latestOfNode.get(a.node)?.n ?? -Infinity) < a.n) latestOfNode.set(a.node, a)
+  for (const a of agents.values()) if (a.node && a.patient == null && a.state === 'failed' && latestOfNode.get(a.node) !== a) a.superseded = true
+  const outstandingNodes = [...nodes.values()].filter((x) => x.failed || x.needsDecision).map((x) => x.node)
+  return { calls, nodes, retained, run, lastN, phases, agents: [...agents.values()].sort((x, y) => x.n - y.n), mail: [...mail.values()], outage, halted: halted && { ...halted, nodes: outstandingNodes } }
 }

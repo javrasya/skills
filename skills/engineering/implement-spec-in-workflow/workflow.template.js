@@ -35,11 +35,16 @@ const ROLES = {
   fix: CLAUDE,           // Gate, Review: one fix slice
   publish: CLAUDE,       // Stack, Review: a ticket's PR, or the integration PR
   review: CLAUDE,        // Review: code-review the whole stack
-  reclaim: CLAUDE,       // Finalize: reclaim worktrees when nothing was published
   finalize: CLAUDE,      // Finalize: reconcile and ready the stack
   retrospective: CLAUDE, // Finalize: the validation report
   recover: CLAUDE,       // any phase: a doctor for an agent that failed (Orca runner only)
 }
+// Two more opts every agent() call may carry, both for the runner (ADR-0016):
+// `node` — the call's stable name for WHAT it is, never when it ran
+// (`ticket/12/impl/r2/s1`, `review`): unique within a run and the same on a
+// re-run given the same results, so a runner can keep a finished node's result
+// by name. `inFlight: true` — a call a single-slice ticket still makes while
+// the run is halting, so a runner can tell it from new work.
 
 // ---- interpolated by the skill ------------------------------------------
 const REPO = '__REPO__'                            // owner/name
@@ -381,13 +386,14 @@ const LAYER0_SCHEMA = {
 const IMPL_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['branch', 'summary', 'checks', 'validated_sha', 'unmet', 'decisions_needed', 'worktree'],
+  required: ['branch', 'summary', 'checks', 'validated_sha', 'unmet', 'decisions_needed', 'decided', 'worktree'],
   properties: {
     branch: { type: 'string' },
     summary: { type: 'string', description: 'one or two sentences' },
     ...CHECKS_FIELD,
-    unmet: { type: 'array', items: { type: 'string' }, description: 'the REMAINDER: work the brief asked for that you did not do — a criterion, a test, a file. Empty when the brief is done. Never a question for a human; that goes in decisions_needed' },
-    decisions_needed: { type: 'array', items: { type: 'string' }, description: 'a question only a human can answer, which blocks a criterion: the ticket and spec are silent or contradict each other on it. Name the question and the criterion. Never work you did not do' },
+    unmet: { type: 'array', items: { type: 'string' }, description: 'the REMAINDER: work the brief asked for that you did not do — a criterion, a test, a file. Empty when the brief is done. Never a question for a human, and never a criterion blocked on one; that goes in decisions_needed' },
+    decisions_needed: { type: 'array', items: { type: 'string' }, description: 'a contradiction only a human can settle, because every fix breaks something the ticket, its spec or an ADR explicitly says to keep. Name the criterion, the constraint and the evidence. It halts this ticket. Never work you did not do' },
+    decided: { type: 'array', items: { type: 'string' }, description: 'each contradiction or silence you closed yourself inside what the ticket leaves open: what the ticket said, what the code showed, what you chose. It goes on the PR' },
     ...WORKTREE_FIELD,
   },
 }
@@ -539,13 +545,6 @@ const INTEGRATION_SCHEMA = {
   },
 }
 
-const RECLAIM_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['worktrees_removed', 'worktrees_kept'],
-  properties: { ...RECLAIM_FIELDS },
-}
-
 const FINALIZE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -572,7 +571,7 @@ Set needs_human on a ticket that cannot be completed by an agent alone: it needs
 start_ref: if work for this spec already sits on a branch (the spec or a ticket names one, or a branch exists whose commits are for this spec), return that branch — it becomes the bottom layer of the stack rather than being orphaned. Otherwise return "${BASE_REF}".
 
 explorations: propose up to 4 research questions whose answers implementers will need — the code paths, the external API contracts, the existing test arrangement. A question need not serve every ticket: give each a label that names its subject plainly, so an implementer can tell whether it bears on their ticket. Ask what is expensive to discover, not what a ticket already states.`,
-  { ...ROLES.graph, phase: 'Graph', schema: GRAPH_SCHEMA, label: `graph:spec-${SPEC}` },
+  { ...ROLES.graph, phase: 'Graph', schema: GRAPH_SCHEMA, label: `graph:spec-${SPEC}`, node: 'graph' },
 )
 if (!graph) throw new Error('graph discovery failed')
 
@@ -596,6 +595,10 @@ if (!auto.length) return { spec: SPEC, error: 'every ticket needs a human', defe
 
 // --- step 2: exploration subagents, notes saved outside the repo ----------
 phase('Explore')
+// One node per topic, named by its slug; a repeated slug gets its index.
+const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'topic'
+const exploreNodes = graph.explorations.map((e, i, a) =>
+  a.filter((x) => slug(x.label) === slug(e.label)).length > 1 ? `explore/${slug(e.label)}-${i + 1}` : `explore/${slug(e.label)}`)
 const notes = (await parallel(
   graph.explorations.map((e, i) => () =>
     agent(
@@ -612,7 +615,7 @@ Keep the note under 300 lines. Every reader ingests it whole at full price, so c
 ${ECONOMY}
 
 Return the absolute path you wrote.`,
-      { ...ROLES.explore, effort: 'low', phase: 'Explore', label: `explore:${e.label}` },
+      { ...ROLES.explore, effort: 'low', phase: 'Explore', label: `explore:${e.label}`, node: exploreNodes[i] },
     ),
   ),
 )).filter(Boolean)
@@ -653,7 +656,7 @@ Do not disturb the user's working copy: leave ${REPO_DIR}'s checked-out branch a
 ${WORKTREE}
 
 Return the PR url and number, what the mirror found, and your worktree.`,
-    { ...ROLES.layer0, effort: 'low', phase: 'Setup', schema: LAYER0_SCHEMA, isolation: 'worktree', label: `layer0:${graph.start_ref}` },
+    { ...ROLES.layer0, effort: 'low', phase: 'Setup', schema: LAYER0_SCHEMA, isolation: 'worktree', label: `layer0:${graph.start_ref}`, node: 'layer0' },
   )
   if (!layer0) throw new Error('layer-0 PR failed — prior work would be orphaned')
   noteWorktree('layer0', graph.start_ref, layer0)
@@ -694,7 +697,22 @@ Return the PR url and number, what the mirror found, and your worktree.`,
 // here as a remainder and spends one of these rounds — one cap, not two.
 const MAX_DISPATCH_ROUNDS = 6
 
-function dispatch(t, remainder) {
+// --- halting (ADR-0016) ------------------------------------------------------
+// A ticket that fails, is left with an unmet remainder or needs a human
+// decision HALTS the run: review and finalize are reached only once every
+// automated ticket is published, since a review of a half-built stack is
+// wasted and a finalize would have to be undone by the resume. Once halting,
+// no ticket starts and a running ticket makes no new agent() call — except
+// one whose current dispatch returned exactly ONE slice, which finishes that
+// slice, its gate and its publish, each call marked `inFlight`.
+let halting = false
+let haltedBy = null // the first ticket to halt the run: { number, state, detail }
+// Checked before every new agent() call on a ticket's path: null when halting
+// stops the call, else what its opts add. `single` — the ticket's current
+// dispatch returned one slice.
+const goOn = (single) => (!halting ? {} : single ? { inFlight: true } : null)
+
+function dispatch(t, remainder, node) {
   return agent(
     `Route ticket #${t.number} — ${t.title} — to the fewest implementation slices that fresh-context agents can finish, and say which acceptance criteria each owns.
 
@@ -707,21 +725,23 @@ This remainder is work the earlier brief asked for and nobody did. It is not a g
 
 You are a router, not a planner. You answer two questions — how many agents, and which criteria each owns — and no third. Read \`gh issue view ${t.number}\` for the criteria. Skim the code's STRUCTURE only — \`git ls-files\`, grep hits — to name the files each criterion is likely to touch; about five tool calls is normal. Read no spec, no research note body and no implementation, and do not work out HOW anything will be done: the implementer designs with the code in front of it, and a design done here is done twice.
 
-The ticket was cut from the spec by a human and is trusted as written. Do not look for gaps, silences or drift; if a criterion is unclear, hand it on verbatim — the implementer meets a real gap at the line where it lives and reports it from there.
+The ticket was cut from the spec by a human and is trusted as written. Do not look for gaps, silences or drift; if a criterion is unclear, hand it on verbatim — the implementer meets a real gap at the line where it lives, with the code running, and settles it or halts the ticket on it from there.
 
 Default to ONE slice. Slice only when one agent plausibly cannot finish in roughly 70 tool calls; when unsure, do not slice. Slices run sequentially on one branch, so each must leave the branch consistent — building, tests green.
 
 Each brief is under 3,000 characters and has four sections, nothing else: (1) the acceptance criteria this slice owns, copied verbatim from the ticket; (2) the files you expect it to touch; (3) which of these research notes to read — ${notes.length ? notes.join(', ') : 'none exist'} — by filename, the ones whose subject bears on its criteria; (4) what is out of scope because another slice owns it. Every criterion of the ticket is owned by exactly one slice, including any test the ticket demands. Set each slice's effort: 'high' for the gnarly ones, 'medium' otherwise.
 
 Also return ticket_brief: one short paragraph on the whole ticket, for later fix agents.`,
-    { ...ROLES.dispatch, effort: 'high', phase: 'Implement', schema: DISPATCH_SCHEMA, label: `dispatch:#${t.number}${remainder ? ':re' : ''}` },
+    { ...ROLES.dispatch, effort: 'high', phase: 'Implement', schema: DISPATCH_SCHEMA, label: `dispatch:#${t.number}${remainder ? ':re' : ''}`, node },
   )
 }
 
-async function runSlices(t, slices, { cutFrom, started, tag }) {
-  const out = { started, summaries: [], last: null, unmet: [], decisions: [] }
+async function runSlices(t, slices, { cutFrom, started, tag, node }) {
+  const out = { started, summaries: [], last: null, unmet: [], decisions: [], decided: [], stopped: null }
   for (let i = 0; i < slices.length; i++) {
     const s = slices[i]
+    const go = goOn(slices.length === 1)
+    if (!go) { out.stopped = `the run halted before slice ${i + 1} of ${slices.length} (${s.title})`; break }
     const r = await agent(
       `Implement one slice of ticket #${t.number}: ${s.title}${slices.length > 1 ? ` (slice ${i + 1} of ${slices.length})` : ''}.
 
@@ -743,15 +763,17 @@ ${ECONOMY}
 
 Past roughly 70 tool calls this slice has outgrown one agent's context. Stop cleanly: commit what works, move the branch to it, and name what you did not reach in \`unmet\` — the dispatcher hands the remainder to a fresh agent. A named remainder is cheap; a 300-turn agent is not.
 
-\`unmet\` is the remainder: anything the brief asked for that you did not do, a test included. It is never a question — a criterion you cannot meet because the ticket is silent or contradicts itself on it goes in \`decisions_needed\`, with the question spelled out. When you hit one: stop that criterion, leave no code for it, and go on to the next criterion. Do not pick a reading and implement it — a provisional interpretation is work review cannot legitimately pass.
+\`unmet\` is the remainder: anything the brief asked for that you did not do, a test included. It is never a question.
+
+When running the code shows the ticket silent, or contradicting itself or its spec: if the fix stays inside what the ticket leaves open, decide it yourself and record it in \`decided\` — it goes on the PR. If the fix would break something the ticket, its spec or an ADR explicitly says to keep, stop that criterion, leave no code for it, and put it in \`decisions_needed\` naming the constraint and the evidence — never in \`unmet\`: it halts this ticket for the operator, and blocked work handed out again as remainder cannot move. Then go on to the next criterion.
 
 ${validationLine}
 Every command must pass on the commit you return. Commit, then move the ticket branch onto your work: \`git update-ref refs/heads/ticket/${t.number} HEAD\`. Push nothing — this branch reaches origin exactly once, when the stack lane publishes it.
 
 ${WORKTREE}
 
-Return the branch, a one-line summary, one result per validation command with its seconds and runs, every other build or test command you ran in \`other_runs\`, the sha the list passed on in \`validated_sha\`, anything from the brief you did not reach in \`unmet\`, any question in \`decisions_needed\`, and your worktree.`,
-      { ...ROLES.impl, effort: s.effort, phase: 'Implement', schema: IMPL_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}` },
+Return the branch, a one-line summary, one result per validation command with its seconds and runs, every other build or test command you ran in \`other_runs\`, the sha the list passed on in \`validated_sha\`, anything from the brief you did not reach in \`unmet\`, what you settled yourself in \`decided\`, any contradiction for the operator in \`decisions_needed\`, and your worktree.`,
+      { ...ROLES.impl, effort: s.effort, phase: 'Implement', schema: IMPL_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}`, node: `${node}/s${i + 1}`, ...go },
     )
     if (!r) throw new Error(`slice implementer for #${t.number} died (${s.title})`)
     noteWorktree(t.number, `ticket/${t.number}`, r)
@@ -759,7 +781,11 @@ Return the branch, a one-line summary, one result per validation command with it
     out.started = true
     out.summaries.push(r.summary)
     out.last = r
-    out.decisions.push(...r.decisions_needed)
+    out.decided.push(...(r.decided || []))
+    // A decision needed ends the ticket's slice rounds, whatever else the slice
+    // says: an agent has filed the blocked criterion in `unmet` too, and the
+    // re-dispatched slice then waited on a reply nobody was there to give.
+    if (r.decisions_needed.length) { out.decisions.push(...r.decisions_needed); break }
     // A red or missing validation result is a remainder like any other: the
     // brief asked for a green list and did not get one.
     const red = readinessRed(r.checks)
@@ -799,8 +825,12 @@ let lastLinkFailure = null
 let stackDisabled = STACK_MODE !== 'native'
 
 let lane = Promise.resolve()
-function enqueuePublish(t, impl, cutFrom) {
+function enqueuePublish(t, impl, cutFrom, single) {
   const run = lane.then(() => {
+    // Checked when the lane reaches the ticket, not when it queued: the run may
+    // have started halting while it waited.
+    const go = goOn(single)
+    if (!go) return { stopped: true }
     const base = tip
     // Layers as they will stand once this PR exists — k is the ACTUAL position
     // in the stack, not the ticket's index in the plan, so the map's fourth box
@@ -843,7 +873,9 @@ ${cutFrom !== base ? `4. The tip moved since this ticket was cut. Replay its com
 
    ${layerLine(layers.length)}
 
-   and must also contain the line \`Closes #${t.number}\`, state that it is part of the stack for spec #${SPEC}, and carry one provenance line — \`Validated green at <sha> by <role>\` — naming the sha the validation list last passed on and who ran it (you, or the role you inherited it from). Leave it a DRAFT — every layer stays draft until the run finalizes, which is how the operator can tell the stack is still being built.
+   and must also contain the line \`Closes #${t.number}\`, state that it is part of the stack for spec #${SPEC}, and carry one provenance line — \`Validated green at <sha> by <role>\` — naming the sha the validation list last passed on and who ran it (you, or the role you inherited it from).${impl.decided.length ? ` Under a heading "Decided during implementation", list what the implementer settled itself where the ticket left it open:
+${impl.decided.map((d) => `   - ${d}`).join('\n')}
+  ` : ''} Leave it a DRAFT — every layer stays draft until the run finalizes, which is how the operator can tell the stack is still being built.
 ${canLink
         ? `9. ${mirror(layers.slice(0, -1))}
 
@@ -867,7 +899,7 @@ You are the only agent publishing right now. After the PR exists, the branch is 
 ${WORKTREE}
 
 Return whether it published, the PR url and number, what you resolved, one result per validation command with its seconds and runs plus the sha they hold for, how the stack link went, any note, the reclaim count and kept list, and your worktree.`,
-      { ...ROLES.publish, effort: 'low', phase: 'Stack', schema: PUBLISH_SCHEMA, isolation: 'worktree', label: `publish:#${t.number}` },
+      { ...ROLES.publish, effort: 'low', phase: 'Stack', schema: PUBLISH_SCHEMA, isolation: 'worktree', label: `publish:#${t.number}`, node: `ticket/${t.number}/publish`, ...go },
     ).then((r) => {
       recordValidation('publish', t.number, r, cutFrom !== base ? null : impl.validated)
       if (!r || !r.published) {
@@ -919,7 +951,7 @@ Return whether it published, the PR url and number, what you resolved, one resul
 // fixer starts. See docs/adr/0004.
 const fkey = (f) => `${f.location}||${f.issue}`
 
-function dispatchFix(findings, { subject, brief, branch, skimRef, started, phase: ph, tag }) {
+function dispatchFix(findings, { subject, brief, branch, skimRef, started, phase: ph, tag, node, go }) {
   return agent(
     `Slice the review findings on ${subject} into the fewest fix slices that fresh-context agents can finish, and write each slice's brief.
 
@@ -936,14 +968,16 @@ Size this work, do not do it. \`git fetch origin\`, then skim at \`${skimRef}\`:
 Default to ONE slice. Slice only when one agent plausibly cannot finish in roughly 70 tool calls; when unsure, do not slice. A finding naming a rename and one naming an extraction read alike in a line and differ by two orders of magnitude in work — that difference, not the finding count, is what you are judging. Slices run sequentially on one branch, so each must leave the branch consistent — building, tests green.
 
 Every finding above belongs to exactly one slice: none dropped, none in two. Each brief must be self-contained — the findings it owns copied in full with their suggested fixes, the files they touch, and every constraint from the distilled work above that bears on them; its fixer reads no issue, no spec and no review.`,
-    { ...ROLES.fixDispatch, effort: 'medium', phase: ph, schema: FIX_DISPATCH_SCHEMA, label: `${tag}:dispatch` },
+    { ...ROLES.fixDispatch, effort: 'medium', phase: ph, schema: FIX_DISPATCH_SCHEMA, label: `${tag}:dispatch`, node: `${node}/dispatch`, ...go },
   )
 }
 
-async function runFixSlices(slices, { subject, branch, cutFrom, started, phase: ph, tag, ledgerKey, validated }) {
-  const out = { verdicts: [], unfinished: [], landed: started, died: null, validated: validated || null }
+async function runFixSlices(slices, { subject, branch, cutFrom, started, phase: ph, tag, node, guard, ledgerKey, validated }) {
+  const out = { verdicts: [], unfinished: [], landed: started, died: null, stopped: false, validated: validated || null }
   for (let i = 0; i < slices.length; i++) {
     const s = slices[i]
+    const go = guard()
+    if (!go) { out.stopped = true; break }
     const r = await agent(
       `Fix one slice of the review findings on ${subject}: ${s.title}${slices.length > 1 ? ` (slice ${i + 1} of ${slices.length})` : ''}.
 
@@ -972,7 +1006,7 @@ Every command must pass on the commit you return — a fix that leaves one red i
 ${WORKTREE}
 
 Return one verdict per finding in your brief you fixed or rejected, the \`location\` of any you did not reach, one result per validation command with its seconds and runs, every other build or test command you ran in \`other_runs\`, the sha the list passed on in \`validated_sha\`, and your worktree.`,
-      { ...ROLES.fix, effort: s.effort, phase: ph, schema: FIX_SLICE_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}` },
+      { ...ROLES.fix, effort: s.effort, phase: ph, schema: FIX_SLICE_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}`, node: `${node}/s${i + 1}`, ...go },
     )
     // A dead fixer is not fatal — it is the next reviewer's problem, and that
     // reviewer reads the branch rather than anyone's account of it. But the
@@ -997,9 +1031,17 @@ Return one verdict per finding in your brief you fixed or rejected, the \`locati
 // this path exists at all is that an agent's own account of what it did not do
 // is unreliable. A finding with no verdict is unfixed, named, and handed to the
 // next reviewer to check explicitly — not silently assumed done.
+//
+// `opts.node` names the fix nodes (`<node>/dispatch`, `<node>/s<i>`), and
+// `opts.guard` is asked before each call: null stops the round (the run is
+// halting), else it gives what the call's opts add. The whole-stack review is
+// reached only once nothing halts, so it passes none.
 async function fixFindings(findings, opts) {
+  opts = { guard: () => ({}), ...opts }
   const skimRef = opts.started ? opts.branch : ref(opts.cutFrom)
-  const plan = await dispatchFix(findings, { ...opts, skimRef })
+  const go = opts.guard()
+  if (!go) return { verdicts: [], unaccounted: findings, landed: opts.started, validated: opts.validated || null, stopped: true }
+  const plan = await dispatchFix(findings, { ...opts, skimRef, go })
   if (!plan) {
     log(`${opts.subject}: fix dispatcher died — ${findings.length} finding(s) unaccounted`)
     return { verdicts: [], unaccounted: findings, landed: opts.started, validated: opts.validated || null }
@@ -1007,6 +1049,7 @@ async function fixFindings(findings, opts) {
   if (plan.slices.length > 1) log(`${opts.subject}: ${findings.length} finding(s) dispatched as ${plan.slices.length} fix slices`)
   const out = await runFixSlices(plan.slices, opts)
   if (out.died) log(`${opts.subject}: fix slice "${out.died}" died — the round stops there`)
+  if (out.stopped) return { verdicts: out.verdicts, unaccounted: findings, landed: out.landed, validated: out.validated, stopped: true }
 
   const unfinished = new Set(out.unfinished)
   const exact = new Map(out.verdicts.map((v) => [fkey(v), v]))
@@ -1054,7 +1097,11 @@ async function fixFindings(findings, opts) {
 // from the branch. One cap governs the gate, not two multiplying ones.
 const GATE_MAX_ROUNDS = 4
 const BLOCKING = `What may block this ticket is exactly three things: an acceptance criterion of the ticket that the diff does not meet; a validation command that is red on the branch; and a correctness bug — a panic or crash reachable from input, an unhandled variant, silent data loss or a check that only runs in debug builds. Mark those \`blocker\` or \`major\`. Everything else — ADR fit, architecture, naming, style, a convention the repo documents — is \`minor\`, which passes the gate: it was settled when the spec was designed, or it is the whole-stack review's to judge across tickets.`
-async function reviewGate(t, impl, cutFrom, ticketBrief) {
+// `tk` is the ticket's own state: `single` for goOn, and `gates`, which numbers
+// its gate rounds across every gate it runs (a readiness red sends the ticket
+// back to dispatch and a later gate goes on counting), so each round's node
+// stays unique. Returns `stopped` when halting ends the gate.
+async function reviewGate(t, impl, cutFrom, ticketBrief, tk) {
   const rejected = []
   let unverified = []
   let lastFixed = []
@@ -1063,6 +1110,9 @@ async function reviewGate(t, impl, cutFrom, ticketBrief) {
   // HEAD still matches (ADR-0009).
   let validated = impl.validated || null
   for (let round = 1; round <= GATE_MAX_ROUNDS; round++) {
+    const go = goOn(tk.single)
+    if (!go) return { stopped: `the run halted before gate round ${round}` }
+    const node = `ticket/${t.number}/gate/r${++tk.gates}`
     const r = await agent(
       `Review ticket #${t.number}'s branch before it is published as a PR${round > 1 ? ` — round ${round}, verifying the previous round's fixes` : ''}.
 
@@ -1086,10 +1136,9 @@ ${lastFixed.map((v) => `- ${v.location} — ${v.issue}\n  fixer says: ${v.reason
 ${BLOCKING}
 
 Judge this ticket's diff. Work another ticket owns is out of scope. Change no code — report.
-${impl.unmet.length ? `
-The implementer declared this remainder after every re-dispatch round the run allows — it is carried to the operator, so report it without re-litigating and do not block on it: ${impl.unmet.join('; ')}` : ''}
-${impl.decisions.length ? `
-These questions were left for a human and their criteria were not implemented — report them without re-litigating and do not block on them: ${impl.decisions.join('; ')}` : ''}
+${impl.decided.length ? `
+The implementer closed these gaps itself, where the ticket left them open. Block on one only if it breaks something the ticket, its spec or an ADR explicitly says to keep:
+${impl.decided.map((d) => `- ${d}`).join('\n')}` : ''}
 ${unverified.length ? `
 The previous round handed these findings to a fixer that never reported back on them. Nobody knows whether they were addressed, so the branch is the only truth — check each one explicitly and raise it again if it is still real:
 
@@ -1102,7 +1151,7 @@ ${rejected.map((v) => `- ${v.location} — ${v.issue}\n  judged wrong because: $
         : ''}
 
 ${WORKTREE}`,
-      { ...ROLES.gate, phase: 'Gate', schema: GATE_REVIEW_SCHEMA, isolation: 'worktree', label: `gate:#${t.number}:r${round}` },
+      { ...ROLES.gate, phase: 'Gate', schema: GATE_REVIEW_SCHEMA, isolation: 'worktree', label: `gate:#${t.number}:r${round}`, node, ...go },
     )
     noteWorktree(t.number, impl.branch, r)
     recordValidation('gate', t.number, r, validated)
@@ -1137,9 +1186,12 @@ ${WORKTREE}`,
       started: true,
       phase: 'Gate',
       tag: `gate-fix:#${t.number}:r${round}`,
+      node: `${node}/fix`,
+      guard: () => goOn(tk.single),
       ledgerKey: t.number,
       validated,
     })
+    if (out.stopped) return { stopped: `the run halted during gate round ${round}'s fixes` }
     validated = out.validated
     for (const v of out.verdicts.filter((v) => v.action === 'rejected')) {
       if (!rejected.some((p) => p.location === v.location && p.issue === v.issue)) rejected.push(v)
@@ -1150,108 +1202,127 @@ ${WORKTREE}`,
   return { unfixed: [], validated }
 }
 
+// Every ticket resolves to an outcome, never rejects: `state` is 'published',
+// or why it is not — 'failed', 'unmet', 'needs decision' (each of which halts
+// the run), 'stopped' (halting reached it mid-way) or 'not started'.
 const memo = new Map()
 function ticketDone(n) {
-  if (!memo.has(n)) {
-    const t = byNum.get(n)
-    memo.set(
-      n,
-      (async () => {
-        await Promise.all(t.blocked_by.filter((d) => byNum.has(d) && !blocked.has(d)).map(ticketDone))
-        // The tip as this ticket starts: its dependencies are already stacked
-        // (awaited above), so cutting from the tip sees all of their work.
-        const cutFrom = tip
-        // This run owns `ticket/N` from here on: every agent addresses it as a
-        // local ref, and it stays off origin until the lane publishes it.
-        runRefs.add(`ticket/${t.number}`)
-        const plan = await dispatch(t, null)
-        if (!plan) throw new Error(`dispatcher for #${t.number} died`)
-        if (plan.slices.length > 1) log(`#${t.number} dispatched as ${plan.slices.length} slices`)
-        const decisions = []
-        // Slice rounds: run the plan; a remainder (a slice bailed out, was
-        // never started, or left the validation list red — including at the
-        // gate) goes back to the dispatcher for a re-slice with a fresh agent.
-        // On the round cap the remainder is carried as unmet — named for the
-        // operator — rather than ground out or ground into a gate-fix.
-        let slices = plan.slices
-        let started = false
-        let last = null
-        const summaries = []
-        let unmet = []
-        let gate = null
-        for (let round = 1; round <= MAX_DISPATCH_ROUNDS; round++) {
-          const out = await runSlices(t, slices, { cutFrom, started, tag: `impl:#${t.number}${round > 1 ? `:r${round}` : ''}` })
-          started = out.started
-          if (out.last) last = out.last
-          summaries.push(...out.summaries)
-          for (const d of out.decisions) if (!decisions.includes(d)) decisions.push(d)
-          unmet = out.unmet
-          if (!unmet.length) {
-            gate = await reviewGate(t, { branch: `ticket/${t.number}`, summary: summaries.join(' '), unmet: [], decisions, validated: last.validated_sha ? { sha: last.validated_sha, by: 'the implementer' } : null }, cutFrom, plan.ticket_brief)
-            if (!gate.readiness) break
-            unmet = gate.readiness.map((c) => `validation red at the gate: ${c}`)
-            gate = null
-          }
-          if (round === MAX_DISPATCH_ROUNDS) break
-          log(`#${t.number} remainder after round ${round}: ${unmet.join('; ')} — re-dispatching`)
-          const replan = await dispatch(t, unmet.join('; '))
-          if (!replan) { log(`#${t.number} re-dispatch died — carrying the remainder as unmet`); break }
-          slices = replan.slices
-        }
-        if (!started || !last) throw new Error(`no slice of #${t.number} landed`)
-        const impl = {
-          branch: `ticket/${t.number}`,
-          summary: summaries.join(' '),
-          checks: last.checks,
-          validated: last.validated_sha ? { sha: last.validated_sha, by: 'the implementer' } : null,
-          unmet,
-          decisions,
-        }
-        if (impl.unmet.length) log(`#${t.number} unmet after ${MAX_DISPATCH_ROUNDS} rounds: ${impl.unmet.join('; ')}`)
-        // A remainder that survived the cap still gets its gate — the reviewer
-        // is told about it and does not block on it (a readiness red here is
-        // already in `unmet`, so it is not re-routed).
-        if (!gate) gate = await reviewGate(t, impl, cutFrom, plan.ticket_brief)
-        // The gate's fixers may have moved the branch; the newest green sha
-        // is what the publisher inherits or invalidates by rebasing.
-        if (gate.validated) impl.validated = gate.validated
-        await enqueuePublish(t, impl, cutFrom)
-        return { number: t.number, ...impl, unfixed: gate.unfixed || [] }
-      })(),
-    )
-  }
+  if (!memo.has(n)) memo.set(n, runTicket(byNum.get(n)))
   return memo.get(n)
 }
 
-phase('Implement')
-const outcomes = await Promise.all(
-  auto.map((t) => ticketDone(t.number).catch((e) => ({ number: t.number, failed: String(e && e.message ? e.message : e) }))),
-)
-const failed = outcomes.filter((o) => o.failed)
-if (failed.length) log(`FAILED: ${failed.map((o) => '#' + o.number).join(', ')}`)
-if (!stacked.length && !hasLayer0) {
-  // Nothing published, so no lane step ever reclaimed. The worktrees are the
-  // same dead weight as after a full run; the same rule applies, and a dirty
-  // one is a dead agent's only copy — kept and named.
-  const leftovers = pendingWorktrees([...worktreesOf.keys()])
-  // On the Orca runner leftovers is empty: the operator reclaims at the end.
-  const reclaim = leftovers.length
-    ? await agent(
-      `Nothing of spec #${SPEC} was published; the run is stopping. ${reclaimStep(leftovers)}
-${strayStep()}
+async function runTicket(t) {
+  const deps = await Promise.all(t.blocked_by.filter((d) => byNum.has(d) && !blocked.has(d)).map(ticketDone))
+  const waits = deps.filter((d) => d.state !== 'published')
+  if (waits.length) return { number: t.number, state: 'not started', detail: `waits on ${waits.map((d) => `#${d.number} (${d.state})`).join(', ')}` }
+  if (halting) return { number: t.number, state: 'not started', detail: `the run halted before it started` }
+  try {
+    return await implementTicket(t)
+  } catch (e) {
+    return halt(t, 'failed', String(e && e.message ? e.message : e))
+  }
+}
 
-${POINTERS}
-Delete no branches: any work these worktrees carried is on its \`ticket/<n>\` branch in ${REPO_DIR}'s clone, and the operator may want it.`,
-      { ...ROLES.reclaim, effort: 'low', phase: 'Finalize', schema: RECLAIM_SCHEMA, label: 'reclaim' },
-    )
-    : null
-  if (reclaim) markReclaimed(leftovers, reclaim)
+function halt(t, state, detail, extra = {}) {
+  if (!halting) haltedBy = { number: t.number, state, detail }
+  halting = true
+  log(`#${t.number} ${state} — the run halts: ${detail}`)
+  return { number: t.number, state, detail, ...extra }
+}
+
+async function implementTicket(t) {
+  // The tip as this ticket starts: its dependencies are already stacked
+  // (awaited above), so cutting from the tip sees all of their work.
+  const cutFrom = tip
+  // This run owns `ticket/N` from here on: every agent addresses it as a
+  // local ref, and it stays off origin until the lane publishes it.
+  runRefs.add(`ticket/${t.number}`)
+  const plan = await dispatch(t, null, `ticket/${t.number}/dispatch`)
+  if (!plan) throw new Error(`dispatcher for #${t.number} died`)
+  if (plan.slices.length > 1) log(`#${t.number} dispatched as ${plan.slices.length} slices`)
+  const tk = { single: false, gates: 0 }
+  const stop = (detail) => {
+    log(`#${t.number} stopped — ${detail}`)
+    return { number: t.number, state: 'stopped', detail }
+  }
+  // Slice rounds: run the plan; a remainder (a slice bailed out, was never
+  // started, or left the validation list red — including at the gate) goes
+  // back to the dispatcher for a re-slice with a fresh agent. A decision
+  // needed, or a remainder that survives the round cap, halts the ticket.
+  let slices = plan.slices
+  let started = false
+  let last = null
+  const summaries = []
+  const decided = []
+  let gate = null
+  for (let round = 1; ; round++) {
+    tk.single = slices.length === 1
+    const out = await runSlices(t, slices, { cutFrom, started, tag: `impl:#${t.number}${round > 1 ? `:r${round}` : ''}`, node: `ticket/${t.number}/impl/r${round}` })
+    started = out.started
+    if (out.last) last = out.last
+    summaries.push(...out.summaries)
+    for (const d of out.decided) if (!decided.includes(d)) decided.push(d)
+    if (out.decisions.length) return halt(t, 'needs decision', out.decisions.join('; '), { questions: out.decisions })
+    if (out.stopped) return stop(out.stopped)
+    let unmet = out.unmet
+    if (!unmet.length) {
+      gate = await reviewGate(t, { branch: `ticket/${t.number}`, summary: summaries.join(' '), decided, validated: last.validated_sha ? { sha: last.validated_sha, by: 'the implementer' } : null }, cutFrom, plan.ticket_brief, tk)
+      if (gate.stopped) return stop(gate.stopped)
+      if (!gate.readiness) break
+      unmet = gate.readiness.map((c) => `validation red at the gate: ${c}`)
+    }
+    if (round === MAX_DISPATCH_ROUNDS) return halt(t, 'unmet', `after ${MAX_DISPATCH_ROUNDS} dispatch rounds: ${unmet.join('; ')}`, { unmet })
+    // A re-dispatch is new work, which halting never starts.
+    if (halting) return stop(`the run halted before its remainder was re-dispatched: ${unmet.join('; ')}`)
+    log(`#${t.number} remainder after round ${round}: ${unmet.join('; ')} — re-dispatching`)
+    const replan = await dispatch(t, unmet.join('; '), `ticket/${t.number}/dispatch/r${round + 1}`)
+    if (!replan) throw new Error(`re-dispatcher for #${t.number} died`)
+    slices = replan.slices
+  }
+  const impl = {
+    branch: `ticket/${t.number}`,
+    summary: summaries.join(' '),
+    checks: last.checks,
+    // The gate's fixers may have moved the branch; the newest green sha is
+    // what the publisher inherits or invalidates by rebasing.
+    validated: gate.validated || (last.validated_sha ? { sha: last.validated_sha, by: 'the implementer' } : null),
+    decided,
+  }
+  const pub = await enqueuePublish(t, impl, cutFrom, tk.single)
+  if (pub.stopped) return stop('the run halted before its publish')
+  return { number: t.number, state: 'published', ...impl, unfixed: gate.unfixed || [] }
+}
+
+phase('Implement')
+const outcomes = await Promise.all(auto.map((t) => ticketDone(t.number)))
+const layer0Line = () => (hasLayer0 ? [`layer 0 (pre-existing): ${layer0.pr_url}`] : [])
+
+// --- a halted run: no review, no finalize, nothing more on GitHub ----------
+// Review and finalize are for a stack every automated ticket reached. Anything
+// less is halted, and waits to be resumed rather than finished with gaps. It
+// reclaims nothing either: a resume carries each failed node on in its own
+// worktree (ADR-0016).
+const unpublished = outcomes.filter((o) => o.state !== 'published')
+if (unpublished.length) {
+  const cause = haltedBy || unpublished[0]
+  log(`HALTED on #${cause.number} (${cause.state}) — ${unpublished.map((o) => `#${o.number} ${o.state}`).join(', ')}`)
+  const localOnly = unpublished.filter((o) => runRefs.has(`ticket/${o.number}`)).map((o) => `ticket/${o.number}`)
   return {
     spec: SPEC,
-    error: 'no ticket was published',
-    failed: failed.map((o) => ({ ticket: o.number, error: o.failed })),
+    halted: true,
+    reason: `#${cause.number} ${cause.state}: ${cause.detail}. No whole-stack review and no finalize until every automated ticket is published — resume the run to carry it on.`,
+    tickets: unpublished.map((o) => ({ ticket: o.number, state: o.state, detail: o.detail, ...(o.questions ? { questions: o.questions } : {}) })),
+    published: [...layer0Line(), ...stacked.map((s) => `#${s.number}: ${s.pr_url}`)],
+    deferred_to_human: deferred.map((t) => ({ ticket: t.number, reason: t.human_reason || 'downstream of a human ticket' })),
+    gate_unfixed: outcomes
+      .filter((o) => o.unfixed && o.unfixed.length)
+      .map((o) => ({ ticket: o.number, findings: o.unfixed.map((f) => `[${f.severity}] ${f.location} — ${f.issue}`) })),
+    local_only_branches: localOnly.length
+      ? { note: `Never pushed. Any work these carry is in ${REPO_DIR}'s clone only, and the worktrees that built it are kept for the resume.`, refs: localOnly }
+      : null,
     worktrees_kept: worktreesKept,
-    local_only_branches: { note: `Never pushed. Any work these carry is in ${REPO_DIR}'s clone only.`, refs: auto.map((t) => `ticket/${t.number}`) },
+    notes: NOTES_DIR,
+    validation: aggregateValidation(),
   }
 }
 
@@ -1270,7 +1341,7 @@ Invoke the \`code-review\` skill with \`${ref(BASE_REF)}\` as the fixed point an
 Every ticket was already reviewed alone on its own branch, so look hardest at what that could not see: two implementations of one helper, abstractions that contradict each other, a contract one ticket relies on that another changed. Return every finding; change no code yourself.
 
 ${WORKTREE}`,
-  { ...ROLES.review, phase: 'Review', schema: REVIEW_SCHEMA, isolation: 'worktree', label: `review:spec-${SPEC}` },
+  { ...ROLES.review, phase: 'Review', schema: REVIEW_SCHEMA, isolation: 'worktree', label: `review:spec-${SPEC}`, node: 'review' },
 )
 noteWorktree('review', tip, review)
 // Fail closed: a review that never returned is not a review with zero findings.
@@ -1297,6 +1368,7 @@ if (findings.length) {
     started: false,
     phase: 'Review',
     tag: 'integration',
+    node: 'review/fix',
     ledgerKey: 'integration',
   })
   integrationVerdicts = out.verdicts
@@ -1334,7 +1406,7 @@ ${reclaimStep(integrationReclaim)}
 ${WORKTREE}
 
 Return the PR url and number, the branch, the reclaim count and kept list, and your worktree.`,
-      { ...ROLES.publish, effort: 'low', phase: 'Review', schema: INTEGRATION_SCHEMA, isolation: 'worktree', label: 'publish:integration' },
+      { ...ROLES.publish, effort: 'low', phase: 'Review', schema: INTEGRATION_SCHEMA, isolation: 'worktree', label: 'publish:integration', node: 'review/publish' },
     )
     if (integration && integration.pr_number) {
       // The prompt reclaims only after the PR exists, so a returned-but-unopened
@@ -1359,17 +1431,14 @@ Return the PR url and number, the branch, the reclaim count and kept list, and y
 // publishes outside the lane, so nothing there ever links it) and repairs any
 // in-lane call that failed. `link` is idempotent, so the cost is one call.
 phase('Finalize')
-// A ticket whose remainder survived every dispatch round is incomplete work,
-// exactly like a failed or deferred ticket: it keeps the spec open. So does a
-// question left for a human, a gate finding nobody fixed, an integration
+// Every automated ticket published to get here. A ticket deferred to a human
+// still keeps the spec open, as do a gate finding nobody fixed, an integration
 // finding with no verdict, and a whole-stack review that never ran: published
 // is not complete, and a run that cannot show its work was reviewed does not
 // get to say the spec is done.
-const unmetTickets = outcomes.filter((o) => o.unmet && o.unmet.length)
-const decisionTickets = outcomes.filter((o) => o.decisions && o.decisions.length)
 const gateUnfixedTickets = outcomes.filter((o) => o.unfixed && o.unfixed.length)
 const integrationOpen = findings.length && (!integration || integrationUnaccounted.length)
-const complete = !deferred.length && !failed.length && !unmetTickets.length && !decisionTickets.length && !gateUnfixedTickets.length && !integrationOpen && !reviewMissing
+const complete = !deferred.length && !gateUnfixedTickets.length && !integrationOpen && !reviewMissing
 const bottomToTop = [
   ...(hasLayer0 ? [{ label: `layer 0 (pre-existing)`, branch: graph.start_ref, pr_url: layer0.pr_url, pr_number: layer0.pr_number }] : []),
   ...stacked.map((s) => ({ label: `#${s.number}`, branch: s.branch, pr_url: s.pr_url, pr_number: s.pr_number })),
@@ -1377,15 +1446,12 @@ const bottomToTop = [
 ]
 const remains = [
   ...deferred.map((t) => `#${t.number} — ${t.human_reason || 'downstream of a human ticket'}`),
-  ...failed.map((o) => `#${o.number} — failed: ${o.failed}`),
-  ...unmetTickets.map((o) => `#${o.number} — published with unmet criteria: ${o.unmet.join('; ')}`),
-  ...decisionTickets.map((o) => `#${o.number} — needs a human decision: ${o.decisions.join('; ')}`),
   ...gateUnfixedTickets.map((o) => `#${o.number} — published with ${o.unfixed.length} unresolved gate finding(s)`),
   ...(integrationOpen ? [`whole-stack review findings not fully fixed or not published`] : []),
   ...(reviewMissing ? ['the whole-stack review never ran — review the stack as a whole by hand'] : []),
 ]
-// Whatever no reclaimer was handed: failed tickets' worktrees, a reclaimer that
-// died, and the last publisher's own. Same rule as the lane — exact paths,
+// Whatever no reclaimer was handed: a reclaimer that died, and the last
+// publisher's own. Same rule as the lane — exact paths,
 // dirty kept and named — never "the ones for this spec".
 const finalReclaim = [...pendingWorktrees([...worktreesOf.keys()]), ...prevPublisher()]
 const finalize = await agent(
@@ -1426,7 +1492,7 @@ ${ON_ORCA ? '' : `   The lane already reclaimed each published ticket's worktree
 Do not merge anything — merging is the operator's.
 
 Return one line on the stack — whether it registered and how many PRs went ready — plus the reclaim count and kept list.`,
-  { ...ROLES.finalize, effort: 'low', phase: 'Finalize', schema: FINALIZE_SCHEMA, label: 'finalize' },
+  { ...ROLES.finalize, effort: 'low', phase: 'Finalize', schema: FINALIZE_SCHEMA, label: 'finalize', node: 'finalize' },
 )
 if (finalize) markReclaimed(finalReclaim, finalize)
 
@@ -1457,7 +1523,7 @@ Write the report in this order:
 Nothing applies these proposals: a human decides, and validation.md is theirs to edit.
 
 Return two or three sentences of summary, the report path, and the proposals as a list.`,
-    { ...ROLES.retrospective, effort: 'low', phase: 'Finalize', label: 'retrospective', schema: RETRO_SCHEMA },
+    { ...ROLES.retrospective, effort: 'low', phase: 'Finalize', label: 'retrospective', node: 'retrospective', schema: RETRO_SCHEMA },
   )
   : null
 
@@ -1477,17 +1543,18 @@ return {
           ? `NOT REGISTERED IN THE LANE — every in-lane link failed${lastLinkFailure ? ` (last: ${lastLinkFailure})` : ''}; finalize's reconcile was the first real attempt, see its report below. Until a stack object exists, merge bottom-up by hand.`
           : 'not registered — the stack never reached two layers, which is the minimum `gh stack link` accepts',
   stack_bottom_to_top: bottomToTop.map((l) => `${l.label}: ${l.pr_url}`),
-  state: complete ? 'complete — ready for review' : 'partial — ready for review, spec stays open',
+  halted: false,
+  state: complete ? 'complete — ready for review' : 'ready for review — spec stays open for what remains',
   merge_how: STACK_MODE === 'native' && !stackDisabled
     ? `Review bottom-up, then merge ONCE from the top PR (the Merge button there, or PUT .../pulls/${bottomToTop[bottomToTop.length - 1].pr_number}/merge-async). Every layer needs green required checks and required approvals, evaluated against ${BASE_REF}. After a FAILED merge, re-read the actual state of ${BASE_REF} — do not assume rollback.`
     : `No stack object (chain mode): merge bottom-up by hand, one PR at a time, with MERGE COMMITS (--merge), deleting each head branch after its merge so GitHub retargets the next PR. Squash/rebase merges rewrite shas and give every child PR a phantom diff.`,
   gate_unfixed: outcomes
     .filter((o) => o.unfixed && o.unfixed.length)
     .map((o) => ({ ticket: o.number, findings: o.unfixed.map((f) => `[${f.severity}] ${f.location} — ${f.issue}`) })),
-  failed: failed.map((o) => ({ ticket: o.number, error: o.failed })),
   deferred_to_human: deferred.map((t) => ({ ticket: t.number, reason: t.human_reason || 'downstream of a human ticket' })),
-  unmet: unmetTickets.map((o) => ({ ticket: o.number, criteria: o.unmet })),
-  decisions_needed: decisionTickets.map((o) => ({ ticket: o.number, questions: o.decisions })),
+  // What implementers settled themselves where a ticket left it open; each is
+  // also on its PR.
+  decided: outcomes.filter((o) => o.decided && o.decided.length).map((o) => ({ ticket: o.number, decisions: o.decided })),
   review_findings: reviewMissing ? 'UNREVIEWED — the whole-stack reviewer died' : findings.length,
   integration_pr: integration ? integration.pr_url : null,
   integration_unfixed: [

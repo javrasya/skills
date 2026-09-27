@@ -11,7 +11,9 @@
 // It reads runs from their run dirs, the registry and Orca (run-view-model.mjs),
 // never from a runner, so a crash here never touches a run; the runner restarts
 // an attached view. Over IPC an attached view only sends {type: 'detach'}
-// before the operator's quit. Exit codes: exit-codes.mjs. The reclaim dialog,
+// before the operator's quit, and {type: 'resume', node?} for R: during an
+// Orca outage the runner probes Orca at once (ADR-0015); on a halted run it
+// resumes that node, or every held one (ADR-0016). Exit codes: exit-codes.mjs. The reclaim dialog,
 // and each confirmation after it, is the model's (view.model.dialog): this
 // file only hands it the keys, clicks and mouse moves.
 //
@@ -31,6 +33,10 @@ import { VIEW_EXIT } from './exit-codes.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REFRESH_MS = 2000
+// While the selected row's name scrolls (draw.mjs), the screen is drawn again
+// this often, one character's step at its 4 a second; else only on a
+// refresh, a key, a click or a resize.
+const MARQUEE_MS = 250
 
 async function terminalKit(logPath) {
   try {
@@ -108,7 +114,15 @@ const unpushed = (path) => worktreeUnpushed(path, bound)
 // Standalone, `runs` takes every key and click, and hands them to the run it
 // opened; `tree()` is the run tree on screen, or null on the list.
 const runs = standalone ? runsView({ orca, registry, unpushed }) : null
-const view = standalone ? null : runView({ stateDir: runDir, orca, registry, unpushed })
+// R's one message to the runner: during an outage it probes Orca; on a halted
+// run it resumes `node`, or every held node without one (ADR-0016).
+const resumeOrca = () => {
+  if (process.connected) process.send({ type: 'resume' })
+}
+const resumeHalted = (node) => {
+  if (process.connected) process.send({ type: 'resume', ...(node && { node }) })
+}
+const view = standalone ? null : runView({ stateDir: runDir, orca, registry, unpushed, resumeOrca, resumeHalted })
 const top = runs ?? view
 const tree = () => (runs ? runs.opened() : view)
 let flash = null
@@ -120,10 +134,31 @@ function render() {
   const size = { width: term.width, height: term.height }
   // A blocked agent's alert stays on the flash line until it is answered: only
   // an action's own outcome, until the next key, goes over it.
-  const screen = t ? draw(t.model, { ...size, flash: flash ?? (t.model?.alert ? null : t.model?.latest), alert: t.model?.alert, ...(runs && { help: TREE_HELP }) }) : drawRuns(runs.model, { ...size, flash: flash ?? runs.model?.message })
+  const screen = t ? draw(t.model, { ...size, flash: flash ?? (t.model?.alert ? null : t.model?.latest), alert: t.model?.alert, now: Date.now(), ...(runs && { help: TREE_HELP }) }) : drawRuns(runs.model, { ...size, flash: flash ?? runs.model?.message })
   rowAt = screen.rowAt
   optionAt = screen.optionAt ?? (() => null)
   process.stdout.write('\x1b[H' + screen.lines.join('\r\n'))
+  marquee(screen.scrolling === true)
+}
+
+// The tick that draws a scrolling name on, only while one scrolls. A tick is
+// a render queued behind the actions like any other, one at a time, so a
+// slow action holds the name still and never piles ticks up behind it.
+let ticker = null
+let ticking = false
+function marquee(on) {
+  if (on && !ticker) {
+    ticker = setInterval(() => {
+      if (ticking) return
+      ticking = true
+      act(() => {}).finally(() => {
+        ticking = false
+      })
+    }, MARQUEE_MS)
+  } else if (!on && ticker) {
+    clearInterval(ticker)
+    ticker = null
+  }
 }
 
 function quit() {

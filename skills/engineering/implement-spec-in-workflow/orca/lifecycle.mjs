@@ -9,7 +9,7 @@
 // A patient, one whose session died past its cap or blocked past the limit,
 // or whose start's retries are spent, is handed to its doctor rounds
 // (doctor.mjs), which also hold the Run mailbox its doctors report over.
-import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs'
+import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, renameSync } from 'fs'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
 import { randomUUID } from 'crypto'
@@ -39,6 +39,10 @@ An earlier start of this task failed before any worker ran, and a doctor, an age
 ## The doctor's note
 ${note}`)
 
+// Nobody answers a worker mid-task: Orca's preamble offers `orchestration
+// ask`, which blocks until the coordinator replies, and this runner never does.
+export const NO_ASK = 'Never run `orca orchestration ask`, and never wait on a reply from anyone: nobody will answer. Put a question only a human can answer in your result (in `decisions_needed`, where your schema has it), finish everything it does not block, then submit.'
+
 // `baseline`: the porcelain lines of the worktree it starts in, or null.
 // `note`: a doctor's note for a start retried after its retries were spent.
 export function workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline = null, note = null }) {
@@ -54,7 +58,9 @@ How this run receives your result: your final message is not read. Your result r
 1. ${what}
 2. Run this, replacing the four <placeholders> with the values from your Orca preamble, copied exactly:
    ${command}
-3. If submit exits non-zero it prints every error: fix the payload and run it again until it exits 0. Then stop and idle.${noteSection(note)}`
+3. If submit exits non-zero it prints every error: fix the payload and run it again until it exits 0. Then stop and idle.
+
+${NO_ASK}${noteSection(note)}`
 }
 
 // FIFO slots: a freed slot passes straight to the longest-waiting call.
@@ -93,15 +99,59 @@ const SICK = Symbol('needs a doctor')
 const mins = (ms) => Math.round(ms / 60_000)
 const wait = (ms) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms / 6_000) / 10} min`)
 
+// What the delivery check looks for in the session: the start of the prompt,
+// whitespace collapsed, which Orca types after its preamble unchanged.
+const needleOf = (prompt) => String(prompt).replace(/\s+/g, ' ').trim().slice(0, 120)
+
+// Lines of Orca's preamble, which worker-start types before the prompt, and
+// which the input to empty may still hold: one Ctrl-U per line, and more on
+// an empty input do nothing.
+const PREAMBLE_LINES = 100
+
+// The prompt typed again, when neither worker-start's typing nor an Enter
+// reached the session. Orca's preamble came with the first typing and cannot
+// be typed again as it was: it alone carried the dispatch capability, which
+// nothing hands the runner (not worker-start's answer, nor `dispatch-show
+// --preamble`). So the runner names the three IDs it holds, which Orca's
+// preamble also names, the worker's handle being its terminal's, and the
+// capability is left out: submit sends worker_done without one (submit.mjs),
+// from the worker's own pane, which Orca settles a dispatch from.
+const resendPrompt = (w, prompt) => `The workflow runner typed this message again: the one worker-start sent did not reach you, and the Orca preamble it began with did not either. Your Orca IDs, for submit and for any Orca mail: worker handle ${w.terminal}, task id ${w.taskId}, dispatch id ${w.dispatchId}. Leave out --dispatch-capability: you have none.
+
+---
+${prompt}`
+
 const NUDGE = 'The workflow has not received your result: your final message is not read. Finish the task, then run the submit command from your instructions until it exits 0.'
 
 // Typed after the resume, or handed as the spec of the dispatch that adopts a
 // new terminal, whose preamble then carries new IDs.
 const continuePrompt = (why) => `You were interrupted: the workflow runner stopped this session and resumed it (${why}). Carry on where you left off and finish the task, then run the submit command from your instructions until it exits 0. If an Orca preamble came with this message, take the four IDs for submit from it, not from an earlier one.`
 
+// A node resumed after the run halted on it (ADR-0016): its session carried
+// on, told why. One that needed decisions is told the operator has answered,
+// on the ticket.
+export const haltedPrompt = (needsDecision) => `${needsDecision
+  ? 'The workflow run was halted here: your result named decisions only the operator can make, and the operator has answered them. Re-read the ticket, its body and its comments, for the answers, then finish the task'
+  : 'The workflow run was halted here, and the operator has resumed it. Carry on from where you are and finish the task'}, then run the submit command from your instructions until it exits 0. If an Orca preamble came with this message, take the four IDs for submit from it, not from an earlier one.`
+
+// The convention a result needs the operator by (ADR-0016): a non-empty
+// `decisions_needed` array, its questions. Null for any other value.
+export const decisionsNeeded = (v) => (v && typeof v === 'object' && Array.isArray(v.decisions_needed) && v.decisions_needed.length ? v.decisions_needed.map((q) => (typeof q === 'string' ? q : JSON.stringify(q))) : null)
+
+// A needs-decision result is journaled and held, and its result.json set
+// aside, so a resume that finds a result.json knows it for a new one.
+export function setAside(resultPath) {
+  try {
+    if (existsSync(resultPath)) renameSync(resultPath, resultPath.replace(/\.json$/, '.needs-decision.json'))
+  } catch {}
+}
+
+// Its node on an agent() call's lines, when it names one.
+const nodeOf = (call) => (call.node ? { node: call.node } : {})
+
 // Re-reads what submit recorded: the script is handed a value only if it is
 // valid now, whatever the worker claimed when it settled.
-function readResult(resultPath, schema) {
+export function readResult(resultPath, schema) {
   if (!existsSync(resultPath)) return { error: 'settled without submitting a result' }
   let value
   try {
@@ -130,11 +180,14 @@ function readResult(resultPath, schema) {
 // this run journaled, which this one acknowledges and never acts on again;
 // mailPending: those it held, since no box had claimed their dispatch, as
 // { id, type, dispatchId, outcome, subject, body }, held again here.
+// outage: the run's Orca outage (outage.mjs), which every Orca call already
+// waits on: its lost() is taken off the watch's clocks, and a retry's backoff
+// is waited as its sleep(), so no clock the runner keeps runs while Orca is gone.
 // Returns life(call), which resolves to the agent's value or null, and throws
 // only if journal or out does. life.doctors() resolves once every doctor
 // still out has ended: a patient's agent() never waits on its doctor once its
 // own result is in, so the runner awaits them before it ends.
-export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, journal, retainWorktree, onRun = () => {}, takeOver = null, transcripts = sessionTranscripts(), nextN, doctorLaunch = () => ({ harness: 'claude' }), history = () => ({ entries: [], log: [] }), mailHandled = [], mailPending = [] }) {
+export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, journal, retainWorktree, onRun = () => {}, takeOver = null, transcripts = sessionTranscripts(), nextN, doctorLaunch = () => ({ harness: 'claude' }), history = () => ({ entries: [], log: [] }), mailHandled = [], mailPending = [], outage = { lost: () => 0, sleep: (ms) => clock.sleep(ms) } }) {
   const live = slots(limits.MAX_LIVE)
   // One Run per workflow run: every agent's worker is dispatched into it.
   let run = null
@@ -159,10 +212,12 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   // it adds after `agent() returns null`. A doctor's failed line names its
   // patient, and fails no agent() call: the runner does not count it, and its
   // log line says its round is spent, naming the patient (patientTitle).
-  const failAgent = ({ key, n, title, patient = null, patientTitle = null }, { reason, retained = null, alsoRetained = [], attempts = 1, continuations = 0, run = null, workerOut = false, workerLeft = false }, { mark = '!!', said = '' } = {}) => {
-    journal({ type: 'failed', key, n, title, reason, attempts, ...(patient != null && { patient }), ...(run && { run }), ...(continuations && { continuations }), ...(retained && { retained }), ...(workerOut && { workerOut }), ...(workerLeft && { workerLeft }) })
+  // A call with a node (ADR-0016) is held rather than handed its null: the
+  // runner halts the run on it, so its line says so.
+  const failAgent = ({ key, n, title, node = null, patient = null, patientTitle = null }, { reason, retained = null, alsoRetained = [], attempts = 1, continuations = 0, run = null, workerOut = false, workerLeft = false }, { mark = '!!', said = '' } = {}) => {
+    journal({ type: 'failed', key, n, ...(node && patient == null && { node }), title, reason, attempts, ...(patient != null && { patient }), ...(run && { run }), ...(continuations && { continuations }), ...(retained && { retained }), ...(workerOut && { workerOut }), ...(workerLeft && { workerLeft }) })
     for (const also of alsoRetained) journal({ type: 'retained', retained: also })
-    out(patient != null ? `${mark} ${title}: ${reason}; its doctor round for ${patientTitle ?? `agent ${patient}`} is spent` : `${mark} ${title}: ${reason}; agent() returns null${said}`)
+    out(patient != null ? `${mark} ${title}: ${reason}; its doctor round for ${patientTitle ?? `agent ${patient}`} is spent` : node ? `${mark} ${title}: ${reason}; its node ${node} is held and the run halts${said}` : `${mark} ${title}: ${reason}; agent() returns null${said}`)
     return null
   }
 
@@ -227,7 +282,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
         if (e.final || i > waits.length) throw e
         out(`!! ${title}: ${e.reason}; trying again in ${wait(waits[i - 1])} (attempt ${i + 1} of ${waits.length + 1})`)
         journal({ type: 'retry', key, n, title, attempt: i + 1, reason: e.reason, nextAt: new Date(clock.now() + waits[i - 1]).toISOString() })
-        await clock.sleep(waits[i - 1])
+        await outage.sleep(waits[i - 1])
       }
     }
   }
@@ -271,7 +326,8 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   // saying which kind). Liveness is two signals (ADR-0013): the session's
   // transcript growing, and the terminal's busy or idle state changing. The
   // worker is stuck only while neither moves. nudged(why, attempt) journals
-  // each nudge; blocked(waiting) and unblocked() journal a wait on a human
+  // each nudge, and moving() the worker moving again, past a nudge's echo,
+  // once after each nudge; blocked(waiting) and unblocked() journal a wait on a human
   // beginning and ending, so the run view shows it while it lasts. mail(), a
   // doctor's, reads the Run mailbox at every look, and ends the watch with
   // what it returns: the doctor's worker_done, read before Orca shows it.
@@ -280,7 +336,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   // counts against it; each counts afresh from its next message. nudgeText:
   // what a nudge types, a doctor's its own, and owes what an idle death
   // says it went without, a doctor's its report.
-  async function watch(w, { title, harness, sessionId, nudged, blocked = () => {}, unblocked = () => {}, mail = null, held = () => false, nudgeText = NUDGE, owes = 'submitting' }) {
+  async function watch(w, { title, harness, sessionId, nudged, moving = () => {}, blocked = () => {}, unblocked = () => {}, mail = null, held = () => false, nudgeText = NUDGE, owes = 'submitting' }) {
     const start = clock.now()
     let errors = 0
     let nudges = 0
@@ -289,13 +345,30 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     let lastNudgeAt = null
     let lastLookAt = start
     let stuckNudged = false
+    // Nudged since it last moved: the run view shows it stuck until it moves.
+    let stuck = false
     let blockedAt = null
     let size = null
     let busy = null
+    // The run's time lost to Orca outages as of the last look: whatever it
+    // has grown by since moves every clock of this watch on by as much, since
+    // nothing of the worker could be seen meanwhile (ADR-0015).
+    let lostAt = outage.lost()
+    const skipOutages = () => {
+      const gone = outage.lost() - lostAt
+      if (!gone) return
+      lostAt += gone
+      graceFrom += gone
+      stillFrom += gone
+      lastLookAt += gone
+      if (lastNudgeAt !== null) lastNudgeAt += gone
+      if (blockedAt !== null) blockedAt += gone
+    }
 
     async function nudge(why, attempt) {
       out(`>> ${title}: ${why}; nudging it`)
       lastNudgeAt = graceFrom = clock.now()
+      stuck = true
       nudged(why, attempt)
       try {
         await orca.terminalSend({ terminal: w.terminal, text: nudgeText })
@@ -327,6 +400,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
         out(`!! ${title}: could not look at its worker: ${e.message}`)
         continue
       }
+      skipOutages()
       if (s.settled) return { outcome: s.outcome }
       if (s.gone) return { dead: 'its terminal is gone', gone: true }
 
@@ -347,6 +421,10 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       if (moved && !echo) {
         stillFrom = now
         stuckNudged = false
+        if (stuck) {
+          stuck = false
+          moving()
+        }
       }
 
       if (s.waiting) {
@@ -355,6 +433,8 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
           out(`!!!!!!!! ${title} is BLOCKED ON A HUMAN. Answer it in terminal ${w.terminal}.`)
           out(`!!!!!!!! waiting on: ${s.waiting}`)
           if (!hold) out(`!!!!!!!! ${title}: if nobody answers within ${mins(limits.blockedFailMs)} minutes, it fails and is kept as it stands, and ${limits.doctorRounds ? 'a doctor diagnoses it while its agent() waits' : 'agent() returns null'}`)
+          // Blocked is its state now, not stuck.
+          stuck = false
           blocked(s.waiting)
         }
         if (hold) blockedAt = now
@@ -421,6 +501,50 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     return { w, sessionId: adopt.sessionId, attempts: 0, continued, end }
   }
 
+  // The prompt worker-start typed must reach the session. A dialog the TUI
+  // opens on launch, such as Claude's "New MCP server found in this project"
+  // (mcp-answers.mjs), passes Orca's tui-idle wait and eats worker-start's
+  // Enter, leaving the prompt unsent in the input box, or gone: the worker
+  // then idles until a nudge. So once worker-start returns, the prompt (`sent`)
+  // must show as a user message in the session within promptDeliveryMs.
+  // Missing, the runner presses Enter; still missing, it empties the input
+  // (Ctrl-U, which can neither exit Claude nor interrupt it) and types the
+  // prompt again; still missing, the start fails with the terminal's last
+  // lines, stops its worker and closes its tab, and is retried like any failed
+  // start. pi is not checked: it writes its transcript only at its first
+  // assistant message, so a prompt it took would not show within the wait, and
+  // an adapter with no promptDelivered checks nothing.
+  async function deliver({ title, isolated, launch }, w, sessionId, sent) {
+    if (launch.harness !== 'claude' || !orca.promptDelivered || !sent) return
+    const ms = limits.promptDeliveryMs
+    const step = Math.max(1, Math.round(ms / 10))
+    const q = { harness: launch.harness, sessionId, worktree: w.worktree ?? null, needle: needleOf(sent) }
+    const arrives = async () => {
+      for (let waited = 0; ; waited += step) {
+        if (await orca.promptDelivered(q)) return true
+        if (waited >= ms) return false
+        await outage.sleep(step)
+      }
+    }
+    try {
+      if (await arrives()) return
+      out(`!! ${title}: its prompt is not in its session ${wait(ms)} after worker-start; pressing Enter in its terminal ${w.terminal}`)
+      await orca.terminalEnter({ terminal: w.terminal })
+      if (await arrives()) return void out(`>> ${title}: its prompt reached its session after the Enter`)
+      out(`!! ${title}: its prompt is still not in its session; emptying its input and typing the prompt again`)
+      const text = resendPrompt(w, sent)
+      await orca.terminalClearInput({ terminal: w.terminal, lines: text.split('\n').length + PREAMBLE_LINES })
+      await orca.terminalSend({ terminal: w.terminal, text })
+      if (await arrives()) return void out(`>> ${title}: its prompt reached its session when typed again`)
+      const screen = await orca.terminalScreen({ terminal: w.terminal, lines: 15 }).catch((e) => [`(its screen could not be read: ${e?.message ?? e})`])
+      throw new Error(`its prompt never reached its session, after an Enter and a second typing; its terminal's last lines:\n${screen.join('\n')}`)
+    } catch (e) {
+      await quietly(title, 'stop the worker its prompt never reached', () => orca.workerStop({ dispatch: w.dispatchId }))
+      await quietly(title, 'close its tab', () => orca.terminalClose({ terminal: w.terminal }))
+      throw Object.assign(e instanceof Object ? e : new Error(String(e)), { dispatched: true, ...(isolated && w.worktree && { worktree: w.worktree }) })
+    }
+  }
+
   // Starts the call's worker, retried as the settings table says. Once it
   // has failed for good, the call's null, or, for an agent() call, its
   // patient's failure, handed to its doctors. again: a doctor's remedy, the
@@ -452,15 +576,21 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
         // already have taken the last one.
         const sessionId = randomUUID()
         attempts = attempt
+        // The text worker-start sends as its spec, which the delivery check
+        // looks for in the session.
+        let sent = prompt
         try {
           const w = await orca.workerStart({
             run: runId,
-            prompt: patient != null ? prompt : (baseline) => workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline, note: again?.note ?? null }),
+            prompt: patient != null ? prompt : (baseline) => (sent = workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline, note: again?.note ?? null })),
             title,
             ...launch,
             sessionId,
             child: isolated ? { name: `${runId}-${call.origin ?? n}`, displayName: title, retry: attempt > 1 || !!again, dispatched, baseline, onBaseline, ...(setup && { setup }) } : null,
           })
+          // Logged at once: a start that then fails its delivery check made them too.
+          for (const why of w.warnings ?? []) warn(call, why)
+          await deliver(call, w, sessionId, sent)
           return { w, sessionId }
         } catch (e) {
           for (const path of [e?.worktree, ...(Array.isArray(e?.worktrees) ? e.worktrees : [])]) if (path) made.add(path)
@@ -479,8 +609,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       }
       return failAgent(call, { ...failure, ...retainMade() })
     }
-    for (const why of w.warnings ?? []) warn(call, why)
-    journal({ type: 'started', key, n, title, run: runId, dispatchId: w.dispatchId, harness: launch.harness, sessionId, worktree: w.worktree ?? null, terminal: w.terminal, dir, ...(call.origin != null && { origin: call.origin }) })
+    journal({ type: 'started', key, n, ...nodeOf(call), title, run: runId, dispatchId: w.dispatchId, harness: launch.harness, sessionId, worktree: w.worktree ?? null, terminal: w.terminal, dir, ...(call.origin != null && { origin: call.origin }) })
     if (isolated && w.worktree) await setStatus(call, w.worktree, phaseName === 'Gate' ? 'in-review' : 'in-progress')
     const on = [launch.harness, launch.model, launch.effort && `${launch.effort} effort`, launch.permissionMode && `${launch.permissionMode} mode`].filter(Boolean).join(', ')
     out(`>> ${title}: started on ${on} as dispatch ${w.dispatchId}, session ${sessionId}, in terminal ${w.terminal}${w.worktree ? ` in ${w.worktree}` : ''}`)
@@ -510,7 +639,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       out("!! no --permission-mode given: Claude workers start in Claude's own default permission mode, not in the orchestrator's.")
     }
     const { from = null } = call
-    const got = from?.restart ? await start(runId, call, from.restart) : from?.carry ? await carryOn(call, from.carry) : call.adopt ? await takeUp(call) : await start(runId, call, call.startAgain ?? null)
+    const got = from?.restart ? await start(runId, call, from.restart) : from?.carry ? await carryOn(call, from.carry) : call.halted ? await carryHalted(runId, call) : call.adopt ? await takeUp(call) : await start(runId, call, call.startAgain ?? null)
     if (!got || got[SICK]) return got
     const { sessionId, attempts } = got
     let { w, end = null, continued } = got
@@ -532,6 +661,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
         end ??= await watch(w, {
           title, harness: launch.harness, sessionId,
           nudged: (reason, attempt) => journal({ type: 'nudge', key, n, title, dispatchId: w.dispatchId, reason, attempt }),
+          moving: () => journal({ type: 'moving', key, n, title, dispatchId: w.dispatchId }),
           blocked: (waiting) => journal({ type: 'blocked', key, n, title, dispatchId: w.dispatchId, terminal: w.terminal, waiting: String(waiting) }),
           unblocked: () => journal({ type: 'unblocked', key, n, title, dispatchId: w.dispatchId }),
           mail,
@@ -593,8 +723,11 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
         }
         return failAgent(call, { ...failure, retained: retain() })
       }
-      journal({ type: 'result', key, n, title, result: result.value })
-      out(`<< ${title}: result received`)
+      // A node's result that needs the operator is held by the runner (ADR-0016).
+      const questions = call.node ? decisionsNeeded(result.value) : null
+      if (questions) setAside(resultPath)
+      journal({ type: 'result', key, n, ...nodeOf(call), title, result: result.value, ...(questions && { needsDecision: true }) })
+      out(questions ? `?? ${title}: result received; it needs decisions only the operator can make: ${questions.join(' · ')}` : `<< ${title}: result received`)
       delivered = true
       if (isolated && w.worktree && published(result.value)) await setStatus(call, w.worktree, 'completed')
       return result.value
@@ -612,7 +745,10 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   // call on a resume has `rounds`, its doctor rounds so far, and, while its
   // agent() waited on them, `held`, where they stood, and `origin`, its
   // agent's (both as the journal's fold names them): it is not supervised
-  // again, but goes on with its round.
+  // again, but goes on with its round. An agent() call that names its node
+  // has `node`, journaled on its lines; one the run halted on and a resume
+  // carries on has `adopt`, the worker it last ran, and `halted`, {
+  // needsDecision }: its session is continued (carryHalted), not taken up.
   async function life(call) {
     const { schema, key, n, label, title, adopt, held = null } = call
     // A worker taken up submits to the files its prompt named: the dir
@@ -626,7 +762,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     // agent it is, never as a new one with no worker.
     if (adopt) {
       journal({
-        type: 'reattached', key, n, title, run: adopt.run ?? takeOver, dispatchId: adopt.dispatchId, harness: adopt.harness ?? call.launch?.harness ?? null,
+        type: 'reattached', key, n, ...nodeOf(call), title, run: adopt.run ?? takeOver, dispatchId: adopt.dispatchId, harness: adopt.harness ?? call.launch?.harness ?? null,
         sessionId: adopt.sessionId, terminal: adopt.terminal, worktree: adopt.worktree, dir: rel, origin: adopt.origin ?? n, ...(adopt.continuations && { continuations: adopt.continuations }),
         ...(call.patient != null && { patient: call.patient, round: call.round }), ...(call.box?.needsYou != null && { needsYou: call.box.needsYou }),
       })
@@ -674,7 +810,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
         })
         // Its row from here on: nothing else is journaled until its worker starts,
         // or its first attempt fails. A worker taken up is journaled already.
-        if (!adopt && !from) journal({ type: 'starting', key: call.key, n, title, run: runId })
+        if (!adopt && !from) journal({ type: 'starting', key: call.key, n, ...nodeOf(call), title, run: runId })
         try {
           got = await supervise(runId, { ...call, dir: rel, schemaPath, resultPath, payloadPath, from })
         } finally {
@@ -717,6 +853,34 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       reason: held.reason, attempts: 0, continuations: adopt.continuations, run: adopt.run ?? runId, workerLeft: true, harness: adopt.harness ?? launch.harness,
       sessionId: adopt.sessionId, worktree: isolated ? w.worktree ?? null : null, w, gone: !!end?.gone, keep: () => ({ retained: keep(call, w) }),
     }
+  }
+
+  // A node the run halted on, resumed (ADR-0016): its session continued in its
+  // own worktree, in its own tab, or in a new one there once that is gone, with
+  // haltedPrompt, then watched as any worker, its continuations counted
+  // afresh. call.adopt is the worker it last ran; call.halted { needsDecision }.
+  async function carryHalted(runId, call) {
+    const { key, n, title, launch, adopt, halted } = call
+    const w = { dispatchId: adopt.dispatchId, terminal: adopt.terminal, worktree: adopt.worktree }
+    // A dispatch that settled cannot be watched again: its session is
+    // continued under a new one, in a new tab, its old tab closed first so no
+    // second process holds the session. One kept running (blocked, or past its
+    // cap) is interrupted and continued in its own tab.
+    let gone = true
+    try {
+      const s = await orca.workerShow({ dispatch: w.dispatchId })
+      if (s.settled && !s.gone) await quietly(title, 'close its settled tab', () => orca.terminalClose({ terminal: w.terminal }))
+      gone = !!(s.gone || s.settled)
+    } catch {}
+    out(`>> ${title}: resuming node ${call.node}: continuing session ${adopt.sessionId} ${gone ? `in a new terminal in ${w.worktree ?? 'its worktree'}` : `in terminal ${w.terminal}`}`)
+    let next
+    try {
+      next = await orca.workerContinue({ run: runId, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: haltedPrompt(!!halted.needsDecision), ...launch, sessionId: adopt.sessionId, reopen: gone })
+    } catch (e) {
+      return failAgent(call, { reason: `resuming its session failed: ${e?.message ?? e}`, attempts: 0, run: runId, retained: keep(call, w) })
+    }
+    journal({ type: 'continued', key, n, ...nodeOf(call), title, dispatchId: next.dispatchId, sessionId: adopt.sessionId, terminal: next.terminal, reason: 'the run was resumed', attempt: 0, reopened: next.dispatchId !== w.dispatchId })
+    return { w: await moveTo(title, w, next), sessionId: adopt.sessionId, attempts: 0, continued: 0 }
   }
 
   // A remedy's continuation, applied once the patient holds its live slot:

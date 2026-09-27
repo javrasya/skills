@@ -5,12 +5,26 @@
 import { execFile } from 'child_process'
 import { existsSync } from 'fs'
 import { RUNNER_SETTINGS } from './settings.mjs'
+import { copyMcpAnswers } from './mcp-answers.mjs'
+import { sessionTranscripts } from './transcript.mjs'
 
 export class OrcaError extends Error {
   constructor(code, message, verb) {
     super(`orca ${verb}: ${code}${message ? ': ' + message : ''}`)
     this.code = code
   }
+}
+
+// Whether an Orca call failed because Orca is not there at all (ADR-0015):
+// its runtime gone (`runtime_unavailable`, in Orca's envelope or on bare
+// stderr), its CLI unable to start, or no orca to spawn. Only these are an
+// outage (outage.mjs). A timeout, or any error from an Orca that answered, is
+// not: a hung Orca must never stall the run without limit.
+export function orcaUnreachable(e) {
+  if (!(e instanceof Error)) return false
+  if (e.code === 'runtime_unavailable' || /\bruntime_unavailable\b/.test(e.message)) return true
+  if (/Unable to start the Orca CLI/.test(e.message)) return true
+  return e.code === 'ENOENT' && /\bspawn .+ ENOENT\b/.test(e.message)
 }
 
 const SETTLED_DISPATCH = new Set(['completed', 'failed', 'cancelled', 'canceled'])
@@ -241,9 +255,17 @@ const TAB_GONE = new Set(['terminal_not_writable', 'terminal_exited', 'terminal_
 // call(args, timeoutMs) and git(cwd, args, timeoutMs) run one Orca or git
 // command; clock.timer bounds every call at callMs, plus any wait it asks for,
 // and a worktree create at createMs. `platform` is the host's, which picks the
-// shell `logTail` types into.
-export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(bin), git = execGit, clock = { timer: realTimer }, callMs = RUNNER_SETTINGS.orcaCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, platform = process.platform } = {}) {
-  const orca = (args, waitMs = 0) => withTimeout(clock, callMs + waitMs, call(args, callMs + waitMs), args.slice(0, 2).join(' '))
+// shell `logTail` types into. guardWith(outage) makes every Orca command wait
+// out an Orca outage (outage.mjs) and run again, one command at a time, so a
+// start Orca drops out of half way goes on from the command that found it
+// gone; probe() is the outage's cheap look, never itself waited. `project` is
+// the checkout the runner runs in, every child worktree's parent, whose MCP
+// answers a child gets (mcp-answers.mjs), read and written through `fs`;
+// `transcripts` is what promptDelivered reads a session's transcript with.
+export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(bin), git = execGit, clock = { timer: realTimer }, callMs = RUNNER_SETTINGS.orcaCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, platform = process.platform, project = process.cwd(), fs, transcripts = sessionTranscripts() } = {}) {
+  const once = (args, waitMs = 0) => withTimeout(clock, callMs + waitMs, call(args, callMs + waitMs), args.slice(0, 2).join(' '))
+  let outage = null
+  const orca = (args, waitMs = 0) => (outage ? outage.guard(() => once(args, waitMs)) : once(args, waitMs))
   const bound = { git, clock, ms: callMs }
 
   const closeQuietly = (handle) => orca(['terminal', 'close', '--terminal', handle]).catch(() => {})
@@ -301,6 +323,11 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
   }
 
   return {
+    guardWith(o) {
+      outage = o
+    },
+    probe: () => once(['terminal', 'list']),
+
     // Run from the runner's own terminal: Orca binds the Run to the caller
     // and refuses a mutation made on another terminal's behalf. `terminal` is
     // that coordinator terminal, the runner's own.
@@ -380,6 +407,15 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
         // Only a create answered in time: one looked up after its timeout may
         // still be running its setup, so its lines are no baseline.
         if (c) {
+          // The operator's MCP answers go in first, so what they change is
+          // part of the baseline, as a setup hook's output is. A failure
+          // leaves the worker to the prompt-delivery check (lifecycle.mjs).
+          try {
+            const m = copyMcpAnswers({ project, worktree, ...(fs && { fs }) })
+            if (m.added.length) warnings.push(`the project has no answer for MCP server(s) ${m.added.join(', ')} of .mcp.json, so its worktree disables them`)
+          } catch (e) {
+            warnings.push(`could not copy the project's MCP server answers into its worktree: ${e?.message ?? e}`)
+          }
           baseline = porcelainLines(await gitIn(worktree, ['status', '--porcelain'], bound))
           await child.onBaseline?.({ worktree, lines: baseline })
         }
@@ -387,7 +423,8 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
         handle = t.terminal.handle
         await waitIdle(handle, command)
         dispatching = true
-        const r = await orca(workerStartArgs({ run, prompt: typeof prompt === 'function' ? prompt(baseline) : prompt, title, place, terminal: handle }))
+        const text = typeof prompt === 'function' ? prompt(baseline) : prompt
+        const r = await orca(workerStartArgs({ run, prompt: text, title, place, terminal: handle }))
         const effect = (r.effects || []).find((e) => e.kind === 'worktree')?.id
         return { dispatchId: r.dispatchId, taskId: r.taskId, terminal: handle, worktree: worktree ?? pathOf(effect) ?? pathOf(t.terminal.worktreeId), warnings }
       } catch (e) {
@@ -436,6 +473,37 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
     // for a check the idle agent never makes.
     async terminalSend({ terminal, text }) {
       await orca(['terminal', 'send', '--terminal', terminal, '--text', text, '--enter'])
+    },
+
+    // Whether the prompt worker-start typed reached the agent: a user message
+    // carrying `needle` in its session's transcript, which the runner finds
+    // by the session id it launched the harness with (transcript.mjs). Part
+    // of a worker's start, so the fake Orca answers it too, from the dialog
+    // it plays.
+    promptDelivered: ({ harness, sessionId, worktree, needle }) => transcripts.delivered({ harness, sessionId, worktree, needle }) === true,
+
+    // A bare Enter: submits whatever sits in the TUI's input box (live, Orca
+    // 1.4.214: `--enter` alone writes the one byte).
+    async terminalEnter({ terminal }) {
+      await orca(['terminal', 'send', '--terminal', terminal, '--enter'])
+    },
+
+    // Empties the TUI's input box with Ctrl-U, Claude's "delete from cursor to
+    // line start", once per line (`lines`), since each takes one line of a
+    // multiline input. Never Ctrl-C, whose second press on an empty input
+    // exits Claude, nor Esc, which interrupts a turn, and whose second press
+    // opens the rewind menu. Ctrl-U deletes text and nothing else (live, Orca
+    // 1.4.214, Claude Code 2.1.283: one emptied a typed draft).
+    async terminalClearInput({ terminal, lines = 1 }) {
+      await orca(['terminal', 'send', '--terminal', terminal, '--text', '\x15'.repeat(Math.max(1, lines))])
+    },
+
+    // The last `lines` rows of what the terminal renders now (`--screen`),
+    // not its accumulated output.
+    async terminalScreen({ terminal, lines = 15 }) {
+      const r = await orca(['terminal', 'read', '--terminal', terminal, '--screen'])
+      const tail = r?.terminal?.tail ?? r?.tail ?? []
+      return (Array.isArray(tail) ? tail : String(tail).split('\n')).map((l) => String(l).trimEnd()).slice(-lines)
     },
 
     async workerStop({ dispatch }) {

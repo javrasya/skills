@@ -13,6 +13,12 @@
 //              after a whole-run `reclaimed`, is a resume: the run is going
 //              again, so it is running and no longer reclaimed
 //   ended      outcome: ok, partial or failed
+//   paused     reason: the run's runner is alive but has paused it, which
+//              fails no agent: `orca outage`, Orca gone past its limit (ADR-0015)
+//   unpaused   the runner carries it on again
+//   halted     node, reason: the run halted on a node that failed or needs a
+//              decision (ADR-0016); its runner stays, and R carries it on
+//   unhalted   no failed or needs-decision node is left: it runs again
 //   reclaimed  agent: the reclaimed agent's worktree name, `<runId>-<n>`, n
 //              being the call that started its worker (its origin: a resume
 //              numbers its calls on, never its agents); for an agent with no
@@ -61,13 +67,22 @@ export function runRegistry(path = REGISTRY_PATH, clock = { now: () => Date.now(
       append({ type: 'ended', runId, outcome })
     },
     reclaimed: ({ runId, agent = null }) => append({ type: 'reclaimed', runId, ...(agent && { agent }) }),
+    paused: ({ runId, reason }) => append({ type: 'paused', runId, reason }),
+    unpaused: ({ runId }) => append({ type: 'unpaused', runId }),
+    halted: ({ runId, node, reason }) => append({ type: 'halted', runId, node, reason }),
+    unhalted: ({ runId }) => append({ type: 'unhalted', runId }),
   }
 }
 
 // Every run the registry knows, in the order they were armed:
 //   { runId, project, runDir, spec, script, permissionMode, armedAt,
-//     state: 'running' | 'ok' | 'partial' | 'failed', endedAt,
+//     state: 'running' | 'halted' | 'ok' | 'partial' | 'failed', endedAt,
+//                                       — halted: its runner halted it, and
+//                                         has not carried it on since
 //     runner: { terminal, at } | null   — where a runner was last seen on it,
+//     paused: { reason, at } | null     — its runner paused it, and has not
+//                                         carried it on, ended it or been
+//                                         followed by another runner,
 //     reclaimed: boolean, reclaimedAt,  — the whole run
 //     reclaimedAgents: [{ agent, at }] }
 // 'running' only means no `ended` was written since a runner last started on
@@ -93,15 +108,19 @@ export function readRegistry(path = REGISTRY_PATH) {
         runs.set(e.runId, {
           runId: e.runId, project: e.project ?? null, runDir: e.runDir ?? null, spec: e.spec ?? null,
           script: e.script ?? null, permissionMode: e.permissionMode ?? null, armedAt: e.at ?? null,
-          state: 'running', endedAt: null, runner: null, reclaimed: false, reclaimedAt: null, reclaimedAgents: [],
+          state: 'running', endedAt: null, runner: null, paused: null, reclaimed: false, reclaimedAt: null, reclaimedAgents: [],
         })
       }
       continue
     }
     const run = runs.get(e.runId)
     if (!run) continue
-    if (e.type === 'runner') Object.assign(run, { runner: { terminal: e.terminal ?? null, at: e.at ?? null }, state: 'running', endedAt: null, reclaimed: false, reclaimedAt: null })
-    else if (e.type === 'ended' && OUTCOMES.includes(e.outcome)) Object.assign(run, { state: e.outcome, endedAt: e.at ?? null })
+    if (e.type === 'runner') Object.assign(run, { runner: { terminal: e.terminal ?? null, at: e.at ?? null }, state: 'running', endedAt: null, paused: null, reclaimed: false, reclaimedAt: null })
+    else if (e.type === 'ended' && OUTCOMES.includes(e.outcome)) Object.assign(run, { state: e.outcome, endedAt: e.at ?? null, paused: null })
+    else if (e.type === 'paused') run.paused = { reason: e.reason ?? null, at: e.at ?? null }
+    else if (e.type === 'unpaused') run.paused = null
+    else if (e.type === 'halted' && run.state === 'running') run.state = 'halted'
+    else if (e.type === 'unhalted' && run.state === 'halted') run.state = 'running'
     else if (e.type === 'reclaimed') {
       if (e.agent) run.reclaimedAgents.push({ agent: e.agent, at: e.at ?? null })
       else Object.assign(run, { reclaimed: true, reclaimedAt: e.at ?? null })

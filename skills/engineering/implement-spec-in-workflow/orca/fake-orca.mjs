@@ -18,6 +18,14 @@
 // whether its tab is open is `terminalList`'s to say. `setupLeaves` is the
 // porcelain every child worktree is born with, as a setup hook's output.
 //
+// `promptLoss({ title, count, sessionId })` says how a start's prompt fails to
+// reach its worker, as a dialog on the agent's launch makes it (count: the
+// how-manieth start): `dialog`, left unsent in the input box until an Enter
+// (terminalEnter); `lost`, gone, until typed again into an emptied input
+// (terminalSend); `never`, not at all, its tab showing the dialog
+// (terminalScreen); or nothing, delivered. Its worker plays only once it is
+// delivered, and promptDelivered answers whether it has been.
+//
 // `faults` fails a step the way real Orca can: step -> ({ count, ...ctx }) =>
 // an error to throw, 'hang' for a call Orca never answers (it fails as the
 // adapter's call timeout does, on `clock`), or nothing. On worktreeCreate,
@@ -53,6 +61,13 @@
 // delivery id, its messages' ids kept. A worker_done settles the dispatch
 // that sent it. `mailCheck` is a step too, handed { ack, batch }: the batch's
 // messages before the ack applies, so a fault can fail an ack.
+//
+// down(error) takes Orca away, as an update does (ADR-0015): every call the
+// runner or the run view makes fails with `error`, one of orcaUnreachable's,
+// until up(). A worker's own calls (mailSend, workerDone) come from its pane,
+// not from the runner, and still land. guardWith(outage) waits each call, and
+// each step of a start, on the runner's outage (outage.mjs), as the adapter
+// waits each command; probe() is the outage's look, recorded as `probe`.
 import { existsSync } from 'fs'
 import { OrcaError, reuseWorktree, afterCreateTimeout, launchCommand, resumeCommand, resumeRunnerCommand, tailCommand, workerStartArgs, withTimeout, workerStatus } from './orca-cli.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
@@ -64,7 +79,7 @@ export const fakeTranscripts = (orca) => ({
   path: ({ sessionId }) => `C:/fake/transcripts/${sessionId}.jsonl`,
 })
 
-export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run', runPrefix = 'run_fake', coordinator = 'term_runner', tabs = [], faults = {}, callMs = RUNNER_SETTINGS.orcaCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, setupLeaves = [] } = {}) {
+export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run', runPrefix = 'run_fake', coordinator = 'term_runner', tabs = [], faults = {}, callMs = RUNNER_SETTINGS.orcaCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, setupLeaves = [], promptLoss = () => null } = {}) {
   const calls = []
   const dispatches = new Map()
   const worktrees = new Map([[runWorktree, { parent: null, name: null, displayName: null, removed: false, status: null, porcelain: [], commits: 0, unpushed: 0 }]])
@@ -86,6 +101,17 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     return mailboxes.get(run)
   }
   const record = (c) => calls.push(clock ? { ...c, at: clock.now() } : c)
+  let outage = null
+  let gone = null
+  // Where every call from the runner or the view meets Orca, there or not;
+  // only while Orca is away, so a call with Orca there takes no extra turn.
+  const away = () => !!gone || !!outage?.state()
+  const reach = () => {
+    const there = async () => {
+      if (gone) throw gone
+    }
+    return outage ? outage.guard(there) : there()
+  }
 
   async function hang(name, ms) {
     if (!clock) throw new Error(`fake orca: ${name} hangs, but no clock was given to time it out`)
@@ -94,6 +120,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
 
   // Resolves 'hang-after' for its caller to act on; throws every other fault.
   async function step(name, ctx = {}, ms = callMs) {
+    if (away()) await reach()
     counts[name] = (counts[name] ?? 0) + 1
     const f = faults[name]?.({ ...ctx, count: counts[name], orca })
     if (f === 'hang') await hang(name, ms)
@@ -140,7 +167,8 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     if (!found) return null
     const [path, w] = found
     await reuseWorktree(path, { dispatched, baseline }, {
-      held: () => [...dispatches.values()].some((d) => d.worktree === path && !d.released),
+      // As the adapter's: an agent's tab still open in it.
+      held: () => [...dispatches.values()].some((d) => d.worktree === path && !d.released && !d.gone),
       lines: () => w.porcelain,
       commits: () => w.commits,
     })
@@ -161,7 +189,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
 
   const preambleOf = (n) => ({ handle: `term_fake${n}`, capability: `cap_fake${n}`, taskId: `task_fake${n}`, dispatchId: `ctx_fake${n}` })
   const preambleIn = (d) => ({ handle: d.handle, capability: d.capability, taskId: d.taskId, dispatchId: d.dispatchId })
-  const fresh = () => ({ settled: false, outcome: null, released: false, stopped: false, gone: false, exited: false, idle: false, waiting: null, nudges: [] })
+  const fresh = () => ({ settled: false, outcome: null, released: false, stopped: false, gone: false, exited: false, idle: false, waiting: null, nudges: [], delivery: null })
 
   // worker-show's answer, in real Orca's shape (live, Orca 1.4.209).
   const STATUS = { succeeded: 'completed', failed: 'failed', cancelled: 'cancelled' }
@@ -200,6 +228,13 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     runs,
     as,
     closeTab: (handle) => closedTabs.add(handle),
+    down: (error) => { gone = error },
+    up: () => { gone = null },
+    guardWith: (o) => { outage = o },
+    async probe() {
+      record({ verb: 'probe', ok: !gone })
+      if (gone) throw gone
+    },
 
     async runCreate({ objective }) {
       await step('runCreate', { objective })
@@ -229,6 +264,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     // and `argv` are what the real adapter would type and run.
     async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null }) {
       if (!sessionId) throw new Error(`fake orca: ${title} was started without a runner-assigned --session-id`)
+      if (away()) await reach()
       const command = launchCommand({ harness, model, effort, permissionMode, sessionId })
       const preamble = preambleOf(++seq)
       const launch = { harness, model, effort, permissionMode }
@@ -304,7 +340,14 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       }
       dispatches.set(d.dispatchId, d)
       record({ verb: 'workerStart', dispatchId: d.dispatchId, title, ...launch, sessionId, command, argv, placement: child ? 'new-child' : 'current', worktree })
-      play(d, () => worker({ prompt: text, preamble, worktree, orca, state: d }))
+      // The worker plays only once its prompt reaches it (promptLoss).
+      counts.promptLoss = (counts.promptLoss ?? 0) + 1
+      d.delivery = promptLoss({ title, count: counts.promptLoss, sessionId }) ?? null
+      d.deliver = () => {
+        d.delivery = null
+        play(d, () => worker({ prompt: text, preamble, worktree, orca, state: d }))
+      }
+      if (!d.delivery) d.deliver()
       return { dispatchId: d.dispatchId, taskId: d.taskId, terminal: d.handle, worktree, warnings }
     },
 
@@ -314,6 +357,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     // played by the `onContinue` its state carries, handed the worker's
     // original prompt and the preamble it now holds.
     async workerContinue({ run, dispatch: id, terminal: handle, worktree, title, prompt: text, harness = 'claude', model, effort, permissionMode, sessionId, reopen = false }) {
+      if (away()) await reach()
       const d = dispatch(id, 'terminal send')
       if (sessionId !== d.sessionId) throw new Error(`fake orca: ${title} was continued with session ${sessionId}, not its own ${d.sessionId}`)
       const command = resumeCommand({ harness, model, effort, permissionMode, sessionId })
@@ -338,24 +382,67 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     },
 
     async workerShow({ dispatch: id }) {
+      if (away()) await reach()
       const s = show(dispatch(id, 'orchestration worker-show'))
       record({ verb: 'workerShow', dispatchId: id, settled: s.settled })
       return s
     },
 
     async terminalIdle({ terminal: handle }) {
+      if (away()) await reach()
       return terminal(handle, 'terminal wait').idle
     },
 
     async terminalSend({ terminal: handle, text }) {
+      if (away()) await reach()
       const d = terminal(handle, 'terminal send', 'terminal_not_writable')
       record({ verb: 'terminalSend', dispatchId: d.dispatchId, text })
+      // The prompt typed again into an empty input reaches a worker whose
+      // first one was lost.
+      if (d.delivery === 'lost') return d.deliver()
       d.nudges.push(text)
       await d.onNudge?.(text)
     },
 
+    // Whether the worker's prompt reached it. A `dialog` holds it unsent in
+    // the input box until an Enter; one `lost` needs typing again; `never`
+    // takes nothing. Not recorded: the adapter reads it from the session's
+    // transcript, never from Orca.
+    async promptDelivered({ sessionId }) {
+      const d = [...dispatches.values()].filter((x) => x.sessionId === sessionId).at(-1)
+      return !!d && !d.delivery
+    },
+
+    async terminalEnter({ terminal: handle }) {
+      if (away()) await reach()
+      const d = terminal(handle, 'terminal send', 'terminal_not_writable')
+      record({ verb: 'terminalEnter', dispatchId: d.dispatchId })
+      if (d.delivery === 'dialog') d.deliver()
+    },
+
+    // Emptying the input drops a prompt a dialog held unsent.
+    async terminalClearInput({ terminal: handle, lines = 1 }) {
+      if (away()) await reach()
+      const d = terminal(handle, 'terminal send', 'terminal_not_writable')
+      record({ verb: 'terminalClearInput', dispatchId: d.dispatchId, lines })
+      if (d.delivery === 'dialog') d.delivery = 'lost'
+    },
+
+    // What the tab renders: a worker whose prompt never arrives sits at a
+    // dialog, the rest at an idle prompt.
+    async terminalScreen({ terminal: handle, lines = 15 }) {
+      if (away()) await reach()
+      const d = terminal(handle, 'terminal read')
+      record({ verb: 'terminalScreen', dispatchId: d.dispatchId, lines })
+      const screen = d.delivery === 'never'
+        ? ['New MCP server found in this project: slint', '❯ 1. Use this and all future MCP servers in this project', '  2. Use this MCP server', '  3. Continue without using this MCP server', 'Enter to confirm · Esc to cancel']
+        : ['❯ ']
+      return screen.slice(-lines)
+    },
+
     // A stopped Dispatch is cancelled: settled, so no longer live.
     async workerStop({ dispatch: id }) {
+      if (away()) await reach()
       const d = dispatch(id, 'orchestration worker-stop')
       record({ verb: 'workerStop', dispatchId: id })
       d.stopped = true
@@ -364,12 +451,14 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
 
     // Orca keeps a tab the worker did not create: releasing closes nothing.
     async workerRelease({ dispatch: id }) {
+      if (away()) await reach()
       const d = dispatch(id, 'orchestration worker-release')
       record({ verb: 'workerRelease', dispatchId: id })
       d.released = true
     },
 
     async terminalRename({ terminal, title }) {
+      if (away()) await reach()
       const d = [...dispatches.values()].find((x) => x.handle === terminal && !x.released)
       if (!d) throw new OrcaError('terminal_handle_stale', `no terminal ${terminal}`, 'terminal rename')
       record({ verb: 'terminalRename', dispatchId: d.dispatchId, title })
@@ -424,12 +513,14 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     // Open tabs only: the runner's own, and every worker's whose tab is
     // neither gone nor closed. No row names a run or a dispatch.
     async terminalList() {
+      if (away()) await reach()
       record({ verb: 'terminalList' })
       return [coordinator, ...openTabs, ...[...logTabs].filter(([, t]) => t.open).map(([h]) => h), ...[...dispatches.values()].filter((d) => !d.gone).map((d) => d.handle)]
         .filter((h) => !closedTabs.has(h))
     },
 
     async terminalClose({ terminal: handle }) {
+      if (away()) await reach()
       if (logTabs.get(handle)?.open) {
         record({ verb: 'terminalClose', terminal: handle })
         logTabs.get(handle).open = false
@@ -444,6 +535,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
 
     // The runner's own tab, a log's, or a worker's; a closed one is refused as exited.
     async terminalSwitch({ terminal: handle }) {
+      if (away()) await reach()
       if (logTabs.has(handle)) {
         if (!logTabs.get(handle).open) throw new OrcaError('terminal_exited', 'terminal_exited', 'terminal switch')
       } else if (handle !== coordinator) terminal(handle, 'terminal switch', 'terminal_exited')
@@ -454,6 +546,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     // As real Orca: only a file inside the worktree, the cwd's unless
     // `worktree` names one, whatever exists outside it.
     async fileOpen({ path, worktree = runWorktree }) {
+      if (away()) await reach()
       const norm = (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
       if (!norm(path).startsWith(norm(worktree) + '/')) throw new OrcaError('runtime_error', 'invalid_relative_path', 'file open')
       if (!existsSync(path)) throw new OrcaError('runtime_error', `ENOENT: no such file or directory, open '${path}'`, 'file open')
@@ -463,6 +556,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     // A tab in the run's worktree following `path`: `command` is what the
     // real adapter types into it. Orca reads no path here; the shell does.
     async logTail({ path, title }) {
+      if (away()) await reach()
       const handle = `term_log${logTabs.size + 1}`
       logTabs.set(handle, { path, title, open: true })
       record({ verb: 'logTail', path, title, command: tailCommand(path), terminal: handle })
@@ -472,6 +566,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     // A tab in a worktree Orca knows, running the runner's resume: `command`
     // is what the real adapter types into it.
     async resumeRunner({ worktree, title, runner, script, stateDir, permissionMode = null }) {
+      if (away()) await reach()
       const command = resumeRunnerCommand({ runner, script, stateDir, permissionMode })
       const w = worktrees.get(worktree)
       if (!w || w.removed) throw new OrcaError('selector_not_found', `no worktree ${worktree}`, 'terminal create')
@@ -483,6 +578,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
 
     // `orca worktree rm --force`: it also kills every terminal in the worktree.
     async worktreeRemove({ path }) {
+      if (away()) await reach()
       const w = worktrees.get(path)
       if (!w || w.removed) throw new OrcaError('selector_not_found', `no worktree ${path}`, 'worktree rm')
       record({ verb: 'worktreeRemove', path })

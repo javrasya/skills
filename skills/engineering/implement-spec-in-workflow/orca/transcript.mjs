@@ -6,7 +6,7 @@
 //   pi:     ~/.pi/agent/sessions/--<enc>--/<created-at>_<id>.jsonl, the enc
 //           being the cwd with '/', '\' and ':' as '-'. pi writes the file
 //           lazily, at its first assistant message.
-import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from 'fs'
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'fs'
 import { homedir } from 'os'
 import { join, resolve } from 'path'
 
@@ -131,10 +131,34 @@ function usageReader() {
   }
 }
 
+// Whether a Claude transcript's text holds a user message carrying `needle`:
+// the prompt worker-start typed, submitted. Whitespace is compared collapsed,
+// as a TUI may rewrap what is typed into it. A meta line (a hook's or a local
+// command's) and a subagent's are no prompt of the session's.
+const flat = (s) => String(s ?? '').replace(/\s+/g, ' ').trim()
+export function promptDelivered(text, needle) {
+  const want = flat(needle)
+  if (!want) return false
+  for (const line of String(text).split('\n')) {
+    let e
+    try {
+      e = JSON.parse(line)
+    } catch {
+      continue
+    }
+    if (e?.type !== 'user' || e.isMeta || e.isSidechain) continue
+    const c = e.message?.content
+    const said = typeof c === 'string' ? c : Array.isArray(c) ? c.filter((b) => b?.type === 'text').map((b) => b.text).join('\n') : ''
+    if (flat(said).includes(want)) return true
+  }
+  return false
+}
+
 // size({ harness, sessionId, worktree }) is the transcript's length in bytes,
 // or null while it has none; path(…) is where it is, or null; usage(…) is
 // { path, context, tokens }, context and tokens null until an assistant turn
-// is written, or null with no transcript. None throws: a transcript the
+// is written, or null with no transcript; delivered({ …, needle }) is
+// promptDelivered on it, false with no transcript. None throws: a transcript the
 // caller cannot see is a signal missing, not a dead worker. A found path is
 // remembered; the scan of every project dir runs on the first miss and every
 // `scanEvery`-th one after, since a runner looks at every live worker every
@@ -168,6 +192,10 @@ export function sessionTranscripts({ home = homedir(), env = process.env, scanEv
       return path ? statSync(path).size : null
     }),
     path: quiet(locate),
+    delivered: quiet((q) => {
+      const path = locate(q)
+      return path ? promptDelivered(readFileSync(path, 'utf8'), q.needle) : false
+    }),
     usage: quiet((q) => {
       const path = locate(q)
       return path ? { path, ...usage(path) } : null

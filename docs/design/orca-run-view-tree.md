@@ -8,7 +8,7 @@ The reference design for the Orca runner's [run view](../../CONTEXT.md) (spec #4
 
 - **Layout:**
   - A header: the run's name, project, Run id, spec, whether the runner is alive, and elapsed time. Under it, the number of agents in each state, blocked and needs you first.
-  - One row per phase. When the phase is unfolded, one row per agent sits under it.
+  - One row per phase, in the order the script's `meta.phases` declares them, then any it does not declare, in the order their agents were called. When the phase is unfolded, one row per agent sits under it, in call order.
   - A bottom pane that describes the selected row.
   - A key-help line.
 - **Phase row:**
@@ -17,7 +17,7 @@ The reference design for the Orca runner's [run view](../../CONTEXT.md) (spec #4
   - When folded, also `peak ctx` for the phase.
   - Clicking the row, pressing Enter, or using ←/→ folds and unfolds it.
 - **Agent row:**
-  - The agent's number, its label, and its state as a glyph and a word (`· queued`, `◌ starting`, `● running`, `! blocked`, `? needs you` (bold yellow), `◐ stuck`, `↻ continued`, `✓ done`, `✗ failed`, `○ reclaimed`). `starting` covers a start being retried; `reclaimed` replaces whatever it was once the registry records it reclaimed. `needs you` is a doctor that escalated: it waits on a human for as long as it takes, until its next handoff, escalation or `worker_done`. The runner's own continuations of a session are not in it: the pane names them (#77).
+  - The agent's number, its label in a column 34 wide (a longer one cut to end in `…`; on the selected row it scrolls instead: its start for 3 s, left at 4 characters a second to its end, its end for 5 s, and over again from its start, each time the row is selected afresh), and its state as a glyph and a word (`· queued`, `◌ starting`, `● running`, `! blocked`, `? needs you` (bold yellow), `◐ stuck`, `↻ continued`, `✓ done`, `✗ failed`, `○ reclaimed`). `stuck` is a nudged worker, until it moves again (or is blocked, continued or settles). `starting` covers a start being retried; `reclaimed` replaces whatever it was once the registry records it reclaimed. `needs you` is a doctor that escalated: it waits on a human for as long as it takes, until its next handoff, escalation or `worker_done`. The runner's own continuations of a session are not in it: the pane names them (#77).
   - A doctor's patient shows its trail (#77): one `✗` for each failure a doctor answered, then its glyph and state, a remedy's `continued` drawn `●`, and its attempt after the state: `✗ failed`, `✗● continued`, `✗✗ failed ×2`, `✗✗● continued ×2`, `✗✗✓ done ×3`. While it is failed its last `✗` is its glyph; `continued ×N` counts the doctors' continuations of it. A round after one that gave up answers the same failure, and adds no `✗`.
   - A context bar with the context size.
   - Cumulative tokens, and elapsed time.
