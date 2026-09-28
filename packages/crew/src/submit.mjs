@@ -3,9 +3,11 @@
 // on its result: it validates the payload against the agent's schema and
 // exits 1 with every error, so the agent repairs its payload inside its own
 // turn. Only a valid payload is recorded, and only then is worker_done sent.
-import { readFileSync, writeFileSync, renameSync, realpathSync } from 'fs'
+import { readFileSync, realpathSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { validate } from './schema.mjs'
+import { parseFlags } from './args.mjs'
+import { writeJsonAtomic } from './fsutil.mjs'
 import { openHost, workerHost } from './hosts.mjs'
 
 export const USAGE =
@@ -22,13 +24,14 @@ const FLAGS = {
 }
 
 function parseArgs(argv) {
-  const a = {}
-  for (let i = 0; i < argv.length; i += 2) {
-    const key = FLAGS[argv[i]]
-    if (!key) throw new Error(`unknown argument ${argv[i]}`)
-    if (argv[i + 1] === undefined) throw new Error(`${argv[i]} needs a value`)
-    a[key] = argv[i + 1]
+  let parsed
+  try {
+    parsed = parseFlags(argv, { strings: Object.keys(FLAGS), dashValues: true })
+  } catch (e) {
+    throw e.kind === 'unexpected' ? new Error(`unknown argument ${e.message.slice('unexpected '.length)}`) : e
   }
+  if (parsed.positionals.length) throw new Error(`unknown argument ${parsed.positionals[0]}`)
+  const a = Object.fromEntries(Object.entries(parsed.values).map(([flag, v]) => [FLAGS[flag], v]))
   const missing = ['result', 'payload', 'taskId', 'dispatchId'].filter((k) => !a[k])
   if (missing.length) throw new Error(`missing ${missing.map((k) => Object.keys(FLAGS).find((f) => FLAGS[f] === k)).join(', ')}`)
   return a
@@ -89,8 +92,7 @@ export async function submit(argv, { host, stdout = (s) => process.stdout.write(
 
   // Written whole or not at all: the runner reads this file once it sees the
   // worker settle, and must never read half of it.
-  writeFileSync(a.result + '.tmp', JSON.stringify(value))
-  renameSync(a.result + '.tmp', a.result)
+  writeJsonAtomic(a.result, value)
 
   try {
     await (host ?? await openHost(workerHost())).workerDone({

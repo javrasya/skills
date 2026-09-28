@@ -7,10 +7,13 @@
 // the repo's path) and pre-fill the next form, beating the harness's own
 // default. A model is remembered per harness, so switching harness never
 // carries Claude's model to pi.
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
+import { mkdirSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import { readCrewConfig, samePath } from './crew-config.mjs'
+import { readCrewConfig } from './crew-config.mjs'
+import { parseFlags } from './args.mjs'
+import { writeJsonAtomic } from './fsutil.mjs'
+import { samePath } from './paths.mjs'
 import { branchNames, currentBranch, execProgram, ghRepo, ghStackInstalled, stacksApi } from './git.mjs'
 import { HARNESSES, lastUsedModel, piModels } from './harness.mjs'
 
@@ -40,7 +43,7 @@ const unique = (xs) => [...new Set(xs.filter(Boolean))]
 export async function probeStart({ cwd = process.cwd(), paths, home = homedir(), env = process.env, run = execProgram } = {}) {
   const claudeLast = lastUsedModel('claude', { home, env })
   const piLast = lastUsedModel('pi', { home, env })
-  const [branch, branches, repo, installed, pi] = await Promise.all([currentBranch(cwd, run), branchNames(cwd, run), ghRepo(cwd, run), ghStackInstalled(run), piModels(run, { env })])
+  const [branch, branches, repo, installed, pi] = await Promise.all([currentBranch(cwd, run), branchNames(cwd, run), ghRepo(cwd, run), ghStackInstalled(run), piModels(run, { env, cwd })])
   const api = await stacksApi(repo, run)
   return {
     repo,
@@ -70,20 +73,9 @@ export function stackOptions({ installed, api, detail }) {
 // The flag-given answers in argv, by row, and the words that are no flag of
 // the form's. A flag with no value is an error naming it.
 export function flagsToAnswers(argv) {
-  const answers = {}
-  const rest = []
-  for (let i = 0; i < argv.length; i++) {
-    const row = ROWS.find((r) => FLAGS[r] === argv[i])
-    if (!row) {
-      rest.push(argv[i])
-      continue
-    }
-    const value = argv[i + 1]
-    if (value === undefined || value.startsWith('--')) throw new Error(`${argv[i]} needs a value`)
-    answers[row] = value
-    i++
-  }
-  return { answers, rest }
+  const { values, positionals } = parseFlags(argv, { strings: Object.values(FLAGS) })
+  const answers = Object.fromEntries(ROWS.filter((r) => values[FLAGS[r]] !== undefined).map((r) => [r, values[FLAGS[r]]]))
+  return { answers, rest: positionals }
 }
 
 // The form over the facts, pre-filled from the remembered answers, then the
@@ -198,6 +190,5 @@ export function rememberAnswers(paths, repo, answers) {
   delete all[key].model
   mkdirSync(paths.home, { recursive: true })
   const file = answersFile(paths)
-  writeFileSync(`${file}.tmp`, `${JSON.stringify(all, null, 2)}\n`)
-  renameSync(`${file}.tmp`, file)
+  writeJsonAtomic(file, all)
 }

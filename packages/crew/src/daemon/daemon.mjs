@@ -34,12 +34,14 @@
 // started this daemon cannot give the run a second runner.
 import net from 'net'
 import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync } from 'fs'
-import { join, resolve } from 'path'
+import { join } from 'path'
 import { StringDecoder } from 'string_decoder'
 import { fileURLToPath } from 'url'
 import { connect, crewPaths, lineDecoder, noDaemon, send } from './transport.mjs'
 import { runBook, runnerCommand, runnerTitle } from './runs.mjs'
 import { REGISTRY_PATH } from '../registry.mjs'
+import { pathKey } from '../paths.mjs'
+import { sleep } from '../util.mjs'
 
 const VERSION = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
 const log = (...parts) => console.log(new Date().toISOString(), ...parts)
@@ -98,7 +100,7 @@ const pidIn = (runDir) => {
 }
 
 // A run dir as one key, however it is spelled.
-const runKey = (dir) => (process.platform === 'win32' ? resolve(dir).toLowerCase() : resolve(dir))
+const runKey = (dir) => pathKey(dir)
 
 // liveRuns: the runs this daemon is host to that are not over, which stop
 // refuses over (runs.mjs). registry: the run registry, which says which runs
@@ -150,7 +152,7 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
           continue
         }
         const pid = pidIn(runDir)
-        for (const deadline = Date.now() + runnerGoneMs; pid && alive(pid) && Date.now() < deadline; ) await new Promise((r) => setTimeout(r, 100))
+        for (const deadline = Date.now() + runnerGoneMs; pid && alive(pid) && Date.now() < deadline; ) await sleep(100)
         if (pid && alive(pid)) {
           say(`run ${runId}: its runner, pid ${pid}, still runs: not resumed`)
           continue

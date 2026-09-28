@@ -280,22 +280,26 @@ test('probeStart: no pi, no gh-stack, no settings still makes a form', async () 
   assert.ok(!run.calls.some((c) => c.startsWith('gh extension install')), 'probing never installs')
 })
 
-test('pi models: a pi.cmd shim that does not start bare on Windows is asked through ComSpec', async () => {
+test('pi models: on Windows pi is found on Path as a shell finds it, and a pi.cmd shim is run through ComSpec', async () => {
   const list = { stdout: 'provider   model   context\nanthropic  claude-opus-4-6  1M\n' }
-  const shim = fakeRun({ 'C:\\Windows\\cmd.exe /d /c pi --list-models': list })
-  assert.deepEqual(await piModels(shim, { platform: 'win32', env: { ComSpec: 'C:\\Windows\\cmd.exe' } }), ['anthropic/claude-opus-4-6'])
-  assert.deepEqual(shim.calls, ['pi --list-models', 'C:\\Windows\\cmd.exe /d /c pi --list-models'])
-  // A pi that starts bare is asked once; elsewhere a pi that does not start is not retried.
-  const bare = fakeRun({ 'pi --list-models': list })
-  assert.deepEqual(await piModels(bare, { platform: 'win32', env: {} }), ['anthropic/claude-opus-4-6'])
-  assert.deepEqual(bare.calls, ['pi --list-models'])
-  const linux = fakeRun({ 'cmd.exe': list })
-  assert.deepEqual(await piModels(linux, { platform: 'linux', env: {} }), [])
+  const bin = mkdtempSync(join(tmpdir(), 'crew-pi-'))
+  writeFileSync(join(bin, 'pi.cmd'), '@echo off\n')
+  const env = { Path: bin, PATHEXT: '.EXE;.CMD', ComSpec: 'C:\\Windows\\cmd.exe' }
+  const shim = fakeRun({ [`C:\\Windows\\cmd.exe /d /c ${join(bin, 'pi.cmd')} --list-models`]: list })
+  assert.deepEqual(await piModels(shim, { platform: 'win32', env }), ['anthropic/claude-opus-4-6'])
+  assert.deepEqual(shim.calls, [`C:\\Windows\\cmd.exe /d /c ${join(bin, 'pi.cmd')} --list-models`], 'asked once, through the shell, by its path')
+  // A pi.exe is run as it is; elsewhere pi is run by its name.
+  writeFileSync(join(bin, 'pi.exe'), '')
+  const exe = fakeRun({ [`${join(bin, 'pi.exe')} --list-models`]: list })
+  assert.deepEqual(await piModels(exe, { platform: 'win32', env }), ['anthropic/claude-opus-4-6'])
+  assert.deepEqual(exe.calls, [`${join(bin, 'pi.exe')} --list-models`])
+  const linux = fakeRun({ 'pi --list-models': list })
+  assert.deepEqual(await piModels(linux, { platform: 'linux', env }), ['anthropic/claude-opus-4-6'])
   assert.deepEqual(linux.calls, ['pi --list-models'])
-  // No pi at all, even through the shell: pi cannot say.
+  // No pi on Path: asked by its name, once, and it cannot say.
   const none = fakeRun({})
-  assert.deepEqual(await piModels(none, { platform: 'win32', env: {} }), [])
-  assert.deepEqual(none.calls, ['pi --list-models', 'cmd.exe /d /c pi --list-models'])
+  assert.deepEqual(await piModels(none, { platform: 'win32', env: { Path: '' } }), [])
+  assert.deepEqual(none.calls, ['pi --list-models'])
 })
 
 test('crew config: claudeModels replaces the static Claude list, and must be model names', async () => {

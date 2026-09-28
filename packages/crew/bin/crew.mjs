@@ -50,11 +50,13 @@ import { HOST_NAMES as HOSTS } from '../src/hosts.mjs'
 import { crewPaths } from '../src/daemon/transport.mjs'
 import { ensureDaemon, request, stopDaemon } from '../src/daemon/client.mjs'
 import { readCrewConfig } from '../src/crew-config.mjs'
-import { runConsole, runsConsole } from '../src/console.mjs'
+import { describeSession, runConsole, runsConsole } from '../src/console.mjs'
+import { parseFlags } from '../src/args.mjs'
+import { samePath } from '../src/paths.mjs'
 import { crewHost } from '../src/crew-host.mjs'
 import { launchRunner, runOrchestrator, startCommand } from '../src/arm.mjs'
 import { REGISTRY_PATH } from '../src/registry.mjs'
-import { runsView, samePath } from '../src/run-view-model.mjs'
+import { runsView } from '../src/run-view-model.mjs'
 import { listRuns } from '../src/run-view/draw.mjs'
 import { DEFAULT_HOST, LEGACY_HOST, openHosts } from '../src/hosts.mjs'
 import { RUNNER_SETTINGS } from '../src/settings.mjs'
@@ -100,11 +102,24 @@ async function daemonAnyway() {
 
 const said = (hello) => `crew daemon: pid ${hello.pid} on ${hello.endpoint}`
 
-async function daemon([verb, ...flags]) {
-  const force = flags.includes('--force')
-  const unknown = flags.filter((f) => f !== '--force')
-  if (unknown.length || !['start', 'status', 'stop', 'restart'].includes(verb) || (force && !['stop', 'restart'].includes(verb))) {
-    usage(`crew daemon: ${verb ? `unexpected ${[verb, ...flags].join(' ')}` : 'start, status, stop or restart'}`)
+// argv's flags (args.mjs), or the usage error `prefix: <what is wrong>`.
+const flagsOf = (argv, prefix, spec) => {
+  try {
+    return parseFlags(argv, spec)
+  } catch (e) {
+    return usage(`${prefix}: ${e.message}`)
+  }
+}
+
+async function daemon(args) {
+  let parsed = null
+  try {
+    parsed = parseFlags(args, { booleans: ['--force'] })
+  } catch {}
+  const [verb, ...extra] = parsed?.positionals ?? []
+  const force = !!parsed?.values['--force']
+  if (!parsed || extra.length || !['start', 'status', 'stop', 'restart'].includes(verb) || (force && !['stop', 'restart'].includes(verb))) {
+    usage(`crew daemon: ${args.length ? `unexpected ${args.join(' ')}` : 'start, status, stop or restart'}`)
   }
   if (verb === 'stop' || verb === 'restart') {
     const stopped = await stopDaemon(paths, { force })
@@ -115,16 +130,16 @@ async function daemon([verb, ...flags]) {
   console.log(`${said(hello)}${hello.started ? ' (started)' : ''}`)
 }
 
-const describe = (s) => `${s.id}\t${s.alive ? 'running' : `exited ${s.exit?.code ?? s.exit?.signal}`}\tpid ${s.pid}\t${s.command.join(' ')}`
-
 async function session([verb, ...args]) {
   if (verb === 'spawn') {
     const dash = args.indexOf('--')
     const command = dash >= 0 ? args.slice(dash + 1) : []
-    const options = dash >= 0 ? args.slice(0, dash) : args
-    const at = options.indexOf('--cwd')
-    const cwd = at >= 0 ? options[at + 1] : process.cwd()
-    if (!command.length || !cwd || options.length !== (at >= 0 ? 2 : 0)) usage('crew session spawn: -- <command…> is required')
+    let options = null
+    try {
+      options = parseFlags(dash >= 0 ? args.slice(0, dash) : args, { strings: ['--cwd'] })
+    } catch {}
+    const cwd = options?.values['--cwd'] ?? process.cwd()
+    if (!command.length || !options || options.positionals.length) usage('crew session spawn: -- <command…> is required')
     await ensureDaemon(paths)
     const { session: s } = await request(paths, {
       op: 'session.spawn',
@@ -139,13 +154,13 @@ async function session([verb, ...args]) {
   }
   if (verb === 'list' && !args.length) {
     await ensureDaemon(paths)
-    for (const s of (await request(paths, { op: 'session.list' })).sessions) console.log(describe(s))
+    for (const s of (await request(paths, { op: 'session.list' })).sessions) console.log(describeSession(s))
     return
   }
   if ((verb === 'screen' || verb === 'kill') && args.length === 1) {
     await ensureDaemon(paths)
     if (verb === 'kill') {
-      console.log(describe((await request(paths, { op: 'session.kill', id: args[0] })).session))
+      console.log(describeSession((await request(paths, { op: 'session.kill', id: args[0] })).session))
       return
     }
     const { screen } = await request(paths, { op: 'session.screen', id: args[0] })
@@ -171,10 +186,14 @@ async function consoleCommand(args) {
 
 // The run registry a command reads: --registry's, for a fixture, else the machine's.
 function registryOf(args, command) {
-  const at = args.indexOf('--registry')
-  const rest = at >= 0 ? args.filter((_, i) => i !== at && i !== at + 1) : args
-  if (at >= 0 && !args[at + 1]) usage(`${command}: --registry needs a file`)
-  return { registry: at >= 0 ? resolve(args[at + 1]) : REGISTRY_PATH, rest }
+  let parsed
+  try {
+    parsed = parseFlags(args, { strings: ['--registry'] })
+  } catch (e) {
+    usage(`${command}: ${e.kind === 'value' ? '--registry needs a file' : e.message}`)
+  }
+  const file = parsed.values['--registry']
+  return { registry: file ? resolve(file) : REGISTRY_PATH, rest: parsed.positionals }
 }
 
 // Only the registry is read: a run's liveness is its runner.pid's to say.
@@ -221,12 +240,10 @@ const SEND_FLAGS = { '--from': 'from', '--dispatch-capability': 'capability', '-
 
 async function orchestration([verb, ...args]) {
   if (verb !== 'send') usage(`crew orchestration: ${verb ? `unexpected ${verb}` : 'send'}`)
-  const m = {}
-  for (let i = 0; i < args.length; i += 2) {
-    const key = SEND_FLAGS[args[i]]
-    if (!key || args[i + 1] === undefined) usage(`crew orchestration send: ${key ? `${args[i]} needs a value` : `unexpected ${args[i]}`}`)
-    m[key] = args[i + 1]
-  }
+  // A body or subject may start with --: every flag here takes a value.
+  const { values, positionals } = flagsOf(args, 'crew orchestration send', { strings: Object.keys(SEND_FLAGS), dashValues: true })
+  if (positionals.length) usage(`crew orchestration send: unexpected ${positionals[0]}`)
+  const m = Object.fromEntries(Object.entries(values).map(([flag, v]) => [SEND_FLAGS[flag], v]))
   const missing = ['taskId', 'dispatchId', 'type'].filter((k) => !m[k])
   if (missing.length) usage(`crew orchestration send: missing ${missing.map((k) => Object.keys(SEND_FLAGS).find((f) => SEND_FLAGS[f] === k)).join(', ')}`)
   const { id } = await crewHost({ paths }).mailSend(m)
@@ -238,21 +255,13 @@ async function orchestration([verb, ...args]) {
 // Its own argv errors would land on a screen nobody has entered yet, so its
 // argv is checked here first. The daemon refuses a second runner on a run dir
 // that has one (run_live), --resume or not.
-const RUN_OPTIONS = ['--state-dir', '--permission-mode']
+const RUN_FLAGS = { strings: ['--host', '--state-dir', '--permission-mode'], booleans: ['--resume'] }
 async function crewRun(args) {
-  const scripts = args.filter((a, i) => !a.startsWith('--') && !RUN_OPTIONS.includes(args[i - 1]))
+  const { values, positionals: scripts } = flagsOf(args, 'crew run', RUN_FLAGS)
   if (scripts.length !== 1) usage(`crew run: ${scripts.length ? `one script, not ${scripts.join(', ')}` : 'the rendered script is required'}`)
-  const unknown = args.filter((a, i) => a.startsWith('--') && !RUN_OPTIONS.includes(args[i - 1]) && ![...RUN_OPTIONS, '--resume'].includes(a))
-  if (unknown.length) usage(`crew run: unexpected ${unknown.join(' ')}`)
-  const valueOf = (flag) => {
-    const at = args.indexOf(flag)
-    if (at < 0) return null
-    if (!args[at + 1] || args[at + 1].startsWith('--')) usage(`crew run: ${flag} needs a value`)
-    return args[at + 1]
-  }
-  const [stateDir, permissionMode] = RUN_OPTIONS.map(valueOf)
+  const [stateDir, permissionMode] = ['--state-dir', '--permission-mode'].map((f) => values[f] ?? null)
   if (!existsSync(scripts[0])) throw new Error(`no script ${resolve(scripts[0])}`)
-  const s = await launchRunner({ ...terminalSize(), paths, script: scripts[0], stateDir, resume: args.includes('--resume'), permissionMode, cwd: process.cwd(), title: `crew run ${basename(scripts[0])}` })
+  const s = await launchRunner({ ...terminalSize(), paths, script: scripts[0], stateDir, resume: !!values['--resume'], permissionMode, cwd: process.cwd(), title: `crew run ${basename(scripts[0])}` })
   console.log(`crew run: the runner is crew session ${s.id}; enter it from \`crew view "${s.runDir}"\``)
 }
 
@@ -278,11 +287,12 @@ async function start(args) {
 
 const [command, ...rest] = process.argv.slice(2)
 if (command === 'run') {
-  const at = rest.indexOf('--host')
-  const host = at >= 0 ? rest[at + 1] : DEFAULT_HOST
-  if (!HOSTS.includes(host)) usage(host ? `crew: unknown host ${host}` : 'crew run: --host needs a host')
+  // Only the host is read here: on orca the runner checks its own argv.
+  const { values } = parseFlags(rest, { ...RUN_FLAGS, lenient: true })
+  const host = values['--host'] ?? DEFAULT_HOST
+  if (!HOSTS.includes(host)) usage(typeof host === 'string' ? `crew: unknown host ${host}` : 'crew run: --host needs a host')
   if (host === 'crew') {
-    await crewRun(rest.filter((_, i) => at < 0 || (i !== at && i !== at + 1))).catch(fail)
+    await crewRun(rest).catch(fail)
   } else {
     await daemonAnyway()
     await launch(entry('../src/runner.mjs'), rest)

@@ -62,6 +62,8 @@ import { createHash } from 'crypto'
 import { basename, dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { checkSchema } from './schema.mjs'
+import { parseFlags } from './args.mjs'
+import { sleep } from './util.mjs'
 import { launchCommand, HARNESSES } from './harness.mjs'
 import { realTimer } from './git.mjs'
 import { hostUnreachable } from './session-host.mjs'
@@ -117,7 +119,7 @@ export const journalKey = (prompt, { inFlight, ...opts } = {}) =>
 // The journal's entry types and its one fold live in journal.mjs.
 export { JOURNAL_ENTRIES, readJournal }
 
-export const realClock = { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)), timer: realTimer }
+export const realClock = { now: () => Date.now(), sleep, timer: realTimer }
 
 const iso = (clock) => new Date(clock.now()).toISOString()
 const took = (ms) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms / 6_000) / 10} min`)
@@ -645,23 +647,17 @@ function logTail(stateDir, n = 20) {
 // still this file's main — resolve() would not dereference the link.
 const isMain = process.argv[1] && realpathSync(process.argv[1]).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase()
 if (isMain) {
-  const args = process.argv.slice(2)
-  let bad = false
-  const r = args.indexOf('--resume')
-  const resume = r >= 0 && !!args.splice(r, 1)
-  const option = (name) => {
-    const at = args.indexOf(name)
-    if (at < 0) return null
-    const [, value] = args.splice(at, 2)
-    if (!value || value.startsWith('--')) bad = true
-    return value ?? null
-  }
-  const stateDir = option('--state-dir')
-  const permissionMode = option('--permission-mode')
-  const hostName = option('--host') ?? undefined
-  if (hostName && !HOST_NAMES.includes(hostName)) bad = true
-  const [scriptPath] = args
-  if (!scriptPath || args.length > 1 || bad) {
+  let parsed = null
+  try {
+    parsed = parseFlags(process.argv.slice(2), { strings: ['--state-dir', '--permission-mode', '--host'], booleans: ['--resume'] })
+  } catch {}
+  const { values = {}, positionals = [] } = parsed ?? {}
+  const resume = !!values['--resume']
+  const stateDir = values['--state-dir'] ?? null
+  const permissionMode = values['--permission-mode'] ?? null
+  const hostName = values['--host']
+  const [scriptPath] = positionals
+  if (!parsed || !scriptPath || positionals.length > 1 || (hostName && !HOST_NAMES.includes(hostName))) {
     console.error(`usage: node runner.mjs <rendered-script.js> [--host <${HOST_NAMES.join('|')}>] [--state-dir <dir>] [--resume] [--permission-mode <orchestrator's Claude permission mode>]`)
     process.exit(2)
   }

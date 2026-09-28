@@ -27,6 +27,7 @@ import { appendFileSync, closeSync, openSync } from 'fs'
 import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { runView, runsView } from '../run-view-model.mjs'
+import { parseFlags } from '../args.mjs'
 import { REGISTRY_PATH } from '../registry.mjs'
 import { worktreeUnpushed } from '../git.mjs'
 import { LEGACY_HOST, openHosts } from '../hosts.mjs'
@@ -61,10 +62,13 @@ async function terminalKit(logPath) {
   }
 }
 
-const args = process.argv.slice(2)
-const option = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined)
-const standalone = args.includes('--standalone')
-if (!standalone && !option('--attached')) {
+let parsed = null
+try {
+  parsed = parseFlags(process.argv.slice(2), { strings: ['--attached', '--host', '--registry'], booleans: ['--standalone'] })
+} catch {}
+const option = (name) => parsed?.values[name]
+const standalone = !!option('--standalone')
+if (!parsed || parsed.positionals.length || (!standalone && !option('--attached'))) {
   console.error('usage: node view.mjs --attached <run-dir> [--host <host>] | --standalone [--registry <run registry, for a fixture>]')
   process.exit(2)
 }

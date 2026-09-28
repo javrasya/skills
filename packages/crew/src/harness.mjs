@@ -3,7 +3,8 @@
 import { readFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import { claudeDir } from './transcript.mjs'
+import { claudeDir, piAgentDir } from './transcript.mjs'
+import { childCommand } from './command.mjs'
 
 export const HARNESSES = ['claude', 'pi']
 
@@ -79,7 +80,7 @@ const settingsOf = (path) => {
 export function lastUsedModel(harness, { home = homedir(), env = process.env } = {}) {
   if (harness === 'claude') return settingsOf(join(claudeDir({ home, env }), 'settings.json')).model || null
   if (harness === 'pi') {
-    const s = settingsOf(join(env.PI_CODING_AGENT_DIR || join(home, '.pi', 'agent'), 'settings.json'))
+    const s = settingsOf(join(piAgentDir({ home, env }), 'settings.json'))
     return s.defaultModel ? (s.defaultProvider ? `${s.defaultProvider}/${s.defaultModel}` : s.defaultModel) : null
   }
   throw new Error(`unknown harness "${harness}": expected one of ${HARNESSES.join(', ')}`)
@@ -87,11 +88,10 @@ export function lastUsedModel(harness, { home = homedir(), env = process.env } =
 
 // pi's models, from `pi --list-models`: a header row, then one model a row
 // whose first two columns are its provider and id. None when pi cannot say.
-// On Windows npm installs pi as a pi.cmd shim, which only a shell starts, so a
-// pi that does not start bare is asked again through ComSpec.
-export async function piModels(run, { platform = process.platform, env = process.env } = {}) {
-  let r = await run('pi', ['--list-models'])
-  if (r.code === null && platform === 'win32') r = await run(env.ComSpec || 'cmd.exe', ['/d', '/c', 'pi', '--list-models'])
+// On Windows npm installs pi as a pi.cmd shim, which only a shell starts: pi
+// is found on Path as a shell would find it, and a shim run through ComSpec.
+export async function piModels(run, { platform = process.platform, env = process.env, cwd = process.cwd() } = {}) {
+  const r = await run(...childCommand('pi', ['--list-models'], { cwd, env, platform }))
   if (r.code !== 0) return []
   return r.stdout.split('\n').slice(1).map((l) => l.trim().split(/\s+/)).filter((w) => w.length >= 2).map(([provider, id]) => `${provider}/${id}`)
 }

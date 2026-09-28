@@ -7,9 +7,10 @@
 // Orca's terminal list and the run registry; the actions go to Orca, and a
 // reclaim goes through reclaim.mjs, so the view keeps its rules.
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from 'fs'
-import { basename, dirname, join, resolve } from 'path'
+import { basename, dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { sessionTranscripts } from './transcript.mjs'
+import { pathKey, samePath } from './paths.mjs'
 import { agentName, agentsOf, ownWorktree, reclaimAgent, reclaimRun } from './reclaim.mjs'
 import { foldJournal, journalLines, timeOf } from './journal.mjs'
 import { REGISTRY_PATH, readRegistry, runRegistry } from './registry.mjs'
@@ -125,11 +126,6 @@ const livenessOf = (alive, stateDir) => {
     return null
   }
 }
-
-// One key for a path, so two spellings of it compare equal: resolved, and
-// case-folded on Windows.
-export const pathKey = (p) => (process.platform === 'win32' ? resolve(p).toLowerCase() : resolve(p))
-export const samePath = (a, b) => !!a && !!b && pathKey(a) === pathKey(b)
 
 // The spec number in a run's name, which for the template is
 // implement-spec-<number>, or null.

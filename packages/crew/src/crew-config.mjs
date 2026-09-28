@@ -17,6 +17,7 @@
 import { readFileSync } from 'fs'
 import { isAbsolute, resolve } from 'path'
 import { HARNESSES } from './harness.mjs'
+import { samePath } from './paths.mjs'
 
 export const DEFAULTS = Object.freeze({ backKey: 'f12', claudeModels: Object.freeze(['opus', 'sonnet', 'haiku', 'opus[1m]', 'sonnet[1m]']) })
 
@@ -104,12 +105,6 @@ function harnessesOf(harnesses = {}) {
     if (!Array.isArray(words) || !words.length || !words.every((w) => typeof w === 'string' && w)) throw new Error(`harnesses.${name}: not a list of program words`)
   }
   return harnesses
-}
-
-// One path however it is spelled: Windows paths match whatever their case and slashes.
-export const samePath = (a, b, platform = process.platform) => {
-  const norm = (p) => resolve(p).replace(/[\\/]+$/, '')
-  return platform === 'win32' ? norm(a).replace(/\\/g, '/').toLowerCase() === norm(b).replace(/\\/g, '/').toLowerCase() : norm(a) === norm(b)
 }
 
 // The repo's own config, {} when crew has none for it; `setup`, when named,

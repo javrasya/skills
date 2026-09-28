@@ -10,6 +10,7 @@
 import { enterSession, request } from './daemon/client.mjs'
 import { RESET } from './daemon/modes.mjs'
 import { backKeySequences } from './crew-config.mjs'
+import { ARROW_KEYS, ENTER_KEYS, decodeKeys } from './keys.mjs'
 import { consoleRunsHelp, consoleTreeHelp, draw, drawRuns } from './run-view/draw.mjs'
 
 const bytes = (chunk) => (Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)).toString('latin1')
@@ -191,7 +192,12 @@ function consoleOn({ paths, stdin, stdout, backKey = 'f12', holdMs = 50, page })
   return { done, mode: () => mode }
 }
 
-const describe = (s) => `${s.id}  ${s.alive ? 'running' : `exited ${s.exit?.code ?? s.exit?.signal}`}  pid ${s.pid}  ${s.cols}x${s.rows}  ${s.command.join(' ')}`
+const CONSOLE_KEYS = [...ARROW_KEYS, ...ENTER_KEYS, ['k', 'up'], ['j', 'down'], ['q', 'quit'], ['\x03', 'quit']]
+
+// One daemon session as a line: `crew session list`'s fields apart by tabs,
+// for a script to cut; `crew console`'s by two spaces, a tab having no width
+// its list can fit.
+export const describeSession = (s, sep = '\t') => [s.id, s.alive ? 'running' : `exited ${s.exit?.code ?? s.exit?.signal}`, `pid ${s.pid}`, `${s.cols}x${s.rows}`, s.command.join(' ')].join(sep)
 
 // `crew console`, for debugging: the daemon's sessions in a flat list, until q or Ctrl+C.
 export function runConsole({ paths, stdin, stdout, backKey = 'f12', refreshMs = 1_000, holdMs = 50 }) {
@@ -208,7 +214,7 @@ export function runConsole({ paths, stdin, stdout, backKey = 'f12', refreshMs = 
     const fit = (line) => line.slice(0, cols)
     const lines = [fit(`crew sessions: Up/Down choose, Enter enters, ${backKey.toUpperCase()} comes back to this list, q quits`), '']
     sessions.forEach((s, i) => {
-      const line = fit(`${i === selected ? '>' : ' '} ${describe(s)}`)
+      const line = fit(`${i === selected ? '>' : ' '} ${describeSession(s, '  ')}`)
       lines.push(i === selected ? `\x1b[7m${line}\x1b[0m` : line)
     })
     if (!sessions.length) lines.push(fit('  no sessions yet: crew session spawn -- <command…> starts one'))
@@ -241,14 +247,15 @@ export function runConsole({ paths, stdin, stdout, backKey = 'f12', refreshMs = 
       },
       resize: paint,
       key(chunk) {
-        const key = bytes(chunk)
-        if (key === 'q' || key === '\x03') return { quit: true }
-        if (key === '\x1b[A' || key === '\x1bOA' || key === 'k') selected = Math.max(0, selected - 1)
-        else if (key === '\x1b[B' || key === '\x1bOB' || key === 'j') selected = Math.min(sessions.length - 1, selected + 1)
-        else if (key === '\r' || key === '\n') {
-          const s = sessions[selected]
-          if (s?.alive) return { enter: s.id }
-          if (s) status = `session ${s.id} has exited`
+        for (const key of decodeKeys(bytes(chunk), CONSOLE_KEYS)) {
+          if (key === 'quit') return { quit: true }
+          if (key === 'up') selected = Math.max(0, selected - 1)
+          else if (key === 'down') selected = Math.min(sessions.length - 1, selected + 1)
+          else if (key === 'enter') {
+            const s = sessions[selected]
+            if (s?.alive) return { enter: s.id }
+            if (s) status = `session ${s.id} has exited`
+          }
         }
         paint()
         return null

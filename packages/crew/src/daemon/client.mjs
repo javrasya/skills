@@ -4,9 +4,9 @@ import { spawn } from 'child_process'
 import { closeSync, mkdirSync, openSync, readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { connect, noDaemon, onMessages, send } from './transport.mjs'
+import { sleep } from '../util.mjs'
 
 const DAEMON = fileURLToPath(new URL('./daemon.mjs', import.meta.url))
-const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
 
 export class DaemonError extends Error {}
 

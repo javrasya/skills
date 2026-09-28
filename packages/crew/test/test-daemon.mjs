@@ -13,7 +13,7 @@ import { fileURLToPath } from 'url'
 import { crewPaths, lineDecoder } from '../src/daemon/transport.mjs'
 import { daemonHello, request, stopDaemon } from '../src/daemon/client.mjs'
 import { startDaemon } from '../src/daemon/daemon.mjs'
-import { resolveCommand } from '../src/daemon/session.mjs'
+import { resolveCommand } from '../src/command.mjs'
 import { runRegistry } from '../src/registry.mjs'
 import { crewHost } from '../src/crew-host.mjs'
 import { runsView } from '../src/run-view-model.mjs'
@@ -218,7 +218,7 @@ test('session: a spawned session keeps running and keeps its screen while nobody
   const printed = crew('session', 'screen', id)
   assert.equal(printed.status, 0, printed.stderr)
   assert.match(printed.stdout, /^header\n/)
-  assert.match(crew('session', 'list').stdout, new RegExp(`^${id}\\trunning\\tpid \\d+\\tnode -e`))
+  assert.match(crew('session', 'list').stdout, new RegExp(`^${id}\\trunning\\tpid \\d+\\t\\d+x\\d+\\tnode -e`))
 
   assert.equal(crew('session', 'kill', id).status, 0)
   await until('the session to exit', async () => !(await request(paths, { op: 'session.list' })).sessions[0].alive)

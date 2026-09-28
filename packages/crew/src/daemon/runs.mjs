@@ -41,10 +41,11 @@
 //   worktree.status { path, status }            → { path, status }
 //   worktree.statuses                           → { statuses: { <path>: <status> } }
 import { randomBytes } from 'crypto'
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
 import { basename } from 'path'
 import { fileURLToPath } from 'url'
 import { readRegistry } from '../registry.mjs'
+import { writeJsonAtomic } from '../fsutil.mjs'
 import { DEFAULT_HOST } from '../hosts.mjs'
 import { isOrchestratorTitle } from '../orchestrator.mjs'
 
@@ -106,8 +107,7 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
       statuses: Object.fromEntries(statuses), messages, deliveries, nextSession, running: [...running, ...died],
     }
     // Whole or not at all: a daemon killed mid-write must not lose the book.
-    writeFileSync(`${file}.tmp`, JSON.stringify(book))
-    renameSync(`${file}.tmp`, file)
+    writeJsonAtomic(file, book)
   }
   const runnerOf = (runner) => (runner == null ? null : String(runner))
 

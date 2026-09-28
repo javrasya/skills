@@ -4,32 +4,13 @@
 // answers, or null when the operator cancels (Esc, Ctrl+C). A spec with no
 // validation list gets one more step, the orchestrator's draft (runDraftStep).
 import { validationListProblem } from './validation-list.mjs'
+import { ARROW_KEYS, ENTER_KEYS, decodeKeys } from './keys.mjs'
 
-const KEYS = [
-  ['\x1b[A', 'up'], ['\x1bOA', 'up'], ['\x1b[B', 'down'], ['\x1bOB', 'down'],
-  ['\x1b[C', 'right'], ['\x1bOC', 'right'], ['\x1b[D', 'left'], ['\x1bOD', 'left'],
-  ['\x1b[Z', 'up'], ['\r\n', 'enter'], ['\r', 'enter'], ['\n', 'enter'], ['\t', 'down'], [' ', 'right'], ['\x03', 'cancel'],
-]
+const KEYS = [...ARROW_KEYS, ['\x1b[Z', 'up'], ...ENTER_KEYS, ['\t', 'down'], [' ', 'right'], ['\x03', 'cancel']]
 
-// The keys in one chunk of raw input. An escape no sequence above starts is
-// Esc: the chunk carries the whole sequence, as raw input delivers a keypress.
-export function keysOf(chunk) {
-  const keys = []
-  for (let i = 0; i < chunk.length;) {
-    const hit = KEYS.find(([seq]) => chunk.startsWith(seq, i))
-    if (hit) {
-      keys.push(hit[1])
-      i += hit[0].length
-    } else if (chunk[i] === '\x1b') {
-      const seq = /^\x1b(\[[0-9;]*[~A-Za-z]|O[A-Za-z])?/.exec(chunk.slice(i))[0]
-      if (seq.length === 1) keys.push('cancel')
-      i += seq.length
-    } else {
-      i++
-    }
-  }
-  return keys
-}
+// The keys in one chunk of raw input (keys.mjs): an unknown sequence or a
+// letter is no key of the form's.
+export const keysOf = (chunk) => decodeKeys(chunk, KEYS)
 
 const BOLD = (s) => `\x1b[1m${s}\x1b[22m`
 const DIM = (s) => `\x1b[2m${s}\x1b[22m`
@@ -108,33 +89,14 @@ export function runStartForm({ form, stdin, stdout, heading = '' }) {
 // orchestrator's draft, as text to edit. Ctrl+S confirms it; Esc or Ctrl+C
 // cancels, and then nothing is written.
 const EDIT_KEYS = [
-  ['\x1b[A', 'up'], ['\x1bOA', 'up'], ['\x1b[B', 'down'], ['\x1bOB', 'down'],
-  ['\x1b[C', 'right'], ['\x1bOC', 'right'], ['\x1b[D', 'left'], ['\x1bOD', 'left'],
+  ...ARROW_KEYS,
   ['\x1b[H', 'home'], ['\x1bOH', 'home'], ['\x1b[1~', 'home'], ['\x1b[F', 'end'], ['\x1bOF', 'end'], ['\x1b[4~', 'end'], ['\x1b[3~', 'delete'],
-  ['\r\n', 'enter'], ['\r', 'enter'], ['\n', 'enter'], ['\x7f', 'backspace'], ['\b', 'backspace'], ['\x13', 'confirm'], ['\x03', 'cancel'],
+  ...ENTER_KEYS, ['\x7f', 'backspace'], ['\b', 'backspace'], ['\x13', 'confirm'], ['\x03', 'cancel'],
 ]
 
 // The keys in one chunk of raw input to the draft: each a name, or { char }
 // for a character typed. A tab is typed as a space.
-export function editKeysOf(chunk) {
-  const keys = []
-  for (let i = 0; i < chunk.length;) {
-    const hit = EDIT_KEYS.find(([seq]) => chunk.startsWith(seq, i))
-    if (hit) {
-      keys.push(hit[1])
-      i += hit[0].length
-    } else if (chunk[i] === '\x1b') {
-      const seq = /^\x1b(\[[0-9;]*[~A-Za-z]|O[A-Za-z])?/.exec(chunk.slice(i))[0]
-      if (seq.length === 1) keys.push('cancel')
-      i += seq.length
-    } else {
-      const char = String.fromCodePoint(chunk.codePointAt(i))
-      if (char === '\t' || char >= ' ') keys.push({ char: char === '\t' ? ' ' : char })
-      i += char.length
-    }
-  }
-  return keys
-}
+export const editKeysOf = (chunk) => decodeKeys(chunk, EDIT_KEYS, { char: (c) => (c === '\t' ? { char: ' ' } : c >= ' ' ? { char: c } : null) })
 
 // The draft as lines and a cursor. text() is validation.md's content: its
 // lines, each ended, or '' when every line is blank.

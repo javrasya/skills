@@ -21,13 +21,15 @@ import { runnerCommand } from './daemon/runs.mjs'
 import { launchedSession, launchWords, resumeWords } from './harness.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { sessionTranscripts } from './transcript.mjs'
-import { readCrewConfig, repoConfig, samePath } from './crew-config.mjs'
+import { readCrewConfig, repoConfig } from './crew-config.mjs'
+import { childCommand } from './command.mjs'
+import { samePath } from './paths.mjs'
+import { sleep } from './util.mjs'
 import { gitIn, repoOf } from './git.mjs'
 import { gitProbes, prepareChildWorktree, reuseWorktree } from './worktree.mjs'
 
 export const CREW_BIN = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url))
 
-const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
 const fail = (code, message, extra = {}) => Object.assign(new Error(`crew: ${code}: ${message}`), { code, ...extra })
 
 // What a worker reads before its prompt. The runner's prompts send it to "your
@@ -61,15 +63,14 @@ async function worktreesOf(repo, bound) {
   return rows
 }
 
-// A setup hook by its kind: a node script, PowerShell, sh or cmd, and
-// anything else run as it is.
+// A setup hook by its kind: a node script, PowerShell or sh, and anything
+// else (a .cmd or .bat through ComSpec, on Windows) run as it is.
 function hookCommand(script) {
   const ext = extname(script).toLowerCase()
   if (['.mjs', '.cjs', '.js'].includes(ext)) return [process.execPath, [script]]
   if (ext === '.ps1') return ['powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script]]
   if (ext === '.sh') return ['sh', [script]]
-  if (ext === '.cmd' || ext === '.bat') return [process.env.ComSpec || 'cmd.exe', ['/d', '/c', script]]
-  return [script, []]
+  return childCommand(script, [])
 }
 
 function runHook(script, { repo, worktree, env, ms }) {

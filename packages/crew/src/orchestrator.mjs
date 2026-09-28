@@ -13,6 +13,7 @@ import { mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { checkSchema } from './schema.mjs'
+import { slug } from './util.mjs'
 import { readResult, workerPrompt } from './lifecycle.mjs'
 import { validationLineProblem } from './validation-list.mjs'
 
@@ -33,8 +34,6 @@ export class OrchestratorError extends Error {
 
 const NUDGE = 'Crew has not received your answer: your final message is not read. Run the submit command from your instructions until it exits 0.'
 const STOPPED = 'its asker stopped asking, and its session was closed'
-
-const slug = (s) => s.replace(/[^\w.-]+/g, '_').slice(0, 60)
 
 // `host` is a session host (session-host.mjs), its worker started in the
 // host's own directory; `dir` where each question's schema, payload and

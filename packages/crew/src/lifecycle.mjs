@@ -14,6 +14,7 @@ import { join } from 'path'
 import { fileURLToPath } from 'url'
 import { randomUUID } from 'crypto'
 import { validate } from './schema.mjs'
+import { slug } from './util.mjs'
 import { sessionTranscripts } from './transcript.mjs'
 import { DOCTOR_NUDGE, doctorContinuePrompt, notePrompt, runMailbox, doctorRounds } from './doctor.mjs'
 
@@ -84,8 +85,6 @@ function slots(max) {
 // A result that reports a PR its agent published: its worktree's work is on
 // the stack, so its board card is done.
 const published = (v) => !!v && typeof v === 'object' && typeof v.pr_url === 'string' && !!v.pr_url && v.published !== false
-
-const slug = (s) => s.replace(/[^\w.-]+/g, '_').slice(0, 60)
 
 // An agent's files, relative to the state dir: named by its call's number and
 // label when its worker starts, and journaled with that worker, so a resume

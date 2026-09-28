@@ -11,7 +11,8 @@
 //
 // Only a console asks: a run that halts while nobody has it open in `crew
 // view` is triaged when someone next opens it there (ADR-0018).
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { writeJsonAtomic } from './fsutil.mjs'
 import { dirname, join } from 'path'
 import { TRIAGE_SCHEMA, triagePrompt } from './orchestrator.mjs'
 
@@ -63,8 +64,7 @@ export function triageHalt({ stateDir, orchestrate, now = () => Date.now() }) {
   const record = (entry) => {
     try {
       // Whole or not at all: a console reads it on every refresh.
-      writeFileSync(`${file}.tmp`, JSON.stringify({ at: notice.at, since, ...entry }, null, 2))
-      renameSync(`${file}.tmp`, file)
+      writeJsonAtomic(file, { at: notice.at, since, ...entry })
     } catch {}
     return { asked: true, state: entry.state }
   }

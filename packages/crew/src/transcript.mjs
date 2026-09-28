@@ -14,6 +14,8 @@ import { join, resolve } from 'path'
 // The one place it is resolved: Claude transcripts and the run registry
 // (registry.mjs) both live under it.
 export const claudeDir = ({ home = homedir(), env = process.env } = {}) => env.CLAUDE_CONFIG_DIR || join(home, '.claude')
+// pi's own dir, its settings.json and (by default) its sessions/ in it.
+export const piAgentDir = ({ home = homedir(), env = process.env } = {}) => env.PI_CODING_AGENT_DIR || join(home, '.pi', 'agent')
 
 export const claudeSlug =(cwd) => resolve(cwd).replace(/[^A-Za-z0-9]/g, '-')
 export const piDir = (cwd) => `--${resolve(cwd).replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`
@@ -40,7 +42,7 @@ const piFileIn = (dir, sessionId) => {
 // runner does not know.
 export function transcriptPath({ harness, sessionId, worktree, scan = true, home = homedir(), env = process.env }) {
   if (harness === 'pi') {
-    const root = env.PI_CODING_AGENT_SESSION_DIR || join(home, '.pi', 'agent', 'sessions')
+    const root = env.PI_CODING_AGENT_SESSION_DIR || join(piAgentDir({ home, env }), 'sessions')
     const direct = [worktree && join(root, piDir(worktree)), env.PI_CODING_AGENT_SESSION_DIR && root].filter(Boolean)
     for (const dir of direct) {
       const f = piFileIn(dir, sessionId)
