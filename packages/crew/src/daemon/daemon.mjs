@@ -6,10 +6,15 @@
 // or { ok: false, error }:
 //   hello                                  → { pid, version, endpoint }
 //   stop { force }                         → refused while runs are live, unless force
-//   session.spawn { command, cwd, env, cols, rows } → { session }
+//   session.spawn { command, cwd, env, cols, rows, title } → { session }
 //   session.list                           → { sessions }
 //   session.screen { id }                  → { screen: { lines, cursor, alternate } }
-//   session.kill { id }                    → { session }
+//   session.write { id, data, paste }      → { session }: data typed as keys,
+//     or with paste as pasted text
+//   session.rename { id, title }           → { session }
+//   session.kill { id }                    → { session }: its program ends,
+//     the session and its last screen stay until closed
+//   session.close { id }                   → { session }: killed and forgotten
 //   session.resize { id, cols, rows }      → { session }
 //   session.enter { id, cols, rows }       → { session }, then the connection
 //     turns into the session's raw byte stream both ways: its screen repaint
@@ -94,19 +99,38 @@ export async function startDaemon({ paths = crewPaths(), liveRuns = () => [], sp
       setImmediate(() => shutdown(force ? 'stop --force' : 'stop'))
       return { pid: process.pid }
     },
-    'session.spawn': ({ command, cwd, env, cols, rows }) => {
+    'session.spawn': ({ command, cwd, env, cols, rows, title = null }) => {
       if (!Array.isArray(command) || !command.length || !command.every((a) => typeof a === 'string')) throw new Error('session.spawn needs a command: a non-empty list of strings')
       const id = String(next++)
-      const session = open({ id, command, cwd: cwd ?? process.cwd(), env: env ?? process.env, cols, rows })
+      const session = open({ id, command, cwd: cwd ?? process.cwd(), env: env ?? process.env, cols, rows, title: title === null ? null : text(title, 'title') })
       sessions.set(id, session)
       say(`session ${id} spawned: ${command.join(' ')} (pid ${session.info().pid})`)
       return { session: session.info() }
     },
     'session.list': () => ({ sessions: [...sessions.values()].map((s) => s.info()) }),
     'session.screen': async ({ id }) => ({ screen: await sessionOf(id).screen() }),
+    'session.write': async ({ id, data, paste = false }) => {
+      const session = sessionOf(id)
+      if (!session.info().alive) throw new Error(`session ${id} has exited`)
+      if (paste) await session.paste(text(data, 'data'))
+      else session.write(text(data, 'data'))
+      return { session: session.info() }
+    },
+    'session.rename': ({ id, title }) => {
+      const session = sessionOf(id)
+      session.rename(text(title, 'title'))
+      return { session: session.info() }
+    },
     'session.kill': ({ id }) => {
       const session = sessionOf(id)
       session.kill()
+      return { session: session.info() }
+    },
+    'session.close': ({ id }) => {
+      const session = sessionOf(id)
+      session.kill()
+      sessions.delete(session.id)
+      say(`session ${id} closed`)
       return { session: session.info() }
     },
     'session.resize': ({ id, cols, rows }) => {
@@ -119,6 +143,11 @@ export async function startDaemon({ paths = crewPaths(), liveRuns = () => [], sp
       if (cols !== undefined || rows !== undefined) session.resize(size(cols), size(rows))
       return { session: session.info(), afterReply: () => connection.enter(session) }
     },
+  }
+
+  const text = (s, what) => {
+    if (typeof s !== 'string') throw new Error(`not a ${what}: ${JSON.stringify(s)?.slice(0, 80)}`)
+    return s
   }
 
   const size = (n) => {

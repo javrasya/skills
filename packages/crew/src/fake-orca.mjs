@@ -411,10 +411,12 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     // Whether the worker's prompt reached it. A `dialog` holds it unsent in
     // the input box until an Enter; one `lost` needs typing again; `never`
     // takes nothing. Not recorded: the adapter reads it from the session's
-    // transcript, never from Orca.
-    async promptDelivered({ sessionId }) {
+    // transcript, never from Orca. As in a transcript, `needle` must be in
+    // its prompt or in something typed to it since.
+    async promptDelivered({ sessionId, needle }) {
       const d = [...dispatches.values()].filter((x) => x.sessionId === sessionId).at(-1)
-      return !!d && !d.delivery
+      const flat = (s) => String(s ?? '').replace(/\s+/g, ' ').trim()
+      return !!d && !d.delivery && (!flat(needle) || [d.prompt, ...d.nudges].some((t) => flat(t).includes(flat(needle))))
     },
 
     async terminalEnter({ terminal: handle }) {
@@ -440,7 +442,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       record({ verb: 'terminalScreen', dispatchId: d.dispatchId, lines })
       const screen = d.delivery === 'never'
         ? ['New MCP server found in this project: slint', '❯ 1. Use this and all future MCP servers in this project', '  2. Use this MCP server', '  3. Continue without using this MCP server', 'Enter to confirm · Esc to cancel']
-        : ['❯ ']
+        : ['❯']
       return screen.slice(-lines)
     },
 

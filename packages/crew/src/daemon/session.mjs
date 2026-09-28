@@ -25,7 +25,7 @@ export function resolveCommand(file, { cwd, env, platform = process.platform }) 
   return file
 }
 
-export function ptySession({ id, command, cwd, env, cols = 120, rows = 30 }) {
+export function ptySession({ id, command, cwd, env, cols = 120, rows = 30, title = null }) {
   const [file, ...args] = command
   const terminal = new Terminal({ cols, rows, scrollback: 1000, allowProposedApi: true })
   const modes = trackModes(terminal)
@@ -42,7 +42,9 @@ export function ptySession({ id, command, cwd, env, cols = 120, rows = 30 }) {
   const exits = new Set()
   let exit = null
   let entered = 0
+  let lastOutput = null
   child.onData((data) => {
+    lastOutput = Date.now()
     terminal.write(data)
     for (const watch of watchers) watch(data)
   })
@@ -64,7 +66,11 @@ export function ptySession({ id, command, cwd, env, cols = 120, rows = 30 }) {
   return {
     id,
     terminal,
-    info: () => ({ id, command, cwd, pid: child.pid, cols: terminal.cols, rows: terminal.rows, alive: exit === null, exit }),
+    // quietMs: how long since its last output, null before its first.
+    info: () => ({ id, title, command, cwd, pid: child.pid, cols: terminal.cols, rows: terminal.rows, alive: exit === null, exit, quietMs: lastOutput === null ? null : Date.now() - lastOutput }),
+    rename(to) {
+      title = to
+    },
     // The visible screen as text, once everything the program wrote so far is parsed.
     async screen() {
       await new Promise((done) => terminal.write('', done))
@@ -74,6 +80,14 @@ export function ptySession({ id, command, cwd, env, cols = 120, rows = 30 }) {
       return { lines, cursor: { x: buffer.cursorX, y: buffer.cursorY }, alternate: buffer.type === 'alternate' }
     },
     write: (data) => child.write(data),
+    // Typed as the program's own terminal would paste it: bracketed when the
+    // program asked for bracketed paste, so a line break in it stays in its
+    // input rather than submitting what came before.
+    async paste(text) {
+      if (exit !== null) throw new Error(`session ${id} has exited`)
+      await new Promise((done) => terminal.write('', done))
+      child.write(terminal.modes.bracketedPasteMode ? `\x1b[200~${text}\x1b[201~` : text)
+    },
     // The pty and the emulator in the same tick, or the screen kept wraps at the old width.
     resize(c, r) {
       child.resize(c, r)
