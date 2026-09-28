@@ -172,11 +172,14 @@ const HELP = ' ↑↓ move · ←→ / click a phase to fold · ⏎/click focus 
 const TOP = 4
 
 // An agent row's width: the halt panel takes what is right of it, or 30 columns.
+// A terminal too narrow to leave ROW_MIN columns of rows beside that draws no panel.
 const ROW_W = 97
 const PANEL_MIN = 30
+const ROW_MIN = 40
 
-// `text` in lines of at most `w` characters, broken at spaces where it can.
+// `text` in lines of at most `w` characters (at least 1), broken at spaces where it can.
 function wrap(text, w) {
+  w = Math.max(1, w)
   const lines = []
   for (const para of String(text).split(/\r?\n/)) {
     let line = ''
@@ -271,8 +274,8 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
     lines.push(i === selected ? c('7', fit(strip(line), W)) : fit(line, W))
   }
   while (lines.length < TOP + body) lines.push(fit('', W))
-  if (model?.halt) {
-    const pw = Math.min(W, Math.max(PANEL_MIN, W - ROW_W))
+  const pw = Math.min(W, Math.max(PANEL_MIN, W - ROW_W))
+  if (model?.halt && W - pw >= ROW_MIN) {
     const panel = haltPanel(model.halt, pw, body)
     for (let i = 0; i < body; i++) lines[TOP + i] = fit(lines[TOP + i], W - pw) + fit(panel[i] ?? grey('│'), pw)
   }

@@ -15,7 +15,7 @@ import { runView, runsView } from '../src/run-view-model.mjs'
 import { TRIAGE_STALE_MS, readTriage, triageHalt } from '../src/triage.mjs'
 import { runDefaultOf, runOrchestrator } from '../src/arm.mjs'
 import { runRegistry } from '../src/registry.mjs'
-import { draw, strip } from '../src/run-view/draw.mjs'
+import { draw, haltPanel, strip } from '../src/run-view/draw.mjs'
 import { crewHost } from '../src/crew-host.mjs'
 import { crewPaths } from '../src/daemon/transport.mjs'
 import { request, stopDaemon } from '../src/daemon/client.mjs'
@@ -288,6 +288,36 @@ test('triage: the run view asks once per at it sees, shows the question asking a
   await view.refresh()
   assert.equal(view.model.halt, null)
   assert.ok(!draw(view.model, { width: 140, height: 30 }).lines.map(strip).some((l) => l.includes('halt triage')))
+})
+
+test('halt panel: any width, however narrow, draws every triage state in its height at once; a terminal too narrow for rows beside it draws the rows alone', async () => {
+  const halt = (triage) => ({ at: AT, nodes: ['impl:a', 'impl:b'], triage })
+  const states = {
+    untriaged: halt(null),
+    asking: halt({ state: 'asking' }),
+    failed: halt({ state: 'failed', error: 'the orchestrator gave no valid answer' }),
+    answered: halt({ state: 'answered', answer: ANSWER }),
+  }
+  for (const [name, h] of Object.entries(states)) {
+    for (const w of [0, 1, 2, 4]) {
+      const started = Date.now()
+      assert.equal(haltPanel(h, w, 5).length, 5, `${name} at ${w} wide`)
+      assert.ok(Date.now() - started < 500, `${name} at ${w} wide is drawn at once`)
+    }
+  }
+
+  const view = treeOf(haltedRun(), { triage: () => triageHalt({ stateDir: haltedRun(), orchestrate: () => ({ ask: () => new Promise(() => {}) }) }) })
+  await view.refresh()
+  assert.ok(view.model.halt)
+  for (const width of [20, 4, 1]) {
+    const screen = draw(view.model, { width, height: 30 }).lines.map(strip)
+    assert.ok(screen.every((l) => l.length === width), `${width} wide`)
+    assert.ok(!screen.some((l) => l.includes('│ ⏸')), `no panel at ${width} wide`)
+  }
+  const narrow = draw(view.model, { width: 20, height: 30 }).lines.map(strip)
+  assert.ok(narrow.slice(4).some((l) => l.includes('impl:a')), "the halted node's row is still drawn")
+  // Wide enough for the rows beside it, the panel is drawn as before.
+  assert.ok(draw(view.model, { width: 70, height: 30 }).lines.map(strip).some((l) => l.includes('⏸ halt triage')))
 })
 
 test('triage: a question that fails says so in the panel, and R resumes the run all the same, while it is asked and after it failed', async () => {
