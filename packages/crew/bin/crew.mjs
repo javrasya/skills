@@ -18,6 +18,9 @@
 //                     run's agent is brought to the front in Orca
 //   crew view --attached <run-dir> | --standalone [--registry <file>]
 //   crew daemon start | status | stop [--force] | restart [--force]
+//                     stop and restart refuse while a run is live, naming
+//                     it, unless --force; a daemon started after one that
+//                     died (a crash, a kill, --force) resumes the runs live then
 //   crew session spawn [--cwd <dir>] -- <command…> | list | screen <id> | kill <id>
 //   crew console      the daemon's sessions; Enter enters one, the back key (F12,
 //                     or backKey in ~/.crew/config.json) comes back

@@ -12,6 +12,8 @@
 //
 //   run      runCreate({ objective }), runUse({ runId }) → { runId, terminal }
 //   worker   workerStart, workerShow, workerStop, workerContinue, workerRelease
+//            (workerShow's `hostDied`, where a host can tell: the session was
+//            lost with the host itself, which is continued uncounted)
 //   terminal terminalIdle, terminalSend, terminalEnter, terminalClearInput,
 //            terminalScreen, terminalList, terminalClose, terminalSwitch,
 //            terminalRename; logTail, resumeRunner (a tab of the view's)

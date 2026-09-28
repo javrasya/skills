@@ -30,7 +30,8 @@ import { foldMail, heldRounds, mailSupersedes } from './doctor.mjs'
 // moves again, past its nudge's echo, so it is no longer stuck. warning: something that went wrong without
 // failing the call. A nudge's
 // `attempt` is its number since the session started or was last continued; a
-// continuation's is its number, up to the cap. `origin` names an agent across
+// continuation's is its number, up to the cap; one with `hostDied`, the session
+// lost with its host, leaves the number as it was. `origin` names an agent across
 // resumes: the n of the call that started its worker, which its `<runId>-<n>`
 // worktree is named by — a resume numbers its calls on, but never renames an
 // agent; a `started` line carries it when a resume retries a held patient's

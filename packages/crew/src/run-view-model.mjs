@@ -916,7 +916,10 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
     if (!run) return say('select a run to resume')
     const label = labelOf(run)
     if (run.reclaimed) return say(`${label} is reclaimed: its agents are gone and the registry closed it, so there is nothing to resume`)
-    if (run.alive === true && run.paused) return say(`${label}'s runner is alive and paused on an Orca outage: it carries on by itself once Orca is back, and R in its ${where(run)} probes Orca at once`)
+    if (run.alive === true && run.paused) {
+      const host = run.paused.reason === 'crew outage' ? 'crew' : 'Orca'
+      return say(`${label}'s runner is alive and paused on ${host === 'crew' ? 'a' : 'an'} ${host} outage: it carries on by itself once ${host} is back, and R in its ${where(run)} probes ${host} at once`)
+    }
     if (run.alive === true && run.outcome === 'halted') return say(`${label}'s runner is alive and halted, in ${where(run)}: R there resumes it`)
     if (run.alive === true) return say(`${label}'s runner is alive, in ${where(run)}: nothing to resume`)
     if (run.alive === null) return say(`could not tell whether ${label}'s runner is alive: its runner.pid, or Orca's list of the tab R opened, did not answer`)

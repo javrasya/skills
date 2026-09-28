@@ -267,9 +267,10 @@ export function age(ms) {
   return `${Math.floor(h / 24)}d${String(h % 24).padStart(2, '0')}h`
 }
 
+const outageHost = (paused) => (paused.reason === 'crew outage' ? 'crew' : 'Orca')
 const OUTCOME = { ok: '32', partial: '33', failed: '31', halted: '1;33' }
-// A run its live runner paused on an Orca outage is not running (ADR-0015).
-const outcomeOf = (r) => (r.outcome ? c(OUTCOME[r.outcome], r.outcome) : r.paused && r.alive !== false ? c('33', 'paused (Orca outage)') : r.alive ? c('36', 'running') : grey('unfinished'))
+// A run its live runner paused on an outage of its host, Orca or crew, is not running (ADR-0015).
+const outcomeOf = (r) => (r.outcome ? c(OUTCOME[r.outcome], r.outcome) : r.paused && r.alive !== false ? c('33', `paused (${outageHost(r.paused)} outage)`) : r.alive ? c('36', 'running') : grey('unfinished'))
 const runnerOf = (r) => (r.alive === true ? c('32', '● alive') : r.alive === false ? c('31', '○ dead') : grey('? unknown'))
 
 const projectLine = (p) => ` ${p.folded ? '▸' : '▾'} ${bold(p.name)}  ${grey(p.path ?? '')}  ${grey(`${p.runs.length} run${p.runs.length === 1 ? '' : 's'}`)}`

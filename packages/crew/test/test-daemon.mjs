@@ -14,6 +14,7 @@ import { crewPaths, lineDecoder } from '../src/daemon/transport.mjs'
 import { daemonHello, request, stopDaemon } from '../src/daemon/client.mjs'
 import { startDaemon } from '../src/daemon/daemon.mjs'
 import { resolveCommand } from '../src/daemon/session.mjs'
+import { runRegistry } from '../src/registry.mjs'
 
 const CREW = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url))
 const homes = []
@@ -152,7 +153,7 @@ test('daemon: stop refuses while runs are live, unless forced', async () => {
   const paths = crewPaths({ CREW_HOME: join(mkdtempSync(join(tmpdir(), 'crew-daemon-')), 'home') })
   const exits = []
   const daemon = await startDaemon({ paths, liveRuns: () => ['run-1'], spawnSession: () => assert.fail('no session here'), exit: (code) => exits.push(code), log: () => {} })
-  await assert.rejects(request(paths, { op: 'stop' }), /1 run\(s\) live \(run-1\); --force stops the daemon anyway/)
+  await assert.rejects(request(paths, { op: 'stop' }), /1 run\(s\) live: run-1; --force stops the daemon anyway, and the next one resumes them/)
   await assert.rejects(request(paths, { op: 'nope' }), /unknown op nope/)
   assert.equal((await request(paths, { op: 'stop', force: true })).ok, true)
   await until('the daemon to exit', () => exits.length)
@@ -221,4 +222,88 @@ test('session: a spawned session keeps running and keeps its screen while nobody
   await until('the session to exit', async () => !(await request(paths, { op: 'session.list' })).sessions[0].alive)
   assert.equal(crew('session', 'spawn').status, 2)
   assert.match(crew('session', 'screen', '99').stderr, /no session 99/)
+})
+
+// A stand-in for a pty session: its program runs until killed.
+function fakeSession({ id, command, cwd, env, title = null }) {
+  let exit = null
+  const exits = new Set()
+  return {
+    id, env,
+    info: () => ({ id, title, command, cwd, pid: 1, cols: 80, rows: 24, alive: exit === null, exit, quietMs: null }),
+    onExit: (watch) => exits.add(watch),
+    kill() {
+      if (exit) return
+      exit = { code: 0, signal: null }
+      for (const watch of exits) watch(exit)
+    },
+    write() {},
+    rename() {},
+    resize() {},
+  }
+}
+
+test('daemon: one that died with a run live is followed by one that starts its runner again; a worker lost with it shows hostDied, one that ended before does not, and stop names the live run', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const registry = join(dir, 'orca-runs.jsonl')
+  const project = join(dir, 'project')
+  mkdirSync(project)
+  const script = join(project, 'workflow.js')
+  writeFileSync(script, 'return 1\n')
+  const runDir = join(project, 'orca-run')
+  const spawned = []
+  const spawnSession = (s) => {
+    const session = fakeSession(s)
+    spawned.push(session)
+    return session
+  }
+  const exits = []
+  await startDaemon({ paths, registry, spawnSession, exit: () => exits.push(1), log: () => {} })
+  const spawn = async (command) => (await request(paths, { op: 'session.spawn', command, cwd: project })).session.id
+  const runner = await spawn(['node', 'runner.mjs'])
+  assert.equal(spawned[0].env.CREW_SESSION, runner, 'a session knows its own id')
+  const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c1', runner })
+  const { run: over } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c2', runner })
+  const rows = runRegistry(registry)
+  rows.armed({ runId: run.id, project, runDir, spec: 'the-spec', script })
+  rows.armed({ runId: over.id, project, runDir, spec: 'done-spec', script })
+  rows.ended({ runId: over.id, outcome: 'ok' })
+  const lost = await spawn(['claude'])
+  const ended = await spawn(['claude'])
+  await request(paths, { op: 'run.worker', run: run.id, session: lost, coordinator: 'c1' })
+  await request(paths, { op: 'run.worker', run: run.id, session: ended, coordinator: 'c1' })
+  await request(paths, { op: 'session.kill', id: ended })
+  await assert.rejects(request(paths, { op: 'stop' }), (e) => e.message.includes(`1 run(s) live: ${run.id} (the-spec);`))
+  // Forced, it takes every session down with it, as a crash does.
+  await request(paths, { op: 'stop', force: true })
+  await until('the first daemon to stop', () => exits.length === 1)
+
+  const second = await startDaemon({ paths, registry, spawnSession, exit: () => exits.push(2), log: () => {} })
+  try {
+    await second.recovered
+    const { sessions } = await request(paths, { op: 'session.list' })
+    assert.equal(sessions.length, 1, 'one runner started again, for the run the registry has live')
+    const [again] = sessions
+    assert.ok(Number(again.id) > Number(ended), 'no session id handed out twice')
+    assert.deepEqual(again.command.slice(2), [script, '--host', 'crew', '--state-dir', runDir, '--resume'])
+    assert.deepEqual([again.cwd, again.title], [project, 'crew run workflow.js'])
+    const show = async (id) => (await request(paths, { op: 'worker.show', id })).worker
+    assert.deepEqual(await show(lost), { settled: false, outcome: null, gone: true, exited: false, waiting: null, terminal: lost, hostDied: true })
+    assert.equal((await show(ended)).hostDied, undefined, 'it had ended before the daemon went')
+    assert.deepEqual((await request(paths, { op: 'run.use', id: run.id, coordinator: 'c3', runner: again.id })).run, { id: run.id, coordinator: 'c3' })
+    await assert.rejects(request(paths, { op: 'stop' }), (e) => e.message.includes(`live: ${run.id} (the-spec)`))
+  } finally {
+    second.shutdown('test over')
+  }
+  await until('the second daemon to stop', () => exits.includes(2))
+  // Recovered once: its new runner is the one a next daemon would look for.
+  const third = await startDaemon({ paths, registry, spawnSession, exit: () => {}, log: () => {} })
+  try {
+    await third.recovered
+    assert.equal((await request(paths, { op: 'session.list' })).sessions.length, 1)
+  } finally {
+    third.shutdown('test over')
+  }
 })

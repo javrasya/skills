@@ -5,9 +5,10 @@
 // Requests, one JSON line each, answered by one line { ok, re: <request id>, … }
 // or { ok: false, error }:
 //   hello                                  → { pid, version, endpoint }
-//   stop { force }                         → refused while runs are live, unless force
-//   session.spawn { command, cwd, env, cols, rows, title } → { session }, its env
-//                                          given CREW_SESSION, the session's id
+//   stop { force }                         → refused, naming them, while runs are
+//     live, unless force
+//   session.spawn { command, cwd, env, cols, rows, title } → { session }: its
+//     program gets its session's id as CREW_SESSION
 //   session.list                           → { sessions }
 //   session.screen { id }                  → { screen: { lines, cursor, alternate } }
 //   session.write { id, data, paste }      → { session }: data typed as keys,
@@ -23,12 +24,18 @@
 //     session, which keeps running; the daemon hangs up when it ends.
 //   run.*, worker.*, mail.*, worktree.*    crew's Runs, their workers'
 //     dispatches and their mailboxes (runs.mjs)
+//
+// Started after a daemon that died with runs live (a crash, a kill, a reboot,
+// a forced stop), it starts each such run's runner again, resuming the run
+// (#104): the runner continues every session lost with the old daemon.
 import net from 'net'
-import { mkdirSync, readFileSync, realpathSync, unlinkSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync } from 'fs'
+import { join } from 'path'
 import { StringDecoder } from 'string_decoder'
 import { fileURLToPath } from 'url'
 import { connect, crewPaths, lineDecoder, noDaemon, send } from './transport.mjs'
-import { runBook } from './runs.mjs'
+import { runBook, runnerCommand, runnerTitle } from './runs.mjs'
+import { REGISTRY_PATH } from '../registry.mjs'
 
 const VERSION = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
 const log = (...parts) => console.log(new Date().toISOString(), ...parts)
@@ -69,16 +76,68 @@ async function claim(server, endpoint) {
   return listen(server, endpoint)
 }
 
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (e) {
+    return e.code === 'EPERM'
+  }
+}
+
+const pidIn = (runDir) => {
+  try {
+    return Number(readFileSync(join(runDir, 'runner.pid'), 'utf8')) || null
+  } catch {
+    return null
+  }
+}
+
 // liveRuns: the runs this daemon is host to that are not over, which stop
-// refuses over: by default those with a worker still running (runs.mjs).
-export async function startDaemon({ paths = crewPaths(), liveRuns = null, spawnSession, exit = (code) => process.exit(code), log: say = log } = {}) {
+// refuses over (runs.mjs). registry: the run registry, which says which runs
+// are; a lost runner still running after `runnerGoneMs` (a pty's children may
+// trail their owner by a moment) is left alone, never run twice.
+export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PATH, liveRuns = null, spawnSession, exit = (code) => process.exit(code), log: say = log, runnerGoneMs = 10_000 } = {}) {
   const open = spawnSession ?? (await import('./session.mjs')).ptySession
   const sessions = new Map()
-  const book = runBook({ sessions })
+  const book = runBook({ sessions, file: paths.runs ?? join(paths.home, 'runs.json'), registry })
   liveRuns ??= book.liveRuns
   const sockets = new Set()
-  let next = 1
   let stopping = false
+
+  function spawnOne({ command, cwd, env, cols, rows, title }) {
+    const id = book.sessionId()
+    const session = open({ id, command, cwd: cwd ?? process.cwd(), env: { ...(env ?? process.env), CREW_SESSION: id }, cols, rows, title })
+    sessions.set(id, session)
+    book.started(id)
+    // A session a stopping daemon ends died with the daemon, as in a crash.
+    session.onExit?.(() => stopping || book.ended(id))
+    say(`session ${id} spawned: ${command.join(' ')} (pid ${session.info().pid})`)
+    return session
+  }
+
+  async function recover() {
+    for (const run of book.recoverable()) {
+      const { runId, script, runDir, project, permissionMode } = run
+      try {
+        if (!script || !runDir || !existsSync(script)) {
+          say(`run ${runId} was live, but its script ${script} is not there: not resumed`)
+          continue
+        }
+        const pid = pidIn(runDir)
+        for (const deadline = Date.now() + runnerGoneMs; pid && alive(pid) && Date.now() < deadline; ) await new Promise((r) => setTimeout(r, 100))
+        if (pid && alive(pid)) {
+          say(`run ${runId}: its runner, pid ${pid}, still runs: not resumed`)
+          continue
+        }
+        const session = spawnOne({ command: runnerCommand({ script, stateDir: runDir, permissionMode }), cwd: project ?? undefined, title: runnerTitle(script) })
+        book.recovered(runId, session.id)
+        say(`run ${runId} was live when the last daemon went: its runner resumes it in session ${session.id}`)
+      } catch (e) {
+        say(`run ${runId}: could not resume it: ${e?.stack ?? e}`)
+      }
+    }
+  }
 
   const sessionOf = (id) => {
     const session = sessions.get(String(id))
@@ -102,18 +161,13 @@ export async function startDaemon({ paths = crewPaths(), liveRuns = null, spawnS
     hello: () => ({ pid: process.pid, version: VERSION, endpoint: paths.endpoint }),
     stop: ({ force }) => {
       const runs = liveRuns()
-      if (runs.length && !force) throw new Error(`${runs.length} run(s) live (${runs.join(', ')}); --force stops the daemon anyway`)
+      if (runs.length && !force) throw new Error(`${runs.length} run(s) live: ${runs.join(', ')}; --force stops the daemon anyway, and the next one resumes them`)
       setImmediate(() => shutdown(force ? 'stop --force' : 'stop'))
       return { pid: process.pid }
     },
     'session.spawn': ({ command, cwd, env, cols, rows, title = null }) => {
       if (!Array.isArray(command) || !command.length || !command.every((a) => typeof a === 'string')) throw new Error('session.spawn needs a command: a non-empty list of strings')
-      const id = String(next++)
-      // CREW_SESSION: a program learns its own session, as a runner names itself to the run registry.
-      const session = open({ id, command, cwd: cwd ?? process.cwd(), env: { ...(env ?? process.env), CREW_SESSION: id }, cols, rows, title: title === null ? null : text(title, 'title') })
-      sessions.set(id, session)
-      say(`session ${id} spawned: ${command.join(' ')} (pid ${session.info().pid})`)
-      return { session: session.info() }
+      return { session: spawnOne({ command, cwd, env, cols, rows, title: title === null ? null : text(title, 'title') }).info() }
     },
     'session.list': () => ({ sessions: [...sessions.values()].map((s) => s.info()) }),
     'session.screen': async ({ id }) => ({ screen: await sessionOf(id).screen() }),
@@ -215,7 +269,8 @@ export async function startDaemon({ paths = crewPaths(), liveRuns = null, spawnS
   mkdirSync(paths.home, { recursive: true })
   await claim(server, paths.endpoint)
   say(`crew daemon ${VERSION} pid ${process.pid} listening on ${paths.endpoint}`)
-  return { server, sessions, shutdown }
+  const recovered = recover().catch((e) => say(`could not resume the runs live when the last daemon went: ${e?.stack ?? e}`))
+  return { server, sessions, shutdown, recovered }
 }
 
 const isMain = process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))

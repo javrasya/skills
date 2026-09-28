@@ -1,10 +1,17 @@
 // The daemon's runs: crew's own Runs, the dispatch each worker session runs
 // under, and each Run's mailbox, the same shapes the Orca host answers in
-// (orca-cli.mjs). They live as long as the daemon, as its sessions do: a
-// daemon restart ends every session, so no Run outlives it either.
+// (orca-cli.mjs). They outlive the daemon, kept in the crew home's runs.json,
+// while its sessions do not: a daemon that dies (a crash, a kill, a reboot, a
+// forced stop) takes every session with it. The next daemon knows which of its
+// sessions were still running then: a dispatch lost that way shows `hostDied`,
+// so its session is continued uncounted (#104), and a Run whose runner session
+// was lost, and the run registry still has live, is one it starts a runner
+// for again (recoverable). Session ids are never handed out twice, across
+// daemons too, since a dispatch is its session's id.
 //
 // A Run is bound to the coordinator that created it or last took it over
-// (run.use), as Orca binds one to a terminal: a worker started into it by any
+// (run.use), and knows the session that coordinator's runner runs in, when it
+// runs in one of crew's (`runner`); as Orca binds one to a terminal: a worker started into it by any
 // other is refused consumer_fenced, and a check reads only the Run bound to
 // the coordinator asking. A dispatch is its worker's session id; its task id
 // and capability are crew's, typed to the worker in its preamble, and a
@@ -17,10 +24,10 @@
 // names the batch, and the answer is the next one. run.use re-batches an
 // unacknowledged batch, its messages' ids kept.
 //
-//   run.create { objective, coordinator }       → { run: { id, coordinator } }
-//   run.use { id, coordinator }                 → { run: { id, coordinator } }
+//   run.create { objective, coordinator, runner } → { run: { id, coordinator } }
+//   run.use { id, coordinator, runner }         → { run: { id, coordinator } }
 //   run.worker { run, session, coordinator }    → { worker: { taskId, capability } }
-//   worker.show { id }                          → { worker: { settled, outcome, gone, exited, waiting, terminal } }
+//   worker.show { id }                          → { worker: { settled, outcome, gone, exited, waiting, terminal, hostDied? } }
 //   worker.stop { id }                          → { worker }: its program ended, unsettled ones cancelled
 //   worker.release { id }                       → { worker }
 //   mail.send { from, capability, taskId, dispatchId, type, subject, body, outcome } → { id }
@@ -28,6 +35,19 @@
 //   worktree.status { path, status }            → { path, status }
 //   worktree.statuses                           → { statuses: { <path>: <status> } }
 import { randomBytes } from 'crypto'
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'fs'
+import { basename } from 'path'
+import { fileURLToPath } from 'url'
+import { readRegistry } from '../registry.mjs'
+
+const RUNNER = fileURLToPath(new URL('../runner.mjs', import.meta.url))
+
+// The runner's command line resuming a crew run from its state dir, as the run
+// view's resume and crew's own recovery start it.
+export const runnerCommand = ({ runner = RUNNER, script, stateDir, permissionMode = null }) =>
+  [process.execPath, runner, script, '--host', 'crew', '--state-dir', stateDir, '--resume', ...(permissionMode ? ['--permission-mode', permissionMode] : [])]
+
+export const runnerTitle = (script) => `crew run ${basename(script)}`
 
 // What a worker may send to its Run's mailbox: its result, and a doctor's report.
 export const MAIL_TYPES = Object.freeze(['worker_done', 'handoff', 'escalation'])
@@ -36,13 +56,45 @@ const STATUSES = new Set(['todo', 'in-progress', 'in-review', 'completed'])
 
 const hex = (n) => randomBytes(n).toString('hex')
 
-// sessions: the daemon's, by id, each with info().
-export function runBook({ sessions, now = () => new Date().toISOString() }) {
+// sessions: the daemon's, by id, each with info(). file: where the book is
+// kept, null for nowhere; registry: the run registry, which says whether a Run
+// is live, null for none.
+export function runBook({ sessions, now = () => new Date().toISOString(), file = null, registry = null }) {
   const runs = new Map()
   const dispatches = new Map()
   const statuses = new Map()
   let messages = 0
   let deliveries = 0
+  let nextSession = 1
+  // Sessions running now; `died`, those an earlier daemon had running when it went.
+  const running = new Set()
+  let died = new Set()
+
+  let kept = null
+  try {
+    kept = file && existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : null
+  } catch {
+    // Written whole by rename, so only a hand-edited book fails to parse: the
+    // daemon still starts, with no runs.
+  }
+  if (kept) {
+    for (const r of kept.runs ?? []) runs.set(r.id, { ...r, acked: new Set(r.acked) })
+    for (const d of kept.dispatches ?? []) dispatches.set(d.id, d)
+    for (const [path, status] of Object.entries(kept.statuses ?? {})) statuses.set(path, status)
+    ;({ messages = 0, deliveries = 0, nextSession = 1 } = kept)
+    died = new Set(kept.running ?? [])
+  }
+  const save = () => {
+    if (!file) return
+    const book = {
+      runs: [...runs.values()].map((r) => ({ ...r, acked: [...r.acked] })), dispatches: [...dispatches.values()],
+      statuses: Object.fromEntries(statuses), messages, deliveries, nextSession, running: [...running, ...died],
+    }
+    // Whole or not at all: a daemon killed mid-write must not lose the book.
+    writeFileSync(`${file}.tmp`, JSON.stringify(book))
+    renameSync(`${file}.tmp`, file)
+  }
+  const runnerOf = (runner) => (runner == null ? null : String(runner))
 
   const runOf = (id) => {
     const r = runs.get(String(id))
@@ -62,18 +114,19 @@ export function runBook({ sessions, now = () => new Date().toISOString() }) {
 
   const show = (d) => {
     const s = sessions.get(d.id)?.info() ?? null
-    return { settled: d.settled, outcome: d.outcome, gone: !s, exited: !!s && !s.alive, waiting: null, terminal: d.id }
+    return { settled: d.settled, outcome: d.outcome, gone: !s, exited: !!s && !s.alive, waiting: null, terminal: d.id, ...(!s && !d.settled && died.has(d.id) && { hostDied: true }) }
   }
 
   const ops = {
-    'run.create': ({ objective = '', coordinator }) => {
-      const r = { id: `run_${hex(6)}`, objective: String(objective), coordinator: word(coordinator, 'coordinator'), pending: [], batch: null, acked: new Set() }
+    'run.create': ({ objective = '', coordinator, runner = null }) => {
+      const r = { id: `run_${hex(6)}`, objective: String(objective), coordinator: word(coordinator, 'coordinator'), runner: runnerOf(runner), pending: [], batch: null, acked: new Set() }
       runs.set(r.id, r)
       return { run: shown(r) }
     },
-    'run.use': ({ id, coordinator }) => {
+    'run.use': ({ id, coordinator, runner = null }) => {
       const r = runOf(id)
       r.coordinator = word(coordinator, 'coordinator')
+      r.runner = runnerOf(runner)
       if (r.batch) {
         r.pending.unshift(...r.batch.messages)
         r.batch = null
@@ -138,8 +191,64 @@ export function runBook({ sessions, now = () => new Date().toISOString() }) {
     'worktree.statuses': () => ({ statuses: Object.fromEntries(statuses) }),
   }
 
-  // The runs not over: those with a worker whose program still runs.
-  const liveRuns = () => [...new Set([...dispatches.values()].filter((d) => sessions.get(d.id)?.info().alive).map((d) => d.run))]
+  for (const [name, op] of Object.entries(ops)) {
+    if (name === 'worker.show' || name === 'worktree.statuses') continue
+    ops[name] = (...args) => {
+      const reply = op(...args)
+      save()
+      return reply
+    }
+  }
 
-  return { ops, liveRuns }
+  const alive = (id) => !!id && sessions.get(id)?.info().alive === true
+  const registered = () => new Map((registry ? readRegistry(registry) : []).map((e) => [e.runId, e]))
+  const unfinished = (e) => (e.state === 'running' || e.state === 'halted') && !e.reclaimed
+  const named = (r, e) => (e?.spec ? `${r.id} (${e.spec})` : r.id)
+
+  // The runs not over, each named with its spec when the registry has it: a
+  // run the registry has, while it is running or halted and its runner or a
+  // worker of it still runs; any other, while a worker of it does.
+  function liveRuns() {
+    const book = registered()
+    const working = new Set([...dispatches.values()].filter((d) => alive(d.id)).map((d) => d.run))
+    return [...runs.values()].filter((r) => {
+      const e = book.get(r.id)
+      return e ? unfinished(e) && (alive(r.runner) || working.has(r.id)) : working.has(r.id)
+    }).map((r) => named(r, book.get(r.id)))
+  }
+
+  // The runs whose runner session died with an earlier daemon while the
+  // registry still has them running or halted: { runId, script, runDir,
+  // project, permissionMode }, what starting their runner again takes.
+  function recoverable() {
+    const book = registered()
+    return [...runs.values()].filter((r) => r.runner && died.has(r.runner) && book.get(r.id) && unfinished(book.get(r.id))).map((r) => {
+      const { script, runDir, project, permissionMode } = book.get(r.id)
+      return { runId: r.id, script, runDir, project, permissionMode }
+    })
+  }
+
+  return {
+    ops,
+    liveRuns,
+    recoverable,
+    // A new session's id: never one an earlier daemon handed out.
+    sessionId() {
+      const id = String(nextSession++)
+      save()
+      return id
+    },
+    started(id) {
+      running.add(id)
+      save()
+    },
+    ended(id) {
+      if (running.delete(id)) save()
+    },
+    // A recovered run's runner is its new session from now on: recovered once.
+    recovered(runId, session) {
+      runs.get(runId).runner = session
+      save()
+    },
+  }
 }

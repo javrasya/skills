@@ -10,6 +10,11 @@ const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
 
 export class DaemonError extends Error {}
 
+// The daemon not there at all, rather than one that answered: none listening,
+// one that died mid-request, or one that would not start. A crew outage.
+export const daemonGone = (e) => noDaemon(e) || e?.code === 'ECONNRESET' || e?.code === 'EPIPE' || e?.daemonGone === true
+const gone = (message) => Object.assign(new DaemonError(message), { daemonGone: true })
+
 export async function request(paths, message, { timeoutMs = 10_000 } = {}) {
   const socket = await connect(paths.endpoint)
   return new Promise((resolvePromise, reject) => {
@@ -20,7 +25,7 @@ export async function request(paths, message, { timeoutMs = 10_000 } = {}) {
     }
     const timer = setTimeout(() => fail(new DaemonError(`crew daemon: no reply to ${message.op} within ${timeoutMs} ms`)), timeoutMs)
     socket.on('error', fail)
-    socket.on('close', () => fail(new DaemonError(`crew daemon: hung up before replying to ${message.op}`)))
+    socket.on('close', () => fail(gone(`crew daemon: hung up before replying to ${message.op}`)))
     onMessages(socket, (reply) => {
       clearTimeout(timer)
       socket.removeAllListeners('close')
@@ -59,11 +64,13 @@ export async function ensureDaemon(paths, { startMs = 10_000 } = {}) {
   const logFd = openSync(paths.log, 'a')
   // Detached, with its output in the log rather than this terminal: on Windows
   // that is a process with no console, so closing this terminal cannot reach it.
+  // A crew session's own id is no daemon's: every session it spawns gets its own.
+  const { CREW_SESSION, ...env } = process.env
   const child = spawn(process.execPath, [DAEMON], {
     detached: true,
     stdio: ['ignore', logFd, logFd],
     windowsHide: true,
-    env: { ...process.env, CREW_HOME: paths.home },
+    env: { ...env, CREW_HOME: paths.home },
   })
   closeSync(logFd)
   let exited = null
@@ -76,8 +83,8 @@ export async function ensureDaemon(paths, { startMs = 10_000 } = {}) {
       const hello = await daemonHello(paths)
       if (hello) return { ...hello, started: hello.pid === child.pid }
       // Exit 0 is a daemon that lost the race to another client's: that one answers soon.
-      if (exited && exited.code !== 0) throw new DaemonError(`crew daemon failed to start (exit ${exited.code ?? exited.signal}); ${paths.log}:\n${logTail(paths.log)}`)
-      if (Date.now() > deadline) throw new DaemonError(`crew daemon did not answer on ${paths.endpoint} within ${startMs} ms; ${paths.log}:\n${logTail(paths.log)}`)
+      if (exited && exited.code !== 0) throw gone(`crew daemon failed to start (exit ${exited.code ?? exited.signal}); ${paths.log}:\n${logTail(paths.log)}`)
+      if (Date.now() > deadline) throw gone(`crew daemon did not answer on ${paths.endpoint} within ${startMs} ms; ${paths.log}:\n${logTail(paths.log)}`)
       await sleep(50)
     }
   } finally {

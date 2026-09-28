@@ -96,6 +96,10 @@ export const agentDir = (n, label) => `agents/${String(n).padStart(3, '0')}-${sl
 // script value can be mistaken for.
 const SICK = Symbol('needs a doctor')
 
+// A worker whose session its host lost when the host itself died (workerShow's
+// `hostDied`, crew's after a crash): continued in a new session, uncounted.
+const HOST_DIED = Object.freeze({ dead: 'its session died with its session host', gone: true, hostDied: true })
+
 const mins = (ms) => Math.round(ms / 60_000)
 const wait = (ms) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms / 6_000) / 10} min`)
 
@@ -402,7 +406,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
       }
       skipOutages()
       if (s.settled) return { outcome: s.outcome }
-      if (s.gone) return { dead: 'its terminal is gone', gone: true }
+      if (s.gone) return s.hostDied ? HOST_DIED : { dead: 'its terminal is gone', gone: true }
 
       const now = clock.now()
       const bytes = measure(w, harness, sessionId)
@@ -485,7 +489,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
       return null
     }
     if (s.settled || s.waiting) return null
-    if (s.gone) return { dead: 'its terminal closed while no runner was watching it', gone: true }
+    if (s.gone) return s.hostDied ? HOST_DIED : { dead: 'its terminal closed while no runner was watching it', gone: true }
     if (s.exited) return { dead: 'it exited while no runner was watching it' }
     return null
   }
@@ -671,13 +675,15 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
         // A dead session is continued in its own session (ADR-0013), unless
         // it waits on a human, Orca cannot see it, or it already submitted.
         if (!end.dead || end.blocked || end.unseen || existsSync(resultPath)) break
-        if (continued >= limits.maxContinuations) {
+        // A session that died with its host is no death of the agent's, and
+        // spends none of its continuations (#104).
+        if (!end.hostDied && continued >= limits.maxContinuations) {
           end = { ...end, dead: `${end.dead}, and its session was already continued ${continued} times, the cap of ${limits.maxContinuations}`, capped: true }
           break
         }
-        const attempt = ++continued
+        const attempt = end.hostDied ? continued : ++continued
         const reopen = !!end.gone
-        out(`>> ${title}: ${end.dead}; continuing session ${sessionId} (continuation ${attempt} of ${limits.maxContinuations}) ${reopen ? `in a new terminal in ${w.worktree ?? 'its worktree'}` : `in terminal ${w.terminal}`}`)
+        out(`>> ${title}: ${end.dead}; continuing session ${sessionId} (${end.hostDied ? 'not counted against the cap' : `continuation ${attempt} of ${limits.maxContinuations}`}) ${reopen ? `in a new terminal in ${w.worktree ?? 'its worktree'}` : `in terminal ${w.terminal}`}`)
         let next
         try {
           next = await host.workerContinue({ run: runId, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: (patient != null ? doctorContinuePrompt : continuePrompt)(end.dead), ...launch, sessionId, reopen })
@@ -685,7 +691,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
           end = { dead: `${end.dead}, and continuing its session failed: ${e?.message ?? e}` }
           break
         }
-        journal({ type: 'continued', key, n, title, dispatchId: next.dispatchId, sessionId, terminal: next.terminal, reason: end.dead, attempt, reopened: next.dispatchId !== w.dispatchId })
+        journal({ type: 'continued', key, n, title, dispatchId: next.dispatchId, sessionId, terminal: next.terminal, reason: end.dead, attempt, reopened: next.dispatchId !== w.dispatchId, ...(end.hostDied && { hostDied: true }) })
         w = await moveTo(title, w, next)
         post()
         end = null

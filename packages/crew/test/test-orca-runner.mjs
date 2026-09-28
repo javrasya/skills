@@ -27,6 +27,7 @@ import { agentsOf, reclaimAgent, reclaimRun } from '../src/reclaim.mjs'
 import { runView, runsView, bandOf, STATES, RUNNER_PATH, runnerAlive, runEnded } from '../src/run-view-model.mjs'
 import { consoleRunsHelp, consoleTreeHelp, draw, drawRuns, listRuns, strip, TREE_HELP, marqueeOffset, NAME_W } from '../src/run-view/draw.mjs'
 import { EventEmitter } from 'events'
+import { daemonGone } from '../src/daemon/client.mjs'
 
 const SCHEMA = {
   type: 'object',
@@ -6363,4 +6364,86 @@ test('resume by node: a failed node a dead runner\'s --resume starts afresh is o
 
 test('resume: inFlight is no part of a call\'s key', () => {
   assert.equal(journalKey('p', { node: 'n/a', inFlight: true }), journalKey('p', { node: 'n/a' }))
+})
+
+// --- crew as the session host, dying and coming back (#104) ---------------------
+
+// The fake Orca played as crew (ADR-0017): its daemon not answering is crew's
+// outage, and a crew that dies takes every session it holds with it, which
+// the next daemon shows as lost with its host (`hostDied`).
+const CREW_GONE = Object.assign(new Error('connect ENOENT \\.\pipe\crew-test'), { code: 'ENOENT' })
+
+async function crewDiesRun({ settings = {}, backAt = 15 * MIN, afterContinue }) {
+  const clock = fakeClock()
+  const lines = []
+  const stateDir = tmp()
+  const registry = registryIn()
+  const live = new Map()
+  const lost = new Set()
+  const orca = fakeOrca({
+    clock,
+    worker: ({ state, preamble }) => {
+      live.set(preamble.dispatchId, state)
+      state.onContinue = afterContinue
+    },
+  })
+  const host = {
+    ...orca, id: 'crew', name: 'crew', unreachable: daemonGone,
+    async workerShow(a) {
+      const s = await orca.workerShow(a)
+      return lost.has(a.dispatch) && s.gone && !s.settled ? { ...s, hostDied: true } : s
+    },
+  }
+  let mid = null
+  clock.at(MIN, () => {
+    orca.down(CREW_GONE)
+    for (const [dispatch, state] of live) {
+      state.gone = true
+      lost.add(dispatch)
+    }
+  })
+  clock.at(12 * MIN, () => { mid = readRegistry(registry).at(0)?.paused ?? null })
+  clock.at(backAt, () => orca.up())
+  const result = await runScript(ONE, { host: sessionHost(host), stateDir, out: (s) => lines.push(s), clock, settings: { ...NO_DOCTOR, ...settings }, transcripts: fakeTranscripts(orca), registry, project: 'C:/repo' })
+  return { result, lines, registry, mid, journal: journalOf(stateDir) }
+}
+
+test('crew: crew unreachable is the outage an Orca outage is — journaled, clocks stopped, paused past its limit as a crew outage, resumed by itself — and a session lost with crew is continued, uncounted, even at a cap of 0', async () => {
+  const r = await crewDiesRun({ settings: { maxContinuations: 0 }, afterContinue: submitGood })
+  assert.deepEqual(r.result, GOOD, r.lines.join('\n'))
+  assertEntries(r.journal)
+  assert.deepEqual(phasesOf(r.journal), ['start', 'paused', 'end'])
+  const [, paused, end] = ofType(r.journal, 'outage')
+  assert.deepEqual([paused.at, end.at], [isoAt(11 * MIN), isoAt(15 * MIN)])
+  assert.ok(r.lines.some((l) => /^!! crew unreachable \(connect ENOENT .*\): every crew call waits for it/.test(l)), r.lines.join('\n'))
+  assert.ok(r.lines.some((l) => l.endsWith('crew unreachable for 10m: run paused; R to resume (or it resumes itself once crew is back)')), r.lines.join('\n'))
+  assert.ok(r.lines.includes('>> crew is back after 14 min: the run carries on'), r.lines.join('\n'))
+  assert.deepEqual(r.mid, { reason: 'crew outage', at: isoAt(11 * MIN) })
+  assert.equal(readRegistry(r.registry)[0].paused, null, 'unpaused once crew is back')
+  const continued = ofType(r.journal, 'continued')
+  assert.deepEqual(continued.map((e) => [e.reason, e.attempt, e.hostDied, e.reopened]), [['its session died with its session host', 0, true, true]])
+  assert.ok(r.lines.some((l) => /its session died with its session host; continuing session \S+ \(not counted against the cap\)/.test(l)), r.lines.join('\n'))
+  assert.deepEqual(ofType(r.journal, 'failed'), [])
+  assert.equal(ofType(r.journal, 'nudge').length, 0, 'fourteen minutes of crew gone stuck nobody')
+})
+
+test('crew: after a continuation for crew dying, an ordinary death still spends the cap: one more is continued at a cap of 1, and the next is past it', async () => {
+  const diesOnce = ({ state }) => {
+    state.gone = true
+    state.onContinue = submitGood
+  }
+  const once = await crewDiesRun({ settings: { maxContinuations: 1 }, backAt: 2 * MIN, afterContinue: diesOnce })
+  assert.deepEqual(once.result, GOOD, once.lines.join('\n'))
+  assert.deepEqual(ofType(once.journal, 'continued').map((e) => [e.attempt, e.hostDied ?? false]), [[0, true], [1, false]])
+
+  const always = ({ state }) => {
+    state.gone = true
+    state.onContinue = always
+  }
+  const capped = await crewDiesRun({ settings: { maxContinuations: 1 }, backAt: 2 * MIN, afterContinue: always })
+  assert.equal(capped.result, null)
+  assert.deepEqual(ofType(capped.journal, 'continued').map((e) => [e.attempt, e.hostDied ?? false]), [[0, true], [1, false]])
+  const [failed] = ofType(capped.journal, 'failed')
+  assert.match(failed.reason, /^its terminal is gone, and its session was already continued 1 times, the cap of 1/)
+  assert.equal(failed.continuations, 1)
 })

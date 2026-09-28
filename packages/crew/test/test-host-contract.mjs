@@ -26,7 +26,9 @@ import { fileURLToPath } from 'url'
 import { fakeOrca } from '../src/fake-orca.mjs'
 import { crewHost, crewWorktrees } from '../src/crew-host.mjs'
 import { repoConfig } from '../src/crew-config.mjs'
-import { RUN_METHODS, SESSION_METHODS } from '../src/session-host.mjs'
+import { RUN_METHODS, SESSION_METHODS, hostUnreachable } from '../src/session-host.mjs'
+import { hostOutage } from '../src/outage.mjs'
+import { realClock } from '../src/runner.mjs'
 import { openHost } from '../src/hosts.mjs'
 import { launchCommand, resumeCommand } from '../src/harness.mjs'
 import { RUNNER_SETTINGS } from '../src/settings.mjs'
@@ -569,6 +571,36 @@ test('crew host: a whole session host by its name, whose agent-side send refuses
   const r = spawnSync(process.execPath, [CREW_BIN, 'orchestration', 'send', '--task-id', 't', '--dispatch-id', 'no-such', '--type', 'handoff', '--subject', 's', '--body', 'b'], { encoding: 'utf8', env: crewScratch().agentEnv })
   assert.equal(r.status, 1)
   assert.match(r.stderr, /dispatch_not_found/)
+})
+
+test('crew host: crew dead is an outage through the host interface: a call that finds its daemon gone waits for a probe to find crew back, then goes on, and a session lost with the daemon is shown hostDied and continues', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'crew-outage-')))
+  const env = { ...process.env, CREW_HOME: join(root, 'home'), CLAUDE_CONFIG_DIR: join(root, 'claude'), PI_CODING_AGENT_SESSION_DIR: join(root, 'pi') }
+  const paths = crewPaths(env)
+  homes.push(paths)
+  const host = crewHost({ paths, env, cwd: root, harnesses: harnessAs([process.execPath, FAKE_HARNESS]), transcripts: sessionTranscripts({ env }), quietMs: 300, readyMs: 20_000, pollMs: 50 })
+  const phases = []
+  const limits = { outageProbeMs: 200, outageProbeMaxMs: 400, outageLimitMs: 60_000, pausedProbeMs: 1_000 }
+  host.guardWith(hostOutage({ clock: realClock, limits, probe: () => host.probe(), unreachable: (e) => hostUnreachable(host, e), on: (e) => phases.push(e.phase) }))
+  const { runId } = await host.runCreate({ objective: 'crew outage' })
+  const sessionId = randomUUID()
+  const w = await host.workerStart({ run: runId, prompt: 'Say hello.', title: 'lost', sessionId })
+  const { pid } = await request(paths, { op: 'hello' })
+  process.kill(pid, 'SIGKILL')
+  await eventually('the daemon gone', () => {
+    try {
+      process.kill(pid, 0)
+      return false
+    } catch {
+      return true
+    }
+  })
+  const shown = await host.workerShow({ dispatch: w.dispatchId })
+  assert.deepEqual(phases, ['start', 'end'])
+  assert.deepEqual([shown.gone, shown.settled, shown.hostDied], [true, false, true])
+  const next = await host.workerContinue({ run: runId, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title: 'lost', prompt: 'Say it again.', sessionId })
+  assert.notEqual(next.terminal, w.terminal)
+  assert.equal((await host.workerShow({ dispatch: next.dispatchId })).hostDied, undefined)
 })
 
 test('the quiet-output threshold is a runner setting, 5 seconds by default', () => {

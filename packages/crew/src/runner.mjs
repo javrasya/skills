@@ -219,8 +219,9 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
     if (!takenOver) record('armed', { runId, project, runDir: stateDir, spec: meta.value?.name ?? fallbackObjective, script: scriptPath, permissionMode, host: host.id })
     record('runner', { runId, terminal: runnerTerminal ?? terminal, host: host.id })
   }
-  // The run's one Orca outage (ADR-0015): every Orca call waits on it, so no
-  // agent is charged for it. It is journaled and logged as it starts, pauses
+  // The run's one outage of its session host (ADR-0015, ADR-0017: Orca's, or
+  // crew's daemon unreachable): every host call waits on it, so no agent is
+  // charged for it. It is journaled and logged as it starts, pauses
   // and ends, and a pause is recorded in the registry until Orca is back.
   // A resume's Run is paused under its id before its takeover lands.
   const runIdNow = () => armed ?? earlier.run?.runId ?? null
@@ -228,13 +229,13 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
     clock, limits, probe: () => host.probe(), unreachable: (e) => hostUnreachable(host, e),
     on: ({ phase, since, ms, reason, paused }) => {
       journal({ type: 'outage', phase, since: new Date(since).toISOString(), ...(reason && { reason }), ...(ms != null && { ms }) })
-      if (phase === 'start') out(`!! Orca unreachable (${reason}): every Orca call waits for it, and no agent is charged for it; probing it for up to ${took(limits.outageLimitMs)} before the run pauses`)
+      if (phase === 'start') out(`!! ${host.name} unreachable (${reason}): every ${host.name} call waits for it, and no agent is charged for it; probing it for up to ${took(limits.outageLimitMs)} before the run pauses`)
       if (phase === 'paused') {
-        out(`!!!!!!!! Orca unreachable for ${Math.round(limits.outageLimitMs / 60_000)}m: run paused; R to resume (or it resumes itself once Orca is back)`)
-        if (runIdNow()) record('paused', { runId: runIdNow(), reason: 'orca outage' })
+        out(`!!!!!!!! ${host.name} unreachable for ${Math.round(limits.outageLimitMs / 60_000)}m: run paused; R to resume (or it resumes itself once ${host.name} is back)`)
+        if (runIdNow()) record('paused', { runId: runIdNow(), reason: `${host.id} outage` })
       }
       if (phase === 'end') {
-        out(`>> Orca is back after ${took(ms)}: the run carries on`)
+        out(`>> ${host.name} is back after ${took(ms)}: the run carries on`)
         if (paused && runIdNow()) record('unpaused', { runId: runIdNow() })
       }
     },
@@ -243,8 +244,8 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
   control.resumeHost = async () => {
     const was = outage.state()
     const r = await outage.resume()
-    if (!r.outage) out('>> Orca is there: nothing is waiting on it')
-    else if (!r.back) out(was?.phase === 'paused' ? `!! Orca is still unreachable: the run stays paused, and probes it again every ${took(limits.pausedProbeMs)}` : '!! Orca is still unreachable: every Orca call still waits for it')
+    if (!r.outage) out(`>> ${host.name} is there: nothing is waiting on it`)
+    else if (!r.back) out(was?.phase === 'paused' ? `!! ${host.name} is still unreachable: the run stays paused, and probes it again every ${took(limits.pausedProbeMs)}` : `!! ${host.name} is still unreachable: every ${host.name} call still waits for it`)
     return r
   }
   // The run's halt (ADR-0016). R in the attached view reaches resume(): an

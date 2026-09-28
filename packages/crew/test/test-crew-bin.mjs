@@ -106,6 +106,50 @@ test('crew start: a spec number, and with no terminal every row\'s flag, each mi
   assert.match(r.stderr, /missing --model, --base, --stack-mode, --permission-mode\n/)
 })
 
+test('crew run: crew killed mid-run, stop and restart refused meanwhile; started again, it resumes the run, every lost session continued uncounted, and the run completes', async () => {
+  const project = realpathSync(mkdtempSync(join(tmpdir(), 'crew-bin-crash-')))
+  const script = join(project, 'workflow.js')
+  copyFileSync(fileURLToPath(new URL('./fixtures/crew-run/slow-agents.workflow.js', import.meta.url)), script)
+  const r = spawnSync(process.execPath, [CREW, 'run', 'workflow.js'], { encoding: 'utf8', env: ENV, cwd: project })
+  assert.equal(r.status, 0, r.stderr)
+  const runDir = join(project, 'orca-run')
+  const lines = (path) => (existsSync(path) ? readFileSync(path, 'utf8') : '').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+  const journal = () => lines(join(runDir, 'journal.jsonl'))
+  const log = () => (existsSync(join(runDir, 'runner.log')) ? readFileSync(join(runDir, 'runner.log'), 'utf8') : '')
+  await eventually('both workers mid-turn', () => journal().filter((e) => e.type === 'started').length === 2, 60_000)
+  const { runId } = journal().find((e) => e.type === 'run')
+
+  for (const verb of ['stop', 'restart']) {
+    const refused = crew('daemon', verb)
+    assert.equal(refused.status, 1, `daemon ${verb}: ${refused.stdout}`)
+    assert.ok(refused.stderr.includes(`1 run(s) live: ${runId} (crew-run-slow)`), refused.stderr)
+  }
+
+  const paths = crewPaths(ENV)
+  const { pid } = await request(paths, { op: 'hello' })
+  process.kill(pid, 'SIGKILL')
+  await eventually('the daemon gone', () => {
+    try {
+      process.kill(pid, 0)
+      return false
+    } catch {
+      return true
+    }
+  }, 20_000)
+  const started = crew('daemon', 'start')
+  assert.equal(started.status, 0, started.stderr)
+
+  const summary = await eventually('summary.json', () => existsSync(join(runDir, 'summary.json')) && JSON.parse(readFileSync(join(runDir, 'summary.json'), 'utf8')), 120_000)
+  assert.deepEqual(summary, { runner: 'orca', ok: true, result: { first: 'hello', second: 'world' } }, log())
+  const continued = journal().filter((e) => e.type === 'continued')
+  assert.deepEqual(continued.map((e) => [e.title, e.hostDied, e.attempt]).sort(), [['[Greet] first', true, 0], ['[Greet] second', true, 0]], log())
+  assert.match(log(), /its session died with its session host; continuing session \S+ \(not counted against the cap\)/)
+  const rows = lines(join(ENV.CLAUDE_CONFIG_DIR, 'orca-runs.jsonl')).filter((e) => e.runId === runId)
+  assert.equal(rows.filter((e) => e.type === 'runner').length, 2, 'a second runner took the run up')
+  assert.equal(rows.at(-1).type, 'ended')
+  assert.equal(rows.at(-1).outcome, 'ok')
+})
+
 test('crew orchestration send: a worker\'s message needs its IDs and a type, and names a dispatch crew made', () => {
   const missing = crew('orchestration', 'send', '--type', 'handoff')
   assert.equal(missing.status, 2)

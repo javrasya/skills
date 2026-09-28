@@ -95,6 +95,10 @@ export function ptySession({ id, command, cwd, env, cols = 120, rows = 30, title
     },
     // Every byte of output from now on; returns the unsubscribe.
     onData,
+    // Called once its program ends.
+    onExit(watch) {
+      exits.add(watch)
+    },
     // Enters the session for a real terminal fed by out: first the bytes that
     // repaint its current screen and restore its modes, then its live output.
     // Output that arrives while the emulator catches up is held and follows

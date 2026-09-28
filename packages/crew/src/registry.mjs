@@ -16,7 +16,8 @@
 //              again, so it is running and no longer reclaimed
 //   ended      outcome: ok, partial or failed
 //   paused     reason: the run's runner is alive but has paused it, which
-//              fails no agent: `orca outage`, Orca gone past its limit (ADR-0015)
+//              fails no agent: `orca outage` or `crew outage`, its session
+//              host gone past its limit (ADR-0015)
 //   unpaused   the runner carries it on again
 //   halted     node, reason: the run halted on a node that failed or needs a
 //              decision (ADR-0016); its runner stays, and R carries it on

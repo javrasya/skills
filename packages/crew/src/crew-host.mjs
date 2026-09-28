@@ -15,8 +15,9 @@ import { existsSync } from 'fs'
 import { basename, dirname, extname, join, resolve } from 'path'
 import { randomBytes } from 'crypto'
 import { fileURLToPath } from 'url'
-import { crewPaths, noDaemon } from './daemon/transport.mjs'
-import { ensureDaemon, request } from './daemon/client.mjs'
+import { crewPaths } from './daemon/transport.mjs'
+import { daemonGone, ensureDaemon, request } from './daemon/client.mjs'
+import { runnerCommand } from './daemon/runs.mjs'
 import { launchCommand, launchedSession, resumeCommand } from './harness.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { sessionTranscripts } from './transcript.mjs'
@@ -106,6 +107,9 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
   // This adapter's side of the Runs it creates or takes over, as a runner's
   // terminal is on Orca: the daemon fences every other coordinator out.
   const coordinator = `coord_${randomBytes(6).toString('hex')}`
+  // The crew session this adapter's runner runs in, if any: the daemon starts
+  // it again, resuming its Run, should the daemon die under it.
+  const runner = env.CREW_SESSION ?? null
   const sessionEnv = { ...env, CREW_HOST: 'crew', CREW_HOME: paths.home }
   const bound = { ms: callMs }
   let daemon = null
@@ -220,7 +224,8 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     // A worker's session is entered in place, from `crew view` or `crew
     // console`, never brought to the front: there are no tabs.
     inPlace: true,
-    unreachable: (e) => noDaemon(e),
+    // Crew not there at all is an outage (ADR-0015, ADR-0017), as Orca's is.
+    unreachable: (e) => daemonGone(e),
     guardWith(o) {
       outage = o
     },
@@ -228,11 +233,11 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
 
     // Crew makes the run id; the Run is bound to this adapter from then on.
     async runCreate({ objective }) {
-      const { run } = await call({ op: 'run.create', objective, coordinator })
+      const { run } = await call({ op: 'run.create', objective, coordinator, runner })
       return { runId: run.id, terminal: run.coordinator }
     },
     async runUse({ runId }) {
-      const { run } = await call({ op: 'run.use', id: runId, coordinator })
+      const { run } = await call({ op: 'run.use', id: runId, coordinator, runner })
       return { runId: run.id, terminal: run.coordinator }
     },
 
@@ -352,7 +357,7 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
       return { terminal: session.id }
     },
     async resumeRunner({ worktree, title, runner, script, stateDir, permissionMode = null }) {
-      const command = [process.execPath, runner, script, '--host', 'crew', '--state-dir', stateDir, '--resume', ...(permissionMode ? ['--permission-mode', permissionMode] : [])]
+      const command = runnerCommand({ runner, script, stateDir, permissionMode })
       const { session } = await call({ op: 'session.spawn', command, cwd: worktree, env: sessionEnv, title })
       return { terminal: session.id, command: command.join(' ') }
     },
