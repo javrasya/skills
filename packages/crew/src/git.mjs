@@ -62,3 +62,51 @@ export async function worktreeUnpushed(path, bound) {
 // -2, -3… when that name was taken. Every reader of a worktree's name takes
 // it from here, so the `<runId>-` ownership rule reads one name.
 export const worktreeName = (path) => String(path).split(/[\\/]/).pop()
+
+// A program's exit, never a rejection: { code, stdout, stderr }, code null
+// when it could not start at all (not installed). The probes `crew start`
+// makes take one of these, so a test hands them its own.
+export function execProgram(program, args, { cwd, timeoutMs = RUNNER_SETTINGS.hostCallMs } = {}) {
+  return new Promise((resolve) => {
+    execFile(program, args, { cwd, windowsHide: true, timeout: timeoutMs }, (err, stdout, stderr) =>
+      resolve({ code: err ? (typeof err.code === 'number' ? err.code : null) : 0, stdout: String(stdout ?? ''), stderr: String(stderr ?? err?.message ?? '') }))
+  })
+}
+
+// The branch the checkout sits on, null on a detached HEAD.
+export async function currentBranch(cwd, run = execProgram) {
+  const r = await run('git', ['-C', cwd, 'branch', '--show-current'])
+  if (r.code !== 0) throw new Error(`git branch in ${cwd}: ${r.stderr.trim()}`)
+  return r.stdout.trim() || null
+}
+
+// Every branch a stack could merge into: the local ones, and origin's by the
+// name a local one would have.
+export async function branchNames(cwd, run = execProgram) {
+  const r = await run('git', ['-C', cwd, 'for-each-ref', '--format=%(refname)', 'refs/heads', 'refs/remotes/origin'])
+  if (r.code !== 0) throw new Error(`git for-each-ref in ${cwd}: ${r.stderr.trim()}`)
+  const names = r.stdout.split('\n').map((l) => l.trim().replace(/^refs\/heads\//, '').replace(/^refs\/remotes\/origin\//, '')).filter((n) => n && n !== 'HEAD')
+  return [...new Set(names)]
+}
+
+// The repo's owner/name as gh knows it, null when gh knows none for the checkout.
+export async function ghRepo(cwd, run = execProgram) {
+  const r = await run('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'], { cwd })
+  return r.code === 0 && r.stdout.trim() ? r.stdout.trim() : null
+}
+
+export const ghStackInstalled = async (run = execProgram) => {
+  const r = await run('gh', ['extension', 'list'])
+  return r.code === 0 && /\bgh-stack\b/.test(r.stdout)
+}
+
+// Whether the repo's stacks API answers: 'enabled' on any 200 (even `[]`),
+// 'disabled' on a 404 (stacks not rolled out for the repo, which installing
+// nothing fixes), and 'unknown' with gh's own words on anything else.
+export async function stacksApi(repo, run = execProgram) {
+  if (!repo) return { state: 'unknown', detail: 'gh knows no GitHub repo for this checkout' }
+  const r = await run('gh', ['api', `repos/${repo}/stacks`, '--silent'])
+  if (r.code === 0) return { state: 'enabled' }
+  if (/\b404\b/.test(r.stderr)) return { state: 'disabled' }
+  return { state: 'unknown', detail: r.code === null ? 'gh is not installed' : r.stderr.trim() || `gh exited ${r.code}` }
+}

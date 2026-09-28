@@ -8,10 +8,13 @@
 //                          the program words a worker's launch line starts
 //                          with in place of the harness's own name, as a test
 //                          puts a fake harness there (crew-host.mjs)
+//   "claudeModels": ["opus", …]
+//                          the models `crew start` cycles Claude through,
+//                          beside the one Claude last ran with (start-form.mjs)
 import { readFileSync } from 'fs'
 import { isAbsolute, resolve } from 'path'
 
-export const DEFAULTS = Object.freeze({ backKey: 'f12' })
+export const DEFAULTS = Object.freeze({ backKey: 'f12', claudeModels: Object.freeze(['opus', 'sonnet', 'haiku', 'opus[1m]', 'sonnet[1m]']) })
 
 // The bytes each key arrives as in raw input. The F-keys have a few spellings:
 // xterm's, the VT220's, and libuv's on the Windows console (F12 is ESC[24~ in all).
@@ -66,6 +69,7 @@ export function readCrewConfig(paths) {
     backKeySequences(merged.backKey)
     reposOf(merged.repos)
     harnessesOf(merged.harnesses)
+    if (!Array.isArray(merged.claudeModels) || !merged.claudeModels.every((m) => typeof m === 'string' && m)) throw new Error('claudeModels: not a list of model names')
   } catch (e) {
     throw new Error(`${paths.config}: ${e.message}`)
   }

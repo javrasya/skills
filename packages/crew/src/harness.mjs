@@ -1,5 +1,10 @@
 // The command lines a worker's harness starts and resumes from, whichever
-// host types them into its terminal.
+// host types them into its terminal, and the models each harness offers.
+import { readFileSync } from 'fs'
+import { homedir } from 'os'
+import { join } from 'path'
+import { claudeDir } from './transcript.mjs'
+
 export const HARNESSES = ['claude', 'pi']
 
 // Typed into the new terminal's shell (PowerShell on Windows), so every word
@@ -46,4 +51,33 @@ function commandLine(harness, session, { model, effort, permissionMode }) {
   const bad = words.find((w) => !SHELL_WORD.test(w))
   if (bad) throw new Error(`refusing to type "${bad}" into a shell to launch ${harness}: use plain model, effort and mode names`)
   return words.join(' ')
+}
+
+const settingsOf = (path) => {
+  try {
+    const s = JSON.parse(readFileSync(path, 'utf8'))
+    return s && typeof s === 'object' ? s : {}
+  } catch {
+    return {}
+  }
+}
+
+// The model the harness last ran with, as its own settings keep it, null when
+// they name none: Claude's `model`; pi's `defaultProvider`/`defaultModel`, as
+// the provider/id pi's --model takes.
+export function lastUsedModel(harness, { home = homedir(), env = process.env } = {}) {
+  if (harness === 'claude') return settingsOf(join(claudeDir({ home, env }), 'settings.json')).model || null
+  if (harness === 'pi') {
+    const s = settingsOf(join(env.PI_CODING_AGENT_DIR || join(home, '.pi', 'agent'), 'settings.json'))
+    return s.defaultModel ? (s.defaultProvider ? `${s.defaultProvider}/${s.defaultModel}` : s.defaultModel) : null
+  }
+  throw new Error(`unknown harness "${harness}": expected one of ${HARNESSES.join(', ')}`)
+}
+
+// pi's models, from `pi --list-models`: a header row, then one model a row
+// whose first two columns are its provider and id. None when pi cannot say.
+export async function piModels(run) {
+  const r = await run('pi', ['--list-models'])
+  if (r.code !== 0) return []
+  return r.stdout.split('\n').slice(1).map((l) => l.trim().split(/\s+/)).filter((w) => w.length >= 2).map(([provider, id]) => `${provider}/${id}`)
 }
