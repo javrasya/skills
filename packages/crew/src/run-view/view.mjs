@@ -26,7 +26,8 @@ import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { runView, runsView } from '../run-view-model.mjs'
 import { REGISTRY_PATH } from '../registry.mjs'
-import { orcaCli, worktreeUnpushed } from '../orca-cli.mjs'
+import { worktreeUnpushed } from '../git.mjs'
+import { openHost } from '../hosts.mjs'
 import { RUNNER_SETTINGS } from '../settings.mjs'
 import { TREE_HELP, draw, drawRuns } from './draw.mjs'
 import { VIEW_EXIT } from './exit-codes.mjs'
@@ -109,20 +110,20 @@ process.on('exit', restore)
 // Every Orca and git call the view makes is bounded at viewCallMs, so a slow
 // Orca holds a key for seconds, never for the runner's two minutes.
 const bound = { ms: RUNNER_SETTINGS.viewCallMs }
-const orca = orcaCli({ callMs: bound.ms })
+const host = await openHost(undefined, { callMs: bound.ms })
 const unpushed = (path) => worktreeUnpushed(path, bound)
 // Standalone, `runs` takes every key and click, and hands them to the run it
 // opened; `tree()` is the run tree on screen, or null on the list.
-const runs = standalone ? runsView({ orca, registry, unpushed }) : null
+const runs = standalone ? runsView({ host, registry, unpushed }) : null
 // R's one message to the runner: during an outage it probes Orca; on a halted
 // run it resumes `node`, or every held node without one (ADR-0016).
-const resumeOrca = () => {
+const resumeHost = () => {
   if (process.connected) process.send({ type: 'resume' })
 }
 const resumeHalted = (node) => {
   if (process.connected) process.send({ type: 'resume', ...(node && { node }) })
 }
-const view = standalone ? null : runView({ stateDir: runDir, orca, registry, unpushed, resumeOrca, resumeHalted })
+const view = standalone ? null : runView({ stateDir: runDir, host, registry, unpushed, resumeHost, resumeHalted })
 const top = runs ?? view
 const tree = () => (runs ? runs.opened() : view)
 let flash = null

@@ -69,7 +69,8 @@
 // each step of a start, on the runner's outage (outage.mjs), as the adapter
 // waits each command; probe() is the outage's look, recorded as `probe`.
 import { existsSync } from 'fs'
-import { OrcaError, reuseWorktree, afterCreateTimeout, launchCommand, resumeCommand, resumeRunnerCommand, tailCommand, workerStartArgs, withTimeout, workerStatus } from './orca-cli.mjs'
+import { OrcaError, orcaUnreachable, reuseWorktree, afterCreateTimeout, resumeRunnerCommand, tailCommand, workerStartArgs, withTimeout, workerStatus } from './orca-cli.mjs'
+import { launchCommand, resumeCommand } from './harness.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 
 // The runner's transcript reader, over the fake's sessions: a session's size
@@ -79,7 +80,7 @@ export const fakeTranscripts = (orca) => ({
   path: ({ sessionId }) => `C:/fake/transcripts/${sessionId}.jsonl`,
 })
 
-export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run', runPrefix = 'run_fake', coordinator = 'term_runner', tabs = [], faults = {}, callMs = RUNNER_SETTINGS.orcaCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, setupLeaves = [], promptLoss = () => null } = {}) {
+export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run', runPrefix = 'run_fake', coordinator = 'term_runner', tabs = [], faults = {}, callMs = RUNNER_SETTINGS.hostCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, setupLeaves = [], promptLoss = () => null } = {}) {
   const calls = []
   const dispatches = new Map()
   const worktrees = new Map([[runWorktree, { parent: null, name: null, displayName: null, removed: false, status: null, porcelain: [], commits: 0, unpushed: 0 }]])
@@ -222,6 +223,9 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
   }
 
   const as = (caller) => ({
+    id: 'orca',
+    name: 'Orca',
+    unreachable: orcaUnreachable,
     calls,
     dispatches,
     worktrees,

@@ -3,7 +3,7 @@
 // (docs/design/orca-run-view-tree.md). No terminal here: view.mjs writes the
 // lines and hands a click's row back through rowAt.
 import { STATES, bandOf } from '../run-view-model.mjs'
-import { worktreeName } from '../orca-cli.mjs'
+import { worktreeName } from '../git.mjs'
 import { RUNNER_SETTINGS } from '../settings.mjs'
 
 const E = '\x1b['

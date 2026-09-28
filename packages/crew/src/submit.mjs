@@ -6,7 +6,7 @@
 import { readFileSync, writeFileSync, renameSync, realpathSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { validate } from './schema.mjs'
-import { orcaCli } from './orca-cli.mjs'
+import { openHost } from './hosts.mjs'
 
 export const USAGE =
   'usage: node submit.mjs --result <file> --payload <file> [--schema <file>] --from <worker_handle> --dispatch-capability <capability> --task-id <task_id> --dispatch-id <dispatch_id>'
@@ -29,7 +29,6 @@ function parseArgs(argv) {
     if (argv[i + 1] === undefined) throw new Error(`${argv[i]} needs a value`)
     a[key] = argv[i + 1]
   }
-  a.from ??= process.env.ORCA_TERMINAL_HANDLE
   const missing = ['result', 'payload', 'taskId', 'dispatchId'].filter((k) => !a[k])
   if (missing.length) throw new Error(`missing ${missing.map((k) => Object.keys(FLAGS).find((f) => FLAGS[f] === k)).join(', ')}`)
   return a
@@ -43,7 +42,7 @@ function readText(path) {
   return buf.toString('utf8').replace(/^﻿/, '')
 }
 
-export async function submit(argv, { orca, stdout = (s) => process.stdout.write(s + '\n'), stderr = (s) => process.stderr.write(s + '\n') } = {}) {
+export async function submit(argv, { host, stdout = (s) => process.stdout.write(s + '\n'), stderr = (s) => process.stderr.write(s + '\n') } = {}) {
   let a
   try {
     a = parseArgs(argv)
@@ -94,7 +93,7 @@ export async function submit(argv, { orca, stdout = (s) => process.stdout.write(
   renameSync(a.result + '.tmp', a.result)
 
   try {
-    await (orca ?? orcaCli()).workerDone({
+    await (host ?? await openHost()).workerDone({
       from: a.from,
       capability: a.capability,
       taskId: a.taskId,

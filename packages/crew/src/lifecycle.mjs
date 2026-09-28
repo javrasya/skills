@@ -187,7 +187,7 @@ export function readResult(resultPath, schema) {
 // only if journal or out does. life.doctors() resolves once every doctor
 // still out has ended: a patient's agent() never waits on its doctor once its
 // own result is in, so the runner awaits them before it ends.
-export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, journal, retainWorktree, onRun = () => {}, takeOver = null, transcripts = sessionTranscripts(), nextN, doctorLaunch = () => ({ harness: 'claude' }), history = () => ({ entries: [], log: [] }), mailHandled = [], mailPending = [], outage = { lost: () => 0, sleep: (ms) => clock.sleep(ms) } }) {
+export function agentLifecycle({ host, clock, limits, out, stateDir, objective, journal, retainWorktree, onRun = () => {}, takeOver = null, transcripts = sessionTranscripts(), nextN, doctorLaunch = () => ({ harness: 'claude' }), history = () => ({ entries: [], log: [] }), mailHandled = [], mailPending = [], outage = { lost: () => 0, sleep: (ms) => clock.sleep(ms) } }) {
   const live = slots(limits.MAX_LIVE)
   // One Run per workflow run: every agent's worker is dispatched into it.
   let run = null
@@ -254,15 +254,15 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   // is gone, so nothing can settle the old dispatch.
   async function moveTo(title, w, next) {
     if (next.dispatchId !== w.dispatchId) {
-      await quietly(title, 'stop its old worker', () => orca.workerStop({ dispatch: w.dispatchId }))
-      await quietly(title, 'title its new tab', () => orca.terminalRename({ terminal: next.terminal, title }))
+      await quietly(title, 'stop its old worker', () => host.workerStop({ dispatch: w.dispatchId }))
+      await quietly(title, 'title its new tab', () => host.terminalRename({ terminal: next.terminal, title }))
     }
     return { ...w, dispatchId: next.dispatchId, terminal: next.terminal, worktree: next.worktree ?? w.worktree }
   }
 
   // The Run mailbox a doctor reports over, and a patient's doctor rounds,
   // which its life() hands its failure to (doctor.mjs).
-  const mailbox = runMailbox({ orca, journal, out, handled: mailHandled, pending: mailPending })
+  const mailbox = runMailbox({ host, journal, out, handled: mailHandled, pending: mailPending })
   const doctors = doctorRounds({ limits, journal, out, life, failAgent, nextN, doctorLaunch, history, transcripts })
 
   // Runs attempt(1), attempt(2)… until one returns, one throws an error
@@ -293,8 +293,8 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   // worker-start, which Orca refuses from any terminal but the Run's.
   function ensureRun(call) {
     const creating = (run ??= takeOver
-      ? retrying(call, `Orca could not hand this run's Run ${takeOver} over to this runner`, () => orca.runUse({ runId: takeOver }).then((r) => (onRun({ ...r, takenOver: true }), r)))
-      : retrying(call, "Orca could not create this run's Run", () => orca.runCreate({ objective: objective() }).then((r) => (onRun(r), r))))
+      ? retrying(call, `Orca could not hand this run's Run ${takeOver} over to this runner`, () => host.runUse({ runId: takeOver }).then((r) => (onRun({ ...r, takenOver: true }), r)))
+      : retrying(call, "Orca could not create this run's Run", () => host.runCreate({ objective: objective() }).then((r) => (onRun(r), r))))
     return creating.catch((e) => {
       if (run === creating) run = null
       throw e
@@ -305,7 +305,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   // a warning and the agent carries on.
   async function setStatus(call, worktree, status) {
     try {
-      await orca.worktreeStatus({ worktree, status })
+      await host.worktreeStatus({ worktree, status })
     } catch (e) {
       warn(call, `could not set its worktree's board status to ${status}: ${e?.message ?? e}`)
     }
@@ -371,7 +371,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       stuck = true
       nudged(why, attempt)
       try {
-        await orca.terminalSend({ terminal: w.terminal, text: nudgeText })
+        await host.terminalSend({ terminal: w.terminal, text: nudgeText })
       } catch (e) {
         out(`!! ${title}: the nudge did not reach it: ${e.message}`)
       }
@@ -390,9 +390,9 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       let s
       let idle = null
       try {
-        s = await orca.workerShow({ dispatch: w.dispatchId })
+        s = await host.workerShow({ dispatch: w.dispatchId })
         if (!s.settled && !s.gone && !s.waiting && !s.exited && w.terminal) {
-          idle = await orca.terminalIdle({ terminal: w.terminal, timeoutMs: limits.idleProbeMs })
+          idle = await host.terminalIdle({ terminal: w.terminal, timeoutMs: limits.idleProbeMs })
         }
         errors = 0
       } catch (e) {
@@ -480,7 +480,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   async function lookBack(w) {
     let s
     try {
-      s = await orca.workerShow({ dispatch: w.dispatchId })
+      s = await host.workerShow({ dispatch: w.dispatchId })
     } catch {
       return null
     }
@@ -515,13 +515,13 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
   // assistant message, so a prompt it took would not show within the wait, and
   // an adapter with no promptDelivered checks nothing.
   async function deliver({ title, isolated, launch }, w, sessionId, sent) {
-    if (launch.harness !== 'claude' || !orca.promptDelivered || !sent) return
+    if (launch.harness !== 'claude' || !host.promptDelivered || !sent) return
     const ms = limits.promptDeliveryMs
     const step = Math.max(1, Math.round(ms / 10))
     const q = { harness: launch.harness, sessionId, worktree: w.worktree ?? null, needle: needleOf(sent) }
     const arrives = async () => {
       for (let waited = 0; ; waited += step) {
-        if (await orca.promptDelivered(q)) return true
+        if (await host.promptDelivered(q)) return true
         if (waited >= ms) return false
         await outage.sleep(step)
       }
@@ -529,18 +529,18 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     try {
       if (await arrives()) return
       out(`!! ${title}: its prompt is not in its session ${wait(ms)} after worker-start; pressing Enter in its terminal ${w.terminal}`)
-      await orca.terminalEnter({ terminal: w.terminal })
+      await host.terminalEnter({ terminal: w.terminal })
       if (await arrives()) return void out(`>> ${title}: its prompt reached its session after the Enter`)
       out(`!! ${title}: its prompt is still not in its session; emptying its input and typing the prompt again`)
       const text = resendPrompt(w, sent)
-      await orca.terminalClearInput({ terminal: w.terminal, lines: text.split('\n').length + PREAMBLE_LINES })
-      await orca.terminalSend({ terminal: w.terminal, text })
+      await host.terminalClearInput({ terminal: w.terminal, lines: text.split('\n').length + PREAMBLE_LINES })
+      await host.terminalSend({ terminal: w.terminal, text })
       if (await arrives()) return void out(`>> ${title}: its prompt reached its session when typed again`)
-      const screen = await orca.terminalScreen({ terminal: w.terminal, lines: 15 }).catch((e) => [`(its screen could not be read: ${e?.message ?? e})`])
+      const screen = await host.terminalScreen({ terminal: w.terminal, lines: 15 }).catch((e) => [`(its screen could not be read: ${e?.message ?? e})`])
       throw new Error(`its prompt never reached its session, after an Enter and a second typing; its terminal's last lines:\n${screen.join('\n')}`)
     } catch (e) {
-      await quietly(title, 'stop the worker its prompt never reached', () => orca.workerStop({ dispatch: w.dispatchId }))
-      await quietly(title, 'close its tab', () => orca.terminalClose({ terminal: w.terminal }))
+      await quietly(title, 'stop the worker its prompt never reached', () => host.workerStop({ dispatch: w.dispatchId }))
+      await quietly(title, 'close its tab', () => host.terminalClose({ terminal: w.terminal }))
       throw Object.assign(e instanceof Object ? e : new Error(String(e)), { dispatched: true, ...(isolated && w.worktree && { worktree: w.worktree }) })
     }
   }
@@ -580,7 +580,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
         // looks for in the session.
         let sent = prompt
         try {
-          const w = await orca.workerStart({
+          const w = await host.workerStart({
             run: runId,
             prompt: patient != null ? prompt : (baseline) => (sent = workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline, note: again?.note ?? null })),
             title,
@@ -616,7 +616,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     // The agent titles its own tab and drops --task-title (ADR-0011), so the
     // tab is renamed to the title the operator finds it by.
     try {
-      await orca.terminalRename({ terminal: w.terminal, title })
+      await host.terminalRename({ terminal: w.terminal, title })
     } catch (e) {
       out(`!! ${title}: could not title its tab: ${e.message}`)
     }
@@ -680,7 +680,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
         out(`>> ${title}: ${end.dead}; continuing session ${sessionId} (continuation ${attempt} of ${limits.maxContinuations}) ${reopen ? `in a new terminal in ${w.worktree ?? 'its worktree'}` : `in terminal ${w.terminal}`}`)
         let next
         try {
-          next = await orca.workerContinue({ run: runId, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: (patient != null ? doctorContinuePrompt : continuePrompt)(end.dead), ...launch, sessionId, reopen })
+          next = await host.workerContinue({ run: runId, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: (patient != null ? doctorContinuePrompt : continuePrompt)(end.dead), ...launch, sessionId, reopen })
         } catch (e) {
           end = { dead: `${end.dead}, and continuing its session failed: ${e?.message ?? e}` }
           break
@@ -708,7 +708,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
       // worker is released during the run: its tab and worktree stay for the
       // operator to reclaim at the end (reclaim.mjs).
       const kept = !!(end.capped || end.blocked) && !!result.error
-      if (end.dead && !kept) await quietly(title, 'stop its worker', () => orca.workerStop({ dispatch: w.dispatchId }))
+      if (end.dead && !kept) await quietly(title, 'stop its worker', () => host.workerStop({ dispatch: w.dispatchId }))
       // A null is journaled as failed, as the Workflow runner journals a dead
       // agent: a resume runs the call live again. The worktree it leaves rides
       // along, so a resume still names it.
@@ -868,14 +868,14 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     // cap) is interrupted and continued in its own tab.
     let gone = true
     try {
-      const s = await orca.workerShow({ dispatch: w.dispatchId })
-      if (s.settled && !s.gone) await quietly(title, 'close its settled tab', () => orca.terminalClose({ terminal: w.terminal }))
+      const s = await host.workerShow({ dispatch: w.dispatchId })
+      if (s.settled && !s.gone) await quietly(title, 'close its settled tab', () => host.terminalClose({ terminal: w.terminal }))
       gone = !!(s.gone || s.settled)
     } catch {}
     out(`>> ${title}: resuming node ${call.node}: continuing session ${adopt.sessionId} ${gone ? `in a new terminal in ${w.worktree ?? 'its worktree'}` : `in terminal ${w.terminal}`}`)
     let next
     try {
-      next = await orca.workerContinue({ run: runId, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: haltedPrompt(!!halted.needsDecision), ...launch, sessionId: adopt.sessionId, reopen: gone })
+      next = await host.workerContinue({ run: runId, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: haltedPrompt(!!halted.needsDecision), ...launch, sessionId: adopt.sessionId, reopen: gone })
     } catch (e) {
       return failAgent(call, { reason: `resuming its session failed: ${e?.message ?? e}`, attempts: 0, run: runId, retained: keep(call, w) })
     }
@@ -893,7 +893,7 @@ export function agentLifecycle({ orca, clock, limits, out, stateDir, objective, 
     out(`>> ${title}: doctor round ${round} handed off a note; continuing session ${sessionId} with it ${failure.gone ? `in a new terminal in ${w.worktree ?? 'its worktree'}` : `in terminal ${w.terminal}`}`)
     let next
     try {
-      next = await orca.workerContinue({ run: failure.run, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: notePrompt(note), ...launch, sessionId, reopen: failure.gone })
+      next = await host.workerContinue({ run: failure.run, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: notePrompt(note), ...launch, sessionId, reopen: failure.gone })
     } catch (e) {
       return failAgent(call, { ...failure, reason: `${failure.reason}, and continuing its session with its doctor's note failed: ${e?.message ?? e}`, retained: keep(call, w) })
     }

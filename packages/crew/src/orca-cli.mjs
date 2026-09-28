@@ -1,12 +1,13 @@
-// The one place the Orca runner and submit talk to Orca (ADR-0011). Callers
-// see only the plain shapes these methods return; the JSON field names of
-// Orca's `--json` output (as of 1.4.207) stay in this file. fake-orca.mjs
-// implements the same methods, which is what lets the tests run offline.
+// The Orca session host (session-host.mjs): the one place the runner and submit
+// talk to Orca (ADR-0011). Callers see only the plain shapes these methods
+// return; the JSON field names of Orca's `--json` output (as of 1.4.207) stay
+// in this file. fake-orca.mjs implements the same interface, offline.
 import { execFile } from 'child_process'
-import { existsSync } from 'fs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { copyMcpAnswers } from './mcp-answers.mjs'
 import { sessionTranscripts } from './transcript.mjs'
+import { bounded, execGit, gitIn, porcelainLines, realTimer, sameLines, worktreeName, worktreeOwnCommits } from './git.mjs'
+import { launchCommand, resumeCommand, SHELL_WORD } from './harness.mjs'
 
 export class OrcaError extends Error {
   constructor(code, message, verb) {
@@ -29,25 +30,10 @@ export function orcaUnreachable(e) {
 
 const SETTLED_DISPATCH = new Set(['completed', 'failed', 'cancelled', 'canceled'])
 
-// A clock's timer: resolves after ms unless cancelled first. The runner's
-// clock carries one, so a test's clock decides when a call has taken too long.
-export function realTimer(ms) {
-  let id
-  const promise = new Promise((r) => { id = setTimeout(r, ms) })
-  return { promise, cancel: () => clearTimeout(id) }
-}
-
 // Every Orca call is bounded. One that has not answered within ms fails as
 // call_timeout, never as Orca's own `timeout`, which a tui-idle wait uses to
 // mean busy.
-export async function withTimeout(clock, ms, p, verb) {
-  const t = clock.timer(ms)
-  try {
-    return await Promise.race([p, t.promise.then(() => { throw new OrcaError('call_timeout', `no answer within ${Math.round(ms / 1000)}s`, verb) })])
-  } finally {
-    t.cancel()
-  }
-}
+export const withTimeout = (clock, ms, p, verb) => bounded(clock, ms, p, () => new OrcaError('call_timeout', `no answer within ${Math.round(ms / 1000)}s`, verb))
 
 // No shell: arguments reach Orca verbatim, prompts included. Windows still
 // caps a command line at 32767 characters, so one prompt must stay under it.
@@ -71,33 +57,6 @@ function execOrca(bin) {
       })
     })
   }
-}
-
-function execGit(cwd, args, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    execFile('git', ['-C', cwd, ...args], { windowsHide: true, timeout: timeoutMs }, (err, stdout, stderr) =>
-      err ? reject(new Error(`git ${args[0]} in ${cwd}: ${String(stderr || err.message).trim()}`)) : resolve(String(stdout)))
-  })
-}
-
-// The one git helper: a git command in `cwd`, bounded at `ms` as an Orca call
-// is, so a hung git fails as call_timeout and never stalls its caller.
-export function gitIn(cwd, args, { git = execGit, clock = { timer: realTimer }, ms = RUNNER_SETTINGS.orcaCallMs } = {}) {
-  return withTimeout(clock, ms, git(cwd, args, ms), `git ${args[0]}`)
-}
-
-// `git status --porcelain` as its lines, each kept whole: a line's leading
-// space is its index column, so the output is never trimmed.
-export const porcelainLines = (text) => String(text ?? '').split('\n').map((l) => l.replace(/\r$/, '')).filter(Boolean)
-
-// Whether a worktree's porcelain lines are its baseline's, in any order.
-export const sameLines = (lines, baseline) => lines.length === baseline.length && [...lines].sort().join('\n') === [...baseline].sort().join('\n')
-
-// Commits on a worktree's branch that no other branch and no remote holds:
-// work of its own, which a retry never takes a worktree over with.
-export async function worktreeOwnCommits(path, branch, bound) {
-  const b = String(branch ?? '').replace(/^refs\/heads\//, '')
-  return Number((await gitIn(path, ['rev-list', '--count', 'HEAD', '--not', `--exclude=${b}`, '--branches', '--remotes'], bound)).trim())
 }
 
 // Whether a retry takes up the worktree at `path` an earlier attempt of its
@@ -129,56 +88,6 @@ export function afterCreateTimeout(e, path, warnings) {
   return path
 }
 
-// Commits reachable from a worktree's HEAD that no remote-tracking ref holds
-// (D6 on #43): what a reclaim refuses to remove unless forced. Uncommitted
-// files do not count. A worktree already gone from disk holds none.
-export async function worktreeUnpushed(path, bound) {
-  if (!existsSync(path)) return 0
-  return Number((await gitIn(path, ['rev-list', '--count', 'HEAD', '--not', '--remotes'], bound)).trim())
-}
-
-export const HARNESSES = ['claude', 'pi']
-
-// Typed into the new terminal's shell (PowerShell on Windows), so every word
-// must be one no shell reads as syntax.
-const WORD = /^[\w.:/@+=-]+$/
-
-// Every worker's harness starts from this command line, never from
-// worker-start's own `--agent` launch (ADR-0011): worker-start has no
-// permission-mode or session-id flag, and forwards --model/--effort to Claude
-// only. The session id is the runner's, so it is known before the agent runs;
-// both harnesses take `--session-id`, and Claude requires a UUID. Without one
-// the command is still built, which is how a call's launch words are checked
-// before any worker starts.
-export function launchCommand({ harness = 'claude', model, effort, permissionMode, sessionId }) {
-  return commandLine(harness, sessionId && ['--session-id', sessionId], { model, effort, permissionMode })
-}
-
-// The same launch, carrying on the session it started (session continuation,
-// ADR-0013). Claude refuses a --session-id already in use, so it resumes with
-// --resume; pi's --session-id reopens the session it names.
-export function resumeCommand({ harness = 'claude', model, effort, permissionMode, sessionId }) {
-  if (!sessionId) throw new Error(`resumeCommand: no session id to continue for ${harness}`)
-  return commandLine(harness, harness === 'claude' ? ['--resume', sessionId] : ['--session-id', sessionId], { model, effort, permissionMode })
-}
-
-function commandLine(harness, session, { model, effort, permissionMode }) {
-  let argv
-  if (harness === 'pi') {
-    // --approve trusts project-local files: an unattended pi worker would
-    // otherwise stop at pi's trust prompt with nobody to answer it.
-    argv = ['pi', '--approve', session, model && ['--model', model], effort && ['--thinking', effort]]
-  } else if (harness === 'claude') {
-    argv = ['claude', session, permissionMode && ['--permission-mode', permissionMode], model && ['--model', model], effort && ['--effort', effort]]
-  } else {
-    throw new Error(`unknown harness "${harness}": expected one of ${HARNESSES.join(', ')}`)
-  }
-  const words = argv.flat().filter(Boolean)
-  const bad = words.find((w) => !WORD.test(w))
-  if (bad) throw new Error(`refusing to type "${bad}" into a shell to launch ${harness}: use plain model, effort and mode names`)
-  return words.join(' ')
-}
-
 // The line that shows a log file's last lines and then every line added to it,
 // typed into the shell `logTail` starts: PowerShell on Windows, where the path
 // sits in a single-quoted literal (nothing in it expands, a quote doubles)
@@ -199,7 +108,7 @@ function quoted(path, platform) {
 // shell `resumeRunner` starts, quoted as tailCommand quotes. The state dir is
 // always named, so a run armed with a state dir of its own resumes from it.
 export function resumeRunnerCommand({ runner, script, stateDir, permissionMode = null }, platform = process.platform) {
-  if (permissionMode && !WORD.test(permissionMode)) throw new Error(`refusing to type permission mode "${permissionMode}" into a shell`)
+  if (permissionMode && !SHELL_WORD.test(permissionMode)) throw new Error(`refusing to type permission mode "${permissionMode}" into a shell`)
   const q = (p) => quoted(p, platform)
   return ['node', q(runner), q(script), '--state-dir', q(stateDir), '--resume', ...(permissionMode ? ['--permission-mode', permissionMode] : [])].join(' ')
 }
@@ -240,11 +149,6 @@ export function workerStatus(r) {
 // The path half of a `<repoId>::<path>` worktree id.
 const pathOf = (id) => (typeof id === 'string' && id.includes('::') ? id.slice(id.indexOf('::') + 2) : null)
 
-// The last segment of a worktree path: the name `worktree create --name` gave
-// it, suffixed -2, -3… when that name was taken. Every reader of a worktree's
-// name takes it from here, so the `<runId>-` ownership rule reads one name.
-export const worktreeName =(path) => String(path).split(/[\\/]/).pop()
-
 // Rows a worktree list asks for: Orca's default page is 200, counted across
 // every repo, and its own UI asks for 1e4.
 const WORKTREE_LIST_LIMIT = 10000
@@ -262,7 +166,7 @@ const TAB_GONE = new Set(['terminal_not_writable', 'terminal_exited', 'terminal_
 // the checkout the runner runs in, every child worktree's parent, whose MCP
 // answers a child gets (mcp-answers.mjs), read and written through `fs`;
 // `transcripts` is what promptDelivered reads a session's transcript with.
-export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(bin), git = execGit, clock = { timer: realTimer }, callMs = RUNNER_SETTINGS.orcaCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, platform = process.platform, project = process.cwd(), fs, transcripts = sessionTranscripts() } = {}) {
+export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(bin), git = execGit, clock = { timer: realTimer }, callMs = RUNNER_SETTINGS.hostCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, platform = process.platform, project = process.cwd(), fs, transcripts = sessionTranscripts() } = {}) {
   const once = (args, waitMs = 0) => withTimeout(clock, callMs + waitMs, call(args, callMs + waitMs), args.slice(0, 2).join(' '))
   let outage = null
   const orca = (args, waitMs = 0) => (outage ? outage.guard(() => once(args, waitMs)) : once(args, waitMs))
@@ -323,6 +227,9 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
   }
 
   return {
+    id: 'orca',
+    name: 'Orca',
+    unreachable: orcaUnreachable,
     guardWith(o) {
       outage = o
     },
@@ -620,8 +527,9 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
     },
 
     // Sent by submit from inside the worker's own pane: Orca settles a
-    // Dispatch only on a worker_done from the pane it was dispatched to.
-    async workerDone({ from, capability, taskId, dispatchId, subject, body }) {
+    // Dispatch only on a worker_done from the pane it was dispatched to, whose
+    // handle Orca puts in ORCA_TERMINAL_HANDLE when the worker names none.
+    async workerDone({ from = process.env.ORCA_TERMINAL_HANDLE, capability, taskId, dispatchId, subject, body }) {
       const args = ['orchestration', 'send', '--type', 'worker_done', '--outcome', 'succeeded', '--subject', subject, '--body', body, '--task-id', taskId, '--dispatch-id', dispatchId]
       if (from) args.push('--from', from)
       if (capability) args.push('--dispatch-capability', capability)

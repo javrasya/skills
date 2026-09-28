@@ -59,10 +59,13 @@ import { createHash } from 'crypto'
 import { basename, dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { checkSchema } from './schema.mjs'
-import { orcaCli, launchCommand, HARNESSES, realTimer } from './orca-cli.mjs'
+import { launchCommand, HARNESSES } from './harness.mjs'
+import { realTimer } from './git.mjs'
+import { hostUnreachable } from './session-host.mjs'
+import { HOST_NAMES, openHost } from './hosts.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { agentLifecycle, readResult, decisionsNeeded, setAside } from './lifecycle.mjs'
-import { orcaOutage } from './outage.mjs'
+import { hostOutage } from './outage.mjs'
 import { runHalt } from './halt.mjs'
 import { JOURNAL_ENTRIES, readJournal, madeByRun, journalLines } from './journal.mjs'
 import { runRegistry, REGISTRY_PATH } from './registry.mjs'
@@ -138,11 +141,11 @@ export function runnerLog(stateDir, print, clock = realClock) {
 // registry: the run registry's path, or null to record nothing there; project:
 // the repo the run works in, and script the rendered script's path, recorded
 // beside it with permissionMode, so the standalone run view can resume the run.
-// control: filled in with resumeOrca(), which probes Orca at once during an
-// outage, and resume({ node }), the attached view's R: resumeOrca while an
+// control: filled in with resumeHost(), which probes Orca at once during an
+// outage, and resume({ node }), the attached view's R: resumeHost while an
 // outage is on, else the halted run's node, or with none every held node.
 // onHalt({ node, nodes }): told each time a node is held and the run halts.
-export async function runScript(text, { orca = orcaCli(), stateDir, out: print = (s) => console.log(s), settings = {}, clock = realClock, transcripts = sessionTranscripts(), fallbackObjective = 'workflow run', resume = false, permissionMode = null, registry = null, project = process.cwd(), script: scriptPath = null, control = {}, onHalt = () => {} }) {
+export async function runScript(text, { host, stateDir, out: print = (s) => console.log(s), settings = {}, clock = realClock, transcripts = sessionTranscripts(), fallbackObjective = 'workflow run', resume = false, permissionMode = null, registry = null, project = process.cwd(), script: scriptPath = null, control = {}, onHalt = () => {} }) {
   const limits = { ...SETTINGS, ...settings }
   const out = runnerLog(stateDir, print, clock)
   const script = loadScript(text)
@@ -219,8 +222,8 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   // and ends, and a pause is recorded in the registry until Orca is back.
   // A resume's Run is paused under its id before its takeover lands.
   const runIdNow = () => armed ?? earlier.run?.runId ?? null
-  const outage = orcaOutage({
-    clock, limits, probe: () => orca.probe(),
+  const outage = hostOutage({
+    clock, limits, probe: () => host.probe(), unreachable: (e) => hostUnreachable(host, e),
     on: ({ phase, since, ms, reason, paused }) => {
       journal({ type: 'outage', phase, since: new Date(since).toISOString(), ...(reason && { reason }), ...(ms != null && { ms }) })
       if (phase === 'start') out(`!! Orca unreachable (${reason}): every Orca call waits for it, and no agent is charged for it; probing it for up to ${took(limits.outageLimitMs)} before the run pauses`)
@@ -234,8 +237,8 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
       }
     },
   })
-  orca.guardWith?.(outage)
-  control.resumeOrca = async () => {
+  host.guardWith?.(outage)
+  control.resumeHost = async () => {
     const was = outage.state()
     const r = await outage.resume()
     if (!r.outage) out('>> Orca is there: nothing is waiting on it')
@@ -245,7 +248,7 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   // The run's halt (ADR-0016). R in the attached view reaches resume(): an
   // outage's R takes precedence while one is on.
   const halt = runHalt({ journal, out, record, runId: runIdNow, onHalt, onChange: haltNotice })
-  control.resume = async ({ node = null } = {}) => (outage.state() ? control.resumeOrca() : halt.resume(node))
+  control.resume = async ({ node = null } = {}) => (outage.state() ? control.resumeHost() : halt.resume(node))
   // How many calls with each key this run has made.
   const seen = new Map()
   let replaying = resume
@@ -321,7 +324,7 @@ export async function runScript(text, { orca = orcaCli(), stateDir, out: print =
   let recover = null
   const doctorLaunch = () => (recover ??= launchOf(meta.value?.roles?.recover ?? {}, permissionMode, 'the role table\'s recover row'))
   const life = agentLifecycle({
-    orca, clock, limits, out, stateDir, objective: () => objectiveOf(meta.value, fallbackObjective), journal, retainWorktree, onRun, takeOver: earlier.run?.runId ?? null, transcripts,
+    host, clock, limits, out, stateDir, objective: () => objectiveOf(meta.value, fallbackObjective), journal, retainWorktree, onRun, takeOver: earlier.run?.runId ?? null, transcripts,
     nextN: () => ++count, doctorLaunch, history, outage, mailHandled: earlier.mail.map((m) => m.messageId),
     mailPending: earlier.mail.filter((m) => m.action === 'pending').map((m) => ({ id: m.messageId, type: m.kind, dispatchId: m.dispatchId, outcome: m.outcome ?? null, subject: m.subject, body: m.body })),
   })
@@ -646,9 +649,11 @@ if (isMain) {
   }
   const stateDir = option('--state-dir')
   const permissionMode = option('--permission-mode')
+  const hostName = option('--host') ?? undefined
+  if (hostName && !HOST_NAMES.includes(hostName)) bad = true
   const [scriptPath] = args
   if (!scriptPath || args.length > 1 || bad) {
-    console.error('usage: node runner.mjs <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <orchestrator\'s Claude permission mode>]')
+    console.error(`usage: node runner.mjs <rendered-script.js> [--host <${HOST_NAMES.join('|')}>] [--state-dir <dir>] [--resume] [--permission-mode <orchestrator's Claude permission mode>]`)
     process.exit(2)
   }
   const path = resolve(scriptPath)
@@ -681,7 +686,7 @@ if (isMain) {
   const say = runnerLog(dir, gate((s) => console.log(s)))
   const sayError = runnerLog(dir, gate((s) => console.error(s)))
   view?.start()
-  const orca = orcaCli()
+  const host = await openHost(hostName)
   // A halted run waits on its held promises alone, which keep no process
   // alive: this does, so the runner stays in its tab, halted, as the registry
   // says (ADR-0016).
@@ -692,7 +697,7 @@ if (isMain) {
       onHalt: () => {
         halted ??= setInterval(() => {}, 60_000)
       },
-      orca,
+      host,
       stateDir: dir,
       out: gate((s) => console.log(s)),
       fallbackObjective: `workflow ${basename(path)}`,

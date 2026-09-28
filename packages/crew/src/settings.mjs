@@ -55,9 +55,9 @@ export const RUNNER_SETTINGS = Object.freeze({
   pausedProbeMs: 2 * MIN,
   // One Orca call, beyond any wait it asks Orca for: one that has not
   // answered by then is killed and counts as failed.
-  orcaCallMs: 2 * MIN,
+  hostCallMs: 2 * MIN,
   // A `worktree create`, which Orca may take far longer over than one call:
-  // it has been seen to finish past orcaCallMs. One that runs out is looked
+  // it has been seen to finish past hostCallMs. One that runs out is looked
   // up by name before its attempt counts as failed.
   worktreeCreateMs: 10 * MIN,
   // A Claude worker's prompt must show in its transcript within this of
@@ -77,7 +77,7 @@ export const RUNNER_SETTINGS = Object.freeze({
   viewRestartMs: 1_000,
   viewCrashes: 3,
   // One Orca or git call from the run view, beyond any wait it asks for: far
-  // shorter than orcaCallMs, since the view's keys wait on it. A call that
+  // shorter than hostCallMs, since the view's keys wait on it. A call that
   // runs out fails that refresh or action, and the view carries on.
   viewCallMs: 10_000,
 })

@@ -13,7 +13,8 @@ import { sessionTranscripts } from './transcript.mjs'
 import { agentName, agentsOf, ownWorktree, reclaimAgent, reclaimRun } from './reclaim.mjs'
 import { foldJournal, journalLines, timeOf } from './journal.mjs'
 import { REGISTRY_PATH, readRegistry, runRegistry } from './registry.mjs'
-import { orcaUnreachable, worktreeUnpushed } from './orca-cli.mjs'
+import { worktreeUnpushed } from './git.mjs'
+import { hostUnreachable } from './session-host.mjs'
 import { probesBy } from './outage.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 
@@ -22,7 +23,7 @@ export const RUNNER_PATH = fileURLToPath(new URL('./runner.mjs', import.meta.url
 // What every key that needs Orca says, and does nothing else, while Orca is
 // not there (ADR-0015): the run's journal says an outage is under way, or the
 // view's own call found Orca gone.
-export const ORCA_GONE = 'Orca unreachable — try again when it is back'
+export const HOST_GONE = 'Orca unreachable — try again when it is back'
 
 // In the order a phase row lists its mix. An agent's state is the journal
 // fold's (journal.mjs), except reclaimed: one the registry records reclaimed.
@@ -149,7 +150,7 @@ function latestEvent(path) {
   }
 }
 
-// view = runView({ stateDir, orca, … }); await view.refresh() reads the run
+// view = runView({ stateDir, host, … }); await view.refresh() reads the run
 // again, and view.model is then:
 //   header  { name, project, runId, spec, alive, ended, elapsedMs, counts: {state: n}, outage },
 //           ended being whether the run has ended (runEnded), null when it
@@ -198,14 +199,14 @@ function latestEvent(path) {
 // transcripts (transcript.mjs); registry is the run registry's path, or null;
 // unpushed(path) counts a worktree's unpushed commits; alive(stateDir) says
 // whether the runner lives (runnerAlive), header.alive being null when it
-// cannot say. resumeOrca(): attached, what R does during an outage: it asks
+// cannot say. resumeHost(): attached, what R does during an outage: it asks
 // the runner to probe Orca at once. While an outage is under way, Enter on an
-// agent, l and r say ORCA_GONE and ask Orca nothing; an agent keeps its state.
+// agent, l and r say HOST_GONE and ask Orca nothing; an agent keeps its state.
 // resumeHalted(node): attached, what R does on a halted run with no outage:
 // it asks the runner to resume that node, or with null every held one.
 // header.halted is the fold's halt, { since, nodes }, nodes being every node
 // still failed or needing decisions, or null.
-export function runView({ stateDir, orca, clock = { now: () => Date.now() }, transcripts = sessionTranscripts(), registry = REGISTRY_PATH, unpushed = worktreeUnpushed, alive = runnerAlive, resumeOrca = null, resumeHalted = null }) {
+export function runView({ stateDir, host, clock = { now: () => Date.now() }, transcripts = sessionTranscripts(), registry = REGISTRY_PATH, unpushed = worktreeUnpushed, alive = runnerAlive, resumeHost = null, resumeHalted = null }) {
   const journalPath = join(stateDir, 'journal.jsonl')
   // name -> folded, only for phases the operator folded or unfolded.
   const folds = new Map()
@@ -288,7 +289,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     let open = null
     if (every.some((a) => a.terminal)) {
       try {
-        open = new Set(await orca.terminalList())
+        open = new Set(await host.terminalList())
       } catch {}
     }
     // A resume journals the Run it takes over before any agent.
@@ -376,7 +377,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     return { message: text }
   }
   const current = () => view.model?.rows[selected] ?? null
-  const orcaAway = () => header?.outage != null
+  const hostAway = () => header?.outage != null
 
   function toggle(phase) {
     folds.set(phase.name, !phase.folded)
@@ -387,14 +388,14 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   // Brings the agent's tab, and its worktree, to the front in Orca.
   async function focus(agent) {
     if (!agent.terminal) return say(`${agent.title} has no tab: its worker never started here`)
-    if (orcaAway()) return say(ORCA_GONE)
+    if (hostAway()) return say(HOST_GONE)
     try {
-      await orca.terminalSwitch({ terminal: agent.terminal })
+      await host.terminalSwitch({ terminal: agent.terminal })
       message = null
       layout()
       return { switched: agent.terminal }
     } catch (e) {
-      if (orcaUnreachable(e)) return say(ORCA_GONE)
+      if (hostUnreachable(host, e)) return say(HOST_GONE)
       return say(`could not focus ${agent.title}'s tab ${agent.terminal}: ${e?.message ?? e}`)
     }
   }
@@ -409,7 +410,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     if (!agent) return null
     let r
     try {
-      r = await reclaimAgent(agent, { orca, unpushed, force, stop })
+      r = await reclaimAgent(agent, { host, unpushed, force, stop })
     } catch (e) {
       r = { reclaimed: false, reason: e?.message ?? String(e) }
     }
@@ -450,7 +451,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   // confirmed retry goes to the agent refused, never to whatever row the
   // selection sits on by then: a refresh that folds its phase moves it.
   async function reclaim({ n, force = false, stop = false } = {}) {
-    if (orcaAway()) return say(ORCA_GONE)
+    if (hostAway()) return say(HOST_GONE)
     let a
     if (n === undefined) {
       const row = current()
@@ -465,7 +466,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     const family = doctorsOf(a).length > 0
     const { r, doctors } = await withItsDoctors(a, { force, stop })
     const also = family ? { doctors: { reclaimed: doctors.reclaimed.map((d) => d.agent), kept: doctors.kept } } : {}
-    if (r && !r.reclaimed) return { ...say(r.unreachable ? ORCA_GONE : `kept ${a.title}: ${r.reason}`), reclaim: r, agent: target, ...also }
+    if (r && !r.reclaimed) return { ...say(r.unreachable ? HOST_GONE : `kept ${a.title}: ${r.reason}`), reclaim: r, agent: target, ...also }
     if (!r && !doctors.reclaimed.length && !doctors.kept.length) return { ...say(`${a.title} has nothing to reclaim: it launched nothing in this run`), agent: target }
     if (r || doctors.reclaimed.length) await refresh()
     const notes = [
@@ -542,7 +543,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     if (reclaimed.length) await refresh()
     dialog = nextConfirmation(kept)
     const asked = kept.filter((k) => confirmationOf(k)).length
-    const text = kept.some((k) => k.reclaim.unreachable) ? `${ORCA_GONE}; reclaimed ${reclaimed.length} of ${total} before it went` : [
+    const text = kept.some((k) => k.reclaim.unreachable) ? `${HOST_GONE}; reclaimed ${reclaimed.length} of ${total} before it went` : [
       `reclaimed ${reclaimed.length} of ${total} agent${total === 1 ? '' : 's'} of ${what}`,
       ...kept.filter((k) => !confirmationOf(k)).map(({ agent, reclaim: r }) => `kept ${agent.title}: ${r.reason}`),
       ...(asked ? [`${asked} to confirm`] : []),
@@ -600,27 +601,27 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
     return {}
   }
 
-  // runner.log in a tab of its own that follows it (orca.logTail): Orca's
+  // runner.log in a tab of its own that follows it (host.logTail): Orca's
   // editor opens no file outside a worktree, and the run dir is outside every
   // checkout. While that tab is open, `l` again brings it back.
   async function openLog() {
-    if (orcaAway()) return say(ORCA_GONE)
+    if (hostAway()) return say(HOST_GONE)
     const path = join(stateDir, 'runner.log')
     if (!existsSync(path)) return say(`could not open ${path}: the runner has not written it yet`)
     if (logTab) {
       try {
-        await orca.terminalSwitch({ terminal: logTab })
+        await host.terminalSwitch({ terminal: logTab })
         return say(`switched to the tab following ${path}`)
       } catch (e) {
-        if (orcaUnreachable(e)) return say(ORCA_GONE)
+        if (hostUnreachable(host, e)) return say(HOST_GONE)
         logTab = null
       }
     }
     try {
-      logTab = (await orca.logTail({ path, title: 'runner.log' })).terminal
+      logTab = (await host.logTail({ path, title: 'runner.log' })).terminal
       return say(`opened ${path} in a tab that follows it`)
     } catch (e) {
-      if (orcaUnreachable(e)) return say(ORCA_GONE)
+      if (hostUnreachable(host, e)) return say(HOST_GONE)
       return say(`could not open ${path}: ${e?.message ?? e}`)
     }
   }
@@ -630,8 +631,8 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   // resumes the selected node when that failed or needs you, or every held
   // node; both go over the one channel to the runner.
   function askResume() {
-    if (orcaAway()) {
-      resumeOrca?.()
+    if (hostAway()) {
+      resumeHost?.()
       return say('asked the runner to probe Orca now: it carries on at once if Orca answers')
     }
     const halted = header?.halted
@@ -663,14 +664,14 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
       case 'RIGHT':
         return current()?.kind === 'phase' ? toggle(current().phase) : {}
       case 'r':
-        if (orcaAway()) return say(ORCA_GONE)
+        if (hostAway()) return say(HOST_GONE)
         dialog = { kind: 'choose', highlight: 0 }
         layout()
         return {}
       case 'l':
         return openLog()
       case 'R':
-        return resumeOrca || resumeHalted ? askResume() : {}
+        return resumeHost || resumeHalted ? askResume() : {}
       case 'q':
         return { quit: true }
       default:
@@ -693,7 +694,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
   return view
 }
 
-// runs = runsView({ orca, … }); await runs.refresh() reads the registry again,
+// runs = runsView({ host, … }); await runs.refresh() reads the registry again,
 // and runs.model is then:
 //   projects  [{ key, name, path, folded, runs }], the project of the latest
 //             run first, each project's runs latest first
@@ -721,7 +722,7 @@ export function runView({ stateDir, orca, clock = { now: () => Date.now() }, tra
 // Read, stop and release are not fenced to a Run's coordinator, so a reclaim
 // needs no takeover. runner is the runner.mjs a resume runs; the rest is as
 // runView's.
-export function runsView({ orca, clock = { now: () => Date.now() }, registry = REGISTRY_PATH, transcripts = sessionTranscripts(), unpushed = worktreeUnpushed, alive = runnerAlive, runner = RUNNER_PATH }) {
+export function runsView({ host, clock = { now: () => Date.now() }, registry = REGISTRY_PATH, transcripts = sessionTranscripts(), unpushed = worktreeUnpushed, alive = runnerAlive, runner = RUNNER_PATH }) {
   const folds = new Map()
   // runId -> { terminal, pid, starting }: the tab R opened, and the runner.pid
   // its run dir held then. While that file is unchanged the new runner has not
@@ -772,7 +773,7 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
     let open = null
     if ([...launched.values()].some((l) => l.starting)) {
       try {
-        open = new Set(await orca.terminalList())
+        open = new Set(await host.terminalList())
       } catch {}
     }
     lastOpen = open
@@ -819,7 +820,7 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
     if (!run) return say(`no run ${runId} in the run registry`)
     if (!run.runDir) return say(`${labelOf(run)} has no run directory recorded`)
     // The tree's header asks what the run's row asks, by the same rule.
-    opened = { runId, view: runView({ stateDir: run.runDir, orca, clock, transcripts, registry, unpushed, alive: () => (recorded.has(runId) ? liveOf(recorded.get(runId), lastOpen) : null) }) }
+    opened = { runId, view: runView({ stateDir: run.runDir, host, clock, transcripts, registry, unpushed, alive: () => (recorded.has(runId) ? liveOf(recorded.get(runId), lastOpen) : null) }) }
     await opened.view.refresh()
     message = null
     layout()
@@ -863,14 +864,14 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
       const done = new Set(readRegistry(registry).find((e) => e.runId === runId)?.reclaimedAgents.map((a) => a.agent) ?? [])
       left = run.runDir ? agentsOf(join(run.runDir, 'journal.jsonl')).filter((a) => a.runId === runId && !done.has(a.name)) : []
       const writer = runRegistry(registry, clock)
-      r = await reclaimRun(left, { orca, unpushed, registry: writer, closeRun: !stays, out: (s) => notes.push(s.replace(/^!! /, '')) })
+      r = await reclaimRun(left, { host, unpushed, registry: writer, closeRun: !stays, out: (s) => notes.push(s.replace(/^!! /, '')) })
       if (!left.length && !stays) writer.reclaimed({ runId })
     } catch (e) {
       return say(`could not reclaim ${label}: ${e?.message ?? e}`)
     }
     await refresh()
     const agents = (n) => `${n} agent${n === 1 ? '' : 's'}`
-    if (r.kept.some((k) => k.unreachable)) return { ...say(`${ORCA_GONE}; reclaimed ${r.reclaimed.length} of ${left.length} agents of ${label} before it went`), reclaimed: r.reclaimed, kept: r.kept }
+    if (r.kept.some((k) => k.unreachable)) return { ...say(`${HOST_GONE}; reclaimed ${r.reclaimed.length} of ${left.length} agents of ${label} before it went`), reclaimed: r.reclaimed, kept: r.kept }
     const text = r.kept.length
       ? `reclaimed ${r.reclaimed.length} of ${left.length} agents of ${label}; ${r.kept.map(({ agent, reason }) => `kept ${agent.title}: ${reason}`).join('; ')}`
       : stays
@@ -898,9 +899,9 @@ export function runsView({ orca, clock = { now: () => Date.now() }, registry = R
     const script = run.script ?? join(dirname(run.runDir), 'workflow.js')
     let t
     try {
-      t = await orca.resumeRunner({ worktree: run.project, title: `${run.name ?? run.runId} (resumed)`, runner, script, stateDir: run.runDir, permissionMode: run.permissionMode })
+      t = await host.resumeRunner({ worktree: run.project, title: `${run.name ?? run.runId} (resumed)`, runner, script, stateDir: run.runDir, permissionMode: run.permissionMode })
     } catch (e) {
-      if (orcaUnreachable(e)) return say(ORCA_GONE)
+      if (hostUnreachable(host, e)) return say(HOST_GONE)
       return say(`could not resume ${label}: ${e?.message ?? e}`)
     }
     if (t.terminal) launched.set(runId, { terminal: t.terminal, pid: runnerPid(run.runDir), starting: true })

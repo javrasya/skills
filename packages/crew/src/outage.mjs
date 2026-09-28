@@ -1,12 +1,11 @@
 // An Orca outage (ADR-0015): a stretch in which Orca itself is not there — its
 // app down or restarting, as while it updates, or its CLI unable to run — as
-// orcaUnreachable (orca-cli.mjs) tells it from an Orca that answered. It is one
-// event for the whole run, never an agent's: every Orca call the runner makes
-// goes through guard(), which holds a call that finds Orca gone on the one
+// the host's unreachable(e) (session-host.mjs) tells it from an Orca that
+// answered. It is one event for the whole run, never an agent's: every Orca
+// call the runner makes goes through guard(), which holds a call that finds Orca gone on the one
 // outage under way and runs it again once Orca answers, so no watch error,
 // start attempt, nudge, continuation or doctor round is spent on it. One probe
 // at a time looks for Orca, however many calls wait on it.
-import { orcaUnreachable } from './orca-cli.mjs'
 
 // When each probe of an outage comes, in ms since it began: after
 // outageProbeMs, each wait twice the last up to outageProbeMaxMs, one at
@@ -48,14 +47,14 @@ export function probesBy(ms, limits) {
 //   sleep(ms)   waits ms of time Orca was there: a retry's backoff
 //   resume()    probes at once, sharing a probe already out: { back, outage },
 //               back once Orca answered, outage whether there was one
-export function orcaOutage({ clock, limits, probe, on = () => {} }) {
+export function hostOutage({ clock, limits, probe, unreachable, on = () => {} }) {
   let current = null
   let ended = 0
   let probing = null
 
   // True unless the probe found Orca still gone: an Orca that answers with
   // an error, or not in time, is there, and the call it held meets that itself.
-  const ask = () => (probing ??= Promise.resolve().then(probe).then(() => true, (e) => !orcaUnreachable(e)).finally(() => {
+  const ask = () => (probing ??= Promise.resolve().then(probe).then(() => true, (e) => !unreachable(e)).finally(() => {
     probing = null
   }))
 
@@ -108,7 +107,7 @@ export function orcaOutage({ clock, limits, probe, on = () => {} }) {
         try {
           return await fn()
         } catch (e) {
-          if (!orcaUnreachable(e)) throw e
+          if (!unreachable(e)) throw e
           if (!current) begin(e)
         }
       }

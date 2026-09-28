@@ -11,9 +11,10 @@
 //   - reclaiming releases the worker, closes its tab if Orca's terminal list
 //     still shows it, and removes its worktree.
 import { madeByRun, readJournal } from './journal.mjs'
-import { orcaUnreachable, worktreeName, worktreeUnpushed } from './orca-cli.mjs'
+import { worktreeName, worktreeUnpushed } from './git.mjs'
+import { hostUnreachable } from './session-host.mjs'
 
-// `unpushed(path)` below defaults to orca-cli.mjs's worktreeUnpushed: commits
+// `unpushed(path)` below defaults to git.mjs's worktreeUnpushed: commits
 // no remote-tracking ref holds (D6 on #43), counted by the one bounded git helper.
 
 // The agents a run's journal names, by the fold every reader of it shares
@@ -59,8 +60,8 @@ export const keptRunning = (agent) => agent.state === 'failed' && agent.workerLe
 // then stops that worker before anything else. `open`: the terminal list's
 // handles, when the caller has already read it for a batch. A refusal
 // because Orca was not there at all (an outage, ADR-0015) is `unreachable`.
-export async function reclaimAgent(agent, { orca, unpushed = worktreeUnpushed, force = false, stop = false, open = null }) {
-  const refuse = (reason, e = null) => ({ reclaimed: false, reason, ...(orcaUnreachable(e) && { unreachable: true }) })
+export async function reclaimAgent(agent, { host, unpushed = worktreeUnpushed, force = false, stop = false, open = null }) {
+  const refuse = (reason, e = null) => ({ reclaimed: false, reason, ...(hostUnreachable(host, e) && { unreachable: true }) })
   let stopFirst = false
   // A missing dispatch is never proof its worker is not live: only an agent
   // the journal shows no worker ever started for skips the check. A failed
@@ -69,7 +70,7 @@ export async function reclaimAgent(agent, { orca, unpushed = worktreeUnpushed, f
   if (agent.dispatchId) {
     let s
     try {
-      s = await orca.workerShow({ dispatch: agent.dispatchId })
+      s = await host.workerShow({ dispatch: agent.dispatchId })
     } catch (e) {
       return refuse(`could not tell whether it is live: ${e?.message ?? e}`, e)
     }
@@ -97,7 +98,7 @@ export async function reclaimAgent(agent, { orca, unpushed = worktreeUnpushed, f
   let tabs = open
   if (agent.terminal && !tabs) {
     try {
-      tabs = await orca.terminalList()
+      tabs = await host.terminalList()
     } catch (e) {
       return refuse(`could not list Orca's terminals: ${e?.message ?? e}`, e)
     }
@@ -105,7 +106,7 @@ export async function reclaimAgent(agent, { orca, unpushed = worktreeUnpushed, f
 
   if (stopFirst) {
     try {
-      await orca.workerStop({ dispatch: agent.dispatchId })
+      await host.workerStop({ dispatch: agent.dispatchId })
     } catch (e) {
       return refuse(`its worker could not be stopped: ${e?.message ?? e}`, e)
     }
@@ -113,14 +114,14 @@ export async function reclaimAgent(agent, { orca, unpushed = worktreeUnpushed, f
   const notes = []
   if (agent.dispatchId) {
     try {
-      await orca.workerRelease({ dispatch: agent.dispatchId })
+      await host.workerRelease({ dispatch: agent.dispatchId })
     } catch (e) {
       notes.push(`its worker was not released: ${e?.message ?? e}`)
     }
   }
   if (agent.terminal && tabs.includes(agent.terminal)) {
     try {
-      await orca.terminalClose({ terminal: agent.terminal })
+      await host.terminalClose({ terminal: agent.terminal })
     } catch (e) {
       // Closed between the list and the close.
       if (e?.code !== 'terminal_exited' && e?.code !== 'terminal_handle_stale') notes.push(`its tab was not closed: ${e?.message ?? e}`)
@@ -128,7 +129,7 @@ export async function reclaimAgent(agent, { orca, unpushed = worktreeUnpushed, f
   }
   if (worktree) {
     try {
-      await orca.worktreeRemove({ path: worktree })
+      await host.worktreeRemove({ path: worktree })
     } catch (e) {
       if (e?.code !== 'selector_not_found') return refuse(`its worktree ${worktree} was not removed: ${e?.message ?? e}`, e)
     }
@@ -144,7 +145,7 @@ export async function reclaimAgent(agent, { orca, unpushed = worktreeUnpushed, f
 // that fails is reported through `out`, never thrown.
 // Returns { reclaimed: [agent], kept: [{ agent, reason }] }, a kept one also
 // `unreachable` when Orca was not there to reclaim it.
-export async function reclaimRun(agents, { orca, unpushed = worktreeUnpushed, force = false, keep = () => null, registry = null, closeRun = true, out = () => {} }) {
+export async function reclaimRun(agents, { host, unpushed = worktreeUnpushed, force = false, keep = () => null, registry = null, closeRun = true, out = () => {} }) {
   const record = (entry) => {
     try {
       registry?.reclaimed(entry)
@@ -157,7 +158,7 @@ export async function reclaimRun(agents, { orca, unpushed = worktreeUnpushed, fo
   let open = null
   if (agents.some((a) => a.terminal && !keep(a))) {
     try {
-      open = await orca.terminalList()
+      open = await host.terminalList()
     } catch (e) {
       out(`!! could not list Orca's terminals: ${e?.message ?? e}`)
     }
@@ -168,7 +169,7 @@ export async function reclaimRun(agents, { orca, unpushed = worktreeUnpushed, fo
       kept.push({ agent, reason: why })
       continue
     }
-    const r = await reclaimAgent(agent, { orca, unpushed, force, open })
+    const r = await reclaimAgent(agent, { host, unpushed, force, open })
     if (!r.reclaimed) {
       kept.push({ agent, reason: r.reason, ...(r.unreachable && { unreachable: true }) })
       continue

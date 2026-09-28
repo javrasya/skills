@@ -123,7 +123,7 @@ ${note}`
 // for a doctor's box, or, with box null, for an agent() call's worker; and
 // ends(box) is the mail() a doctor's watch reads at every look, which
 // resolves to its worker_done once one is read.
-export function runMailbox({ orca, journal, out, handled: mailHandled = [], pending: mailPending = [] }) {
+export function runMailbox({ host, journal, out, handled: mailHandled = [], pending: mailPending = [] }) {
   const handled = new Set(mailHandled)
   const mailboxes = new Map()
   const agentsOut = new Set()
@@ -138,7 +138,7 @@ export function runMailbox({ orca, journal, out, handled: mailHandled = [], pend
     return r
   }
   async function drain() {
-    for (let r = await orca.mailCheck(); r.deliveryId; r = await orca.mailCheck({ ack: r.deliveryId })) {
+    for (let r = await host.mailCheck(); r.deliveryId; r = await host.mailCheck({ ack: r.deliveryId })) {
       for (const m of r.messages) await take(m)
     }
   }

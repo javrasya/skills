@@ -540,7 +540,12 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   const onRunner = async (runner, overrides = {}) => (await run(overrides, { runner }))
   const publish10 = (calls) => calls.find((c) => c.label === 'publish:#10').prompt
   const onWorkflow = await onRunner('workflow')
-  const onOrca = await onRunner('orca')
+  const onOrca = await onRunner('session')
+  // 'orca' is what RUNNER was rendered as before 'session': such a script,
+  // and its resume, must run exactly as the new rendering does.
+  const onOrcaValue = await onRunner('orca')
+  const trace = (r) => JSON.stringify([r.calls.map((c) => [c.label, c.prompt]), r.result])
+  check("R: a script rendered with RUNNER 'orca' runs exactly as one rendered with 'session'", trace(onOrcaValue) === trace(onOrca), '')
   const wf = publish10(onWorkflow.calls)
   const orca = publish10(onOrca.calls)
   const reclaimCmd = /git worktree remove|git worktree prune|orca worktree rm/
@@ -554,11 +559,11 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   // A publish that fails halts the run: nothing is reclaimed on either runner.
   const unpublished = { publish: () => ({ published: false, note: 'push rejected', worktree: '/wt/publish-10', worktrees_removed: 0, worktrees_kept: [] }) }
   const wfNone = await onRunner('workflow', unpublished)
-  const orcaNone = await onRunner('orca', unpublished)
+  const orcaNone = await onRunner('session', unpublished)
   check('R: a failed publish halts the run on either runner', wfNone.result.halted === true && orcaNone.result.halted === true && wfNone.result.tickets.find((x) => x.ticket === 10).state === 'failed', JSON.stringify(wfNone.result.tickets))
   check('R: a halted run starts no reclaim agent on either runner — a resume carries its worktrees on', ![...wfNone.calls, ...orcaNone.calls].some((c) => c.label === 'reclaim'), wfNone.calls.map((c) => c.label).join(' | '))
   // One template, one rendering: the runner value is the only difference.
-  const diff = render('workflow').split('\n').filter((l, i) => l !== render('orca').split('\n')[i])
+  const diff = render('workflow').split('\n').filter((l, i) => l !== render('session').split('\n')[i])
   check('R: the rendered script differs between runners only in RUNNER', diff.length === 1 && /^const RUNNER = 'workflow'/.test(diff[0]), diff.join(' | '))
 }
 

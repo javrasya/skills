@@ -9,8 +9,8 @@
 // process: a child process would split the terminal and its signals between two.
 import { realpathSync } from 'fs'
 import { fileURLToPath, pathToFileURL } from 'url'
+import { HOST_NAMES as HOSTS } from '../src/hosts.mjs'
 
-const HOSTS = ['orca']
 const USAGE = [
   'usage: crew run --host <host> <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]',
   '       crew view --attached <run-dir> | --standalone [--registry <run registry, for a fixture>]',
@@ -32,7 +32,6 @@ if (command === 'run') {
     console.error(host ? `crew: unknown host ${host}\n${USAGE}` : `crew run: --host is required\n${USAGE}`)
     process.exit(2)
   }
-  rest.splice(at, 2)
   await launch(entry('../src/runner.mjs'), rest)
 } else if (command === 'view') {
   await launch(entry('../src/run-view/view.mjs'), rest)
