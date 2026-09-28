@@ -220,6 +220,7 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
       const session = sessionOf(id)
       session.kill()
       sessions.delete(session.id)
+      book.closed(session.id)
       say(`session ${id} closed`)
       return { session: session.info() }
     },

@@ -3,9 +3,10 @@
 // its current screen and modes first (the daemon's repaint), then its live
 // output, with every key but the back key passed to it byte for byte and every
 // resize forwarded. The back key leaves for the page; the session keeps
-// running. Two pages: `crew console`'s flat list of the daemon's sessions
-// (runConsole), and `crew view`'s runs and their trees (runsConsole), where
-// Enter on a crew run's agent, or on its runner, enters that session.
+// running. Two pages: `crew view`'s runs and their trees (runsConsole), the
+// run console, where an operator enters a crew run's agent, or its runner;
+// and `crew console`'s flat list of the daemon's raw sessions (runConsole), a
+// debug view that knows no runs.
 import { enterSession, request } from './daemon/client.mjs'
 import { RESET } from './daemon/modes.mjs'
 import { backKeySequences } from './crew-config.mjs'
@@ -192,7 +193,7 @@ function consoleOn({ paths, stdin, stdout, backKey = 'f12', holdMs = 50, page })
 
 const describe = (s) => `${s.id}  ${s.alive ? 'running' : `exited ${s.exit?.code ?? s.exit?.signal}`}  pid ${s.pid}  ${s.cols}x${s.rows}  ${s.command.join(' ')}`
 
-// `crew console`: the daemon's sessions in a flat list, until q or Ctrl+C.
+// `crew console`, for debugging: the daemon's sessions in a flat list, until q or Ctrl+C.
 export function runConsole({ paths, stdin, stdout, backKey = 'f12', refreshMs = 1_000, holdMs = 50 }) {
   let sessions = []
   let selected = 0

@@ -41,6 +41,7 @@ export function ptySession({ id, command, cwd, env, cols = 120, rows = 30, title
   const watchers = new Set()
   const exits = new Set()
   let exit = null
+  let killing = false
   let entered = 0
   let lastOutput = null
   child.onData((data) => {
@@ -129,8 +130,12 @@ export function ptySession({ id, command, cwd, env, cols = 120, rows = 30, title
         exits.delete(ended)
       }
     },
+    // Once: a pty killed again while its first kill is under way (its exit
+    // not in yet) takes the daemon down with it, and reclaim, a stop then a
+    // close, and the orchestrator's stop then close all kill twice.
     kill() {
-      if (exit !== null) return
+      if (exit !== null || killing) return
+      killing = true
       try {
         child.kill()
       } catch {

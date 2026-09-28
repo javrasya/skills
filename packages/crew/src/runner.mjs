@@ -141,8 +141,9 @@ export function runnerLog(stateDir, print, clock = realClock) {
 // registry: the run registry's path, or null to record nothing there; project:
 // the repo the run works in, and script the rendered script's path, recorded
 // beside it with permissionMode, so the standalone run view can resume the run;
-// runnerTerminal, where the registry says the runner is when the host's Run
-// terminal is not the runner's own.
+// runnerTerminal, where the runner is when the host's Run terminal is not
+// the runner's own (crew's session): the registry, the journal and
+// halted.json name it.
 // control: filled in with resumeHost(), which probes Orca at once during an
 // outage, and resume({ node }), the attached view's R: resumeHost while an
 // outage is on, else the halted run's node, or with none every held node.
@@ -211,11 +212,13 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
   // Called once, when Orca creates the Run, or hands the journaled one over to
   // a resume: that Run was armed by the runner that created it, and gains
   // this runner's terminal. The script has run by then, so its meta names
-  // its phases.
+  // its phases. The runner's terminal is journaled, and so named in
+  // halted.json, as the one an operator enters: on crew its own session
+  // (runnerTerminal), not the adapter's side of the Run.
   const onRun = ({ runId, terminal, takenOver = false }) => {
     armed = runId
     const phases = phaseTitles(meta.value) ?? earlier.phases
-    journal({ type: 'run', runId, terminal, ...(phases && { phases }) })
+    journal({ type: 'run', runId, terminal: runnerTerminal ?? terminal, ...(phases && { phases }) })
     if (!takenOver) record('armed', { runId, project, runDir: stateDir, spec: meta.value?.name ?? fallbackObjective, script: scriptPath, permissionMode, host: host.id })
     record('runner', { runId, terminal: runnerTerminal ?? terminal, host: host.id })
   }

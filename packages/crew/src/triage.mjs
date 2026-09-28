@@ -4,8 +4,14 @@
 // created exclusively before it is asked: an `at` is asked once, however many
 // consoles show the run and across their restarts, and a notice rewritten with
 // a new `at` is a new question. A question never holds anything up: R resumes
-// the run whatever became of it, and one that fails is recorded failed.
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
+// the run whatever became of it, and one that fails is recorded failed. One
+// given up on because its console quit (the orchestrator closed) is no
+// answer and no failure: its claim is dropped, and the next console to show
+// the run asks it again.
+//
+// Only a console asks: a run that halts while nobody has it open in `crew
+// view` is triaged when someone next opens it there (ADR-0018).
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { TRIAGE_SCHEMA, triagePrompt } from './orchestrator.mjs'
 
@@ -63,6 +69,10 @@ export function triageHalt({ stateDir, orchestrate, now = () => Date.now() }) {
     return { asked: true, state: entry.state }
   }
   return (async () => orchestrate().ask({ name: 'halt-triage', prompt: triagePrompt({ stateDir, notice }), schema: TRIAGE_SCHEMA }))()
-    .then((answer) => record({ state: 'answered', answer }), (e) => record({ state: 'failed', error: e?.message ?? String(e) }))
+    .then((answer) => record({ state: 'answered', answer }), (e) => {
+      if (!e?.stopped) return record({ state: 'failed', error: e?.message ?? String(e) })
+      rmSync(file, { force: true })
+      return { asked: true, state: null }
+    })
 }
 

@@ -6057,11 +6057,11 @@ function nodeRig(plays = {}, { faults = {} } = {}) {
   const lines = []
   const halts = []
   let runs = 0
-  const go = (script, { resume = false, settings = {} } = {}) => {
+  const go = (script, { resume = false, settings = {}, runnerTerminal = null } = {}) => {
     const from = orca.calls.length
     const control = {}
     const run = { control, settled: null, calls: () => orca.calls.slice(from) }
-    run.p = runScript(script, { host: orca.as(`term_${++runs}`), stateDir, registry, out: (s) => lines.push(s), settings: { ...FAST, ...NO_DOCTOR, ...settings }, resume, control, onHalt: (h) => halts.push(h) })
+    run.p = runScript(script, { host: orca.as(`term_${++runs}`), stateDir, registry, out: (s) => lines.push(s), settings: { ...FAST, ...NO_DOCTOR, ...settings }, resume, control, onHalt: (h) => halts.push(h), runnerTerminal })
     run.p.then((v) => { run.settled = { value: v } }, (e) => { run.settled = { error: e } })
     return run
   }
@@ -6314,6 +6314,17 @@ test('halt: halted.json tells the arming session: removed at start, written on t
   await run.control.resume({})
   assert.deepEqual(await run.p, [GOOD, ANSWERED])
   assert.equal(existsSync(at), false, 'removed once the run leaves halted')
+})
+
+test("halt: where the Run's terminal is not the runner's own (crew), halted.json, the journal and the registry all name the runner's own session", async () => {
+  const rig = nodeRig({ 'Do a.': diesThenSubmitsOnContinue })
+  const run = rig.go(`return await ${nodeCall('a')}`, { runnerTerminal: '7' })
+  await until(() => rig.halts.length === 1, 'the halt')
+  assert.equal(JSON.parse(readFileSync(join(rig.stateDir, 'halted.json'), 'utf8')).terminal, '7', 'the session R is pressed in')
+  assert.equal(ofType(rig.journal(), 'run')[0].terminal, '7')
+  assert.equal(readRegistry(rig.registry)[0].runner.terminal, '7')
+  await run.control.resume({})
+  assert.deepEqual(await run.p, GOOD)
 })
 
 test('halt: while an Orca outage is on, R probes Orca and resumes no held node; once Orca is back, R resumes the held node', async () => {

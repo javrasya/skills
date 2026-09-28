@@ -28,6 +28,9 @@ A run is armed today by an agent session running the skill. That session runs th
   - drafts a missing validation list, which the operator confirms in the form;
   - lays out a halted run's questions;
   - answers the operator's own questions about a run, in a session opened from the console with `?`.
+
+  Its questions are crew's, not runs: the Run each is asked in is flagged at creation, never counts as live for `crew daemon stop`, and is dropped from the daemon's book once its session is closed. Whoever asks closes a question it stops waiting for — quitting `crew view`, Ctrl+C while `crew start` drafts — so no orchestrator session outlives its asker.
+- **Halt triage is the run console's.** `crew view` asks it, once per `halted.json` `at`, while it shows the run. A run that halts with nobody watching it there, or watched only from the runner's attached view, is triaged when it is next opened in `crew view`; a triage given up because its console quit is asked again by the next. The runner does not ask it: the run carries on without an answer, and R resumes it whatever became of the question.
 - **The skill keeps both paths.** On the crew path it calls `crew start` with flags and waits on `summary.json` and `halted.json` as today. The template stays in the skill folder, and crew's publish step bundles a copy.
 
 ## Considered options

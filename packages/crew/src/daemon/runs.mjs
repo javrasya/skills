@@ -19,6 +19,12 @@
 // capability when it names them at all (a prompt typed again carries no
 // capability). A worker_done settles its dispatch.
 //
+// A Run whose objective is an orchestrator question's title (orchestrator.mjs)
+// is flagged `orchestrator` at its creation: it is crew's own question, no
+// workflow run, so it is never live, and it is dropped from the book, its
+// dispatches with it, once every session of it is closed, and by the next
+// daemon, which none of its sessions outlive.
+//
 // The mailbox is Orca's: a check freezes every waiting message into a batch
 // and hands that batch back, marked replayed, until it is acknowledged; `ack`
 // names the batch, and the answer is the next one. run.use re-batches an
@@ -40,6 +46,7 @@ import { basename } from 'path'
 import { fileURLToPath } from 'url'
 import { readRegistry } from '../registry.mjs'
 import { DEFAULT_HOST } from '../hosts.mjs'
+import { isOrchestratorTitle } from '../orchestrator.mjs'
 
 // The runner every launch of one starts: `crew run`, `crew start`, crew's own
 // recovery and the run views' R.
@@ -86,8 +93,8 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
     // daemon still starts, with no runs.
   }
   if (kept) {
-    for (const r of kept.runs ?? []) runs.set(r.id, { ...r, acked: new Set(r.acked) })
-    for (const d of kept.dispatches ?? []) dispatches.set(d.id, d)
+    for (const r of kept.runs ?? []) if (!r.orchestrator) runs.set(r.id, { ...r, acked: new Set(r.acked) })
+    for (const d of kept.dispatches ?? []) if (runs.has(d.run)) dispatches.set(d.id, d)
     for (const [path, status] of Object.entries(kept.statuses ?? {})) statuses.set(path, status)
     ;({ messages = 0, deliveries = 0, nextSession = 1 } = kept)
     died = new Set(kept.running ?? [])
@@ -127,7 +134,10 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
 
   const ops = {
     'run.create': ({ objective = '', coordinator, runner = null }) => {
-      const r = { id: `run_${hex(6)}`, objective: String(objective), coordinator: word(coordinator, 'coordinator'), runner: runnerOf(runner), pending: [], batch: null, acked: new Set() }
+      const r = {
+        id: `run_${hex(6)}`, objective: String(objective), coordinator: word(coordinator, 'coordinator'), runner: runnerOf(runner), pending: [], batch: null, acked: new Set(),
+        ...(isOrchestratorTitle(objective) && { orchestrator: true }),
+      }
       runs.set(r.id, r)
       return { run: shown(r) }
     },
@@ -215,11 +225,13 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
 
   // The runs not over, each named with its spec when the registry has it: a
   // run the registry has, while it is running or halted and its runner or a
-  // worker of it still runs; any other, while a worker of it does.
+  // worker of it still runs; any other but an orchestrator's, while a worker
+  // of it does.
   function liveRuns() {
     const book = registered()
     const working = new Set([...dispatches.values()].filter((d) => alive(d.id)).map((d) => d.run))
     return [...runs.values()].filter((r) => {
+      if (r.orchestrator) return false
       const e = book.get(r.id)
       return e ? unfinished(e) && (alive(r.runner) || working.has(r.id)) : working.has(r.id)
     }).map((r) => named(r, book.get(r.id)))
@@ -252,6 +264,17 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
     },
     ended(id) {
       if (running.delete(id)) save()
+    },
+    // Session `id` is closed: the orchestrator Run it was a dispatch of goes,
+    // once no session of it is left.
+    closed(id) {
+      const r = runs.get(dispatches.get(String(id))?.run)
+      if (!r?.orchestrator) return
+      const own = [...dispatches.values()].filter((d) => d.run === r.id)
+      if (own.some((d) => sessions.has(d.id))) return
+      for (const d of own) dispatches.delete(d.id)
+      runs.delete(r.id)
+      save()
     },
     // A recovered run's runner is its new session from now on: recovered once.
     recovered(runId, session) {

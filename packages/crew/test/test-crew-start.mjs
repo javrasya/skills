@@ -234,6 +234,37 @@ test('crew start at a terminal: cancelling the draft writes nothing and arms not
   assert.ok(!existsSync(join(w.notesDir, 'workflow.js')))
 })
 
+test('crew start at a terminal: Ctrl+C while the orchestrator drafts closes its question before crew start ends; nothing written, nothing armed', async () => {
+  const w = world({ validation: null })
+  await w.ready
+  let ctrlC = null
+  let listening = false
+  const interrupt = (on) => {
+    listening = true
+    ctrlC = on
+    return () => (listening = false)
+  }
+  let closed = 0
+  const drafting = () => {
+    let giveUp
+    return {
+      ask: () => new Promise((_, reject) => {
+        giveUp = reject
+        setImmediate(() => ctrlC())
+      }),
+      close: async () => {
+        closed++
+        giveUp(new OrchestratorError('validation-list', 'its asker stopped asking', { stopped: true }))
+      },
+    }
+  }
+  await assert.rejects(w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r']), stdout: fakeStdout(), orchestrate: drafting, interrupt }), (e) => e.code === 130 && /cancelled while the orchestrator drafted; its session closed, no validation list written, nothing armed/.test(e.message))
+  assert.equal(closed, 1, 'the question given up, its session closed')
+  assert.equal(listening, false, 'Ctrl+C is crew start\'s own again')
+  assert.equal(w.launches.length, 0)
+  assert.ok(!existsSync(join(w.notesDir, 'validation.md')))
+})
+
 test("crew start at a terminal: a draft edited to hold a backtick is not confirmed; the step stays, says why, and confirms once it is gone", async () => {
   const w = world({ validation: null })
   await w.ready

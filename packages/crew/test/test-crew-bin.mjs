@@ -38,6 +38,7 @@ test('crew: no command, or an unknown one, is a usage error', () => {
   for (const r of [crew(), crew('launch')]) {
     assert.equal(r.status, 2)
     assert.match(r.stderr, /usage: crew run \[--host <host>\]/)
+    assert.match(r.stderr, /\ndebug: crew session spawn .*\n +crew console \(the daemon's raw sessions/)
   }
 })
 
@@ -75,6 +76,7 @@ test('crew run: on the crew host, a whole run of fake-harness agents in crew ses
   assert.equal(r.status, 0, r.stderr)
   const [, runner] = /the runner is crew session (\S+);/.exec(r.stdout)
   const runDir = join(project, 'orca-run')
+  assert.ok(r.stdout.includes(`enter it from \`crew view "${runDir}"\``), `the run console, not the debug one: ${r.stdout}`)
   const summary = await eventually('summary.json', () => existsSync(join(runDir, 'summary.json')) && JSON.parse(readFileSync(join(runDir, 'summary.json'), 'utf8')), 120_000)
   assert.deepEqual(summary, { runner: 'orca', ok: true, result: { first: 'hello', second: 'world' } }, readFileSync(join(runDir, 'runner.log'), 'utf8'))
   const { sessions } = await request(crewPaths(ENV), { op: 'session.list' })

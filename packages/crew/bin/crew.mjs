@@ -3,7 +3,8 @@
 //
 //   crew run [--host crew|orca] <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]
 //                     on the crew host, its default, the runner is a crew
-//                     session of the daemon's, entered from `crew console`;
+//                     session of the daemon's, entered from the run console
+//                     (`crew view <run dir>`, the dir it prints);
 //                     on orca it is this process, in the operator's Orca tab
 //   crew start <spec#> [--harness h] [--model m] [--base b] [--stack-mode s] [--permission-mode p]
 //                     arms a run of the implement-spec workflow from a form,
@@ -24,8 +25,10 @@
 //                     it, unless --force; a daemon started after one that
 //                     died (a crash, a kill, --force) resumes the runs live then
 //   crew session spawn [--cwd <dir>] -- <command…> | list | screen <id> | kill <id>
-//   crew console      the daemon's sessions; Enter enters one, the back key (F12,
-//                     or backKey in ~/.crew/config.json) comes back
+//   crew console      debug only: the daemon's raw sessions, whatever run they
+//                     are of, in a flat list; Enter enters one, the back key
+//                     (F12, or backKey in ~/.crew/config.json) comes back. An
+//                     operator enters a run's agents and runner from `crew view`
 //   crew orchestration send --from <h> --dispatch-capability <c> --task-id <t>
 //        --dispatch-id <d> --type <worker_done|handoff|escalation> --subject <s>
 //        --body <b> [--outcome succeeded|failed]
@@ -33,7 +36,8 @@
 //                     preamble (crew-host.mjs) names it; no Orca involved
 //
 // Every command but `daemon stop` and `ls` starts the per-machine crew daemon when none
-// answers (src/daemon/). view, and run on orca, carry on without it if it
+// answers (src/daemon/); `ls` reads only the run registry, so it never does
+// (ADR-0017 records the deviation). view, and run on orca, carry on without it if it
 // cannot start: nothing they do needs it yet.
 //
 // Each entry keeps its own argv parsing and its own "am I main" check, so this
@@ -62,9 +66,9 @@ const USAGE = [
   '       crew view <run id or run dir> [--registry <run registry, for a fixture>]',
   '       crew view --attached <run-dir> | --standalone [--registry <run registry, for a fixture>]',
   '       crew daemon start | status | stop [--force] | restart [--force]',
-  '       crew session spawn [--cwd <dir>] -- <command…> | list | screen <id> | kill <id>',
-  '       crew console',
   '       crew orchestration send --from <h> --dispatch-capability <c> --task-id <t> --dispatch-id <d> --type <worker_done|handoff|escalation> --subject <s> --body <b> [--outcome succeeded|failed]',
+  'debug: crew session spawn [--cwd <dir>] -- <command…> | list | screen <id> | kill <id>',
+  '       crew console (the daemon\'s raw sessions; a run\'s are entered from crew view)',
   `hosts: ${HOSTS.join(', ')}`,
 ].join('\n')
 
@@ -194,7 +198,8 @@ async function view(args) {
   // Each run's tree, reclaim and resume go to the host the registry names for it.
   const callMs = RUNNER_SETTINGS.viewCallMs
   const hosts = await openHosts({ paths, callMs })
-  const runs = runsView({ host: hosts[LEGACY_HOST], hostOf: (name) => hosts[name] ?? hosts[LEGACY_HOST], registry, enter: true, orchestrator: runOrchestrator({ paths }) })
+  const orchestrator = runOrchestrator({ paths })
+  const runs = runsView({ host: hosts[LEGACY_HOST], hostOf: (name) => hosts[name] ?? hosts[LEGACY_HOST], registry, enter: true, orchestrator })
   await runs.refresh()
   const run = runs.model.projects.flatMap((p) => p.runs).find((r) => r.runId === target || samePath(r.runDir, target))
   if (!run) throw new Error(`no run ${target} in the run registry ${registry}`)
@@ -206,6 +211,9 @@ async function view(args) {
   await daemonAnyway()
   await runs.open(run.runId)
   await runsConsole({ paths, stdin: process.stdin, stdout: process.stdout, runs, backKey }).done
+  // A halt triage still asked is given up, its session closed, before the
+  // exit: none outlives the view to hold `crew daemon stop` up.
+  await orchestrator.close()
   process.exit(0)
 }
 
@@ -226,7 +234,7 @@ async function orchestration([verb, ...args]) {
 }
 
 // The runner as a session of the daemon's, on the crew host: it outlives this
-// command, as a runner outlives its Orca tab, and `crew console` enters it.
+// command, as a runner outlives its Orca tab, and `crew view <run dir>` enters it.
 // Its own argv errors would land on a screen nobody has entered yet, so its
 // argv is checked here first. The daemon refuses a second runner on a run dir
 // that has one (run_live), --resume or not.
@@ -245,7 +253,7 @@ async function crewRun(args) {
   const [stateDir, permissionMode] = RUN_OPTIONS.map(valueOf)
   if (!existsSync(scripts[0])) throw new Error(`no script ${resolve(scripts[0])}`)
   const s = await launchRunner({ ...terminalSize(), paths, script: scripts[0], stateDir, resume: args.includes('--resume'), permissionMode, cwd: process.cwd(), title: `crew run ${basename(scripts[0])}` })
-  console.log(`crew run: the runner is crew session ${s.id}; enter it from \`crew console\``)
+  console.log(`crew run: the runner is crew session ${s.id}; enter it from \`crew view "${s.runDir}"\``)
 }
 
 const terminalSize = () => ({ cols: process.stdout.columns || 120, rows: process.stdout.rows || 30 })
@@ -260,7 +268,7 @@ async function start(args) {
       stdout: process.stdout,
       launch: (o) => launchRunner({ ...terminalSize(), ...o, paths }),
     })
-    console.log(`crew start: armed ${script}; the runner is crew session ${s.id}; enter it from \`crew console\``)
+    console.log(`crew start: armed ${script}; the runner is crew session ${s.id}; enter it from \`crew view "${s.runDir}"\``)
   } catch (e) {
     if (e.code === 2) usage(`crew start: ${e.message}`)
     console.error(`crew start: ${e.message}`)

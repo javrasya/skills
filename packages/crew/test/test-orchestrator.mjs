@@ -420,3 +420,24 @@ test('crew host: ? starts the fake harness in a session of no run, titled orches
   assert.ok(!told.some((t) => t.includes('Your Orca preamble')), 'no worker preamble')
   await request(paths, { op: 'session.close', id })
 })
+
+test('crew host: a console quit with its halt triage still asked leaves no orchestrator session running, holds no `crew daemon stop` up, and the next console asks again', async () => {
+  const { paths, repo, host } = crewScratch()
+  await host.probe()
+  const stateDir = haltedRun()
+  const orch = runOrchestrator({ paths, host: () => host })
+  const triaged = orch.triage({ runDir: stateDir, script: null, project: repo, permissionMode: null })
+  const questions = async () => (await request(paths, { op: 'session.list' })).sessions.filter((s) => isOrchestratorTitle(s.title))
+  for (const until = Date.now() + 20_000; !(await questions()).some((s) => s.alive); await new Promise((done) => setTimeout(done, 100))) {
+    if (Date.now() > until) assert.fail('the triage question never started')
+  }
+  assert.equal(readTriage(stateDir, AT).state, 'asking')
+  await orch.close()
+  assert.deepEqual(await triaged, { asked: true, state: null })
+  assert.deepEqual(await questions(), [], 'its session closed, not left running')
+  assert.equal(readTriage(stateDir, AT), null, 'no answer and no failure: the next console asks it again')
+  const closed = orchestrator({ host, dir: scratch('files') })
+  await closed.close()
+  await assert.rejects(closed.ask({ name: 'late', prompt: 'x', schema: SCHEMA }), (e) => e instanceof OrchestratorError && e.stopped, 'a closed orchestrator asks nothing more')
+  assert.ok((await request(paths, { op: 'stop' })).pid, 'crew daemon stop is not refused')
+})

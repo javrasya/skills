@@ -104,19 +104,20 @@ export function clearEndSignals(stateDir) {
 // process is that runner's, whichever host it runs on, and nothing is armed
 // or launched over it, its end signals left as they are.
 export function refuseLiveRunner(stateDir, alive = runnerAlive) {
-  if (alive(stateDir) === true) throw new StartError(`${stateDir} has its runner already: the process its runner.pid names is alive, and a run has one runner at a time; enter it from \`crew console\`, or end it, then arm again; nothing armed`)
+  if (alive(stateDir) === true) throw new StartError(`${stateDir} has its runner already: the process its runner.pid names is alive, and a run has one runner at a time; enter it from \`crew view "${stateDir}"\`, or end it, then arm again; nothing armed`)
 }
 
 // The runner as a session of the daemon's, on the crew host: it outlives the
-// command that launched it, and `crew console` enters it. Its state dir is
-// `stateDir`, else the one the runner takes by default, beside the script,
-// and the daemon refuses it run_live while that run has a runner already.
+// command that launched it, and the run console (`crew view <run dir>`)
+// enters it. Its state dir is `stateDir`, else the one the runner takes by
+// default, beside the script, and the daemon refuses it run_live while that
+// run has a runner already. Answers its session, and the run dir as `runDir`.
 export async function launchRunner({ paths, script, stateDir = null, resume = false, permissionMode = null, cwd, title, env = process.env, cols = 120, rows = 30 }) {
   const path = resolve(cwd, script)
   const runDir = stateDir ? resolve(cwd, stateDir) : stateDirOf(dirname(path))
   await ensureDaemon(paths)
   const { session } = await request(paths, { op: 'session.spawn', command: runnerCommand({ script: path, stateDir: runDir, resume, permissionMode }), runDir, cwd, env, title, cols, rows })
-  return session
+  return { ...session, runDir }
 }
 
 // The checkout's top, SKILL.md step 2's __REPO_DIR__.
@@ -147,8 +148,10 @@ export const crewOrchestrator = ({ paths, repoDir, harness, model, permissionMod
 // The orchestrator's two console uses for runsView's runs, on the crew host,
 // in the run's project, on the run default its script was armed with and the
 // runner's permission mode: triage(run) asks about its halt, consult(run)
-// starts a `?` session and answers its id.
+// starts a `?` session and answers its id. close() gives up every triage
+// still asked, its session closed: a console calls it as it quits.
 export function runOrchestrator({ paths, host = (cwd) => crewHost({ paths, cwd }) }) {
+  const asking = new Set()
   const launchOf = (run) => {
     let runDefault = null
     try {
@@ -158,20 +161,43 @@ export function runOrchestrator({ paths, host = (cwd) => crewHost({ paths, cwd }
   }
   const cwdOf = (run) => run.project ?? run.runDir
   return {
-    triage: (run) => triageHalt({ stateDir: run.runDir, orchestrate: () => orchestrator({ host: host(cwdOf(run)), dir: join(paths.home, 'orchestrator'), ...launchOf(run) }) }),
+    triage: (run) => {
+      const orch = orchestrator({ host: host(cwdOf(run)), dir: join(paths.home, 'orchestrator'), ...launchOf(run) })
+      asking.add(orch)
+      return triageHalt({ stateDir: run.runDir, orchestrate: () => orch }).finally(() => asking.delete(orch))
+    },
     consult: (run) => consultSession({ host: host(cwdOf(run)), stateDir: run.runDir, dir: cwdOf(run), ...launchOf(run) }),
+    close: () => Promise.all([...asking].map((orch) => orch.close())),
   }
 }
 
+// Ctrl+C at a terminal not in raw mode: `on()` is called on each, and the
+// returned function stops listening.
+const sigint = (on) => {
+  process.on('SIGINT', on)
+  return () => process.off('SIGINT', on)
+}
+
 // The orchestrator's draft of the list, shown as the form's last step, and
-// written only once the operator confirms it. Null when they cancel.
-async function draftStep({ target, answers, orchestrate, paths, stdin, stdout, heading }) {
+// written only once the operator confirms it. Null when they cancel. A
+// Ctrl+C while it drafts gives the question up, its session closed, before
+// crew start ends: no orchestrator session outlives it.
+async function draftStep({ target, answers, orchestrate, paths, stdin, stdout, heading, interrupt = sigint }) {
   drawDrafting(stdout, { heading, file: target.validationFile })
+  const orch = orchestrate({ paths, repoDir: target.repoDir, ...answers })
+  let interrupted = false
+  const unlisten = interrupt(() => {
+    interrupted = true
+    orch.close?.()
+  })
   let draft
   try {
-    draft = await draftValidation(orchestrate({ paths, repoDir: target.repoDir, ...answers }), { repoDir: target.repoDir })
+    draft = await draftValidation(orch, { repoDir: target.repoDir })
   } catch (e) {
+    if (interrupted) throw new StartError('cancelled while the orchestrator drafted; its session closed, no validation list written, nothing armed', 130)
     throw new StartError(`${e.message}; no validation list written, nothing armed`)
+  } finally {
+    unlisten()
   }
   const text = await runDraftStep({ editor: draftEditor(draft.text), stdin, stdout, heading, file: target.validationFile, empty: draft.empty })
   if (text === null) return null
@@ -213,7 +239,7 @@ export class StartError extends Error {
 // remembered answers, then the orchestrator's draft of a missing list. The
 // repo's config and remembered answers are its main checkout's, whichever of
 // its worktrees crew start runs in; the run itself is armed in this one.
-export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdin, stdout, run = execProgram, home = homedir(), env = process.env, launch, orchestrate = crewOrchestrator, alive = runnerAlive }) {
+export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdin, stdout, run = execProgram, home = homedir(), env = process.env, launch, orchestrate = crewOrchestrator, alive = runnerAlive, interrupt = sigint }) {
   let parsed
   try {
     parsed = flagsToAnswers(argv)
@@ -248,7 +274,7 @@ export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdi
   const answers = tty ? await runStartForm({ form, stdin, stdout, heading }) : form.answers()
   if (!answers) throw new StartError('cancelled; nothing armed', 130)
   if (target.validation === null) {
-    const validation = await draftStep({ target, answers, orchestrate, paths, stdin, stdout, heading })
+    const validation = await draftStep({ target, answers, orchestrate, paths, stdin, stdout, heading, interrupt })
     if (validation === null) throw new StartError('cancelled; no validation list written, nothing armed', 130)
     target = { ...target, validation }
   }

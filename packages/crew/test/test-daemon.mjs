@@ -4,7 +4,7 @@
 //   node packages/crew/test/test-daemon.mjs
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawn, spawnSync } from 'child_process'
@@ -405,6 +405,45 @@ test('daemon: a run it is recovering takes no other runner while its old runner 
     assert.ok((await request(paths, { op: 'session.spawn', command: ['node', 'runner.mjs', '--resume'], cwd: project })).session)
   } finally {
     trailing.kill()
+    second.shutdown('test over')
+  }
+})
+
+test("daemon: an orchestrator question's Run is never live, and is dropped from runs.json once its session is closed, or by the next daemon", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const book = () => JSON.parse(readFileSync(join(paths.home, 'runs.json'), 'utf8'))
+  const exits = []
+  const first = await startDaemon({ paths, registry: join(dir, 'orca-runs.jsonl'), spawnSession: fakeSession, exit: () => exits.push(1), log: () => {} })
+  const spawn = async () => (await request(paths, { op: 'session.spawn', command: ['claude'], cwd: dir })).session.id
+  const ask = async () => {
+    const { run } = await request(paths, { op: 'run.create', objective: 'orchestrator/halt-triage', coordinator: 'c1' })
+    const session = await spawn()
+    await request(paths, { op: 'run.worker', run: run.id, session, coordinator: 'c1' })
+    return { run: run.id, session }
+  }
+  const answered = await ask()
+  const pending = await ask()
+  const { run: plain } = await request(paths, { op: 'run.create', objective: 'a workflow run', coordinator: 'c2' })
+  const worker = await spawn()
+  await request(paths, { op: 'run.worker', run: plain.id, session: worker, coordinator: 'c2' })
+  await assert.rejects(request(paths, { op: 'stop' }), (e) => e.message.includes(`1 run(s) live: ${plain.id};`), 'a live question never holds stop up')
+  await request(paths, { op: 'worker.stop', id: answered.session })
+  await request(paths, { op: 'session.close', id: answered.session })
+  assert.deepEqual(book().runs.map((r) => r.id), [pending.run, plain.id], 'the closed question is dropped')
+  assert.ok(!book().dispatches.some((d) => d.id === answered.session), 'its dispatch with it')
+  await request(paths, { op: 'session.close', id: worker })
+  assert.deepEqual(book().runs.map((r) => r.id), [pending.run, plain.id], 'a workflow Run is kept however its sessions end')
+  first.shutdown('test over')
+  await until('the first daemon to stop', () => exits.length === 1)
+  const second = await startDaemon({ paths, registry: join(dir, 'orca-runs.jsonl'), spawnSession: fakeSession, exit: () => {}, log: () => {} })
+  try {
+    await second.recovered
+    await spawn()
+    assert.deepEqual(book().runs.map((r) => r.id), [plain.id], 'a question none of whose sessions outlived its daemon is dropped')
+    assert.deepEqual(book().dispatches.map((d) => d.id), [worker])
+  } finally {
     second.shutdown('test over')
   }
 })

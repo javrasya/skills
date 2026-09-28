@@ -26,7 +26,8 @@ import { fileURLToPath } from 'url'
 import { fakeOrca } from '../src/fake-orca.mjs'
 import { crewHost, crewWorktrees } from '../src/crew-host.mjs'
 import { repoConfig } from '../src/crew-config.mjs'
-import { RUN_METHODS, SESSION_METHODS, hostUnreachable } from '../src/session-host.mjs'
+import { CREW_ONLY, RUN_METHODS, SESSION_METHODS, hostUnreachable } from '../src/session-host.mjs'
+import { reclaimAgent } from '../src/reclaim.mjs'
 import { hostOutage } from '../src/outage.mjs'
 import { realClock } from '../src/runner.mjs'
 import { openHost } from '../src/hosts.mjs'
@@ -408,6 +409,19 @@ export const SCENARIOS = [
       await assert.rejects(h.host.worktreeRemove({ path: w.worktree }), /selector_not_found/)
     },
   },
+  {
+    name: 'reclaim: a failed worker kept running is stopped and its terminal closed straight after, a kill on a kill under way, and the host lives on',
+    async run(h) {
+      const w = await start(h, 'reclaim')
+      await eventually('the start prompt', () => delivered(h, w, w.prompt))
+      const agent = { runId: w.run, n: 1, title: 'reclaim', state: 'failed', workerLeft: true, dispatchId: w.dispatchId, terminal: w.terminal, worktree: w.worktree }
+      assert.deepEqual(await reclaimAgent(agent, { host: h.host, stop: true, unpushed: async () => 0 }), { reclaimed: true, notes: [] })
+      assert.ok(!(await h.host.terminalList()).includes(w.terminal), 'its terminal closed')
+      const next = await start(h, 'after reclaim')
+      assert.ok((await h.host.terminalList()).includes(next.terminal), 'the host still starts workers')
+      await h.host.terminalClose({ terminal: next.terminal })
+    },
+  },
 ]
 
 for (const kind of HOSTS) {
@@ -420,6 +434,11 @@ for (const kind of HOSTS) {
 
 // The crew host alone: what the fake host has no pty, harness or daemon for.
 const crewKind = HOSTS.find((k) => k.name === 'crew')
+
+test('crew host: has crew\'s own methods beyond the interface, sessionStart and mailSend', () => {
+  const { host } = crewKind.open()
+  assert.deepEqual(CREW_ONLY.filter((m) => typeof host[m] !== 'function'), [])
+})
 
 test('crew host: the harness starts from the runner\'s launch line word for word, only its program swapped', async () => {
   const h = crewKind.open()

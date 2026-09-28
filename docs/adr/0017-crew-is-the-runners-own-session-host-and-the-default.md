@@ -17,7 +17,15 @@ The Orca runner relies on Orca for about 20 calls (`worktree`, `terminal`, `orch
 - **The run console** is the run view's graph. Choosing an agent enters its live session in the same terminal, and a configurable **back key** (F12 by default) returns to the graph. Ctrl+Left and Ctrl+] were rejected: pi binds both, to moving a word left and to jumping to a character.
 - **Crew makes worktrees** at `<repo-parent>/<repo>.crew/<runId>-<n>`, then runs a per-repo setup hook from crew config. The hook is skipped for doctors.
 - **Idle** comes from the session transcript, with quiet pty output as the fallback.
-- **A crew crash kills its sessions**; this was verified on Windows, where a hard-killed pty owner takes its children with it. When crew comes back, every session a live run lost is carried on by session continuation, charged to no agent. Crew refuses to restart while runs are live unless forced.
+- **A crew crash kills its sessions**; this was verified on Windows, where a hard-killed pty owner takes its children with it. When crew comes back, every session a live run lost is carried on by session continuation, charged to no agent. Crew refuses to restart while runs are live unless forced. A daemon brings those runs back only as it starts, so the skill's crew path, finding its runner dead with no `summary.json`, starts one (`crew daemon start`) and waits for a runner to come back before it calls the run dead.
+- **The run console is the operator's way in.** `crew console`, a flat list of the daemon's raw sessions from before the run console, is kept as a debug view, beside `crew session spawn|list|screen|kill`; `crew run`, `crew start` and the skill point the operator at `crew view <run>`.
+
+## Deviations
+
+Two deliberate departures from the tickets:
+
+- **`crew ls` starts no daemon**, though #96 has every `crew` command start one. It reads only the run registry, where each run's liveness is its `runner.pid`'s to say, so a look at the list never starts a daemon, nor the run recovery a starting daemon does. `crew daemon stop` starts none either.
+- **Without crew, no session runner is offered**, though #105 has the offer unchanged without crew. The runner is crew's package (#95), on Orca too, so the skill's Orca probe needs the crew probe: without crew the run goes on the Workflow runner, nothing is asked, and the skill says once that the session runner needs crew installed.
 
 ## Considered options
 

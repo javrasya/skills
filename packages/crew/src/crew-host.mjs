@@ -217,8 +217,8 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
   return {
     id: 'crew',
     name: 'crew',
-    // A worker's session is entered in place, from `crew view` or `crew
-    // console`, never brought to the front: there are no tabs.
+    // A worker's session is entered in place, from `crew view` (or `crew
+    // console`, for debugging), never brought to the front: there are no tabs.
     inPlace: true,
     // Crew not there at all is an outage (ADR-0015, ADR-0017), as Orca's is.
     unreachable: (e) => daemonGone(e),
@@ -276,7 +276,8 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
 
     // A harness session of no Run, for a person to talk to: in `dir` (the
     // host's own directory by default), prompted once ready, and entered from
-    // the console. Nothing settles it, and closing it is its opener's.
+    // the run console. Nothing settles it, and closing it is its opener's.
+    // Crew's own, beyond the session host interface (session-host.mjs CREW_ONLY).
     async sessionStart({ title, prompt, harness = 'claude', model, effort, permissionMode, sessionId, dir = cwd }) {
       const { terminal } = await launch(launchWords({ harness, model, effort, permissionMode, sessionId }), { harness, dir, title, prompt, run: null })
       return { terminal }
@@ -351,7 +352,7 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     async terminalRename({ terminal, title }) {
       await call({ op: 'session.rename', id: terminal, title })
     },
-    // Crew has no tabs to bring forward: the session is entered from `crew console`.
+    // Crew has no tabs to bring forward: the session is entered from `crew view`.
     async terminalSwitch({ terminal }) {
       if (!(await sessionOf(terminal))) throw new Error(`no crew session ${terminal}`)
       return { terminal, worktreeId: null }
