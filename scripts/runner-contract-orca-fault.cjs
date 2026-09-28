@@ -1,5 +1,5 @@
 // Preloaded into the Orca runner for the runner contract tests only:
-//   node --require <repo>/scripts/runner-contract-orca-fault.cjs <repo>/skills/engineering/implement-spec-in-workflow/orca/runner.mjs …
+//   node --require <repo>/scripts/runner-contract-orca-fault.cjs <repo>/packages/crew/src/runner.mjs …
 // The contract scripts cannot fault Orca themselves, and the runner carries no
 // test hook. orca-cli.mjs reaches Orca through child_process.execFile; this
 // patches it before any ES module imports it.

@@ -6,16 +6,16 @@ disable-model-invocation: true
 
 The **run view** is the operator's terminal screen for runs of [`implement-spec-in-workflow`](../implement-spec-in-workflow/SKILL.md) on the Orca runner (ADR-0012). The runner shows it attached, in its own tab, on its own run. This skill opens it **standalone**: every run in the run registry (`~/.claude/orca-runs.jsonl`, or `$CLAUDE_CONFIG_DIR/orca-runs.jsonl` when that is set), finished, paused or dead, with no runner needed.
 
-The view is code of `implement-spec-in-workflow`, not of this skill: one copy, beside the runner that also starts it. Both skills are installed side by side, so it is reached from this skill's directory.
+The view is code of the `crew` package, not of this skill: one copy, beside the runner that also starts it, reached through the `crew` bin.
 
-**Requires** Node, and a session inside an Orca terminal (`TERM_PROGRAM` is `Orca`). On its first start the view installs its one dependency, terminal-kit, beside itself with `npm ci`, which needs npm and the network once.
+**Requires** Node, crew installed (`npm install -g @javrasya/crew`, or from a checkout of this repo `npm install -g <repo>/packages/crew`), and a session inside an Orca terminal (`TERM_PROGRAM` is `Orca`). On its first start the view installs its one dependency, terminal-kit, beside itself with `npm ci`, which needs npm and the network once.
 
 ## Steps
 
-1. **Open it in a new Orca tab.** `<skill-dir>` is the directory holding this file:
+1. **Open it in a new Orca tab:**
 
    ```
-   orca terminal create --title "Orca runs" --command "node \"<skill-dir>/../implement-spec-in-workflow/orca/run-view/view.mjs\" --standalone" --focus --json
+   orca terminal create --title "Orca runs" --command "crew view --standalone" --focus --json
    ```
 
    If the command fails, or `result.terminal.surface` is not `visible`, tell the operator the view has no visible tab, and stop. Outside Orca, say the view needs an Orca terminal, and stop.

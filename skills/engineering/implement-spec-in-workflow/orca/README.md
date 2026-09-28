@@ -2,6 +2,8 @@
 
 The second runner for `workflow.template.js` (ADR-0011): a Node script, launched in its own Orca terminal, that runs the rendered workflow script unchanged and starts each `agent()` as a supervised Orca worker the operator can watch and answer.
 
+Its code is the **crew** package, `packages/crew` in this repo (`@javrasya/crew`, ADR-0017), which must be installed for the skill's Orca path: `npm install -g @javrasya/crew`, or from a checkout `npm install -g <repo>/packages/crew`. The files below are in its `src/`; its `crew` bin launches the runner (`crew run --host orca`) and the run view (`crew view`). The template stays beside the skill's `SKILL.md`, and the package's pack step copies it in.
+
 | file | what it is |
 |---|---|
 | `runner.mjs` | the runner: the four hooks, naming each `agent()` call, replay and the resume journal, `runner.log`, the retained worktrees |
@@ -23,7 +25,7 @@ The second runner for `workflow.template.js` (ADR-0011): a Node script, launched
 | `settings.mjs` | every limit the runner enforces, in one table |
 
 ```
-node runner.mjs <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]
+crew run --host orca <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]
 ```
 
 The state dir defaults to `orca-run/` beside the rendered script, which is `<notes-dir>/orca-run` for a run the skill armed. When the runner exits it writes `summary.json` there — `{"runner": "orca", "ok": true, "result": …}`, or `"ok": false` with the `error` and `worktrees_kept`, the worktrees retained because their agent died or never started (below) — and that file, not the terminal's log, is what the arming session reads and reports. The runner writes it when the script ends and asks nothing; it then stays in its tab until the operator quits the run view (below). So the arming session waits for the file to appear, not for the tab to exit: the tab stays open once the runner is done. What the operator reclaims, always from the run view, is in the run registry.
@@ -190,11 +192,11 @@ Not yet confirmed against live Orca: that `worker-show` follows a dispatch whose
 
 ## Two checks, and when each runs
 
-- **Offline:** `node scripts/test-orca-runner.mjs`. Fast and free. It runs the runner against the fake Orca, so it proves the runner does what the fake says Orca does, and nothing about the Workflow runner.
+- **Offline:** `node scripts/test-orca-runner.mjs`, which runs the crew package's suite (`packages/crew/test/`); `npm test` in `packages/crew` runs the same. Fast and free. It runs the runner against the fake Orca, so it proves the runner does what the fake says Orca does, and nothing about the Workflow runner.
 - **The runner contract test:** `scripts/runner-contract.workflow.js`. Slow, and it spends tokens on eight short agents per fresh run, so it runs by hand. It is the only check that the Orca runner gives a script what the Workflow runner gives it, and that is the promise the whole Orca runner rests on.
 - **The Orca-only contract test:** `scripts/runner-contract-orca.workflow.js`, for the guarantees only the Orca runner makes. An agent runs it end to end with the Orca CLI, with no human and no `/workflows` UI (see [The Orca-only contract](#the-orca-only-contract)).
 
-**It gates every Orca runner change.** A change to any file in this directory, or to the template's use of the hooks, is not done until the contract test returns the expected object under both runners, fresh and resumed. The one exception: a change confined to the Orca runner, which leaves `scripts/runner-contract.workflow.js` byte-identical, is gated by the Orca-only contract and the two-runner contract's **Orca leg**, each fresh and resumed. Such a change touches neither the Workflow runner nor the script it runs, so the Workflow leg, whose kill steps need the `/workflows` UI, is not re-run; the agent runs both Orca checks with the Orca CLI alone. The offline tests do not replace either check. A guarantee the script comes to rely on gets a case in the contract script first. The script has to stay byte-identical under both runners, and it must never use `Date.now()`, `Math.random()` or an argless `new Date()`.
+**It gates every Orca runner change.** A change to any file in the crew package's `src/`, or to the template's use of the hooks, is not done until the contract test returns the expected object under both runners, fresh and resumed. The one exception: a change confined to the Orca runner, which leaves `scripts/runner-contract.workflow.js` byte-identical, is gated by the Orca-only contract and the two-runner contract's **Orca leg**, each fresh and resumed. Such a change touches neither the Workflow runner nor the script it runs, so the Workflow leg, whose kill steps need the `/workflows` UI, is not re-run; the agent runs both Orca checks with the Orca CLI alone. The offline tests do not replace either check. A guarantee the script comes to rely on gets a case in the contract script first. The script has to stay byte-identical under both runners, and it must never use `Date.now()`, `Math.random()` or an argless `new Date()`.
 
 ## What the contract covers
 
@@ -233,7 +235,7 @@ Run each runner from an Orca terminal on the repo. `<repo>` is the absolute path
 **Orca runner.** Launch it in its own terminal, so the Run binds to that terminal. `--require` preloads `scripts/runner-contract-orca-fault.cjs`, which fails `contract:retry`'s first `worker-start` as an Orca refusal would; the runner itself carries no test hook:
 
 ```
-orca terminal create --worktree path:<worktree> --title "runner contract (orca)" --command "node --require <repo>/scripts/runner-contract-orca-fault.cjs <repo>/skills/engineering/implement-spec-in-workflow/orca/runner.mjs <repo>/scripts/runner-contract.workflow.js --state-dir <dir>" --json
+orca terminal create --worktree path:<worktree> --title "runner contract (orca)" --command "node --require <repo>/scripts/runner-contract-orca-fault.cjs <repo>/packages/crew/src/runner.mjs <repo>/scripts/runner-contract.workflow.js --state-dir <dir>" --json
 ```
 
 `<worktree>` is as for [the Orca-only contract](#how-an-agent-runs-it): an Orca worktree, such as the main checkout. An agent runs this leg with the same three rules as that contract (a new terminal, every kill an `orca terminal close`, every operator answer an `orca terminal send`), and confirms it the same way, against the Orca object above.
@@ -327,7 +329,7 @@ The steps:
 
 1. **Launch** and keep `result.terminal.handle` as `<runner>`:
    ```
-   orca terminal create --worktree path:<worktree> --title "runner contract (orca only)" --command "node --require <repo>/scripts/runner-contract-orca-fault.cjs <repo>/skills/engineering/implement-spec-in-workflow/orca/runner.mjs <repo>/scripts/runner-contract-orca.workflow.js --state-dir <dir>" --json
+   orca terminal create --worktree path:<worktree> --title "runner contract (orca only)" --command "node --require <repo>/scripts/runner-contract-orca-fault.cjs <repo>/packages/crew/src/runner.mjs <repo>/scripts/runner-contract-orca.workflow.js --state-dir <dir>" --json
    ```
    `--require` preloads the faults the cases need (`scripts/runner-contract-orca-fault.cjs`). A fresh run takes one to two hours, most of it waiting on nudges: `contract:dirty-retry`'s held create, `contract:never-started`'s spent start retries and doctor, and `contract:doctor`'s idle sessions and doctor run side by side for about half an hour, and `orca-contract:doctored`'s kills and three doctors take the rest.
 2. **Wait for `<dir>/summary.json`.** Poll for the file. `<dir>/runner.pid` holding a pid that is no longer alive (`node -e "process.kill(+process.argv[1], 0)" <pid>` throws) and no `summary.json` means the runner died: the pass failed. Do each case's kills and answers from its row above as the log reaches them.
@@ -515,13 +517,13 @@ While the view is attached (decision D5 on #43):
 
 The view exits 0 when the operator quits it and 3 when it cannot run here (`run-view/exit-codes.mjs`); the runner never restarts either. Anything else is a crash.
 
-The view's one dependency, terminal-kit, is pinned in `run-view/package.json` with a committed lockfile. It is installed beside `view.mjs` on the view's first start (`npm ci`, its output in `runner.log`), because the installed skill may be a copy of the repo rather than a link to it, and the copy is where the view runs. This departs from ADR-0001's self-contained repo, and ADR-0012 records the departure: nothing is vendored, so the first view needs npm and the network. If the install fails, the view exits 3 and the runner prints its log in the tab. The offline tests import `draw.mjs` and the model, never terminal-kit, so they need no install.
+The view's one dependency, terminal-kit, is pinned in `run-view/package.json` with a committed lockfile. It is installed beside `view.mjs` on the view's first start (`npm ci`, its output in `runner.log`), because the crew package may be installed from a copy of the repo rather than linked to it, and that copy is where the view runs. This departs from ADR-0001's self-contained repo, and ADR-0012 records the departure: nothing is vendored, so the first view needs npm and the network. If the install fails, the view exits 3 and the runner prints its log in the tab. The offline tests import `draw.mjs` and the model, never terminal-kit, so they need no install.
 
-To look at the view without a run, point it at a run dir: `node run-view/view.mjs --attached <state-dir> [--registry <registry file>]`. `--registry` is for a fixture run, whose header comes from a registry file of its own rather than the machine's.
+To look at the view without a run, point it at a run dir: `crew view --attached <state-dir> [--registry <registry file>]`. `--registry` is for a fixture run, whose header comes from a registry file of its own rather than the machine's.
 
 ## The run view standalone
 
-`node run-view/view.mjs --standalone [--registry <registry file>]`, which the [`orca-runs`](../../orca-runs/SKILL.md) skill opens in a new Orca tab (D8 on #43), lists every run in the run registry, grouped by project, the project of the latest run first. No runner needs to be going. Each run shows its spec, its outcome (`ok`, `partial` or `failed`; `halted` while its runner has halted it, which is no end: R on a live one points at its tab, and on a dead one resumes it by node; while no `ended` is recorded, `running`, or `paused (Orca outage)` while its live runner has paused it), whether its runner is alive, how many agents it keeps (those its journal names that no `reclaimed` entry has taken), and its age since it was armed. A runner is alive by the one rule attached mode's header uses too (`runnerAlive` in `run-view-model.mjs`): the process `<runDir>/runner.pid` names is alive. Its tab says nothing, since the tab outlives the runner. The one exception is the tab **R** opened, which counts as the runner while Orca lists it, until the new runner has written its own `runner.pid`. When a `runner.pid` cannot be read or probed, the view says it does not know. A run the registry records ended or reclaimed, then resumed, is running and open again: the resume's `runner` entry reopens it. Two runs in one repo are two rows, keyed by Run id.
+`crew view --standalone [--registry <registry file>]`, which the [`orca-runs`](../../orca-runs/SKILL.md) skill opens in a new Orca tab (D8 on #43), lists every run in the run registry, grouped by project, the project of the latest run first. No runner needs to be going. Each run shows its spec, its outcome (`ok`, `partial` or `failed`; `halted` while its runner has halted it, which is no end: R on a live one points at its tab, and on a dead one resumes it by node; while no `ended` is recorded, `running`, or `paused (Orca outage)` while its live runner has paused it), whether its runner is alive, how many agents it keeps (those its journal names that no `reclaimed` entry has taken), and its age since it was armed. A runner is alive by the one rule attached mode's header uses too (`runnerAlive` in `run-view-model.mjs`): the process `<runDir>/runner.pid` names is alive. Its tab says nothing, since the tab outlives the runner. The one exception is the tab **R** opened, which counts as the runner while Orca lists it, until the new runner has written its own `runner.pid`. When a `runner.pid` cannot be read or probed, the view says it does not know. A run the registry records ended or reclaimed, then resumed, is running and open again: the resume's `runner` entry reopens it. Two runs in one repo are two rows, keyed by Run id.
 
 Its keys, on the list:
 

@@ -1,0 +1,28 @@
+{
+  "name": "@javrasya/crew",
+  "version": "0.1.0",
+  "description": "The session runner: runs a rendered workflow script, starting each agent() as a supervised session on a host (Orca), with its run view.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/javrasya/skills.git",
+    "directory": "packages/crew"
+  },
+  "bin": {
+    "crew": "bin/crew.mjs"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "workflow.template.js"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node test/test-orca-runner.mjs && node test/test-crew-bin.mjs",
+    "prepack": "node scripts/pack-template.mjs",
+    "postpack": "node scripts/pack-template.mjs --clean"
+  }
+}

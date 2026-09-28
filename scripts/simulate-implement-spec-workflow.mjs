@@ -2,7 +2,7 @@
 // it through the paths the dispatcher redesign added.
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
-import { loadScript } from '../skills/engineering/implement-spec-in-workflow/orca/runner.mjs'
+import { loadScript } from '../packages/crew/src/runner.mjs'
 
 const TPL = fileURLToPath(new URL('../skills/engineering/implement-spec-in-workflow/workflow.template.js', import.meta.url))
 
