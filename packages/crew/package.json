@@ -21,8 +21,12 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node test/test-orca-runner.mjs && node test/test-crew-bin.mjs",
+    "test": "node test/test-orca-runner.mjs && node test/test-crew-bin.mjs && node test/test-daemon.mjs",
     "prepack": "node scripts/pack-template.mjs",
     "postpack": "node scripts/pack-template.mjs --clean"
+  },
+  "dependencies": {
+    "@xterm/headless": "6.0.0",
+    "node-pty": "1.1.0"
   }
 }

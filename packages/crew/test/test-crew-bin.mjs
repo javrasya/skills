@@ -1,17 +1,21 @@
 // Offline tests for the crew bin and the package's pack step.
 //   node packages/crew/test/test-crew-bin.mjs
-import { test } from 'node:test'
+import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
+import { crewPaths } from '../src/daemon/transport.mjs'
+import { stopDaemon } from '../src/daemon/client.mjs'
 
 const PACKAGE = fileURLToPath(new URL('..', import.meta.url))
 const CREW = join(PACKAGE, 'bin', 'crew.mjs')
-// A scratch Claude dir, so a run started here is never recorded in the operator's run registry.
-const ENV = { ...process.env, CLAUDE_CONFIG_DIR: mkdtempSync(join(tmpdir(), 'crew-bin-claude-')) }
+// A scratch Claude dir, so a run started here is never recorded in the operator's run registry,
+// and a scratch crew home, so the daemon these commands start is never the operator's.
+const ENV = { ...process.env, CLAUDE_CONFIG_DIR: mkdtempSync(join(tmpdir(), 'crew-bin-claude-')), CREW_HOME: join(mkdtempSync(join(tmpdir(), 'crew-bin-home-')), 'home') }
+after(() => stopDaemon(crewPaths(ENV), { force: true }))
 const crew = (...args) => spawnSync(process.execPath, [CREW, ...args], { encoding: 'utf8', env: ENV })
 
 test('crew: no command, or an unknown one, is a usage error', () => {
