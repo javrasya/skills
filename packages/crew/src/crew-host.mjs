@@ -22,9 +22,8 @@ import { launchedSession, launchWords, resumeWords } from './harness.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { sessionTranscripts } from './transcript.mjs'
 import { readCrewConfig, repoConfig, samePath } from './crew-config.mjs'
-import { gitIn, porcelainLines, repoOf, worktreeOwnCommits } from './git.mjs'
-import { reuseWorktree } from './orca-cli.mjs'
-import { copyMcpAnswers } from './mcp-answers.mjs'
+import { gitIn, repoOf } from './git.mjs'
+import { gitProbes, prepareChildWorktree, reuseWorktree } from './worktree.mjs'
 
 export const CREW_BIN = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url))
 
@@ -32,12 +31,12 @@ const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
 const fail = (code, message, extra = {}) => Object.assign(new Error(`crew: ${code}: ${message}`), { code, ...extra })
 
 // What a worker reads before its prompt. The runner's prompts send it to "your
-// Orca preamble" for its IDs and "orchestration send" for its mail, so crew's
-// says it stands in for that preamble and names the command in full.
+// session host's preamble" for its IDs and "orchestration send" for its mail,
+// so crew's is titled as that preamble and names the command in full.
 export function crewPreamble({ terminal, taskId, capability }) {
   const ids = `--from ${terminal} --dispatch-capability ${capability} --task-id ${taskId} --dispatch-id ${terminal}`
-  return `=== Your Orca preamble, from crew ===
-No Orca runs here: crew, this run's session host, stands in for it. Your IDs: ${ids}
+  return `=== Your session host's preamble, from crew ===
+Crew is this run's session host. Your IDs: ${ids}
 Every \`orchestration send\` your instructions name is this command, with those IDs:
   node "${CREW_BIN}" orchestration send ${ids} --type <worker_done|handoff|escalation> --subject "<subject>" --body "<body>" [--outcome succeeded|failed]
 === TASK ===
@@ -189,8 +188,7 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     if (known && child.retry) {
       await reuseWorktree(path, { dispatched: child.dispatched, baseline: child.baseline ?? null }, {
         held: async () => (await sessions()).some((s) => s.alive && samePath(s.cwd, path)),
-        lines: async () => porcelainLines(await gitIn(path, ['status', '--porcelain'], bound)),
-        commits: () => worktreeOwnCommits(path, known.branch, bound),
+        ...gitProbes(path, known.branch, bound),
       })
       return { path, made: false }
     }
@@ -253,16 +251,7 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
         if (child) {
           const made = await childWorktree(child)
           worktree = made.path
-          if (made.made) {
-            try {
-              const m = copyMcpAnswers({ project, worktree })
-              if (m.added.length) warnings.push(`the project has no answer for MCP server(s) ${m.added.join(', ')} of .mcp.json, so its worktree disables them`)
-            } catch (e) {
-              warnings.push(`could not copy the project's MCP server answers into its worktree: ${e?.message ?? e}`)
-            }
-            baseline = porcelainLines(await gitIn(worktree, ['status', '--porcelain'], bound))
-            await child.onBaseline?.({ worktree, lines: baseline })
-          }
+          if (made.made) baseline = await prepareChildWorktree({ project, worktree, bound, child, warnings })
         }
         const text = typeof prompt === 'function' ? prompt(baseline) : prompt
         const w = await launch(launchWords({ harness, model, effort, permissionMode, sessionId }), { harness, dir: worktree, title, prompt: text, run, typing: () => { dispatched = true } })

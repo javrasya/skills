@@ -1,4 +1,4 @@
-// Every limit the Orca runner enforces on a worker, in one table. A worker
+// Every limit the session runner enforces on a worker, in one table. A worker
 // that crosses one is nudged, then its session is continued (ADR-0013); one
 // past the continuation cap, or blocked on a human too long, becomes `null`
 // from agent(), as a dead subagent does on the Workflow runner, so the
@@ -6,8 +6,8 @@
 const MIN = 60_000
 
 export const RUNNER_SETTINGS = Object.freeze({
-  // Agents live at once — started and not yet settled or stopped. Orca's own
-  // cap for this runner, not the Workflow runner's; further agent() calls
+  // Agents live at once — started and not yet settled or stopped. The session
+  // runner's own cap, not the Workflow runner's; further agent() calls
   // queue. A settled worker's tab stays open until reclaimed, and costs no slot.
   MAX_LIVE: 10,
   // How often a live worker is looked at.
@@ -46,23 +46,23 @@ export const RUNNER_SETTINGS = Object.freeze({
   // failed and kept if nobody answers within this. Never continued:
   // continuing does not answer the question it waits on.
   blockedFailMs: 30 * MIN,
-  // Orca calls that fail in a row while watching a worker before it counts
+  // Host calls that fail in a row while watching a worker before it counts
   // as dead: one transient CLI failure must not kill a long agent. A call
-  // that finds Orca not there at all is an outage, never one of these.
+  // that finds the host not there at all is an outage, never one of these.
   watchErrors: 3,
-  // An Orca outage (ADR-0015): Orca itself not there, as while it updates.
-  // Every Orca call waits on it, and the runner's clocks stop for its length.
+  // A session host outage (ADR-0015): the host itself not there, as Orca while
+  // it updates or crew's daemon gone. Every host call waits on it, and the runner's clocks stop for its length.
   // It is probed after outageProbeMs, each wait twice the last, up to
   // outageProbeMaxMs; one still going at outageLimitMs pauses the run, which
-  // fails no agent, and is probed every pausedProbeMs until Orca answers.
+  // fails no agent, and is probed every pausedProbeMs until the host answers.
   outageProbeMs: 5_000,
   outageProbeMaxMs: 30_000,
   outageLimitMs: 10 * MIN,
   pausedProbeMs: 2 * MIN,
-  // One Orca call, beyond any wait it asks Orca for: one that has not
+  // One host call, beyond any wait it asks the host for: one that has not
   // answered by then is killed and counts as failed.
   hostCallMs: 2 * MIN,
-  // A `worktree create`, which Orca may take far longer over than one call:
+  // A `worktree create`, which a host may take far longer over than one call:
   // it has been seen to finish past hostCallMs. One that runs out is looked
   // up by name before its attempt counts as failed.
   worktreeCreateMs: 10 * MIN,
@@ -82,7 +82,7 @@ export const RUNNER_SETTINGS = Object.freeze({
   // stops restarting it and prints its log in the tab instead.
   viewRestartMs: 1_000,
   viewCrashes: 3,
-  // One Orca or git call from the run view, beyond any wait it asks for: far
+  // One host or git call from the run view, beyond any wait it asks for: far
   // shorter than hostCallMs, since the view's keys wait on it. A call that
   // runs out fails that refresh or action, and the view carries on.
   viewCallMs: 10_000,

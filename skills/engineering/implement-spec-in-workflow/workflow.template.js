@@ -18,7 +18,7 @@ export const meta = {
 // roles on pi, hard ones on Claude. Every agent() call spreads its role's row.
 // harness: 'claude' (Claude Code) or 'pi'. model: always a Claude model name.
 // piModel: a pi model pattern ('provider/id'), read only for a pi row.
-// Only the Orca runner reads `harness` and `piModel`. The Workflow runner
+// Only the session runner reads `harness` and `piModel`. The Workflow runner
 // ignores both and runs every role on Claude with `model`, so a pi row keeps a
 // Claude `model` beside its `piModel` — e.g.
 // { harness: 'pi', piModel: 'openai/gpt-5', model: 'opus' } — and the same
@@ -42,7 +42,7 @@ const ROLES = {
   review: RUN_DEFAULT,        // Review: code-review the whole stack
   finalize: RUN_DEFAULT,      // Finalize: reconcile and ready the stack
   retrospective: RUN_DEFAULT, // Finalize: the validation report
-  recover: RUN_DEFAULT,       // any phase: a doctor for an agent that failed (Orca runner only)
+  recover: RUN_DEFAULT,       // any phase: a doctor for an agent that failed (session runner only)
 }
 // Two more opts every agent() call may carry, both for the runner (ADR-0016):
 // `node` — the call's stable name for WHAT it is, never when it ran
@@ -113,17 +113,18 @@ const mirror = (branches) => `\`git fetch origin\`, then mirror origin into the 
 // each agent to name its own — an agent for the next ticket sits clean at the
 // same commit and is indistinguishable by git state alone.
 //
-// On the Orca runner that worktree is an Orca child of the run's worktree, and
+// On the session runner that worktree is a child of the run's worktree, made by
+// its session host, and
 // the script reclaims nothing: every agent is kept for the whole run, and the
 // runner asks the operator what to reclaim once summary.json is written
-// (ADR-0012). The reclaim steps below therefore hand an Orca run no path, and
+// (ADR-0012). The reclaim steps below therefore hand a session run no path, and
 // the rendered script stays the same under both runners but for RUNNER.
 const ON_SESSION = RUNNER === 'session' || RUNNER === 'orca'
-// The Orca runner starts each doctor itself, with no agent() call to spread a
+// The session runner starts each doctor itself, with no agent() call to spread a
 // row into, so it reads the recover row from meta (ADR-0014).
 if (ON_SESSION) meta.roles = ROLES
 const WORKTREE = ON_SESSION
-  ? `Your worktree is an Orca child worktree of this run's worktree, per agent. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. Never remove it: the operator decides at the end of the run whether it is reclaimed.`
+  ? `Your worktree is a child worktree of this run's worktree, per agent, made by this run's session host. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. Never remove it: the operator decides at the end of the run whether it is reclaimed.`
   : `Your worktree is throwaway and per agent. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. This run reclaims it — uncommitted leftovers included — once the work it holds is published.`
 
 // --- the worktree ledger ---------------------------------------------------
@@ -173,7 +174,7 @@ ${entries.map((e) => `   - ${e.path} → ${ref(e.branch)}`).join('\n')}
 // A dead agent never reported a path, so its worktree is not in the ledger.
 // The harness names a run's worktrees `wf_<run>-<n>`; the prefix is read off
 // any reported path so a reclaimer can NAME the strays without touching them.
-// The Orca runner reclaims nothing in-script, so there is nothing to guess.
+// The session runner reclaims nothing in-script, so there is nothing to guess.
 const strayPrefix = () => {
   for (const e of worktreesOf.values()) for (const p of e.paths) { const m = /^(.*[\\/]wf_[^\\/]+-)\d+$/.exec(p); if (m) return m[1] }
   return null

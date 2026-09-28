@@ -458,7 +458,7 @@ test('crew host: the fake harness is a TUI on the alternate screen that echoes e
   await eventually('the start prompt', () => delivered(h, w, w.prompt))
   const screen = await eventually('the echo', async () => {
     const s = (await request(h.paths, { op: 'session.screen', id: w.terminal })).screen
-    return s.lines.some((l) => l.startsWith('echo: === Your Orca preamble, from crew ===')) && s
+    return s.lines.some((l) => l.startsWith("echo: === Your session host's preamble, from crew ===")) && s
   })
   assert.equal(screen.alternate, true)
   assert.ok(screen.lines.some((l) => l.startsWith(`> ${w.prompt}`)))

@@ -417,7 +417,7 @@ test('crew host: ? starts the fake harness in a session of no run, titled orches
   for (const until = Date.now() + 10_000; !transcripts().length && Date.now() < until;) await new Promise((done) => setTimeout(done, 50))
   const told = transcripts()
   assert.ok(told.some((t) => t.includes('opened from the run console') && t.includes('C:/runs/app/orca-run')), 'its first prompt names the run directory')
-  assert.ok(!told.some((t) => t.includes('Your Orca preamble')), 'no worker preamble')
+  assert.ok(!told.some((t) => t.includes("Your session host's preamble")), 'no worker preamble')
   await request(paths, { op: 'session.close', id })
 })
 

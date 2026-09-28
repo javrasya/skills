@@ -48,7 +48,7 @@ export function validate(schema, value, path = '$') {
 }
 
 // The Workflow runner throws at agent() on a schema no result can satisfy;
-// the Orca runner throws on the same two shapes before launching anyone.
+// the session runner throws on the same two shapes before launching anyone.
 export function checkSchema(schema) {
   if (!IS.object(schema) || schema.type !== 'object' || !IS.object(schema.properties)) {
     throw new Error('agent() schema needs {type: "object", properties} at its root')

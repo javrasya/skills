@@ -1,14 +1,15 @@
 #!/usr/bin/env node
-// The Orca runner (ADR-0011): runs a rendered workflow script unchanged by
-// supplying its four hooks, and starts each agent() as a supervised Orca
-// worker. Launch it from its own Orca terminal — the Run it creates binds to
-// that terminal.
+// The session runner (ADR-0011, ADR-0017): runs a rendered workflow script
+// unchanged by supplying its four hooks, and starts each agent() as a
+// supervised worker on its session host (hosts.mjs: crew, the default, or
+// Orca). Launch it from its own terminal on that host — the Run it creates
+// binds to that terminal.
 //
-//   node runner.mjs <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]
+//   node runner.mjs <rendered-script.js> [--host <name>] [--state-dir <dir>] [--resume] [--permission-mode <mode>]
 //
 // Every settled agent() call is journaled in the state dir, which defaults
 // to <notes-dir>/orca-run for the rendered <notes-dir>/workflow.js: a value as
-// its result, and a null (a dead agent, one that never started, one Orca could
+// its result, and a null (a dead agent, one that never started, one its host could
 // not reach) as failed, with no result. --resume replays the unchanged prefix
 // of agent() calls from that journal without launching anything; the first
 // call not in it or journaled as failed, and every call after it, runs live.
@@ -22,12 +23,13 @@
 // until R carries it on, in this process; halted.json in the state dir names
 // the held nodes for the arming session meanwhile. A resume, from any
 // terminal, takes the journaled Run over (run-use) before it starts a worker,
-// and takes up each worker the last run left out: watched again if Orca still
+// and takes up each worker the last run left out: watched again if its host still
 // shows it live, its session continued if it died. A patient whose agent()
 // waited on its doctor stays pending: its round goes on, its doctor taken up
 // like any worker, never a second one started, and a handoff journaled but not
 // yet applied is applied once. When the script settles the
-// runner writes summary.json to the state dir: {runner, ok, result | error},
+// runner writes summary.json to the state dir: {runner: 'session', host, ok,
+// result | error}, host the session host's id,
 // and on a failure also worktrees_kept, the worktrees it retained because
 // their agent died or never started. Every line
 // it prints is also appended, timestamped, to runner.log there.
@@ -45,11 +47,12 @@
 // with ok, partial or failed when the script settles, and `reclaimed` for what
 // the operator reclaims from the run view.
 //
-// An Orca outage, Orca itself not there, as while it updates, is waited out
-// by every Orca call and charged to no agent (ADR-0015, outage.mjs): it is
-// journaled (`outage`), and one past its limit pauses the run, recorded in
-// the registry as `paused` until Orca answers again. The runner stays in its
-// tab meanwhile, and R in the attached view has it probe Orca at once.
+// A session host outage, the host itself not there (Orca while it updates,
+// crew's daemon gone), is waited out by every host call and charged to no
+// agent (ADR-0015, outage.mjs): it is journaled (`outage`), and one past its
+// limit pauses the run, recorded in the registry as `paused` until the host
+// answers again. The runner stays in its tab meanwhile, and R in the attached
+// view has it probe the host at once.
 //
 // No change to this directory is done until the runner contract test passes
 // under both runners (README.md). The offline tests do not replace it.
@@ -144,7 +147,7 @@ export function runnerLog(stateDir, print, clock = realClock) {
 // runnerTerminal, where the runner is when the host's Run terminal is not
 // the runner's own (crew's session): the registry, the journal and
 // halted.json name it.
-// control: filled in with resumeHost(), which probes Orca at once during an
+// control: filled in with resumeHost(), which probes the host at once during an
 // outage, and resume({ node }), the attached view's R: resumeHost while an
 // outage is on, else the halted run's node, or with none every held node.
 // onHalt({ node, nodes }): told each time a node is held and the run halts.
@@ -159,8 +162,8 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
   const earlier = resume ? readJournal(journalPath) : { calls: new Map(), nodes: new Map(), retained: [], run: null, lastN: 0, phases: null, agents: [], mail: [] }
   const journaled = earlier.calls
   // A resume numbers its calls on from the last run's: the Run it takes over
-  // already holds a `<runId>-<n>` child worktree for each n used, and Orca
-  // answers a create of a taken name with <name>-2.
+  // already holds a `<runId>-<n>` child worktree for each n used, and a
+  // host may answer a create of a taken name with <name>-2 (Orca does).
   let count = earlier.lastN
   // Rewritten from empty, replayed calls included, so the journal always
   // describes the latest run and a later resume replays from it alone. It
@@ -209,7 +212,7 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
       out(`!! run registry: could not record ${what} for ${entry.runId}: ${e?.message ?? e}`)
     }
   }
-  // Called once, when Orca creates the Run, or hands the journaled one over to
+  // Called once, when the host creates the Run, or hands the journaled one over to
   // a resume: that Run was armed by the runner that created it, and gains
   // this runner's terminal. The script has run by then, so its meta names
   // its phases. The runner's terminal is journaled, and so named in
@@ -225,7 +228,7 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
   // The run's one outage of its session host (ADR-0015, ADR-0017: Orca's, or
   // crew's daemon unreachable): every host call waits on it, so no agent is
   // charged for it. It is journaled and logged as it starts, pauses
-  // and ends, and a pause is recorded in the registry until Orca is back.
+  // and ends, and a pause is recorded in the registry until the host is back.
   // A resume's Run is paused under its id before its takeover lands.
   const runIdNow = () => armed ?? earlier.run?.runId ?? null
   const outage = hostOutage({
@@ -288,7 +291,7 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
   // So a resume that makes no live call still leaves the Run to the next one.
   if (earlier.run) journal({ type: 'run', ...earlier.run, lastN: earlier.lastN, ...(earlier.phases && { phases: earlier.phases }) })
   // Every Run mailbox message an earlier runner acted on, as it journaled it:
-  // Orca delivers a batch again until it is acknowledged, and it is never
+  // the host delivers a batch again until it is acknowledged, and it is never
   // acted on twice.
   for (const m of earlier.mail) journal(m)
   // Every other agent an earlier runner of this Run made: it launched
@@ -503,10 +506,10 @@ function launchOf(opts, permissionMode, who = 'agent()') {
   return launch
 }
 
-// summary.json for a run that threw: the error, and every worktree the runner
+// summary.json for a run that threw, on the host `host` names: the error, and every worktree the runner
 // retained because its agent died or never started, since the arming session
 // reads this file and not the log.
-export const failureSummary = (e) => ({ runner: 'orca', ok: false, error: e?.stack ?? String(e), worktrees_kept: Array.isArray(e?.worktrees_kept) ? e.worktrees_kept : [] })
+export const failureSummary = (e, host) => ({ runner: 'session', host, ok: false, error: e?.stack ?? String(e), worktrees_kept: Array.isArray(e?.worktrees_kept) ? e.worktrees_kept : [] })
 
 // The run's result names each worktree retained because its agent died or
 // never started beside the ones a reclaimer kept, in the same {path, reason}
@@ -548,7 +551,7 @@ export function finish({ stateDir, summary, out }) {
 //   guard(on)    ignores a Ctrl-C that reaches the runner while a view lives:
 //                one that dies outside raw mode lets Ctrl-C reach every
 //                process on the console
-//   resume(m)    the view's R, sent as {type: 'resume', node?}: probe Orca
+//   resume(m)    the view's R, sent as {type: 'resume', node?}: probe the host
 //                now during an outage, else resume the halted run's node, or
 //                every held one (runScript's control.resume)
 // Returns { start(), gate(print), closed, crashes() }. gate wraps a print so
@@ -716,11 +719,11 @@ if (isMain) {
       // operator enters the runner by its own session, which the daemon names.
       runnerTerminal: host.id === 'crew' ? process.env.CREW_SESSION ?? null : null,
     })
-    summary = { runner: 'orca', ok: true, result }
+    summary = { runner: 'session', host: host.id, ok: true, result }
   } catch (e) {
     sayError(e?.stack ?? String(e))
     process.exitCode = 1
-    summary = failureSummary(e)
+    summary = failureSummary(e, host.id)
   }
   clearInterval(halted)
   try {

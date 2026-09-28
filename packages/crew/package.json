@@ -1,7 +1,7 @@
 {
   "name": "@javrasya/crew",
   "version": "0.1.0",
-  "description": "The session runner: runs a rendered workflow script, starting each agent() as a supervised session on a host (Orca), with its run view.",
+  "description": "The session runner: runs a rendered workflow script, starting each agent() as a supervised session on a session host (crew, the default, or Orca), with its run view.",
   "type": "module",
   "license": "MIT",
   "repository": {

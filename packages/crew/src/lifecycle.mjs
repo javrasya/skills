@@ -1,4 +1,4 @@
-// One agent's life under the Orca runner: its files, the run's Run, a live
+// One agent's life under the session runner: its files, the run's Run, a live
 // slot, its worker's start (or, on a resume, taking up the worker the last run
 // left out), the watch until it settles or dies (its session
 // nudged and continued on the way), its result, and
@@ -39,9 +39,9 @@ An earlier start of this task failed before any worker ran, and a doctor, an age
 ## The doctor's note
 ${note}`)
 
-// Nobody answers a worker mid-task: Orca's preamble offers `orchestration
+// Nobody answers a worker mid-task: a host's preamble may offer `orchestration
 // ask`, which blocks until the coordinator replies, and this runner never does.
-export const NO_ASK = 'Never run `orca orchestration ask`, and never wait on a reply from anyone: nobody will answer. Put a question only a human can answer in your result (in `decisions_needed`, where your schema has it), finish everything it does not block, then submit.'
+export const NO_ASK = "Never run any `orchestration ask` command, whatever your session host's preamble offers, and never wait on a reply from anyone: nobody will answer. Put a question only a human can answer in your result (in `decisions_needed`, where your schema has it), finish everything it does not block, then submit."
 
 // `baseline`: the porcelain lines of the worktree it starts in, or null.
 // `note`: a doctor's note for a start retried after its retries were spent.
@@ -56,7 +56,7 @@ export function workerPrompt(prompt, { schemaPath, resultPath, payloadPath, base
 ---
 How this run receives your result: your final message is not read. Your result reaches the workflow only through the submit command below, and submit sends your worker_done for you — never send worker_done yourself.
 1. ${what}
-2. Run this, replacing the four <placeholders> with the values from your Orca preamble, copied exactly:
+2. Run this, replacing the four <placeholders> with the values from your session host's preamble, copied exactly:
    ${command}
 3. If submit exits non-zero it prints every error: fix the payload and run it again until it exits 0. Then stop and idle.
 
@@ -104,23 +104,23 @@ const mins = (ms) => Math.round(ms / 60_000)
 const wait = (ms) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms / 6_000) / 10} min`)
 
 // What the delivery check looks for in the session: the start of the prompt,
-// whitespace collapsed, which Orca types after its preamble unchanged.
+// whitespace collapsed, which the host types after its preamble unchanged.
 const needleOf = (prompt) => String(prompt).replace(/\s+/g, ' ').trim().slice(0, 120)
 
-// Lines of Orca's preamble, which worker-start types before the prompt, and
+// Lines of the host's preamble, which worker-start types before the prompt, and
 // which the input to empty may still hold: one Ctrl-U per line, and more on
 // an empty input do nothing.
 const PREAMBLE_LINES = 100
 
 // The prompt typed again, when neither worker-start's typing nor an Enter
-// reached the session. Orca's preamble came with the first typing and cannot
+// reached the session. The host's preamble came with the first typing and cannot
 // be typed again as it was: it alone carried the dispatch capability, which
 // nothing hands the runner (not worker-start's answer, nor `dispatch-show
-// --preamble`). So the runner names the three IDs it holds, which Orca's
-// preamble also names, the worker's handle being its terminal's, and the
+// --preamble`). So the runner names the three IDs it holds, which the
+// host's preamble also names, the worker's handle being its terminal's, and the
 // capability is left out: submit sends worker_done without one (submit.mjs),
-// from the worker's own pane, which Orca settles a dispatch from.
-const resendPrompt = (w, prompt) => `The workflow runner typed this message again: the one worker-start sent did not reach you, and the Orca preamble it began with did not either. Your Orca IDs, for submit and for any Orca mail: worker handle ${w.terminal}, task id ${w.taskId}, dispatch id ${w.dispatchId}. Leave out --dispatch-capability: you have none.
+// from the worker's own pane, which the host settles a dispatch from.
+const resendPrompt = (w, prompt) => `The workflow runner typed this message again: the one worker-start sent did not reach you, and your session host's preamble it began with did not either. Your IDs, for submit and for any Run mail: worker handle ${w.terminal}, task id ${w.taskId}, dispatch id ${w.dispatchId}. Leave out --dispatch-capability: you have none.
 
 ---
 ${prompt}`
@@ -129,14 +129,14 @@ const NUDGE = 'The workflow has not received your result: your final message is 
 
 // Typed after the resume, or handed as the spec of the dispatch that adopts a
 // new terminal, whose preamble then carries new IDs.
-const continuePrompt = (why) => `You were interrupted: the workflow runner stopped this session and resumed it (${why}). Carry on where you left off and finish the task, then run the submit command from your instructions until it exits 0. If an Orca preamble came with this message, take the four IDs for submit from it, not from an earlier one.`
+const continuePrompt = (why) => `You were interrupted: the workflow runner stopped this session and resumed it (${why}). Carry on where you left off and finish the task, then run the submit command from your instructions until it exits 0. If a session host's preamble came with this message, take the four IDs for submit from it, not from an earlier one.`
 
 // A node resumed after the run halted on it (ADR-0016): its session carried
 // on, told why. One that needed decisions is told the operator has answered,
 // on the ticket.
 export const haltedPrompt = (needsDecision) => `${needsDecision
   ? 'The workflow run was halted here: your result named decisions only the operator can make, and the operator has answered them. Re-read the ticket, its body and its comments, for the answers, then finish the task'
-  : 'The workflow run was halted here, and the operator has resumed it. Carry on from where you are and finish the task'}, then run the submit command from your instructions until it exits 0. If an Orca preamble came with this message, take the four IDs for submit from it, not from an earlier one.`
+  : 'The workflow run was halted here, and the operator has resumed it. Carry on from where you are and finish the task'}, then run the submit command from your instructions until it exits 0. If a session host's preamble came with this message, take the four IDs for submit from it, not from an earlier one.`
 
 // The convention a result needs the operator by (ADR-0016): a non-empty
 // `decisions_needed` array, its questions. Null for any other value.
@@ -174,7 +174,7 @@ export function readResult(resultPath, schema) {
 // list holds for it.
 // takeOver: the id of a Run an earlier runner of this run created, which this
 // one takes over (run-use) instead of creating one. onRun({ runId, terminal,
-// takenOver }) is called once, when Orca creates the Run or hands it over.
+// takenOver }) is called once, when the host creates the Run or hands it over.
 // transcripts.size({ harness, sessionId, worktree }) measures a session's
 // transcript (transcript.mjs), and transcripts.path(…) names it.
 // nextN() is the run's next agent number, which a doctor is started under;
@@ -184,9 +184,9 @@ export function readResult(resultPath, schema) {
 // this run journaled, which this one acknowledges and never acts on again;
 // mailPending: those it held, since no box had claimed their dispatch, as
 // { id, type, dispatchId, outcome, subject, body }, held again here.
-// outage: the run's Orca outage (outage.mjs), which every Orca call already
+// outage: the run's session host outage (outage.mjs), which every host call already
 // waits on: its lost() is taken off the watch's clocks, and a retry's backoff
-// is waited as its sleep(), so no clock the runner keeps runs while Orca is gone.
+// is waited as its sleep(), so no clock the runner keeps runs while the host is gone.
 // Returns life(call), which resolves to the agent's value or null, and throws
 // only if journal or out does. life.doctors() resolves once every doctor
 // still out has ended: a patient's agent() never waits on its doctor once its
@@ -293,12 +293,12 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
 
   // Every agent's worker is dispatched into the one Run. Concurrent calls
   // share its creation, or its takeover, retries included; once it has failed
-  // for good, the next call asks Orca again. A takeover precedes every
-  // worker-start, which Orca refuses from any terminal but the Run's.
+  // for good, the next call asks the host again. A takeover precedes every
+  // worker-start, which the host refuses from any terminal but the Run's.
   function ensureRun(call) {
     const creating = (run ??= takeOver
-      ? retrying(call, `Orca could not hand this run's Run ${takeOver} over to this runner`, () => host.runUse({ runId: takeOver }).then((r) => (onRun({ ...r, takenOver: true }), r)))
-      : retrying(call, "Orca could not create this run's Run", () => host.runCreate({ objective: objective() }).then((r) => (onRun(r), r))))
+      ? retrying(call, `${host.name} could not hand this run's Run ${takeOver} over to this runner`, () => host.runUse({ runId: takeOver }).then((r) => (onRun({ ...r, takenOver: true }), r)))
+      : retrying(call, `${host.name} could not create this run's Run`, () => host.runCreate({ objective: objective() }).then((r) => (onRun(r), r))))
     return creating.catch((e) => {
       if (run === creating) run = null
       throw e
@@ -334,7 +334,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
   // once after each nudge; blocked(waiting) and unblocked() journal a wait on a human
   // beginning and ending, so the run view shows it while it lasts. mail(), a
   // doctor's, reads the Run mailbox at every look, and ends the watch with
-  // what it returns: the doctor's worker_done, read before Orca shows it.
+  // what it returns: the doctor's worker_done, read before the host shows it.
   // held(), a doctor's, is whether it needs you: while it does, it waits on
   // a human for as long as it takes, so no idle, stillness or blocked limit
   // counts against it; each counts afresh from its next message. nudgeText:
@@ -354,7 +354,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
     let blockedAt = null
     let size = null
     let busy = null
-    // The run's time lost to Orca outages as of the last look: whatever it
+    // The run's time lost to host outages as of the last look: whatever it
     // has grown by since moves every clock of this watch on by as much, since
     // nothing of the worker could be seen meanwhile (ADR-0015).
     let lostAt = outage.lost()
@@ -400,7 +400,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
         }
         errors = 0
       } catch (e) {
-        if (++errors >= limits.watchErrors) return { dead: `Orca failed ${errors} times in a row watching it (${e.message})`, unseen: true }
+        if (++errors >= limits.watchErrors) return { dead: `${host.name} failed ${errors} times in a row watching it (${e.message})`, unseen: true }
         out(`!! ${title}: could not look at its worker: ${e.message}`)
         continue
       }
@@ -478,7 +478,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
   }
 
   // How a worker the last run started fared while no runner watched it: null
-  // to watch it again (live, settled, blocked, or one Orca could not show,
+  // to watch it again (live, settled, blocked, or one the host could not show,
   // which the watch gives up on as on any other), or the death to continue
   // its session from.
   async function lookBack(w) {
@@ -507,7 +507,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
 
   // The prompt worker-start typed must reach the session. A dialog the TUI
   // opens on launch, such as Claude's "New MCP server found in this project"
-  // (mcp-answers.mjs), passes Orca's tui-idle wait and eats worker-start's
+  // (mcp-answers.mjs), passes the host's idle wait and eats worker-start's
   // Enter, leaving the prompt unsent in the input box, or gone: the worker
   // then idles until a nudge. So once worker-start returns, the prompt (`sent`)
   // must show as a user message in the session within promptDeliveryMs.
@@ -558,7 +558,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
     const { prompt, isolated, launch, key, n, title, phaseName, dir, schemaPath, resultPath, payloadPath, patient = null, setup = null } = call
     // The child worktrees failed attempts left. Every attempt of a call asks
     // for the same `<runId>-<n>` name, so a retry takes that one up again;
-    // one Orca made under a suffixed name leaves both it and that one.
+    // one the host made under a suffixed name leaves both it and that one.
     const made = new Set(again?.made)
     // Once any attempt has sent its worker-start, a worker may have run in
     // that worktree, and a retry no longer takes it up whatever it holds.
@@ -603,7 +603,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
         }
       }))
     } catch (e) {
-      // A worktree Orca made before the start failed is named like a dead
+      // A worktree the host made before the start failed is named like a dead
       // agent's: the runner never removes one. A patient's are retained only
       // once its doctor rounds end in null.
       const retainMade = () => keepMade(call, [...made])
@@ -673,7 +673,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
           nudgeText: patient != null ? DOCTOR_NUDGE : NUDGE, owes: patient != null ? 'reporting' : 'submitting',
         })
         // A dead session is continued in its own session (ADR-0013), unless
-        // it waits on a human, Orca cannot see it, or it already submitted.
+        // it waits on a human, the host cannot see it, or it already submitted.
         if (!end.dead || end.blocked || end.unseen || existsSync(resultPath)) break
         // A session that died with its host is no death of the agent's, and
         // spends none of its continuations (#104).
@@ -782,8 +782,8 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
     // result. One taken up may have submitted while no runner watched it.
     if (!adopt) rmSync(resultPath, { force: true })
 
-    // Like a worker that cannot start, a Run Orca cannot create is this
-    // agent's null, never a throw; the next agent() asks Orca again.
+    // Like a worker that cannot start, a Run the host cannot create is this
+    // agent's null, never a throw; the next agent() asks the host again.
     let runId
     try {
       ;({ runId } = await ensureRun(call))

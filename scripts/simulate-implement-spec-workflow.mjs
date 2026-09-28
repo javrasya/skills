@@ -121,7 +121,7 @@ async function run(overrides = {}, { runner = 'workflow' } = {}) {
   const log = (m) => logs.push(m)
   const phase = () => {}
 
-  // The Orca runner's own loader, so the script is loaded one way everywhere.
+  // The session runner's own loader, so the script is loaded one way everywhere.
   const result = await loadScript(render(runner))(agent, parallel, phase, log, {})
   EVERY_CALL.push(...calls)
   EVERY_RUN.push(calls)
@@ -553,7 +553,7 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('R: the Workflow finalize reclaims what the lane did not', /\/wt\/publish-11 → ticket\/11/.test(onWorkflow.calls.find((c) => c.label === 'finalize').prompt), '')
   check('R: no Orca prompt names a worktree to reclaim or a way to remove one', !onOrca.calls.some((c) => reclaimCmd.test(c.prompt) || / → ticket\/\d+\n/.test(c.prompt)), [...new Set(onOrca.calls.filter((c) => reclaimCmd.test(c.prompt)).map((c) => c.label))].join(' | '))
   check('R: the Orca publisher is told to remove no worktree', /Remove no worktree/.test(orca) && /Never remove it: the operator decides at the end of the run/.test(orca), orca.slice(0, 1500))
-  check('R: an Orca agent is told its worktree is a child of the run\'s', /an Orca child worktree of this run's worktree/.test(onOrca.calls.find((c) => c.label === 'impl:#10').prompt), '')
+  check('R: a session agent is told its worktree is a child of the run\'s', /a child worktree of this run's worktree, per agent, made by this run's session host/.test(onOrca.calls.find((c) => c.label === 'impl:#10').prompt), '')
   check('R: no Orca prompt guesses strays from harness paths', !onOrca.calls.some((c) => /not in the ledger/.test(c.prompt)), '')
   check('R: the Orca run completes', onOrca.result.state.startsWith('complete'), onOrca.result.state)
   // A publish that fails halts the run: nothing is reclaimed on either runner.

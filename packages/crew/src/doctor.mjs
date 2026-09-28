@@ -13,7 +13,7 @@
 export const ANSWERS = Object.freeze(['handoff', 'escalation', 'worker_done'])
 const answers = (kind) => ANSWERS.includes(kind)
 
-// What the runner does with a message of `kind` (Orca's type) and `outcome`
+// What the runner does with a message of `kind` (the host's message type) and `outcome`
 // from the dispatch whose doctor's box is `box` (null for none): remedy (a
 // round's first handoff), needsYou (an escalation before it), gaveUp or ended
 // (its worker_done, failed or not), or none (no box, a round closed, a later
@@ -45,11 +45,11 @@ export function foldMail(d, e) {
 
 // How a doctor reports, as its brief says: it has no submit command, so its
 // nudge and continuation prompt never name one.
-const REPORT = 'report over Orca mail as your instructions say: send your note as a handoff, then worker_done; escalate if only a human can clear the failure; or give up with worker_done --outcome failed. If you already sent your note, send worker_done'
+const REPORT = 'report over Run mail as your instructions say: send your note as a handoff, then worker_done; escalate if only a human can clear the failure; or give up with worker_done --outcome failed. If you already sent your note, send worker_done'
 export const DOCTOR_NUDGE = `The workflow has not received your report: your final message is not read. Finish your diagnosis, then ${REPORT}.`
 
 // The doctor's whole brief: it gets no submit command, since its only output
-// is a note, sent as Orca mail (ADR-0014).
+// is a note, sent as Run mail (ADR-0014).
 // earlier: each earlier round of this patient, { round, note, outcome }, so
 // that no doctor hands it a note that already failed.
 const earlierRounds = (earlier) => (earlier.length ? `
@@ -66,9 +66,9 @@ export function doctorPrompt({ patient, reason, round, rounds, transcript, workt
 
 Change nothing. Edit, create or delete no file, in any worktree; change no environment, configuration or installed tool; log in to or out of nothing. Read only. Your only output is the note.
 
-When only a human can clear the failure (a login, credentials, a sandbox permission), state the situation and what the human must do or decide, plainly. Do not question them: they handle it their own way. Never run \`orca orchestration ask\`: nobody answers it. A question only a human can answer goes in your escalation or your note, as below.
+When only a human can clear the failure (a login, credentials, a sandbox permission), state the situation and what the human must do or decide, plainly. Do not question them: they handle it their own way. Never run any \`orchestration ask\` command, whatever your session host's preamble offers: nobody answers it. A question only a human can answer goes in your escalation or your note, as below.
 
-Report over Orca mail to your Run's mailbox, with the IDs from your Orca preamble:
+Report over Run mail to your Run's mailbox, with the IDs from your session host's preamble:
 - the note: orchestration send --type handoff --subject note --body "<the note>", then worker_done --outcome succeeded. Your first handoff is this round's note: the runner carries the patient on with it at once, and takes no later handoff or escalation from you, so send it only once you are done, then worker_done;
 - a human is needed: orchestration send --type escalation --subject "Blocked: <what>" --body "<what the human must do or decide>", then wait for as long as it takes: nobody hurries you. Once the human tells you in your tab that they did their part, send your note as above, or escalate again if something is still needed;
 - you give up: worker_done --outcome failed, with why in the body.
@@ -90,16 +90,16 @@ ${log.join('\n') || '(none)'}`
 }
 
 // A doctor's, which has no submit command.
-export const doctorContinuePrompt = (why) => `You were interrupted: the workflow runner stopped this session and resumed it (${why}). Carry on with your diagnosis where you left off, then ${REPORT}. If an Orca preamble came with this message, take the IDs for Orca mail from it, not from an earlier one.`
+export const doctorContinuePrompt = (why) => `You were interrupted: the workflow runner stopped this session and resumed it (${why}). Carry on with your diagnosis where you left off, then ${REPORT}. If a session host's preamble came with this message, take the IDs for Run mail from it, not from an earlier one.`
 
 // A doctor's remedy: the patient's session carries on with its note.
-export const notePrompt = (note) => `You were stopped: this session failed, and the workflow runner resumed it once a doctor, an agent that read your transcript, had worked out why. Its note follows. Carry on where you left off, with the note in mind, and finish the task, then run the submit command from your instructions until it exits 0. If an Orca preamble came with this message, take the four IDs for submit from it, not from an earlier one.
+export const notePrompt = (note) => `You were stopped: this session failed, and the workflow runner resumed it once a doctor, an agent that read your transcript, had worked out why. Its note follows. Carry on where you left off, with the note in mind, and finish the task, then run the submit command from your instructions until it exits 0. If a session host's preamble came with this message, take the four IDs for submit from it, not from an earlier one.
 
 ## The doctor's note
 ${note}`
 
 // The Run mailbox, read from the runner's own terminal while a doctor is
-// out. Orca hands a batch back until it is acknowledged, and a resume's
+// out. The host hands a batch back until it is acknowledged, and a resume's
 // run-use re-batches it under a new delivery id, so a message is acted on
 // once by its id: journaled as `mail` with what the runner did (mailAction),
 // acted on, and only then acknowledged. A doctor's box claims each dispatch

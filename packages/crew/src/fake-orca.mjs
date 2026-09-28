@@ -69,7 +69,8 @@
 // each step of a start, on the runner's outage (outage.mjs), as the adapter
 // waits each command; probe() is the outage's look, recorded as `probe`.
 import { existsSync } from 'fs'
-import { OrcaError, orcaUnreachable, reuseWorktree, afterCreateTimeout, resumeRunnerCommand, tailCommand, workerStartArgs, withTimeout, workerStatus } from './orca-cli.mjs'
+import { OrcaError, orcaUnreachable, afterCreateTimeout, resumeRunnerCommand, tailCommand, workerStartArgs, withTimeout, workerStatus } from './orca-cli.mjs'
+import { reuseWorktree } from './worktree.mjs'
 import { launchCommand, resumeCommand } from './harness.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 
@@ -161,8 +162,8 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     return [...worktrees].find(([, w]) => w.name === name && !w.removed) ?? null
   }
 
-  // The worktree a retry takes up, by name, decided by the adapter's own
-  // rule (reuseWorktree) on what this Orca holds.
+  // The worktree a retry takes up, by name, decided by the rule every host shares
+  // (worktree.mjs's reuseWorktree) on what this Orca holds.
   async function earlierWorktree(name, dispatched, baseline) {
     const found = findWorktree(name)
     if (!found) return null

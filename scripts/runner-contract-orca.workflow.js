@@ -2,7 +2,7 @@ export const meta = { name: 'runner-contract-orca', description: 'the guarantees
 
 // Orca-only guarantees, which scripts/runner-contract.workflow.js (byte-identical
 // under both runners) cannot hold. The expected object and the agent-driven
-// procedure: skills/engineering/implement-spec-in-workflow/orca/README.md.
+// procedure: packages/crew/README.md.
 // No Date.now(), Math.random() or argless new Date(): they break a resume's replay.
 
 const EXPECTED = {

@@ -78,7 +78,7 @@ test('crew run: on the crew host, a whole run of fake-harness agents in crew ses
   const runDir = join(project, 'orca-run')
   assert.ok(r.stdout.includes(`enter it from \`crew view "${runDir}"\``), `the run console, not the debug one: ${r.stdout}`)
   const summary = await eventually('summary.json', () => existsSync(join(runDir, 'summary.json')) && JSON.parse(readFileSync(join(runDir, 'summary.json'), 'utf8')), 120_000)
-  assert.deepEqual(summary, { runner: 'orca', ok: true, result: { first: 'hello', second: 'world' } }, readFileSync(join(runDir, 'runner.log'), 'utf8'))
+  assert.deepEqual(summary, { runner: 'session', host: 'crew', ok: true, result: { first: 'hello', second: 'world' } }, readFileSync(join(runDir, 'runner.log'), 'utf8'))
   const { sessions } = await request(crewPaths(ENV), { op: 'session.list' })
   assert.equal(sessions.find((s) => s.id === runner)?.title, 'crew run workflow.js')
   const lines = (path) => readFileSync(path, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
@@ -142,7 +142,7 @@ test('crew run: crew killed mid-run, stop and restart refused meanwhile; started
   assert.equal(started.status, 0, started.stderr)
 
   const summary = await eventually('summary.json', () => existsSync(join(runDir, 'summary.json')) && JSON.parse(readFileSync(join(runDir, 'summary.json'), 'utf8')), 120_000)
-  assert.deepEqual(summary, { runner: 'orca', ok: true, result: { first: 'hello', second: 'world' } }, log())
+  assert.deepEqual(summary, { runner: 'session', host: 'crew', ok: true, result: { first: 'hello', second: 'world' } }, log())
   const continued = journal().filter((e) => e.type === 'continued')
   assert.deepEqual(continued.map((e) => [e.title, e.hostDied, e.attempt]).sort(), [['[Greet] first', true, 0], ['[Greet] second', true, 0]], log())
   assert.match(log(), /its session died with its session host; continuing session \S+ \(not counted against the cap\)/)

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// The worker's end of an agent() call on the Orca runner. The worker runs it
+// The worker's end of an agent() call on the session runner. The worker runs it
 // on its result: it validates the payload against the agent's schema and
 // exits 1 with every error, so the agent repairs its payload inside its own
 // turn. Only a valid payload is recorded, and only then is worker_done sent.

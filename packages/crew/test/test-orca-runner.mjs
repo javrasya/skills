@@ -19,6 +19,7 @@ import { fakeOrca, fakeTranscripts } from '../src/fake-orca.mjs'
 import { RUNNER_SETTINGS } from '../src/settings.mjs'
 import { orcaCli, OrcaError, tailCommand, resumeRunnerCommand, orcaUnreachable } from '../src/orca-cli.mjs'
 import { worktreeUnpushed } from '../src/git.mjs'
+import { reuseWorktree, prepareChildWorktree, WorktreeError } from '../src/worktree.mjs'
 import { hostOutage, probesBy } from '../src/outage.mjs'
 import { sessionHost, missingMethods } from '../src/session-host.mjs'
 import { runRegistry, readRegistry, OUTCOMES } from '../src/registry.mjs'
@@ -969,7 +970,7 @@ function runEntry(body) {
 test('entry point: the run\'s result is written to summary.json in the state dir, naming the runner', () => {
   const r = runEntry(`log('hi')\nreturn { stack: [], n: 1 }`)
   assert.equal(r.code, 0)
-  assert.deepEqual(r.summary(), { runner: 'orca', ok: true, result: { stack: [], n: 1 } })
+  assert.deepEqual(r.summary(), { runner: 'session', host: 'orca', ok: true, result: { stack: [], n: 1 } })
 })
 
 test('entry point: a script that throws still leaves a summary, with the error, and exits non-zero', () => {
@@ -1212,7 +1213,7 @@ test('orca-cli: a retry after a worker-start was sent takes up a worktree whose 
     }
     assert.equal(got.code, code, status)
     assert.equal(got.final, true)
-    assert.equal(got.message, `orca worktree reuse: worktree_dirty: ${CHILD_PATH} has changed since it was made`)
+    assert.equal(got.message, `worktree reuse: worktree_dirty: ${CHILD_PATH} has changed since it was made`)
   }
   const commits = childCli(EARLIER, { git: gitStub({ status: `${SETUP.join('\n')}\n`, 'rev-list': '1\n' }).git })
   const e = await commits.orca.workerStart({ ...START, child: { ...CHILD, retry: true, dispatched: true, baseline: SETUP } }).catch((x) => x)
@@ -1480,11 +1481,56 @@ return b`
   const e = await runScript(script, { host: orca, stateDir: tmp(), out: () => {}, settings: FAST }).catch((x) => x)
   assert.match(e.message, /layer-0 PR failed/)
   const deadPath = startedAs(orca, '[Setup] layer0').worktree
-  const summary = failureSummary(e)
+  const summary = failureSummary(e, 'orca')
+  assert.equal(summary.runner, 'session')
+  assert.equal(summary.host, 'orca')
   assert.equal(summary.ok, false)
   assert.match(summary.error, /layer-0 PR failed/)
   assert.deepEqual(summary.worktrees_kept.map((k) => k.path), [deadPath])
   assert.match(summary.worktrees_kept[0].reason, /layer0\) died before reporting/)
+})
+
+test('one run: a Run its host cannot create is named by that host, never as Orca', async () => {
+  const lines = []
+  const host = fakeOrca({ worker: submitting() })
+  host.name = 'crew'
+  const create = host.runCreate
+  let tries = 0
+  host.runCreate = async (a) => {
+    if (++tries <= RUNNER_SETTINGS.retryBackoffMs.length + 1) throw new Error('crew: daemon_busy: try later')
+    return create(a)
+  }
+  const script = `const S = ${JSON.stringify(SCHEMA)}
+return [await agent('Name a thing.', { label: 'a', schema: S }), await agent('Name a thing.', { label: 'b', schema: S })]`
+  assert.deepEqual(await runScript(script, { host, stateDir: tmp(), out: (s) => lines.push(s), settings: FAST, clock: fakeClock() }), [null, GOOD])
+  assert.ok(lines.some((l) => l.includes("[Run] a: crew could not create this run's Run")), lines.join('\n'))
+  assert.ok(!lines.some((l) => /\bOrca\b/.test(l)), lines.join('\n'))
+})
+
+test('worktree: a refused take-up is a host-neutral WorktreeError, never an OrcaError or an outage, and the crew host reaches it without orca-cli', async () => {
+  const probes = (o) => ({ held: async () => false, lines: async () => [], commits: async () => 0, ...o })
+  const held = await reuseWorktree('/wt', { dispatched: false, baseline: null }, probes({ held: async () => true })).catch((x) => x)
+  assert.ok(held instanceof WorktreeError && !(held instanceof OrcaError))
+  assert.deepEqual([held.message, held.code, held.final, held.worktree], ['worktree reuse: worktree_held: /wt still has an agent running in it', 'worktree_held', false, '/wt'])
+  assert.equal(orcaUnreachable(held), false)
+  const dirty = await reuseWorktree('/wt', { dispatched: true, baseline: null }, probes({ lines: async () => ['?? x'] })).catch((x) => x)
+  assert.deepEqual([dirty.code, dirty.final], ['worktree_dirty', true])
+  assert.equal(await reuseWorktree('/wt', { dispatched: true, baseline: ['?? x'] }, probes({ lines: async () => ['?? x'] })), '/wt')
+  const crewHost = readFileSync(fileURLToPath(new URL('../src/crew-host.mjs', import.meta.url)), 'utf8')
+  assert.ok(!/from '\.\/orca-cli\.mjs'/.test(crewHost), 'the crew host imports nothing of the Orca adapter')
+})
+
+test('worktree: prepareChildWorktree copies the MCP answers, warns on a failure, and takes and hands over the baseline', async () => {
+  const project = tmp()
+  const worktree = tmp()
+  const seen = []
+  const warnings = []
+  const bound = { git: async (cwd, args) => (assert.deepEqual([cwd, args], [worktree, ['status', '--porcelain']]), ' M a\r\n?? b\n') }
+  const broken = { existsSync: () => { throw new Error('disk gone') } }
+  const lines = await prepareChildWorktree({ project, worktree, bound, child: { onBaseline: (b) => seen.push(b) }, warnings, fs: broken })
+  assert.deepEqual(lines, [' M a', '?? b'])
+  assert.deepEqual(seen, [{ worktree, lines }])
+  assert.deepEqual(warnings, ["could not copy the project's MCP server answers into its worktree: disk gone"])
 })
 
 test('one run: a Run Orca cannot create, retries included, is that agent\'s null, and the next agent() creates it', async () => {
@@ -2779,8 +2825,8 @@ for (const [what, spoil] of [
 }
 
 for (const [what, spoil, reason] of [
-  ['uncommitted changes', (w) => { w.porcelain.push('?? notes.txt') }, `its worker did not start: orca worktree reuse: worktree_dirty: ${CHILD_WT} has uncommitted changes`],
-  ['commits', (w) => { w.commits = 2 }, `its worker did not start: orca worktree reuse: worktree_has_commits: ${CHILD_WT} has 2 commit(s) of its own`],
+  ['uncommitted changes', (w) => { w.porcelain.push('?? notes.txt') }, `its worker did not start: worktree reuse: worktree_dirty: ${CHILD_WT} has uncommitted changes`],
+  ['commits', (w) => { w.commits = 2 }, `its worker did not start: worktree reuse: worktree_has_commits: ${CHILD_WT} has 2 commit(s) of its own`],
 ]) {
   test(`retry: a retry after a worker-start was sent that finds its worktree with ${what} fails with that reason, and keeps the worktree`, async () => {
     const r = await runOne(submitGood, {
@@ -2848,7 +2894,7 @@ test('baseline: a retry after a dispatched worker takes up a worktree unchanged 
   assert.equal(changed.result, null)
   assert.deepEqual(types(changed), ['starting', 'baseline', 'retry', 'failed'])
   const [failed] = entries(changed, 'failed')
-  assert.equal(failed.reason, `its worker did not start: orca worktree reuse: worktree_dirty: ${CHILD_WT} has changed since it was made`)
+  assert.equal(failed.reason, `its worker did not start: worktree reuse: worktree_dirty: ${CHILD_WT} has changed since it was made`)
   assert.equal(failed.retained.path, CHILD_WT)
 })
 
@@ -4154,7 +4200,7 @@ viewTest('reclaim dialog: r opens it over the tree, its options in order; Reclai
   // does once the script ends: the dialog, still open, offers it.
   const all = () => [view.model.dialog.options[2].disabled, view.model.dialog.options[2].reason]
   runRegistry(registry, { now: () => 0 }).ended({ runId: 'run_fake1', outcome: 'partial' })
-  writeFileSync(join(stateDir, 'summary.json'), JSON.stringify({ runner: 'orca', ok: true, result: {} }))
+  writeFileSync(join(stateDir, 'summary.json'), JSON.stringify({ runner: 'session', host: 'orca', ok: true, result: {} }))
   await view.refresh()
   assert.equal(view.model.header.alive, true, 'the runner is still live')
   assert.equal(view.model.header.ended, true)
@@ -4173,7 +4219,7 @@ viewTest('reclaim dialog: r opens it over the tree, its options in order; Reclai
 
   // summary.json alone, a live runner having written it, says the run ended:
   // the runner removes a stale one before it writes its runner.pid.
-  writeFileSync(join(stateDir, 'summary.json'), JSON.stringify({ runner: 'orca', ok: false, error: 'x' }))
+  writeFileSync(join(stateDir, 'summary.json'), JSON.stringify({ runner: 'session', host: 'orca', ok: false, error: 'x' }))
   await view.refresh()
   assert.deepEqual(all(), [false, null])
 
@@ -4710,7 +4756,7 @@ async function attachedRun({ onStart = () => {}, attached = true } = {}) {
   }, clock })
   const result = await runScript(END, { host: orca, stateDir, out: gate((s) => tab.push(s)), clock, registry, project: 'C:/repo', settings: NO_DOCTOR })
   // As the entry point ends a run: summary.json, then it waits on the view.
-  const end = () => finish({ stateDir, summary: { runner: 'orca', ok: true, result }, out: say })
+  const end = () => finish({ stateDir, summary: { runner: 'session', host: 'orca', ok: true, result }, out: say })
   return { clock, stateDir, tab, guards, views, view, orca, registry, result, end, verbs: () => orca.calls.map((c) => c.verb) }
 }
 
@@ -4780,7 +4826,7 @@ test('end of run: the runner writes summary.json, asks nothing, reclaims nothing
   const run = await attachedRun()
   const since = run.orca.calls.length
   run.end()
-  assert.deepEqual(JSON.parse(readFileSync(join(run.stateDir, 'summary.json'), 'utf8')), { runner: 'orca', ok: true, result: [GOOD, null, GOOD] })
+  assert.deepEqual(JSON.parse(readFileSync(join(run.stateDir, 'summary.json'), 'utf8')), { runner: 'session', host: 'orca', ok: true, result: [GOOD, null, GOOD] })
   assert.deepEqual(readdirSync(run.stateDir).filter((f) => f.endsWith('.json')), ['summary.json'])
   let closed = false
   run.view.closed.then(() => (closed = true))
@@ -5848,10 +5894,10 @@ test('prompt delivery: a pi worker is not checked, since pi writes no transcript
 test('prompts: every worker, and every doctor, is told never to run orchestration ask', () => {
   const p = workerPrompt('Do a thing.', { schemaPath: 's.json', resultPath: 'r.json', payloadPath: 'p.json' })
   assert.ok(p.includes(NO_ASK))
-  assert.match(NO_ASK, /^Never run `orca orchestration ask`, and never wait on a reply from anyone/)
+  assert.match(NO_ASK, /^Never run any `orchestration ask` command, whatever your session host's preamble offers, and never wait on a reply from anyone/)
   assert.match(NO_ASK, /`decisions_needed`.*then submit\.$/)
   const d = doctorPrompt({ patient: { title: 't', prompt: 'p' }, reason: 'r', round: 1, rounds: 3, transcript: 'x', worktree: null, entries: [], log: [] })
-  assert.match(d, /Never run `orca orchestration ask`: nobody answers it\. A question only a human can answer goes in your escalation or your note/)
+  assert.match(d, /Never run any `orchestration ask` command, whatever your session host's preamble offers: nobody answers it\. A question only a human can answer goes in your escalation or your note/)
 })
 
 // --- the run view's phase order, name column, and stuck clearing ------------

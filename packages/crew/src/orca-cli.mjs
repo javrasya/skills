@@ -4,9 +4,9 @@
 // in this file. fake-orca.mjs implements the same interface, offline.
 import { execFile } from 'child_process'
 import { RUNNER_SETTINGS } from './settings.mjs'
-import { copyMcpAnswers } from './mcp-answers.mjs'
+import { gitProbes, prepareChildWorktree, reuseWorktree } from './worktree.mjs'
 import { sessionTranscripts } from './transcript.mjs'
-import { bounded, execGit, gitIn, porcelainLines, realTimer, sameLines, worktreeName, worktreeOwnCommits } from './git.mjs'
+import { bounded, execGit, gitIn, realTimer, worktreeName } from './git.mjs'
 import { launchCommand, resumeCommand, SHELL_WORD } from './harness.mjs'
 import { runnerArgs } from './daemon/runs.mjs'
 
@@ -58,26 +58,6 @@ function execOrca(bin) {
       })
     })
   }
-}
-
-// Whether a retry takes up the worktree at `path` an earlier attempt of its
-// start made: its path, or a refusal naming it. One an agent still runs in
-// (held()) is refused for this attempt only. Until an attempt has reached
-// worker-start (`dispatched`), whatever it holds is Orca's own making, such
-// as a setup hook's untracked output, so it is taken up as it is; after that,
-// one that holds work is refused for good (`final`). Work is what it holds
-// beyond its `baseline`, the porcelain lines it was made with (lines()): with
-// none (a create that timed out), any line is work; and any commit of its own
-// (commits()). The adapter and the fake Orca both decide by this one rule,
-// each reading the worktree its own way, and only as far as the rule needs.
-export async function reuseWorktree(path, { dispatched, baseline }, { held, lines, commits }) {
-  const refuse = (code, why, final) => Object.assign(new OrcaError(code, `${path} ${why}`, 'worktree reuse'), { worktree: path, final })
-  if (await held()) throw refuse('worktree_held', 'still has an agent running in it', false)
-  if (!dispatched) return path
-  if (!sameLines(await lines(), baseline ?? [])) throw refuse('worktree_dirty', baseline?.length ? 'has changed since it was made' : 'has uncommitted changes', true)
-  const own = await commits()
-  if (own > 0) throw refuse('worktree_has_commits', `has ${own} commit(s) of its own`, true)
-  return path
 }
 
 // A create Orca finishes after its answer timed out still leaves the
@@ -211,7 +191,7 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
   }
 
   // The worktree an earlier attempt of this start made, if there is one to
-  // take up (reuseWorktree): Orca answers a second `worktree create --name`
+  // take up (worktree.mjs's reuseWorktree): Orca answers a second `worktree create --name`
   // with a new <name>-2, never an error, so a retry looks its name up first.
   // terminal list leaves closed tabs out, and agentIdentity marks an agent's pane.
   async function earlierWorktree(name, dispatched, baseline) {
@@ -219,8 +199,7 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
     if (!row) return null
     return reuseWorktree(row.path, { dispatched, baseline }, {
       held: async () => ((await orca(['terminal', 'list', '--worktree', `path:${row.path}`]))?.terminals ?? []).some((x) => x.agentIdentity && !x.orphaned),
-      lines: async () => porcelainLines(await gitIn(row.path, ['status', '--porcelain'], bound)),
-      commits: () => worktreeOwnCommits(row.path, row.branch, bound),
+      ...gitProbes(row.path, row.branch, bound),
     })
   }
 
@@ -315,19 +294,7 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       try {
         // Only a create answered in time: one looked up after its timeout may
         // still be running its setup, so its lines are no baseline.
-        if (c) {
-          // The operator's MCP answers go in first, so what they change is
-          // part of the baseline, as a setup hook's output is. A failure
-          // leaves the worker to the prompt-delivery check (lifecycle.mjs).
-          try {
-            const m = copyMcpAnswers({ project, worktree, ...(fs && { fs }) })
-            if (m.added.length) warnings.push(`the project has no answer for MCP server(s) ${m.added.join(', ')} of .mcp.json, so its worktree disables them`)
-          } catch (e) {
-            warnings.push(`could not copy the project's MCP server answers into its worktree: ${e?.message ?? e}`)
-          }
-          baseline = porcelainLines(await gitIn(worktree, ['status', '--porcelain'], bound))
-          await child.onBaseline?.({ worktree, lines: baseline })
-        }
+        if (c) baseline = await prepareChildWorktree({ project, worktree, bound, child, warnings, fs })
         const t = await orca(['terminal', 'create', ...terminalIn, '--title', title, '--command', command])
         handle = t.terminal.handle
         await waitIdle(handle, command)
