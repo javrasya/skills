@@ -90,6 +90,17 @@ test('crew run: on the crew host, a whole run of fake-harness agents in crew ses
   assert.ok(rows.some((e) => e.type === 'ended' && e.runId === armed.runId && e.outcome === 'ok'))
 })
 
+test('crew start: a spec number, and with no terminal every row\'s flag, each missing one named', async () => {
+  const none = crew('start')
+  assert.equal(none.status, 2)
+  assert.match(none.stderr, /crew start: the spec issue number is required\nusage: crew run/)
+  const repo = realpathSync(mkdtempSync(join(tmpdir(), 'crew-bin-start-')))
+  assert.equal(spawnSync('git', ['init', '-q', repo]).status, 0)
+  const r = spawnSync(process.execPath, [CREW, 'start', '94', '--harness', 'claude'], { encoding: 'utf8', env: ENV, cwd: repo })
+  assert.equal(r.status, 2, r.stderr)
+  assert.match(r.stderr, /missing --model, --base, --stack-mode, --permission-mode\n/)
+})
+
 test('crew orchestration send: a worker\'s message needs its IDs and a type, and names a dispatch crew made', () => {
   const missing = crew('orchestration', 'send', '--type', 'handoff')
   assert.equal(missing.status, 2)

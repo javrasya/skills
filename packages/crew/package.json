@@ -21,7 +21,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node test/test-orca-runner.mjs && node test/test-crew-bin.mjs && node test/test-daemon.mjs && node test/test-console.mjs && node test/test-host-contract.mjs && node test/test-crew-run.mjs && node test/test-start-form.mjs",
+    "test": "node test/test-orca-runner.mjs && node test/test-crew-bin.mjs && node test/test-daemon.mjs && node test/test-console.mjs && node test/test-host-contract.mjs && node test/test-crew-run.mjs && node test/test-start-form.mjs && node test/test-crew-start.mjs",
     "prepack": "node scripts/pack-template.mjs",
     "postpack": "node scripts/pack-template.mjs --clean"
   },

@@ -5,6 +5,10 @@
 //                     on the crew host, its default, the runner is a crew
 //                     session of the daemon's, entered from `crew console`;
 //                     on orca it is this process, in the operator's Orca tab
+//   crew start <spec#> [--harness h] [--model m] [--base b] [--stack-mode s] [--permission-mode p]
+//                     arms a run of the implement-spec workflow from a form,
+//                     each row a flag (every one of them with no terminal),
+//                     and launches it as `crew run` does
 //   crew view --attached <run-dir> | --standalone [--registry <file>]
 //   crew daemon start | status | stop [--force] | restart [--force]
 //   crew session spawn [--cwd <dir>] -- <command…> | list | screen <id> | kill <id>
@@ -32,9 +36,11 @@ import { ensureDaemon, request, stopDaemon } from '../src/daemon/client.mjs'
 import { readCrewConfig } from '../src/crew-config.mjs'
 import { runConsole } from '../src/console.mjs'
 import { crewHost } from '../src/crew-host.mjs'
+import { launchRunner, startCommand } from '../src/arm.mjs'
 
 const USAGE = [
   'usage: crew run [--host <host>] <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]',
+  '       crew start <spec#> [--harness claude|pi] [--model <m>] [--base <branch>] [--stack-mode native|install|chain] [--permission-mode <mode>]',
   '       crew view --attached <run-dir> | --standalone [--registry <run registry, for a fixture>]',
   '       crew daemon start | status | stop [--force] | restart [--force]',
   '       crew session spawn [--cwd <dir>] -- <command…> | list | screen <id> | kill <id>',
@@ -164,17 +170,28 @@ async function crewRun(args) {
   const scripts = args.filter((a, i) => !a.startsWith('--') && !['--state-dir', '--permission-mode'].includes(args[i - 1]))
   if (scripts.length !== 1) usage(`crew run: ${scripts.length ? `one script, not ${scripts.join(', ')}` : 'the rendered script is required'}`)
   if (!existsSync(scripts[0])) throw new Error(`no script ${resolve(scripts[0])}`)
-  await ensureDaemon(paths)
-  const { session: s } = await request(paths, {
-    op: 'session.spawn',
-    command: [process.execPath, entry('../src/runner.mjs'), ...args, '--host', 'crew'],
-    cwd: process.cwd(),
-    env: process.env,
-    title: `crew run ${basename(scripts[0])}`,
-    cols: process.stdout.columns || 120,
-    rows: process.stdout.rows || 30,
-  })
+  const s = await launchRunner({ ...terminalSize(), paths, args, cwd: process.cwd(), title: `crew run ${basename(scripts[0])}` })
   console.log(`crew run: the runner is crew session ${s.id}; enter it from \`crew console\``)
+}
+
+const terminalSize = () => ({ cols: process.stdout.columns || 120, rows: process.stdout.rows || 30 })
+
+async function start(args) {
+  try {
+    const { script, session: s } = await startCommand({
+      argv: args,
+      paths,
+      tty: !!(process.stdin.isTTY && process.stdout.isTTY),
+      stdin: process.stdin,
+      stdout: process.stdout,
+      launch: (o) => launchRunner({ ...terminalSize(), ...o, paths }),
+    })
+    console.log(`crew start: armed ${script}; the runner is crew session ${s.id}; enter it from \`crew console\``)
+  } catch (e) {
+    if (e.code === 2) usage(`crew start: ${e.message}`)
+    console.error(`crew start: ${e.message}`)
+    process.exit(typeof e.code === 'number' ? e.code : 1)
+  }
 }
 
 const [command, ...rest] = process.argv.slice(2)
@@ -188,6 +205,10 @@ if (command === 'run') {
     await daemonAnyway()
     await launch(entry('../src/runner.mjs'), rest)
   }
+} else if (command === 'start') {
+  await start(rest)
+  // The daemon's socket and the form's stdin would otherwise hold it open.
+  process.exit(0)
 } else if (command === 'view') {
   await daemonAnyway()
   await launch(entry('../src/run-view/view.mjs'), rest)
