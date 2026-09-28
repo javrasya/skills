@@ -10,10 +10,16 @@
 //   session.list                           → { sessions }
 //   session.screen { id }                  → { screen: { lines, cursor, alternate } }
 //   session.kill { id }                    → { session }
+//   session.resize { id, cols, rows }      → { session }
+//   session.enter { id, cols, rows }       → { session }, then the connection
+//     turns into the session's raw byte stream both ways: its screen repaint
+//     and live output out, the terminal's keys in. Hanging up leaves the
+//     session, which keeps running; the daemon hangs up when it ends.
 import net from 'net'
 import { mkdirSync, readFileSync, realpathSync, unlinkSync } from 'fs'
+import { StringDecoder } from 'string_decoder'
 import { fileURLToPath } from 'url'
-import { connect, crewPaths, noDaemon, onMessages, send } from './transport.mjs'
+import { connect, crewPaths, lineDecoder, noDaemon, send } from './transport.mjs'
 
 const VERSION = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
 const log = (...parts) => console.log(new Date().toISOString(), ...parts)
@@ -103,25 +109,60 @@ export async function startDaemon({ paths = crewPaths(), liveRuns = () => [], sp
       session.kill()
       return { session: session.info() }
     },
+    'session.resize': ({ id, cols, rows }) => {
+      const session = sessionOf(id)
+      session.resize(size(cols), size(rows))
+      return { session: session.info() }
+    },
+    'session.enter': ({ id, cols, rows }, connection) => {
+      const session = sessionOf(id)
+      if (cols !== undefined || rows !== undefined) session.resize(size(cols), size(rows))
+      return { session: session.info(), afterReply: () => connection.enter(session) }
+    },
+  }
+
+  const size = (n) => {
+    if (!Number.isInteger(n) || n < 1 || n > 10_000) throw new Error(`not a terminal size: ${n}`)
+    return n
   }
 
   const server = net.createServer((socket) => {
     sockets.add(socket)
     socket.on('close', () => sockets.delete(socket))
     socket.on('error', () => {})
-    onMessages(socket, async (request) => {
+    // Until a session is entered the connection carries JSON lines; after, raw bytes.
+    let raw = null
+    const text = new StringDecoder('utf8')
+    const connection = {
+      enter(session) {
+        raw = (keys) => session.write(keys)
+        const leave = session.enter(
+          (bytes) => socket.write(bytes),
+          // The last output may trail the exit by a moment.
+          () => setTimeout(() => socket.end(), 100),
+        )
+        socket.on('close', leave)
+        say(`session ${session.id} entered`)
+      },
+    }
+    const lines = lineDecoder(async (request) => {
+      if (raw) return
       let reply
+      let afterReply = null
       try {
         if (request.bad !== undefined) throw new Error(`not a JSON request: ${request.bad.slice(0, 80)}`)
         const op = Object.hasOwn(ops, request.op) ? ops[request.op] : null
         if (!op) throw new Error(`unknown op ${request.op}`)
         if (stopping) throw new Error('the daemon is stopping')
-        reply = { ok: true, ...(await op(request)) }
+        ;({ afterReply = null, ...reply } = { ok: true, ...(await op(request, connection)) })
       } catch (e) {
         reply = { ok: false, error: e.message }
       }
-      if (!socket.destroyed) send(socket, { re: request.id ?? null, ...reply })
+      if (socket.destroyed) return
+      send(socket, { re: request.id ?? null, ...reply })
+      afterReply?.()
     })
+    socket.on('data', (chunk) => (raw ? raw(chunk) : lines(text.write(chunk))))
   })
 
   mkdirSync(paths.home, { recursive: true })

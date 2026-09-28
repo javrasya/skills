@@ -5,6 +5,7 @@ import { existsSync } from 'fs'
 import { delimiter, extname, isAbsolute, join, resolve } from 'path'
 import pty from 'node-pty'
 import xterm from '@xterm/headless'
+import { repaint, stripHostModes, trackModes } from './modes.mjs'
 
 const { Terminal } = xterm
 
@@ -27,6 +28,7 @@ export function resolveCommand(file, { cwd, env, platform = process.platform }) 
 export function ptySession({ id, command, cwd, env, cols = 120, rows = 30 }) {
   const [file, ...args] = command
   const terminal = new Terminal({ cols, rows, scrollback: 1000, allowProposedApi: true })
+  const modes = trackModes(terminal)
   const child = pty.spawn(resolveCommand(file, { cwd, env }), args, {
     name: 'xterm-256color',
     cols,
@@ -37,20 +39,27 @@ export function ptySession({ id, command, cwd, env, cols = 120, rows = 30 }) {
     ...(process.platform === 'win32' ? { useConptyDll: true } : {}),
   })
   const watchers = new Set()
+  const exits = new Set()
   let exit = null
+  let entered = 0
   child.onData((data) => {
     terminal.write(data)
     for (const watch of watchers) watch(data)
   })
   // The emulator's answers to the program's queries (device attributes, cursor
   // position): conpty and many TUIs wait on them. While a session is entered the
-  // real terminal answers too, so entering must mute these.
+  // real terminal answers instead, and two answers would confuse the program.
   terminal.onData((answer) => {
-    if (exit === null) child.write(answer)
+    if (exit === null && !entered) child.write(answer)
   })
   child.onExit(({ exitCode, signal }) => {
     exit = { code: exitCode, signal: signal ?? null }
+    for (const watch of exits) watch(exit)
   })
+  const onData = (watch) => {
+    watchers.add(watch)
+    return () => watchers.delete(watch)
+  }
 
   return {
     id,
@@ -71,9 +80,36 @@ export function ptySession({ id, command, cwd, env, cols = 120, rows = 30 }) {
       terminal.resize(c, r)
     },
     // Every byte of output from now on; returns the unsubscribe.
-    onData(watch) {
-      watchers.add(watch)
-      return () => watchers.delete(watch)
+    onData,
+    // Enters the session for a real terminal fed by out: first the bytes that
+    // repaint its current screen and restore its modes, then its live output.
+    // Output that arrives while the emulator catches up is held and follows
+    // the repaint, so nothing is shown twice or lost. onExit is called if the
+    // program ends while entered. Returns leave(); the session keeps running.
+    enter(out, onExit = () => {}) {
+      entered++
+      let held = []
+      let left = false
+      const forward = (data) => out(stripHostModes(data))
+      const unwatch = onData((data) => (held ? held.push(data) : forward(data)))
+      terminal.write('', () => {
+        if (left) return
+        out(repaint(terminal, modes))
+        for (const data of held) forward(data)
+        held = null
+        if (exit !== null) onExit(exit)
+      })
+      const ended = (e) => {
+        if (!held) onExit(e)
+      }
+      exits.add(ended)
+      return function leave() {
+        if (left) return
+        left = true
+        entered--
+        unwatch()
+        exits.delete(ended)
+      }
     },
     kill() {
       if (exit !== null) return
@@ -82,6 +118,10 @@ export function ptySession({ id, command, cwd, env, cols = 120, rows = 30 }) {
       } catch {
         // Gone between the exit check and the kill.
       }
+      // node-pty 1.1.0 with useConptyDll frees the conout worker thread only when
+      // output arrives after the kill (lib/windowsPtyAgent.js, kill()); a quiet
+      // program would leak it, and keep the process holding it alive.
+      child._agent?._conoutSocketWorker?.dispose?.()
     },
   }
 }

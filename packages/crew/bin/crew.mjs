@@ -5,6 +5,8 @@
 //   crew view --attached <run-dir> | --standalone [--registry <file>]
 //   crew daemon start | status | stop [--force] | restart [--force]
 //   crew session spawn [--cwd <dir>] -- <command…> | list | screen <id> | kill <id>
+//   crew console      the daemon's sessions; Enter enters one, the back key (F12,
+//                     or backKey in ~/.crew/config.json) comes back
 //
 // Every command but `daemon stop` starts the per-machine crew daemon when none
 // answers (src/daemon/). run and view carry on without it if it cannot start:
@@ -19,12 +21,15 @@ import { fileURLToPath, pathToFileURL } from 'url'
 import { HOST_NAMES as HOSTS } from '../src/hosts.mjs'
 import { crewPaths } from '../src/daemon/transport.mjs'
 import { ensureDaemon, request, stopDaemon } from '../src/daemon/client.mjs'
+import { readCrewConfig } from '../src/crew-config.mjs'
+import { runConsole } from '../src/console.mjs'
 
 const USAGE = [
   'usage: crew run --host <host> <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]',
   '       crew view --attached <run-dir> | --standalone [--registry <run registry, for a fixture>]',
   '       crew daemon start | status | stop [--force] | restart [--force]',
   '       crew session spawn [--cwd <dir>] -- <command…> | list | screen <id> | kill <id>',
+  '       crew console',
   `hosts: ${HOSTS.join(', ')}`,
 ].join('\n')
 
@@ -113,6 +118,18 @@ async function session([verb, ...args]) {
   usage(`crew session: ${verb ? `unexpected ${[verb, ...args].join(' ')}` : 'spawn, list, screen or kill'}`)
 }
 
+async function consoleCommand(args) {
+  if (args.length) usage(`crew console: unexpected ${args.join(' ')}`)
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.error('crew console: needs a terminal')
+    process.exit(3)
+  }
+  const { backKey } = readCrewConfig(paths)
+  await ensureDaemon(paths)
+  await runConsole({ paths, stdin: process.stdin, stdout: process.stdout, backKey }).done
+  process.exit(0)
+}
+
 const [command, ...rest] = process.argv.slice(2)
 if (command === 'run') {
   const at = rest.indexOf('--host')
@@ -127,6 +144,8 @@ if (command === 'run') {
   await daemon(rest).catch(fail)
 } else if (command === 'session') {
   await session(rest).catch(fail)
+} else if (command === 'console') {
+  await consoleCommand(rest).catch(fail)
 } else {
   console.error(USAGE)
   process.exit(command === '--help' || command === '-h' ? 0 : 2)

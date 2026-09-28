@@ -106,3 +106,37 @@ export async function stopDaemon(paths, { force = false, goneMs = 10_000 } = {})
   }
   return { stopped: true, pid: hello.pid }
 }
+
+// Enters a session: resolves, once the daemon agrees, with the session and the
+// connection, which is from then on the session's raw byte stream. onOutput
+// gets every byte of its output, the repaint of its current screen first.
+export async function enterSession(paths, { id, cols, rows }, onOutput) {
+  const socket = await connect(paths.endpoint)
+  return new Promise((resolvePromise, reject) => {
+    let head = Buffer.alloc(0)
+    let replied = false
+    const fail = (e) => {
+      socket.destroy()
+      reject(e)
+    }
+    socket.on('error', (e) => replied || fail(e))
+    socket.on('close', () => replied || fail(new DaemonError('crew daemon: hung up before replying to session.enter')))
+    socket.on('data', (chunk) => {
+      if (replied) return onOutput(chunk)
+      head = Buffer.concat([head, chunk])
+      const at = head.indexOf(10)
+      if (at < 0) return
+      replied = true
+      let reply
+      try {
+        reply = JSON.parse(head.subarray(0, at).toString('utf8'))
+      } catch {
+        reply = { ok: false, error: 'crew daemon: session.enter got a reply that is not JSON' }
+      }
+      if (!reply.ok) return fail(new DaemonError(reply.error ?? 'crew daemon: session.enter failed'))
+      resolvePromise({ session: reply.session, socket })
+      if (head.length > at + 1) onOutput(head.subarray(at + 1))
+    })
+    send(socket, { op: 'session.enter', id, cols, rows })
+  })
+}
