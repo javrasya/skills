@@ -8,7 +8,9 @@
 //   crew start <spec#> [--harness h] [--model m] [--base b] [--stack-mode s] [--permission-mode p]
 //                     arms a run of the implement-spec workflow from a form,
 //                     each row a flag (every one of them with no terminal),
-//                     and launches it as `crew run` does
+//                     and launches it as `crew run` does; a spec with no
+//                     validation.md gets the orchestrator's draft as the
+//                     form's last step, and is an error with no terminal
 //   crew ls [--registry <file>]
 //                     every run in the run registry, crew's and Orca's, by project
 //   crew view <run> [--registry <file>]

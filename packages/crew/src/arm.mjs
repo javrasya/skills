@@ -11,7 +11,9 @@ import { repoConfig } from './crew-config.mjs'
 import { ensureDaemon, request } from './daemon/client.mjs'
 import { execProgram } from './git.mjs'
 import { flagsToAnswers, probeStart, rememberAnswers, rememberedAnswers, settleStackMode, startForm } from './start-form.mjs'
-import { runStartForm } from './start-tui.mjs'
+import { draftEditor, drawDrafting, runDraftStep, runStartForm } from './start-tui.mjs'
+import { crewHost } from './crew-host.mjs'
+import { draftValidation, orchestrator } from './orchestrator.mjs'
 
 // The copy `npm pack` bundles (scripts/pack-template.mjs), else, in a checkout
 // of this repo, the skill folder's own: the copy is taken from it.
@@ -96,20 +98,38 @@ export async function repoDirOf(cwd, run = execProgram) {
 }
 
 // What arming needs beyond the form, each a refusal when it cannot be had:
-// the repo gh knows the checkout as, the spec's title, and the validation
-// list the notes dir keeps.
+// the repo gh knows the checkout as and the spec's title. `validation` is the
+// list the notes dir keeps at `validationFile`, null when it keeps none.
 export async function resolveArming({ repoDir, spec, repo, run = execProgram, home = homedir() }) {
   if (!repo) throw new Error('gh knows no GitHub repo for this checkout, so there is no spec to arm')
   const issue = await run('gh', ['issue', 'view', String(spec), '--repo', repo, '--json', 'title', '-q', '.title'], { cwd: repoDir })
   if (issue.code !== 0) throw new Error(`no spec #${spec} in ${repo}: ${issue.stderr.trim() || `gh exited ${issue.code}`}`)
   const notesDir = notesDirOf(repo, spec, home)
   const validationFile = join(notesDir, 'validation.md')
-  // Refused until a later ticket of #94 infers the checks: the skill's
-  // interactive path is the one that writes them today.
-  if (!existsSync(validationFile)) {
-    throw new Error(`spec #${spec} has no validation list: ${validationFile} does not exist. Write the project's checks there, one command per line (# for comments), or arm the run with the implement-spec-in-workflow skill, which writes it`)
+  const validation = existsSync(validationFile) ? readFileSync(validationFile, 'utf8') : null
+  return { spec, repo, repoDir, notesDir, title: issue.stdout.trim(), validationFile, validation }
+}
+
+// The orchestrator `crew start` drafts a missing validation list with: on the
+// crew host, in the checkout, on the harness and model the form answered.
+export const crewOrchestrator = ({ paths, repoDir, harness, model, permissionMode }) =>
+  orchestrator({ host: crewHost({ paths, cwd: repoDir }), harness, model, permissionMode, dir: join(paths.home, 'orchestrator') })
+
+// The orchestrator's draft of the list, shown as the form's last step, and
+// written only once the operator confirms it. Null when they cancel.
+async function draftStep({ target, answers, orchestrate, paths, stdin, stdout, heading }) {
+  drawDrafting(stdout, { heading, file: target.validationFile })
+  let draft
+  try {
+    draft = await draftValidation(orchestrate({ paths, repoDir: target.repoDir, ...answers }), { repoDir: target.repoDir })
+  } catch (e) {
+    throw new StartError(`${e.message}; no validation list written, nothing armed`)
   }
-  return { spec, repo, repoDir, notesDir, title: issue.stdout.trim(), validation: readFileSync(validationFile, 'utf8') }
+  const text = await runDraftStep({ editor: draftEditor(draft.text), stdin, stdout, heading, file: target.validationFile, empty: draft.empty })
+  if (text === null) return null
+  mkdirSync(target.notesDir, { recursive: true })
+  writeFileSync(target.validationFile, text)
+  return text
 }
 
 // Renders the template into the notes dir, clears the end signals, launches.
@@ -137,9 +157,11 @@ export class StartError extends Error {
 }
 
 // `crew start <spec#> [--harness h] [--model m] [--base b] [--stack-mode s]
-// [--permission-mode p]`. With no terminal each row's flag is required; at one,
-// the form shows, pre-filled from the flags and the repo's remembered answers.
-export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdin, stdout, run = execProgram, home = homedir(), env = process.env, launch }) {
+// [--permission-mode p]`. With no terminal each row's flag is required, and so
+// is the spec's validation list, since nobody is there to confirm a draft of
+// one; at one, the form shows, pre-filled from the flags and the repo's
+// remembered answers, then the orchestrator's draft of a missing list.
+export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdin, stdout, run = execProgram, home = homedir(), env = process.env, launch, orchestrate = crewOrchestrator }) {
   let parsed
   try {
     parsed = flagsToAnswers(argv)
@@ -162,9 +184,18 @@ export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdi
     const missing = form.missingFlags()
     if (missing.length) throw new StartError(`no terminal to show the form at, so every row needs its flag: missing ${missing.join(', ')}`, 2)
   }
-  const target = await resolveArming({ repoDir, spec, repo: facts.repo, run, home })
-  const answers = tty ? await runStartForm({ form, stdin, stdout, heading: `crew start: ${target.repo} #${spec}: ${target.title}` }) : form.answers()
+  let target = await resolveArming({ repoDir, spec, repo: facts.repo, run, home })
+  if (!tty && target.validation === null) {
+    throw new StartError(`spec #${spec} has no validation list, and with no terminal nobody can confirm the orchestrator's draft of one: write the project's checks to ${target.validationFile}, one command per line (# for comments), or run crew start at a terminal`)
+  }
+  const heading = `crew start: ${target.repo} #${spec}: ${target.title}`
+  const answers = tty ? await runStartForm({ form, stdin, stdout, heading }) : form.answers()
   if (!answers) throw new StartError('cancelled; nothing armed', 130)
+  if (target.validation === null) {
+    const validation = await draftStep({ target, answers, orchestrate, paths, stdin, stdout, heading })
+    if (validation === null) throw new StartError('cancelled; no validation list written, nothing armed', 130)
+    target = { ...target, validation }
+  }
   const settled = { ...answers, stackMode: await settleStackMode(answers, run) }
   rememberAnswers(paths, repoDir, settled)
   return { ...(await armRun({ target, answers: settled, roles, launch })), target, answers: settled }

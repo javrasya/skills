@@ -25,13 +25,17 @@
 // else the text of the latest [answer <text>], else `done`. Told it is a
 // doctor, it plays nothing else: it sends the text of the patient's
 // [cure <text>] as its handoff, `no note` without one, then its worker_done,
-// with the `orchestration send` its preamble names.
+// with the `orchestration send` its preamble names. Asked by crew's
+// orchestrator to draft a validation list, it answers FIXED_DRAFT, reading
+// nothing.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
 import { randomUUID } from 'crypto'
 import { claudeDir, claudeSlug, piDir, transcriptPath } from '../../../src/transcript.mjs'
+
+const FIXED_DRAFT = { checks: [{ command: 'npm test', source: 'package.json scripts.test' }, { command: 'npm run lint', source: '.github/workflows/ci.yml job lint' }] }
 
 const argv = process.argv.slice(2)
 const after = (flag) => (argv.includes(flag) ? argv[argv.indexOf(flag) + 1] : null)
@@ -94,7 +98,8 @@ function submit() {
   if (!command || !ids) return
   const flag = (name) => new RegExp(`--${name} "([^"]+)"`).exec(command[0])?.[1] ?? null
   const note = latest(/## The doctor's note\n([\s\S]*)$/)?.[1].trim()
-  writeFileSync(flag('payload'), note ?? latest(/\[answer ([^\]]*)\]/)?.[1] ?? 'done')
+  const draft = latest(/You are crew's orchestrator\. [\s\S]*no validation list/) && JSON.stringify(FIXED_DRAFT)
+  writeFileSync(flag('payload'), note ?? latest(/\[answer ([^\]]*)\]/)?.[1] ?? draft ?? 'done')
   run([command[1], ...(flag('schema') ? ['--schema', flag('schema')] : []), '--result', flag('result'), '--payload', flag('payload'), ...ids])
 }
 

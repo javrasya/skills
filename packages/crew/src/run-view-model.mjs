@@ -15,6 +15,7 @@ import { foldJournal, journalLines, timeOf } from './journal.mjs'
 import { REGISTRY_PATH, readRegistry, runRegistry } from './registry.mjs'
 import { worktreeUnpushed } from './git.mjs'
 import { hostUnreachable } from './session-host.mjs'
+import { isOrchestratorTitle } from './orchestrator.mjs'
 import { probesBy } from './outage.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 
@@ -43,8 +44,9 @@ const TITLE = /^\[([^\]]*)\] ([\s\S]*)$/
 // entry's. An agent a resume carried forward or took up again is the one row,
 // never a second one under the resumed run's call number. A failed attempt
 // of a node that a later one superseded (journal.mjs) is no row either, but
-// Reclaim All still takes it, with any worktree it was given.
-const agentsIn = (fold) => fold.agents.map((a) => {
+// Reclaim All still takes it, with any worktree it was given. An orchestrator
+// session (orchestrator.mjs) is never a row, whatever journal names one.
+const agentsIn = (fold) => fold.agents.filter((a) => !isOrchestratorTitle(a.title)).map((a) => {
   const [, phase, label] = TITLE.exec(a.title ?? '') ?? [null, 'Run', a.title ?? `agent-${a.n}`]
   return { ...a, phase, label }
 })

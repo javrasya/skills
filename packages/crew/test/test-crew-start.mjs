@@ -1,7 +1,9 @@
-// Offline tests for `crew start`: the form at a terminal, flag-only use, and
-// arming (resolve, render, clear the end signals, launch).
+// Offline tests for `crew start`: the form at a terminal, flag-only use,
+// arming (resolve, render, clear the end signals, launch), and the
+// orchestrator's draft of a missing validation list, played by the fake
+// harness on the crew host.
 //   node packages/crew/test/test-crew-start.mjs
-import { test } from 'node:test'
+import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'events'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'fs'
@@ -9,6 +11,9 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
 import { crewPaths } from '../src/daemon/transport.mjs'
+import { stopDaemon } from '../src/daemon/client.mjs'
+import { crewHost } from '../src/crew-host.mjs'
+import { OrchestratorError, orchestrator } from '../src/orchestrator.mjs'
 import { execProgram } from '../src/git.mjs'
 import { STACKS_DOCS, rememberedAnswers, startForm } from '../src/start-form.mjs'
 import { END_SIGNALS, PLACEHOLDERS, notesDirOf, renderRoles, renderTemplate, startCommand, templatePath } from '../src/arm.mjs'
@@ -16,6 +21,7 @@ import { DEFAULTS } from '../src/crew-config.mjs'
 import { loadScript } from '../src/runner.mjs'
 import { drawStartForm, keysOf, runStartForm } from '../src/start-tui.mjs'
 
+const FAKE_HARNESS = fileURLToPath(new URL('./fixtures/crew/fake-harness.mjs', import.meta.url))
 const SKILL_TEMPLATE = fileURLToPath(new URL('../../../skills/engineering/implement-spec-in-workflow/workflow.template.js', import.meta.url))
 const scratch = (name) => realpathSync(mkdtempSync(join(tmpdir(), `crew-start-${name}-`)))
 const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '')
@@ -59,7 +65,8 @@ const FACTS = {
   ghStack: { installed: true, api: 'disabled' },
 }
 
-// Raw input: the keys arrive once the form listens, as a keypress would.
+// Raw input: the keys arrive while the form listens, as a keypress would, and
+// wait while nothing does, as a terminal holds them.
 class FakeStdin extends EventEmitter {
   constructor(chunks) {
     super()
@@ -71,6 +78,7 @@ class FakeStdin extends EventEmitter {
     super.on(event, fn)
     if (event === 'data') {
       const next = () => {
+        if (!this.listenerCount('data')) return
         const chunk = this.chunks.shift()
         if (chunk === undefined) return
         this.emit('data', chunk)
@@ -107,6 +115,20 @@ test('form at a terminal: Enter through it takes every default; arrows change a 
   assert.match(lastScreen(through), /> Permission mode/)
 })
 
+// The orchestrator as `crew start` builds it, on the crew host of the scratch
+// crew home, its harness the fake one, whose draft is FIXED_DRAFT.
+const FIXED_DRAFT = '# package.json scripts.test\nnpm test\n# .github/workflows/ci.yml job lint\nnpm run lint\n'
+const daemons = []
+after(async () => {
+  for (const paths of daemons) await stopDaemon(paths, { force: true }).catch(() => {})
+})
+const fakeOrchestrator = (home) => ({ paths, repoDir, harness, model, permissionMode }) => {
+  daemons.push(paths)
+  const env = { ...process.env, CREW_HOME: paths.home, CLAUDE_CONFIG_DIR: join(home, '.claude'), PI_CODING_AGENT_SESSION_DIR: join(home, '.pi') }
+  const host = crewHost({ paths, env, cwd: repoDir, harnesses: { claude: [process.execPath, FAKE_HARNESS], pi: [process.execPath, FAKE_HARNESS] }, quietMs: 300, readyMs: 20_000 })
+  return orchestrator({ host, harness, model, permissionMode, dir: join(paths.home, 'orchestrator'), pollMs: 100, idleMs: 2_000, answerMs: 60_000 })
+}
+
 // A repo on disk for git, and gh and pi answered from a table.
 function world({ validation = 'npm test\n', stackInstalled = true } = {}) {
   const home = scratch('home')
@@ -140,7 +162,7 @@ function world({ validation = 'npm test\n', stackInstalled = true } = {}) {
     launches.push({ ...o, signals: END_SIGNALS.filter((f) => existsSync(join(notesDir, 'orca-run', f))) })
     return { id: 's7' }
   }
-  const start = (argv, over = {}) => startCommand({ argv, paths, cwd: repoDir, tty: false, run, home, env: {}, launch, ...over })
+  const start = (argv, over = {}) => startCommand({ argv, paths, cwd: repoDir, tty: false, run, home, env: {}, launch, orchestrate: fakeOrchestrator(home), ...over })
   return { home, repoDir, paths, notesDir, calls, launches, start, ready: (async () => {
     await git('init', '-q', '-b', 'develop')
     await git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init')
@@ -160,11 +182,56 @@ test('crew start with no terminal: every missing flag is an error naming it, and
   assert.ok(!existsSync(join(w.notesDir, 'workflow.js')))
 })
 
-test('crew start: a spec with no validation.md is refused, saying so, before any form', async () => {
+const FLAGS = ['--harness', 'claude', '--model', 'opus', '--base', 'main', '--stack-mode', 'chain', '--permission-mode', 'auto']
+
+test('crew start with no terminal: a spec with no validation.md is an error, never a draft nobody confirmed', async () => {
   const w = world({ validation: null })
   await w.ready
-  await assert.rejects(w.start(['94'], { tty: true, stdin: new FakeStdin([]), stdout: fakeStdout() }), (e) => e.message.includes(join(w.notesDir, 'validation.md')) && /no validation list/.test(e.message))
+  let asked = 0
+  await assert.rejects(w.start(['94', ...FLAGS], { orchestrate: () => ({ ask: async () => asked++ }) }), (e) => e.code === 1 && e.message.includes(join(w.notesDir, 'validation.md')) && /no validation list, and with no terminal nobody can confirm/.test(e.message))
+  assert.equal(asked, 0, 'the orchestrator is never asked')
   assert.equal(w.launches.length, 0)
+  assert.ok(!existsSync(w.notesDir), 'nothing written')
+})
+
+test("crew start at a terminal, no validation.md: the orchestrator's draft is the form's last step; edited and confirmed, it is written and armed with", async () => {
+  const w = world({ validation: null })
+  await w.ready
+  const out = fakeStdout()
+  const keys = ['\r', '\r', '\r', '\r', '\r', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[F', '\r', 'make check', '\x13']
+  const armed = await w.start(['94'], { tty: true, stdin: new FakeStdin(keys), stdout: out })
+  const draft = out.text.split('\x1b[2J\x1b[H').map(strip).find((screen) => screen.includes("drafted by crew's orchestrator"))
+  assert.ok(draft, out.text)
+  for (const line of FIXED_DRAFT.trim().split('\n')) assert.ok(draft.includes(line), `${line} in the draft step:\n${draft}`)
+  assert.ok(draft.includes(join(w.notesDir, 'validation.md')))
+  assert.ok(!draft.includes('the list is empty'))
+  const validation = `${FIXED_DRAFT}make check\n`
+  assert.equal(readFileSync(join(w.notesDir, 'validation.md'), 'utf8'), validation)
+  assert.equal(armed.target.validation, validation)
+  assert.ok(readFileSync(armed.script, 'utf8').includes(validation), 'the run is armed with the confirmed list')
+  assert.equal(w.launches.length, 1)
+})
+
+test('crew start at a terminal: cancelling the draft writes nothing and arms nothing; an orchestrator with no valid answer is reported, and writes nothing either', async () => {
+  const w = world({ validation: null })
+  await w.ready
+  await assert.rejects(w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', 'x', '\x1b']), stdout: fakeStdout() }), (e) => e.code === 130 && /no validation list written, nothing armed/.test(e.message))
+  const failing = () => ({ ask: async () => { throw new OrchestratorError('validation-list', 'its session settled failed') } })
+  await assert.rejects(w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r']), stdout: fakeStdout(), orchestrate: failing }), (e) => e.code === 1 && /the orchestrator gave no valid answer to validation-list: its session settled failed; no validation list written, nothing armed/.test(e.message))
+  assert.equal(w.launches.length, 0)
+  assert.ok(!existsSync(join(w.notesDir, 'validation.md')))
+  assert.ok(!existsSync(join(w.notesDir, 'workflow.js')))
+})
+
+test('crew start at a terminal: a repo with no discoverable checks gets an empty draft, and the step says so', async () => {
+  const w = world({ validation: null })
+  await w.ready
+  const out = fakeStdout()
+  const none = () => ({ ask: async () => ({ checks: [] }) })
+  const armed = await w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\x13']), stdout: out, orchestrate: none })
+  assert.match(lastScreen(out), /found no checks in this repo's CI config, workflow files, Makefile or package scripts, so the list is empty/)
+  assert.equal(readFileSync(join(w.notesDir, 'validation.md'), 'utf8'), '')
+  assert.equal(armed.target.validation, '')
 })
 
 test('crew start at a terminal: Enter through the form renders workflow.js, clears the last run\'s end signals, launches, remembers', async () => {
