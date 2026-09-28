@@ -8,6 +8,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawn, spawnSync } from 'child_process'
+import net from 'net'
 import { fileURLToPath } from 'url'
 import { crewPaths, lineDecoder } from '../src/daemon/transport.mjs'
 import { daemonHello, request, stopDaemon } from '../src/daemon/client.mjs'
@@ -157,6 +158,31 @@ test('daemon: stop refuses while runs are live, unless forced', async () => {
   await until('the daemon to exit', () => exits.length)
   assert.deepEqual(exits.slice(0, 1), [0])
   assert.equal(daemon.server.listening, false)
+})
+
+test('daemon: a request that is JSON but not an object gets an error reply, and the daemon lives on', async () => {
+  const paths = crewPaths({ CREW_HOME: join(mkdtempSync(join(tmpdir(), 'crew-daemon-')), 'home') })
+  const daemon = await startDaemon({ paths, spawnSession: () => assert.fail('no session here'), exit: () => {}, log: () => {} })
+  try {
+    const socket = net.connect(paths.endpoint)
+    const replies = []
+    socket.on('data', lineDecoder((m) => replies.push(m)))
+    const sent = ['null', '42', '"x"', '[]', 'true']
+    socket.write(sent.map((line) => `${line}\n`).join(''))
+    await until('a reply to each', () => replies.length === sent.length)
+    for (const reply of replies) {
+      assert.equal(reply.ok, false)
+      assert.equal(reply.re, null)
+      assert.match(reply.error, /not a JSON object request/)
+    }
+    socket.write('{"op":"hello","id":7}\n')
+    await until('the hello on the same connection', () => replies.length === sent.length + 1)
+    assert.deepEqual([replies.at(-1).re, replies.at(-1).ok], [7, true])
+    socket.destroy()
+    assert.equal((await daemonHello(paths))?.pid, process.pid, 'a new connection is answered too')
+  } finally {
+    await daemon.shutdown('test over')
+  }
 })
 
 test('session: a spawned session keeps running and keeps its screen while nobody has it entered', async () => {

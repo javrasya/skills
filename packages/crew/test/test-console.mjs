@@ -279,6 +279,40 @@ test('console: the back key named in crew config leaves, and F12 then reaches th
   await crew.done
 })
 
+test('console: keys typed while the enter is in flight reach the session in order, and a buffered back key still leaves', async (t) => {
+  const { paths, id, typed } = await scriptedSession(t)
+  const term = fakeTerminal(80, 24)
+  const crew = runConsole({ paths, stdin: term.stdin, stdout: term.stdout, refreshMs: 100 })
+  await until('the list', () => term.text().includes(`> ${id}  running`))
+  // The console's mode as each chunk reached it; this listener runs after the console's own.
+  const arrivedIn = []
+  term.stdin.on('data', () => arrivedIn.push(crew.mode()))
+
+  // Typed ahead, and a paste, before the daemon answers the enter.
+  const ahead = 'ls\x1b[A\x1b[200~pasted\x1b[201~'
+  term.press('\r')
+  term.press(ahead)
+  await until('the session entered', () => arrivedIn.length === 2)
+  assert.equal(arrivedIn[1], 'entering', 'the keys arrived while the enter was in flight')
+  await until('the session entered', () => crew.mode() === 'entered')
+  term.press('!')
+  await until('every key at the pty', () => typed() === `${ahead}!`)
+
+  term.press(F12)
+  await until('the list again', () => crew.mode() === 'list')
+  const before = typed()
+  const pressed = arrivedIn.length
+  term.press('\r')
+  term.press(`z${F12}`)
+  await until('the keys to arrive', () => arrivedIn.length === pressed + 2)
+  assert.equal(arrivedIn.at(-1), 'entering')
+  await until('the buffered back key to leave', () => crew.mode() === 'list' && term.text().includes(`> ${id}  running  pid`))
+  await sleep(100)
+  assert.equal(typed(), `${before}z`, 'keys before the buffered back key go through, the back key does not')
+  term.press('q')
+  await crew.done
+})
+
 test('crew console: needs a terminal, and takes no arguments', () => {
   const env = { ...process.env, CREW_HOME: join(mkdtempSync(join(tmpdir(), 'crew-console-bin-')), 'home') }
   const run = (...args) => spawnSync(process.execPath, [CREW, 'console', ...args], { encoding: 'utf8', env, stdio: ['pipe', 'pipe', 'pipe'] })

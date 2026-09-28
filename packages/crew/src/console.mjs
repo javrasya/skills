@@ -114,7 +114,7 @@ export function runConsole({ paths, stdin, stdout, backKey = 'f12', refreshMs = 
   async function enter(s) {
     mode = 'entering'
     clearInterval(timer)
-    const e = { id: s.id, open: true, socket: null, filter: null }
+    const e = { id: s.id, open: true, socket: null, filter: null, pending: [] }
     entered = e
     try {
       const { socket } = await enterSession(paths, { id: s.id, ...size() }, (output) => e.open && stdout.write(output))
@@ -123,6 +123,8 @@ export function runConsole({ paths, stdin, stdout, backKey = 'f12', refreshMs = 
       if (!e.open) return socket.destroy()
       e.filter = backKeyFilter({ sequences, holdMs, forward: (keys) => socket.write(keys), back: () => leave('') })
       mode = 'entered'
+      // Keys typed while the enter was in flight go through the filter first, in order.
+      for (const chunk of e.pending.splice(0)) if (entered === e) e.filter.push(chunk)
     } catch (err) {
       entered = null
       status = err.message
@@ -136,7 +138,11 @@ export function runConsole({ paths, stdin, stdout, backKey = 'f12', refreshMs = 
     e.open = false
     entered = null
     e.filter?.dispose()
-    e.socket?.destroy()
+    // End, not destroy: keys forwarded just before the back key are still in flight.
+    if (e.socket) {
+      e.socket.end()
+      setTimeout(() => e.socket.destroy(), 1000).unref()
+    }
     stdout.write(RESET)
     status = why
     if (mode !== 'quit') list()
@@ -144,6 +150,7 @@ export function runConsole({ paths, stdin, stdout, backKey = 'f12', refreshMs = 
 
   function onKey(chunk) {
     if (mode === 'entered') return entered.filter.push(chunk)
+    if (mode === 'entering') return entered?.pending.push(chunk)
     if (mode !== 'list') return
     const key = bytes(chunk)
     if (key === 'q' || key === '\x03') return quit()

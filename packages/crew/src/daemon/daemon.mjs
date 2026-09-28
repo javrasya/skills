@@ -150,7 +150,10 @@ export async function startDaemon({ paths = crewPaths(), liveRuns = () => [], sp
       let reply
       let afterReply = null
       try {
-        if (request.bad !== undefined) throw new Error(`not a JSON request: ${request.bad.slice(0, 80)}`)
+        if (!request || typeof request !== 'object' || Array.isArray(request)) {
+          throw new Error(`not a JSON object request: ${JSON.stringify(request).slice(0, 80)}`)
+        }
+        if (request.bad !== undefined) throw new Error(`not a JSON request: ${String(request.bad).slice(0, 80)}`)
         const op = Object.hasOwn(ops, request.op) ? ops[request.op] : null
         if (!op) throw new Error(`unknown op ${request.op}`)
         if (stopping) throw new Error('the daemon is stopping')
@@ -159,10 +162,17 @@ export async function startDaemon({ paths = crewPaths(), liveRuns = () => [], sp
         reply = { ok: false, error: e.message }
       }
       if (socket.destroyed) return
-      send(socket, { re: request.id ?? null, ...reply })
+      send(socket, { re: request?.id ?? null, ...reply })
       afterReply?.()
     })
-    socket.on('data', (chunk) => (raw ? raw(chunk) : lines(text.write(chunk))))
+    socket.on('data', (chunk) => {
+      try {
+        raw ? raw(chunk) : lines(text.write(chunk))
+      } catch (e) {
+        // A write to a pty that just ended must not take the daemon and its other sessions down.
+        say(`connection input dropped: ${e.message}`)
+      }
+    })
   })
 
   mkdirSync(paths.home, { recursive: true })
@@ -175,6 +185,8 @@ const isMain = process.argv[1] && realpathSync(process.argv[1]) === realpathSync
 if (isMain) {
   // Started detached, it has no terminal to lose; a hangup is not a reason to stop.
   process.on('SIGHUP', () => {})
+  // One bad request must never take every session down with the daemon.
+  process.on('unhandledRejection', (e) => log(`crew daemon: unhandled rejection: ${e?.stack ?? e}`))
   try {
     const daemon = await startDaemon()
     process.on('SIGTERM', () => daemon.shutdown('SIGTERM'))
