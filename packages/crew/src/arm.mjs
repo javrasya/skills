@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { basename, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
+import { repoConfig } from './crew-config.mjs'
 import { ensureDaemon, request } from './daemon/client.mjs'
 import { execProgram } from './git.mjs'
 import { flagsToAnswers, probeStart, rememberAnswers, rememberedAnswers, settleStackMode, startForm } from './start-form.mjs'
@@ -35,6 +36,35 @@ export function renderTemplate(template, values) {
   const missing = PLACEHOLDERS.filter((k) => values[k] === undefined || values[k] === null)
   if (missing.length) throw new Error(`no value for ${missing.map((k) => `__${k}__`).join(', ')}`)
   return template.replace(PLACEHOLDER, (_, k) => String(values[k]))
+}
+
+// The template's role table (#101): RUN_DEFAULT's line and one
+// `<role>: RUN_DEFAULT,` row per role. A checkout's template may be CRLF.
+const DEFAULT_LINE = /^const RUN_DEFAULT = \{ harness: 'claude', model: '([^']+)' \}(?=\r?$)/m
+const ROLE_ROW = /^( +)(\w+): RUN_DEFAULT,/gm
+
+// A role's row from a harness and that harness's model. A pi row keeps a
+// Claude `model` beside its `piModel`: the Workflow runner ignores
+// `harness` and runs every role on Claude with `model`.
+export const roleRow = ({ harness, model }, claudeModel) => (harness === 'pi' ? { harness: 'pi', piModel: model, model: claudeModel } : { harness, model })
+
+const quote = (v) => `'${String(v).replace(/[\\']/g, '\\$&')}'`
+const literal = (row) => `{ ${Object.entries(row).map(([k, v]) => `${k}: ${quote(v)}`).join(', ')} }`
+
+// The rendered script's role table: RUN_DEFAULT from the form's harness and
+// model, and each role in `roles` (crew's per-repo config) on a row of its
+// own. A pi row's Claude model is the run default's when that is Claude, else
+// the template's.
+export function renderRoles(script, { runDefault, roles = {} }) {
+  const line = DEFAULT_LINE.exec(script)
+  if (!line) throw new Error("the workflow template has no `const RUN_DEFAULT = { harness: 'claude', model: '…' }` line to render the run default into")
+  const names = [...script.matchAll(ROLE_ROW)].map((m) => m[2])
+  const unknown = Object.keys(roles).filter((r) => !names.includes(r))
+  if (unknown.length) throw new Error(`crew config roles: ${unknown.join(', ')} ${unknown.length > 1 ? 'are no roles' : 'is no role'} of the workflow template's; its roles are ${names.join(', ')}`)
+  const claudeModel = runDefault.harness === 'claude' ? runDefault.model : line[1]
+  return script
+    .replace(DEFAULT_LINE, () => `const RUN_DEFAULT = ${literal(roleRow(runDefault, claudeModel))}`)
+    .replace(ROLE_ROW, (row, indent, name) => (roles[name] ? `${indent}${name}: ${literal(roleRow(roles[name], claudeModel))},` : row))
 }
 
 // SKILL.md step 2's __NOTES_DIR__.
@@ -83,14 +113,16 @@ export async function resolveArming({ repoDir, spec, repo, run = execProgram, ho
 }
 
 // Renders the template into the notes dir, clears the end signals, launches.
-// `answers` are the form's, stackMode settled to the template's value.
-export async function armRun({ target, answers, template = readFileSync(templatePath(), 'utf8'), launch }) {
+// `answers` are the form's, stackMode settled to the template's value;
+// `roles` the per-role overrides of crew's per-repo config.
+export async function armRun({ target, answers, roles, template = readFileSync(templatePath(), 'utf8'), launch }) {
   const { spec, repo, repoDir, notesDir, title, validation } = target
   const script = join(notesDir, 'workflow.js')
-  mkdirSync(notesDir, { recursive: true })
-  writeFileSync(script, renderTemplate(template, {
+  const rendered = renderRoles(renderTemplate(template, {
     SPEC: spec, REPO: repo, REPO_DIR: repoDir, NOTES_DIR: notesDir, BASE_REF: answers.base, STACK_MODE: answers.stackMode, RUNNER: 'session', VALIDATION: validation,
-  }))
+  }), { runDefault: answers, roles })
+  mkdirSync(notesDir, { recursive: true })
+  writeFileSync(script, rendered)
   clearEndSignals(stateDirOf(notesDir))
   const args = [script, ...(answers.permissionMode ? ['--permission-mode', answers.permissionMode] : [])]
   const session = await launch({ args, cwd: repoDir, title: `implement-spec #${spec}: ${title}` })
@@ -118,6 +150,7 @@ export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdi
   if (rest.length !== 1 || !/^[1-9]\d*$/.test(rest[0])) throw new StartError(rest.length ? `one spec issue number, not ${rest.join(' ')}` : 'the spec issue number is required', 2)
   const spec = Number(rest[0])
   const repoDir = await repoDirOf(cwd, run)
+  const { roles } = repoConfig(paths, repoDir)
   const facts = await probeStart({ cwd: repoDir, paths, home, env, run })
   let form
   try {
@@ -134,5 +167,5 @@ export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdi
   if (!answers) throw new StartError('cancelled; nothing armed', 130)
   const settled = { ...answers, stackMode: await settleStackMode(answers, run) }
   rememberAnswers(paths, repoDir, settled)
-  return { ...(await armRun({ target, answers: settled, launch })), target, answers: settled }
+  return { ...(await armRun({ target, answers: settled, roles, launch })), target, answers: settled }
 }

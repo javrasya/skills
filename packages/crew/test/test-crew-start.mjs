@@ -11,7 +11,9 @@ import { fileURLToPath } from 'url'
 import { crewPaths } from '../src/daemon/transport.mjs'
 import { execProgram } from '../src/git.mjs'
 import { STACKS_DOCS, rememberedAnswers, startForm } from '../src/start-form.mjs'
-import { END_SIGNALS, PLACEHOLDERS, notesDirOf, renderTemplate, startCommand, templatePath } from '../src/arm.mjs'
+import { END_SIGNALS, PLACEHOLDERS, notesDirOf, renderRoles, renderTemplate, startCommand, templatePath } from '../src/arm.mjs'
+import { DEFAULTS } from '../src/crew-config.mjs'
+import { loadScript } from '../src/runner.mjs'
 import { drawStartForm, keysOf, runStartForm } from '../src/start-tui.mjs'
 
 const SKILL_TEMPLATE = fileURLToPath(new URL('../../../skills/engineering/implement-spec-in-workflow/workflow.template.js', import.meta.url))
@@ -196,4 +198,85 @@ test('crew start by flags alone: pi takes no permission mode, Install and Use in
   assert.match(script, /^const STACK_MODE = 'native'/m)
   assert.match(script, /^const BASE_REF = 'main'/m)
   assert.equal(rememberedAnswers(w.paths, w.repoDir).stackMode, 'native')
+})
+
+// The rendered script's role table as the script itself evaluates it.
+const rolesOf = (script) => {
+  const table = /^const RUN_DEFAULT = [^\n]*\n(?:[^\n]*\n)*?const ROLES = \{\r?\n(?:[^\n]*\n)*?\}/m.exec(script)
+  assert.ok(table, 'the rendered script has its role table')
+  return new Function(`${table[0]}\nreturn ROLES`)()
+}
+const ROLE_NAMES = Object.keys(rolesOf(readFileSync(SKILL_TEMPLATE, 'utf8')))
+const CLAUDE_MODELS = DEFAULTS.claudeModels
+const configRoles = (w, roles) => {
+  mkdirSync(w.paths.home, { recursive: true })
+  writeFileSync(w.paths.config, JSON.stringify({ repos: { [w.repoDir]: { roles } } }))
+}
+const armedWith = async (argv, { roles } = {}) => {
+  const w = world()
+  await w.ready
+  if (roles) configRoles(w, roles)
+  await w.start(['94', '--base', 'main', '--stack-mode', 'chain', ...argv])
+  return { w, script: readFileSync(join(w.notesDir, 'workflow.js'), 'utf8') }
+}
+
+test('run default, Claude: every role row carries harness claude and the chosen model', async () => {
+  const { script } = await armedWith(['--harness', 'claude', '--model', 'sonnet[1m]', '--permission-mode', 'auto'])
+  const roles = rolesOf(script)
+  assert.ok(ROLE_NAMES.length > 10)
+  assert.deepEqual(Object.keys(roles), ROLE_NAMES)
+  for (const name of ROLE_NAMES) assert.deepEqual(roles[name], { harness: 'claude', model: 'sonnet[1m]' }, name)
+})
+
+test('run default, pi: every role row carries harness pi, piModel the chosen model, and a Claude model', async () => {
+  const { script } = await armedWith(['--harness', 'pi', '--model', "lmstudio/qwen3's"])
+  const roles = rolesOf(script)
+  for (const name of ROLE_NAMES) assert.deepEqual(roles[name], { harness: 'pi', piModel: "lmstudio/qwen3's", model: 'opus' }, name)
+  assert.ok(CLAUDE_MODELS.includes(roles.impl.model))
+})
+
+test('a per-role override in crew\'s per-repo config wins for that role only', async () => {
+  const { script } = await armedWith(['--harness', 'claude', '--model', 'sonnet', '--permission-mode', 'auto'], { roles: { impl: { harness: 'pi', model: 'openai/gpt-5' }, gate: { harness: 'claude', model: 'opus' } } })
+  const roles = rolesOf(script)
+  assert.deepEqual(roles.impl, { harness: 'pi', piModel: 'openai/gpt-5', model: 'sonnet' }, 'a pi override keeps the run default\'s Claude model')
+  assert.deepEqual(roles.gate, { harness: 'claude', model: 'opus' })
+  for (const name of ROLE_NAMES.filter((r) => r !== 'impl' && r !== 'gate')) assert.deepEqual(roles[name], { harness: 'claude', model: 'sonnet' }, name)
+  const onPi = rolesOf((await armedWith(['--harness', 'pi', '--model', 'lmstudio/qwen3'], { roles: { review: { harness: 'claude', model: 'haiku' } } })).script)
+  assert.deepEqual(onPi.review, { harness: 'claude', model: 'haiku' })
+  assert.deepEqual(onPi.impl, { harness: 'pi', piModel: 'lmstudio/qwen3', model: 'opus' })
+})
+
+test('a per-role override naming no role of the template\'s is refused, and nothing is armed', async () => {
+  const w = world()
+  await w.ready
+  configRoles(w, { implement: { harness: 'pi', model: 'x/y' } })
+  await assert.rejects(w.start(['94', '--harness', 'pi', '--model', 'x/y', '--base', 'main', '--stack-mode', 'chain']), /roles: implement is no role of the workflow template's; its roles are graph, /)
+  assert.equal(w.launches.length, 0)
+  assert.ok(!existsSync(join(w.notesDir, 'workflow.js')))
+  configRoles(w, { impl: { harness: 'codex', model: 'x' } })
+  await assert.rejects(w.start(['94']), /roles\.impl: not \{ "harness": "claude" or "pi"/, 'a malformed override is refused before any form')
+})
+
+test('the rendered script still runs on the Workflow runner: only role rows differ, and every agent() call carries a Claude model', async () => {
+  const template = readFileSync(SKILL_TEMPLATE, 'utf8')
+  const values = { ...VALUES, RUNNER: 'workflow' }
+  const plain = skillRender(template, values)
+  const rendered = renderRoles(renderTemplate(template, values), { runDefault: { harness: 'pi', model: 'lmstudio/qwen3' }, roles: { impl: { harness: 'claude', model: 'sonnet' } } })
+  const [before, after] = [plain, rendered].map((s) => s.split('\n'))
+  const changed = after.filter((l, i) => l !== before[i])
+  assert.equal(after.length, before.length)
+  assert.equal(changed.length, 2)
+  assert.match(changed[0], /^const RUN_DEFAULT = \{ harness: 'pi', piModel: 'lmstudio\/qwen3', model: 'opus' \}\r?$/)
+  assert.match(changed[1], /^ {2}impl: \{ harness: 'claude', model: 'sonnet' \},/)
+  // The Workflow runner reads only `model`: the first call is made, with one.
+  const calls = []
+  const stop = new Error('stop')
+  const agent = async (prompt, opts) => {
+    calls.push(opts)
+    throw stop
+  }
+  await assert.rejects(loadScript(rendered)(agent, async (fns) => Promise.all(fns.map((f) => f())), () => {}, () => {}, {}), (e) => e === stop)
+  assert.equal(calls.length, 1)
+  assert.ok(CLAUDE_MODELS.includes(calls[0].model), calls[0].model)
+  assert.equal(calls[0].harness, 'pi')
 })

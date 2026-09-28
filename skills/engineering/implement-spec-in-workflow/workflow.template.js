@@ -23,21 +23,26 @@ export const meta = {
 // Claude `model` beside its `piModel` — e.g.
 // { harness: 'pi', piModel: 'openai/gpt-5', model: 'opus' } — and the same
 // rendered script runs on either runner.
-const CLAUDE = { harness: 'claude', model: 'opus' }
+// `crew start` renders this table (packages/crew/src/arm.mjs, renderRoles):
+// RUN_DEFAULT becomes the harness and model its form chose, and a role named
+// in crew's per-repo `roles` config gets a row of its own in place of
+// RUN_DEFAULT. Keep RUN_DEFAULT's line and the `<role>: RUN_DEFAULT,` rows in
+// this shape, or crew refuses to arm.
+const RUN_DEFAULT = { harness: 'claude', model: 'opus' }
 const ROLES = {
-  graph: CLAUDE,         // Graph: read the spec, return the ticket graph
-  explore: CLAUDE,       // Explore: one research note
-  layer0: CLAUDE,        // Setup: the layer-0 PR
-  dispatch: CLAUDE,      // Implement: size a ticket into slices
-  impl: CLAUDE,          // Implement: one slice
-  gate: CLAUDE,          // Gate: code-review one ticket
-  fixDispatch: CLAUDE,   // Gate, Review: route findings into fix slices
-  fix: CLAUDE,           // Gate, Review: one fix slice
-  publish: CLAUDE,       // Stack, Review: a ticket's PR, or the integration PR
-  review: CLAUDE,        // Review: code-review the whole stack
-  finalize: CLAUDE,      // Finalize: reconcile and ready the stack
-  retrospective: CLAUDE, // Finalize: the validation report
-  recover: CLAUDE,       // any phase: a doctor for an agent that failed (Orca runner only)
+  graph: RUN_DEFAULT,         // Graph: read the spec, return the ticket graph
+  explore: RUN_DEFAULT,       // Explore: one research note
+  layer0: RUN_DEFAULT,        // Setup: the layer-0 PR
+  dispatch: RUN_DEFAULT,      // Implement: size a ticket into slices
+  impl: RUN_DEFAULT,          // Implement: one slice
+  gate: RUN_DEFAULT,          // Gate: code-review one ticket
+  fixDispatch: RUN_DEFAULT,   // Gate, Review: route findings into fix slices
+  fix: RUN_DEFAULT,           // Gate, Review: one fix slice
+  publish: RUN_DEFAULT,       // Stack, Review: a ticket's PR, or the integration PR
+  review: RUN_DEFAULT,        // Review: code-review the whole stack
+  finalize: RUN_DEFAULT,      // Finalize: reconcile and ready the stack
+  retrospective: RUN_DEFAULT, // Finalize: the validation report
+  recover: RUN_DEFAULT,       // any phase: a doctor for an agent that failed (Orca runner only)
 }
 // Two more opts every agent() call may carry, both for the runner (ADR-0016):
 // `node` — the call's stable name for WHAT it is, never when it ran

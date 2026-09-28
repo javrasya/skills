@@ -1,9 +1,12 @@
 // Crew's own config: ~/.crew/config.json (crewPaths().config), every key optional.
 //   "backKey": "f12"       the key that leaves an entered session for the list
-//   "repos": { "<repo path>": { "setup": "<script>" } }
+//   "repos": { "<repo path>": { "setup": "<script>", "roles": { "<role>": { "harness": "pi", "model": "<model>" } } } }
 //                          per repo, by its main checkout's path, never in the
 //                          repo: `setup` is the hook run in each worktree crew
-//                          makes of it (crew-host.mjs), relative to the repo
+//                          makes of it (crew-host.mjs), relative to the repo;
+//                          `roles` the workflow template's roles that run on a
+//                          harness and model of their own in place of the run
+//                          default `crew start` chose (arm.mjs renderRoles)
 //   "harnesses": { "<harness>": ["<program>", "<arg>", …] }
 //                          the program words a worker's launch line starts
 //                          with in place of the harness's own name, as a test
@@ -13,6 +16,7 @@
 //                          beside the one Claude last ran with (start-form.mjs)
 import { readFileSync } from 'fs'
 import { isAbsolute, resolve } from 'path'
+import { HARNESSES } from './harness.mjs'
 
 export const DEFAULTS = Object.freeze({ backKey: 'f12', claudeModels: Object.freeze(['opus', 'sonnet', 'haiku', 'opus[1m]', 'sonnet[1m]']) })
 
@@ -83,6 +87,13 @@ function reposOf(repos = {}) {
   for (const [repo, c] of Object.entries(repos)) {
     if (!isObject(c)) throw new Error(`repos[${JSON.stringify(repo)}]: not an object`)
     if (c.setup !== undefined && (typeof c.setup !== 'string' || !c.setup)) throw new Error(`repos[${JSON.stringify(repo)}].setup: not a script path`)
+    if (c.roles === undefined) continue
+    if (!isObject(c.roles)) throw new Error(`repos[${JSON.stringify(repo)}].roles: not an object of role names`)
+    for (const [role, row] of Object.entries(c.roles)) {
+      const at = `repos[${JSON.stringify(repo)}].roles.${role}`
+      if (!isObject(row) || !HARNESSES.includes(row.harness)) throw new Error(`${at}: not { "harness": ${HARNESSES.map((h) => `"${h}"`).join(' or ')}, "model": "<model>" }`)
+      if (typeof row.model !== 'string' || !row.model) throw new Error(`${at}.model: not a model name`)
+    }
   }
   return repos
 }
