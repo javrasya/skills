@@ -217,6 +217,9 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
   return {
     id: 'crew',
     name: 'crew',
+    // A worker's session is entered in place, from `crew view` or `crew
+    // console`, never brought to the front: there are no tabs.
+    inPlace: true,
     unreachable: (e) => noDaemon(e),
     guardWith(o) {
       outage = o

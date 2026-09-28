@@ -22,3 +22,9 @@ export async function openHost(name = DEFAULT_HOST, options = {}) {
   if (!make) throw new Error(`unknown host ${name}: expected one of ${HOST_NAMES.join(', ')}`)
   return sessionHost(await make(options))
 }
+
+// Every host by its name, each opened with the `options` it knows: for a
+// reader of runs on any host, as the run views are, which asks each run's.
+export async function openHosts(options = {}) {
+  return Object.fromEntries(await Promise.all(HOST_NAMES.map(async (name) => [name, await openHost(name, options)])))
+}

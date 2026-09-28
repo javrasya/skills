@@ -146,6 +146,18 @@ function agentPane(a) {
   ]
 }
 
+// The runner's row, first on a crew-hosted run: its session, entered like an
+// agent's, where its attached view takes R and shows its log.
+const runnerLine = (r, h) =>
+  ` ${bold('▶ runner')}   ${grey('crew session')} ${cyan(r.session)}${r.open === false ? grey(' (closed)') : ''}   ${h?.alive === true ? c('32', '● alive') : h?.alive === false ? c('31', '○ gone') : grey('? unknown')}`
+
+function runnerPane(r, h) {
+  return [
+    ` ${bold('the runner')}  crew session ${cyan(r.session)}${r.open === true ? grey(' (open)') : r.open === false ? grey(' (closed)') : ''}  ${h?.alive === true ? c('32', '● alive') : h?.alive === false ? c('31', '○ gone') : grey('? unknown')}`,
+    grey('   Enter enters its session: its attached view, its log, and R to resume a halted run'),
+  ]
+}
+
 function phasePane(p, problems) {
   const lines = [` ${bold(p.name)}  ${p.total} agent${p.total === 1 ? '' : 's'}  ${mixOf(p.mix)}`]
   const room = PANE - 2
@@ -195,13 +207,13 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
   const scrolling = chosen?.kind === 'agent' && nameCell(chosen.agent, chosen.depth, elapsed).overflows
   for (let i = top; i < Math.min(rows.length, top + body); i++) {
     const r = rows[i]
-    const line = r.kind === 'phase' ? phaseLine(r.phase) : agentLine(r.agent, r.depth, i === selected ? elapsed : null)
+    const line = r.kind === 'runner' ? runnerLine(r.runner, model.header) : r.kind === 'phase' ? phaseLine(r.phase) : agentLine(r.agent, r.depth, i === selected ? elapsed : null)
     lines.push(i === selected ? c('7', fit(strip(line), W)) : fit(line, W))
   }
   while (lines.length < TOP + body) lines.push(fit('', W))
   lines.push(fit(grey('─'.repeat(W)), W))
   const pane = model?.pane
-  const paneLines = !pane ? [grey(' no agent has started yet')] : pane.kind === 'agent' ? agentPane(pane.agent) : phasePane(pane.phase, pane.problems)
+  const paneLines = !pane ? [grey(' no agent has started yet')] : pane.kind === 'runner' ? runnerPane(pane.runner, model.header) : pane.kind === 'agent' ? agentPane(pane.agent) : phasePane(pane.phase, pane.problems)
   for (let i = 0; i < PANE; i++) lines.push(fit(paneLines[i] ?? '', W))
   lines.push(fit(flash ? ' ' + c('1;36', flash) : alert ? ' ' + c(COLOUR[alert.startsWith('NEEDS YOU') ? 'needs you' : 'blocked'], alert) : '', W))
   lines.push(fit(grey(help), W))
@@ -239,6 +251,13 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
 export const TREE_HELP = ' ↑↓ move · ←→ / click a phase to fold · ⏎/click focus tab · r reclaim · l log · R resume · q back to the runs'
 const RUNS_HELP = ' ↑↓ move · ⏎/click open a run · ←→ fold a project · r reclaim the run · R resume a dead runner · q quit'
 
+// The key lines of `crew view`, which enters a crew run's sessions in place
+// and comes back from one with `backKey`; an Orca run's agent is its tab.
+export const consoleTreeHelp = (host, backKey) => host === 'crew'
+  ? ` ↑↓ move · ←→ fold · ⏎/click enter a session, ${backKey.toUpperCase()} comes back · r reclaim · l log · R resume · q back to the runs`
+  : TREE_HELP
+export const consoleRunsHelp = (backKey) => `${RUNS_HELP} · ${backKey.toUpperCase()} leaves an entered session`
+
 export function age(ms) {
   if (ms == null) return '—'
   const m = Math.floor(ms / 60_000)
@@ -260,17 +279,19 @@ const runLine = (r) =>
 function runPane(r) {
   // The tab outlives its runner, so whether it is open says nothing of the runner.
   const tab = r.terminal ? cyan(shortHandle(r.terminal)) : grey('—')
+  const runner = r.host === 'crew' ? 'runner session' : 'runner tab'
   const does = ['Enter opens its tree', r.reclaimed ? null : r.closable ? 'r reclaims every agent and closes the run' : 'r reclaims every agent it may; the run stays open', r.resumable ? 'R resumes it: its runner is dead' : null].filter(Boolean).join(' · ')
   return [
     ` ${bold(r.name ?? r.runId)}  ${grey(r.runId)}${r.spec ? `  spec ${r.spec}` : ''}  ${outcomeOf(r)}  ${r.kept} kept${r.reclaimed ? grey('  reclaimed') : ''}`,
-    ` runner tab ${tab}   project ${grey(r.project ?? '—')}`,
+    ` ${runner} ${tab}   project ${grey(r.project ?? '—')}`,
     grey(` run dir ${r.runDir ?? '—'}`),
     grey(`   ${does}`),
   ]
 }
 
 // model: runsView's, with no run opened. As draw: the lines, and rowAt(y).
-export function drawRuns(model, { width: W = 140, height: H = 40, flash = null } = {}) {
+// title: what the runs are, help: the key line.
+export function drawRuns(model, { width: W = 140, height: H = 40, flash = null, title = 'Orca runs', help = RUNS_HELP } = {}) {
   const rows = model?.rows ?? []
   const selected = model?.selected ?? 0
   const body = Math.max(1, H - TOP - 1 - PANE - 2)
@@ -280,7 +301,7 @@ export function drawRuns(model, { width: W = 140, height: H = 40, flash = null }
   const dot = grey(' · ')
   const count = (n, what) => `${n} ${what}${n === 1 ? '' : 's'}`
   const lines = [
-    fit(` ${bold('Orca runs')}${dot}${count(all.length, 'run')}${dot}${count(projects.length, 'project')}`, W),
+    fit(` ${bold(title)}${dot}${count(all.length, 'run')}${dot}${count(projects.length, 'project')}`, W),
     fit(` ${c('32', `● ${all.filter((r) => r.alive === true).length} alive`)}  ${c('31', `○ ${all.filter((r) => r.alive === false).length} dead`)}  ${grey(`${all.filter((r) => r.reclaimed).length} reclaimed`)}`, W),
     fit(grey('─'.repeat(W)), W),
     fit(grey('   RUN                  SPEC     OUTCOME              RUNNER     KEPT       AGE'), W),
@@ -298,7 +319,7 @@ export function drawRuns(model, { width: W = 140, height: H = 40, flash = null }
     : [` ${bold(row.project.name)}  ${grey(row.project.path ?? '')}`, grey(`   ${count(row.project.runs.length, 'run')} · ${row.project.folded ? '→ / Enter to unfold' : '← / Enter to fold'}`)]
   for (let i = 0; i < PANE; i++) lines.push(fit(paneLines[i] ?? '', W))
   lines.push(fit(flash ? ' ' + c('1;36', flash) : '', W))
-  lines.push(fit(grey(RUNS_HELP), W))
+  lines.push(fit(grey(help), W))
   return {
     lines: lines.slice(0, H),
     rowAt: (y) => {
@@ -306,4 +327,20 @@ export function drawRuns(model, { width: W = 140, height: H = 40, flash = null }
       return y > TOP && y <= TOP + body && i < rows.length ? i : null
     },
   }
+}
+
+// `crew ls`: runsView's runs as plain lines, by project as the standalone
+// list draws them, each run with its host, spec, outcome, runner, kept
+// agents and age.
+export function listRuns(model) {
+  const projects = model?.projects ?? []
+  if (!projects.length) return ['the run registry holds no run yet']
+  const lines = []
+  for (const p of projects) {
+    lines.push(`${p.name}  ${p.path ?? ''}`.trimEnd())
+    for (const r of p.runs) {
+      lines.push(`  ${r.runId.padEnd(20)} ${(r.host ?? 'orca').padEnd(5)} ${(r.spec ?? r.name ?? '—').padEnd(8)} ${strip(outcomeOf(r)).padEnd(20)} ${`runner ${strip(runnerOf(r))}`.padEnd(17)} ${String(r.kept).padStart(3)} kept  ${age(r.ageMs).padStart(7)}${r.reclaimed ? '  reclaimed' : ''}`)
+    }
+  }
+  return lines
 }

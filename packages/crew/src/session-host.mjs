@@ -21,6 +21,9 @@
 //
 // promptDelivered({ harness, sessionId, worktree, needle }) is optional: a
 // host that cannot tell leaves the prompt-delivery check out.
+// inPlace is optional too: true on a host whose sessions a console enters in
+// place (crew), where Enter on an agent enters its session rather than
+// terminalSwitch bringing its tab to the front.
 export const SESSION_HOST = Object.freeze([
   'unreachable', 'probe', 'guardWith',
   'runCreate', 'runUse',

@@ -8,7 +8,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { PassThrough, Writable } from 'stream'
-import { mkdtempSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawnSync } from 'child_process'
@@ -20,7 +20,10 @@ import { startDaemon } from '../src/daemon/daemon.mjs'
 import { ptySession } from '../src/daemon/session.mjs'
 import { RESET, repaint, stripHostModes, trackModes } from '../src/daemon/modes.mjs'
 import { backKeySequences, readCrewConfig } from '../src/crew-config.mjs'
-import { backKeyFilter, runConsole } from '../src/console.mjs'
+import { backKeyFilter, keyNames, runConsole, runsConsole } from '../src/console.mjs'
+import { crewHost } from '../src/crew-host.mjs'
+import { runRegistry } from '../src/registry.mjs'
+import { runsView } from '../src/run-view-model.mjs'
 
 const { Terminal } = xterm
 const CREW = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url))
@@ -311,6 +314,76 @@ test('console: keys typed while the enter is in flight reach the session in orde
   assert.equal(typed(), `${before}z`, 'keys before the buffered back key go through, the back key does not')
   term.press('q')
   await crew.done
+})
+
+test('run console keys: raw input as the run view\'s key names, and a left click as its row', () => {
+  assert.deepEqual(keyNames('\x1b[A\x1bOB\x1b[C\x1b[D\r\x1br R\x03q'), ['UP', 'DOWN', 'RIGHT', 'LEFT', 'ENTER', 'ESCAPE', 'r', ' ', 'R', 'CTRL_C', 'q'])
+  assert.deepEqual(keyNames('\x1b[<0;12;7M\x1b[<0;12;7m\x1b[<2;3;4M\x1b[<35;1;1M'), [{ click: { x: 12, y: 7 } }], 'a press of the left button, and nothing else')
+  assert.deepEqual(keyNames('\x1b[24~\x1b[1;5D'), ['LEFT'], 'a key the tree takes no name for is dropped, and a modified arrow is the arrow')
+})
+
+// A crew-hosted run whose one agent runs in `agent`'s session and whose runner
+// is `runner`'s, as the journal and the registry name them.
+function crewRun(agent, runner) {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-view-'))
+  const stateDir = join(dir, 'orca-run')
+  mkdirSync(stateDir)
+  const at = new Date().toISOString()
+  const journal = [
+    { type: 'run', at, runId: 'run_c1', terminal: 'coord_c1' },
+    { type: 'started', at, key: 'k1', n: 1, title: '[Work] one', run: 'run_c1', dispatchId: agent, harness: 'claude', sessionId: 'sid-c1', worktree: dir, terminal: agent },
+  ]
+  writeFileSync(join(stateDir, 'journal.jsonl'), journal.map((e) => JSON.stringify(e) + '\n').join(''))
+  writeFileSync(join(stateDir, 'runner.pid'), String(process.pid))
+  const registry = join(dir, 'runs.jsonl')
+  const w = runRegistry(registry)
+  w.armed({ runId: 'run_c1', project: dir, runDir: stateDir, spec: 'crew-view-fixture', host: 'crew' })
+  w.runner({ runId: 'run_c1', terminal: runner, host: 'crew' })
+  return registry
+}
+
+test('crew view: Enter on a crew run\'s agent, or on its runner, enters that session in place, and the back key returns to the tree, the same row selected and the session still running', async (t) => {
+  const { paths, id, info, typed } = await scriptedSession(t)
+  const { session: runner } = await request(paths, { op: 'session.spawn', command: [process.execPath, SCRIPTED], cols: 80, rows: 24 })
+  const registry = crewRun(id, runner.id)
+  const runs = runsView({ host: crewHost({ paths }), registry, enter: true, transcripts: { usage: () => null } })
+  await runs.refresh()
+  await runs.open('run_c1')
+  const tree = () => runs.opened().model
+  const row = () => tree().rows[tree().selected].key
+  const term = fakeTerminal(120, 30)
+  const crew = runsConsole({ paths, stdin: term.stdin, stdout: term.stdout, runs, refreshMs: 100 })
+  await until('the tree', async () => (await term.screen()).lines.some((l) => l.startsWith(` ▶ runner   crew session ${runner.id}`)))
+  assert.deepEqual(tree().rows.map((r) => r.key), ['runner', 'phase:Work', 'agent:1'])
+
+  term.press('\x1b[B\x1b[B')
+  await until('the agent selected', () => row() === 'agent:1')
+  term.press('\r')
+  await until('its session entered', async () => crew.mode() === 'entered' && (await term.screen()).lines[2] === '    ready')
+  term.press('hi')
+  await until('the keys at its pty', () => typed().endsWith('hi'))
+  term.press(F12)
+  await until('the tree again', async () => crew.mode() === 'list' && (await term.screen()).lines.some((l) => l.includes('AGENT')))
+  assert.equal(row(), 'agent:1', 'the same row selected')
+  assert.equal((await info()).alive, true, 'leaving keeps the session running')
+
+  // The runner's row enters the runner's session.
+  const runnerScreen = async () => (await request(paths, { op: 'session.screen', id: runner.id })).screen.lines
+  term.press('\x1b[A\x1b[A')
+  await until('the runner selected', () => row() === 'runner')
+  term.press('\r')
+  await until('the runner entered', () => crew.mode() === 'entered')
+  term.press('go')
+  await until('the runner read the keys', async () => (await runnerScreen())[4].startsWith('got 676f'))
+  term.press(F12)
+  await until('the tree once more', () => crew.mode() === 'list' && row() === 'runner')
+
+  // q goes back to the runs, and q there quits.
+  term.press('q')
+  await until('the runs', () => runs.opened() === null)
+  term.press('q')
+  await crew.done
+  assert.equal(crew.mode(), 'quit')
 })
 
 test('crew console: needs a terminal, and takes no arguments', () => {

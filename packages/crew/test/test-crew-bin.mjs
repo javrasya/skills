@@ -9,6 +9,7 @@ import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { crewPaths } from '../src/daemon/transport.mjs'
 import { request, stopDaemon } from '../src/daemon/client.mjs'
+import { runRegistry } from '../src/registry.mjs'
 
 const PACKAGE = fileURLToPath(new URL('..', import.meta.url))
 const CREW = join(PACKAGE, 'bin', 'crew.mjs')
@@ -85,9 +86,13 @@ test('crew run: on the crew host, a whole run of fake-harness agents in crew ses
   const rows = lines(join(ENV.CLAUDE_CONFIG_DIR, 'orca-runs.jsonl'))
   const armed = rows.find((e) => e.type === 'armed')
   assert.ok(armed, 'the run is registered')
-  assert.deepEqual({ project: armed.project, runDir: armed.runDir, spec: armed.spec, script: armed.script }, { project, runDir, spec: 'crew-run-fixture', script })
+  assert.deepEqual({ project: armed.project, runDir: armed.runDir, spec: armed.spec, script: armed.script, host: armed.host }, { project, runDir, spec: 'crew-run-fixture', script, host: 'crew' })
   assert.match(armed.runId, /^run_/)
   assert.ok(rows.some((e) => e.type === 'ended' && e.runId === armed.runId && e.outcome === 'ok'))
+  assert.deepEqual(rows.filter((e) => e.type === 'runner').map((e) => [e.terminal, e.host]), [[runner, 'crew']], 'the runner is its crew session, to be entered from crew view')
+  const ls = crew('ls')
+  assert.equal(ls.status, 0, ls.stderr)
+  assert.match(ls.stdout, new RegExp(`^  ${armed.runId} +crew +crew-run-fixture +ok +runner`, 'm'))
 })
 
 test('crew start: a spec number, and with no terminal every row\'s flag, each missing one named', async () => {
@@ -109,6 +114,31 @@ test('crew orchestration send: a worker\'s message needs its IDs and a type, and
   const stranger = crew('orchestration', 'send', '--task-id', 't', '--dispatch-id', 'd', '--type', 'handoff', '--subject', 's', '--body', 'b')
   assert.equal(stranger.status, 1)
   assert.match(stranger.stderr, /dispatch_not_found/)
+})
+
+test('crew ls: every run of the registry, crew\'s and Orca\'s, by project; crew view <run> needs a run the registry has, and a terminal', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-bin-ls-'))
+  const registry = join(dir, 'runs.jsonl')
+  assert.equal(crew('ls', '--registry', registry).stdout.trim(), 'the run registry holds no run yet')
+  const w = runRegistry(registry)
+  w.armed({ runId: 'run_o1', project: join(dir, 'proj'), runDir: join(dir, 'o'), spec: 'implement-spec-12' })
+  w.armed({ runId: 'run_c1', project: join(dir, 'proj'), runDir: join(dir, 'c'), spec: 'implement-spec-13', host: 'crew' })
+  w.ended({ runId: 'run_o1', outcome: 'ok' })
+  const r = crew('ls', '--registry', registry)
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stdout, /^proj {2}.*proj$/m)
+  assert.match(r.stdout, /^ {2}run_o1 +orca +#12 +ok +runner ○ dead +0 kept/m)
+  assert.match(r.stdout, /^ {2}run_c1 +crew +#13 +unfinished +runner ○ dead +0 kept/m)
+  assert.equal(crew('ls', 'extra').status, 2)
+
+  const none = crew('view', 'run_nope', '--registry', registry)
+  assert.equal(none.status, 1)
+  assert.match(none.stderr, /no run run_nope in the run registry/)
+  for (const target of ['run_c1', join(dir, 'c')]) {
+    const piped = crew('view', target, '--registry', registry)
+    assert.equal(piped.status, 3, piped.stderr)
+    assert.match(piped.stderr, /crew view: needs a terminal/)
+  }
 })
 
 test('crew view: it is the run view, with the view\'s own argv', () => {

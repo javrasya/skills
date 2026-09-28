@@ -7,8 +7,10 @@
 //
 // Entries, each with `type`, `runId` and `at` (ISO time):
 //   armed      project, runDir, spec: the runner created the Run; script and
-//              permissionMode, when it had them: what a resume relaunches it with
-//   runner     terminal: a runner started on the run — at creation, and again
+//              permissionMode, when it had them: what a resume relaunches it with;
+//              host, the session host it runs on (hosts.mjs), none being orca
+//   runner     terminal: a runner started on the run, in that terminal (on
+//              crew, the runner's own crew session), and host — at creation, and again
 //              whenever one takes it up on a resume. One after `ended`, or
 //              after a whole-run `reclaimed`, is a resume: the run is going
 //              again, so it is running and no longer reclaimed
@@ -59,9 +61,9 @@ export function runRegistry(path = REGISTRY_PATH, clock = { now: () => Date.now(
   }
   return {
     path,
-    armed: ({ runId, project, runDir, spec, script = null, permissionMode = null }) =>
-      append({ type: 'armed', runId, project, runDir, spec, ...(script && { script }), ...(permissionMode && { permissionMode }) }),
-    runner: ({ runId, terminal }) => append({ type: 'runner', runId, terminal: terminal ?? null }),
+    armed: ({ runId, project, runDir, spec, script = null, permissionMode = null, host = null }) =>
+      append({ type: 'armed', runId, project, runDir, spec, ...(script && { script }), ...(permissionMode && { permissionMode }), ...(host && { host }) }),
+    runner: ({ runId, terminal, host = null }) => append({ type: 'runner', runId, terminal: terminal ?? null, ...(host && { host }) }),
     ended: ({ runId, outcome }) => {
       if (!OUTCOMES.includes(outcome)) throw new Error(`run registry: unknown outcome "${outcome}": expected one of ${OUTCOMES.join(', ')}`)
       append({ type: 'ended', runId, outcome })
@@ -75,7 +77,7 @@ export function runRegistry(path = REGISTRY_PATH, clock = { now: () => Date.now(
 }
 
 // Every run the registry knows, in the order they were armed:
-//   { runId, project, runDir, spec, script, permissionMode, armedAt,
+//   { runId, host, project, runDir, spec, script, permissionMode, armedAt,
 //     state: 'running' | 'halted' | 'ok' | 'partial' | 'failed', endedAt,
 //                                       — halted: its runner halted it, and
 //                                         has not carried it on since
@@ -90,7 +92,9 @@ export function runRegistry(path = REGISTRY_PATH, clock = { now: () => Date.now(
 // is its runner.pid's to say (run-view-model.mjs's runnerAlive). A resume's
 // `runner` entry reopens a run that ended, or was reclaimed as a whole: state
 // is running again and reclaimed false, while reclaimedAgents keeps the agents
-// already reclaimed, since their worktrees are gone. A line that does not parse (a torn last line) is skipped, and so is an entry
+// already reclaimed, since their worktrees are gone. host is the one its
+// latest runner named, else its armed entry's, else orca: every run armed
+// before hosts had names ran on Orca. A line that does not parse (a torn last line) is skipped, and so is an entry
 // for a Run never armed here.
 export function readRegistry(path = REGISTRY_PATH) {
   const runs = new Map()
@@ -106,7 +110,7 @@ export function readRegistry(path = REGISTRY_PATH) {
     if (e.type === 'armed') {
       if (!runs.has(e.runId)) {
         runs.set(e.runId, {
-          runId: e.runId, project: e.project ?? null, runDir: e.runDir ?? null, spec: e.spec ?? null,
+          runId: e.runId, host: e.host ?? 'orca', project: e.project ?? null, runDir: e.runDir ?? null, spec: e.spec ?? null,
           script: e.script ?? null, permissionMode: e.permissionMode ?? null, armedAt: e.at ?? null,
           state: 'running', endedAt: null, runner: null, paused: null, reclaimed: false, reclaimedAt: null, reclaimedAgents: [],
         })
@@ -115,7 +119,7 @@ export function readRegistry(path = REGISTRY_PATH) {
     }
     const run = runs.get(e.runId)
     if (!run) continue
-    if (e.type === 'runner') Object.assign(run, { runner: { terminal: e.terminal ?? null, at: e.at ?? null }, state: 'running', endedAt: null, paused: null, reclaimed: false, reclaimedAt: null })
+    if (e.type === 'runner') Object.assign(run, { runner: { terminal: e.terminal ?? null, at: e.at ?? null }, state: 'running', endedAt: null, paused: null, reclaimed: false, reclaimedAt: null, ...(e.host && { host: e.host }) })
     else if (e.type === 'ended' && OUTCOMES.includes(e.outcome)) Object.assign(run, { state: e.outcome, endedAt: e.at ?? null, paused: null })
     else if (e.type === 'paused') run.paused = { reason: e.reason ?? null, at: e.at ?? null }
     else if (e.type === 'unpaused') run.paused = null

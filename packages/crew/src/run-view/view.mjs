@@ -2,8 +2,10 @@
 // The run view (ADR-0012): runs as trees that keep updating in place. Two
 // modes (D5 and D8 on #43):
 //
-//   node view.mjs --attached <run-dir>   the runner starts it as its child, in
-//                                        its own tab, on that one run
+//   node view.mjs --attached <run-dir> [--host <host>]
+//                                        the runner starts it as its child, in
+//                                        its own tab, on that one run, naming
+//                                        the host the run is on (orca if none)
 //   node view.mjs --standalone           every run in the run registry, by
 //                                        project; the orca-runs skill opens it
 //                                        in a tab of its own
@@ -27,7 +29,7 @@ import { fileURLToPath } from 'url'
 import { runView, runsView } from '../run-view-model.mjs'
 import { REGISTRY_PATH } from '../registry.mjs'
 import { worktreeUnpushed } from '../git.mjs'
-import { openHost } from '../hosts.mjs'
+import { DEFAULT_HOST, openHosts } from '../hosts.mjs'
 import { RUNNER_SETTINGS } from '../settings.mjs'
 import { TREE_HELP, draw, drawRuns } from './draw.mjs'
 import { VIEW_EXIT } from './exit-codes.mjs'
@@ -63,7 +65,7 @@ const args = process.argv.slice(2)
 const option = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined)
 const standalone = args.includes('--standalone')
 if (!standalone && !option('--attached')) {
-  console.error('usage: node view.mjs --attached <run-dir> | --standalone [--registry <run registry, for a fixture>]')
+  console.error('usage: node view.mjs --attached <run-dir> [--host <host>] | --standalone [--registry <run registry, for a fixture>]')
   process.exit(2)
 }
 const registry = option('--registry') ? resolve(option('--registry')) : REGISTRY_PATH
@@ -110,11 +112,15 @@ process.on('exit', restore)
 // Every Orca and git call the view makes is bounded at viewCallMs, so a slow
 // Orca holds a key for seconds, never for the runner's two minutes.
 const bound = { ms: RUNNER_SETTINGS.viewCallMs }
-const host = await openHost(undefined, { callMs: bound.ms })
+// Standalone, each run's tree, reclaim and resume go to the host the registry
+// names for it.
+const hosts = await openHosts({ callMs: bound.ms })
+const host = hosts[option('--host') ?? DEFAULT_HOST]
+if (!host) crash(new Error(`unknown host ${option('--host')}`))
 const unpushed = (path) => worktreeUnpushed(path, bound)
 // Standalone, `runs` takes every key and click, and hands them to the run it
 // opened; `tree()` is the run tree on screen, or null on the list.
-const runs = standalone ? runsView({ host, registry, unpushed }) : null
+const runs = standalone ? runsView({ host, hostOf: (name) => hosts[name] ?? host, registry, unpushed }) : null
 // R's one message to the runner: during an outage it probes Orca; on a halted
 // run it resumes `node`, or every held node without one (ADR-0016).
 const resumeHost = () => {

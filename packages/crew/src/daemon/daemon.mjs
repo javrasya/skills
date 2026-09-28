@@ -6,7 +6,8 @@
 // or { ok: false, error }:
 //   hello                                  → { pid, version, endpoint }
 //   stop { force }                         → refused while runs are live, unless force
-//   session.spawn { command, cwd, env, cols, rows, title } → { session }
+//   session.spawn { command, cwd, env, cols, rows, title } → { session }, its env
+//                                          given CREW_SESSION, the session's id
 //   session.list                           → { sessions }
 //   session.screen { id }                  → { screen: { lines, cursor, alternate } }
 //   session.write { id, data, paste }      → { session }: data typed as keys,
@@ -108,7 +109,8 @@ export async function startDaemon({ paths = crewPaths(), liveRuns = null, spawnS
     'session.spawn': ({ command, cwd, env, cols, rows, title = null }) => {
       if (!Array.isArray(command) || !command.length || !command.every((a) => typeof a === 'string')) throw new Error('session.spawn needs a command: a non-empty list of strings')
       const id = String(next++)
-      const session = open({ id, command, cwd: cwd ?? process.cwd(), env: env ?? process.env, cols, rows, title: title === null ? null : text(title, 'title') })
+      // CREW_SESSION: a program learns its own session, as a runner names itself to the run registry.
+      const session = open({ id, command, cwd: cwd ?? process.cwd(), env: { ...(env ?? process.env), CREW_SESSION: id }, cols, rows, title: title === null ? null : text(title, 'title') })
       sessions.set(id, session)
       say(`session ${id} spawned: ${command.join(' ')} (pid ${session.info().pid})`)
       return { session: session.info() }

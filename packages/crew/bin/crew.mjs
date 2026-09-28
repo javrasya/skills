@@ -9,6 +9,13 @@
 //                     arms a run of the implement-spec workflow from a form,
 //                     each row a flag (every one of them with no terminal),
 //                     and launches it as `crew run` does
+//   crew ls [--registry <file>]
+//                     every run in the run registry, crew's and Orca's, by project
+//   crew view <run> [--registry <file>]
+//                     the run console: the run's tree (by run id or run dir);
+//                     Enter on a crew run's agent, or its runner, enters that
+//                     session, and the back key comes back to the tree; an Orca
+//                     run's agent is brought to the front in Orca
 //   crew view --attached <run-dir> | --standalone [--registry <file>]
 //   crew daemon start | status | stop [--force] | restart [--force]
 //   crew session spawn [--cwd <dir>] -- <command…> | list | screen <id> | kill <id>
@@ -20,7 +27,7 @@
 //                     a worker's message to its crew Run's mailbox, as its
 //                     preamble (crew-host.mjs) names it; no Orca involved
 //
-// Every command but `daemon stop` starts the per-machine crew daemon when none
+// Every command but `daemon stop` and `ls` starts the per-machine crew daemon when none
 // answers (src/daemon/). view, and run on orca, carry on without it if it
 // cannot start: nothing they do needs it yet.
 //
@@ -34,13 +41,20 @@ import { HOST_NAMES as HOSTS } from '../src/hosts.mjs'
 import { crewPaths } from '../src/daemon/transport.mjs'
 import { ensureDaemon, request, stopDaemon } from '../src/daemon/client.mjs'
 import { readCrewConfig } from '../src/crew-config.mjs'
-import { runConsole } from '../src/console.mjs'
+import { runConsole, runsConsole } from '../src/console.mjs'
 import { crewHost } from '../src/crew-host.mjs'
 import { launchRunner, startCommand } from '../src/arm.mjs'
+import { REGISTRY_PATH } from '../src/registry.mjs'
+import { runsView, samePath } from '../src/run-view-model.mjs'
+import { listRuns } from '../src/run-view/draw.mjs'
+import { DEFAULT_HOST, openHosts } from '../src/hosts.mjs'
+import { RUNNER_SETTINGS } from '../src/settings.mjs'
 
 const USAGE = [
   'usage: crew run [--host <host>] <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]',
   '       crew start <spec#> [--harness claude|pi] [--model <m>] [--base <branch>] [--stack-mode native|install|chain] [--permission-mode <mode>]',
+  '       crew ls [--registry <run registry, for a fixture>]',
+  '       crew view <run id or run dir> [--registry <run registry, for a fixture>]',
   '       crew view --attached <run-dir> | --standalone [--registry <run registry, for a fixture>]',
   '       crew daemon start | status | stop [--force] | restart [--force]',
   '       crew session spawn [--cwd <dir>] -- <command…> | list | screen <id> | kill <id>',
@@ -146,6 +160,50 @@ async function consoleCommand(args) {
   process.exit(0)
 }
 
+// The run registry a command reads: --registry's, for a fixture, else the machine's.
+function registryOf(args, command) {
+  const at = args.indexOf('--registry')
+  const rest = at >= 0 ? args.filter((_, i) => i !== at && i !== at + 1) : args
+  if (at >= 0 && !args[at + 1]) usage(`${command}: --registry needs a file`)
+  return { registry: at >= 0 ? resolve(args[at + 1]) : REGISTRY_PATH, rest }
+}
+
+// Only the registry is read: a run's liveness is its runner.pid's to say.
+async function ls(args) {
+  const { registry, rest } = registryOf(args, 'crew ls')
+  if (rest.length) usage(`crew ls: unexpected ${rest.join(' ')}`)
+  const runs = runsView({ host: null, registry, transcripts: { usage: () => null } })
+  await runs.refresh()
+  if (runs.model.message) throw new Error(runs.model.message)
+  console.log(listRuns(runs.model).join('\n'))
+}
+
+async function view(args) {
+  if (!args.length || args[0].startsWith('--')) {
+    await daemonAnyway()
+    return launch(entry('../src/run-view/view.mjs'), args)
+  }
+  const [target, ...more] = args
+  const { registry, rest } = registryOf(more, 'crew view')
+  if (rest.length) usage(`crew view: unexpected ${rest.join(' ')}`)
+  // Each run's tree, reclaim and resume go to the host the registry names for it.
+  const callMs = RUNNER_SETTINGS.viewCallMs
+  const hosts = await openHosts({ paths, callMs })
+  const runs = runsView({ host: hosts[DEFAULT_HOST], hostOf: (name) => hosts[name] ?? hosts[DEFAULT_HOST], registry, enter: true })
+  await runs.refresh()
+  const run = runs.model.projects.flatMap((p) => p.runs).find((r) => r.runId === target || samePath(r.runDir, target))
+  if (!run) throw new Error(`no run ${target} in the run registry ${registry}`)
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.error('crew view: needs a terminal')
+    process.exit(3)
+  }
+  const { backKey } = readCrewConfig(paths)
+  await daemonAnyway()
+  await runs.open(run.runId)
+  await runsConsole({ paths, stdin: process.stdin, stdout: process.stdout, runs, backKey }).done
+  process.exit(0)
+}
+
 const SEND_FLAGS = { '--from': 'from', '--dispatch-capability': 'capability', '--task-id': 'taskId', '--dispatch-id': 'dispatchId', '--type': 'type', '--subject': 'subject', '--body': 'body', '--outcome': 'outcome' }
 
 async function orchestration([verb, ...args]) {
@@ -210,8 +268,9 @@ if (command === 'run') {
   // The daemon's socket and the form's stdin would otherwise hold it open.
   process.exit(0)
 } else if (command === 'view') {
-  await daemonAnyway()
-  await launch(entry('../src/run-view/view.mjs'), rest)
+  await view(rest).catch(fail)
+} else if (command === 'ls') {
+  await ls(rest).catch(fail)
 } else if (command === 'daemon') {
   await daemon(rest).catch(fail)
 } else if (command === 'session') {

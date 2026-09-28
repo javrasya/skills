@@ -62,7 +62,7 @@ import { checkSchema } from './schema.mjs'
 import { launchCommand, HARNESSES } from './harness.mjs'
 import { realTimer } from './git.mjs'
 import { hostUnreachable } from './session-host.mjs'
-import { HOST_NAMES, openHost } from './hosts.mjs'
+import { DEFAULT_HOST, HOST_NAMES, openHost } from './hosts.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { agentLifecycle, readResult, decisionsNeeded, setAside } from './lifecycle.mjs'
 import { hostOutage } from './outage.mjs'
@@ -140,12 +140,14 @@ export function runnerLog(stateDir, print, clock = realClock) {
 // Claude's own default mode.
 // registry: the run registry's path, or null to record nothing there; project:
 // the repo the run works in, and script the rendered script's path, recorded
-// beside it with permissionMode, so the standalone run view can resume the run.
+// beside it with permissionMode, so the standalone run view can resume the run;
+// runnerTerminal, where the registry says the runner is when the host's Run
+// terminal is not the runner's own.
 // control: filled in with resumeHost(), which probes Orca at once during an
 // outage, and resume({ node }), the attached view's R: resumeHost while an
 // outage is on, else the halted run's node, or with none every held node.
 // onHalt({ node, nodes }): told each time a node is held and the run halts.
-export async function runScript(text, { host, stateDir, out: print = (s) => console.log(s), settings = {}, clock = realClock, transcripts = sessionTranscripts(), fallbackObjective = 'workflow run', resume = false, permissionMode = null, registry = null, project = process.cwd(), script: scriptPath = null, control = {}, onHalt = () => {} }) {
+export async function runScript(text, { host, stateDir, out: print = (s) => console.log(s), settings = {}, clock = realClock, transcripts = sessionTranscripts(), fallbackObjective = 'workflow run', resume = false, permissionMode = null, registry = null, project = process.cwd(), script: scriptPath = null, control = {}, onHalt = () => {}, runnerTerminal = null }) {
   const limits = { ...SETTINGS, ...settings }
   const out = runnerLog(stateDir, print, clock)
   const script = loadScript(text)
@@ -214,8 +216,8 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
     armed = runId
     const phases = phaseTitles(meta.value) ?? earlier.phases
     journal({ type: 'run', runId, terminal, ...(phases && { phases }) })
-    if (!takenOver) record('armed', { runId, project, runDir: stateDir, spec: meta.value?.name ?? fallbackObjective, script: scriptPath, permissionMode })
-    record('runner', { runId, terminal })
+    if (!takenOver) record('armed', { runId, project, runDir: stateDir, spec: meta.value?.name ?? fallbackObjective, script: scriptPath, permissionMode, host: host.id })
+    record('runner', { runId, terminal: runnerTerminal ?? terminal, host: host.id })
   }
   // The run's one Orca outage (ADR-0015): every Orca call waits on it, so no
   // agent is charged for it. It is journaled and logged as it starts, pauses
@@ -673,7 +675,7 @@ if (isMain) {
   // and the runner prints as it always did.
   const view = process.stdout.isTTY && process.stdin.isTTY
     ? attachView({
-      spawnView: () => spawn(process.execPath, [VIEW, '--attached', dir], { stdio: ['inherit', 'inherit', 'inherit', 'ipc'] }),
+      spawnView: () => spawn(process.execPath, [VIEW, '--attached', dir, '--host', hostName ?? DEFAULT_HOST], { stdio: ['inherit', 'inherit', 'inherit', 'ipc'] }),
       tab: (s) => console.log(s),
       log: (s) => say(s),
       tail: () => logTail(dir),
@@ -706,6 +708,9 @@ if (isMain) {
       registry: REGISTRY_PATH,
       script: path,
       control,
+      // On crew the Run's terminal is this adapter's, not the runner's: the
+      // operator enters the runner by its own session, which the daemon names.
+      runnerTerminal: host.id === 'crew' ? process.env.CREW_SESSION ?? null : null,
     })
     summary = { runner: 'orca', ok: true, result }
   } catch (e) {
