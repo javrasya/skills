@@ -1,10 +1,10 @@
 ---
 name: orca-runs
-description: "Open the Orca run view in standalone mode: every Orca-runner run on this machine, by project, to look into, reclaim, or resume one whose runner died."
+description: "Open the Orca run view in standalone mode: every Orca-hosted session-runner run on this machine, by project, to look into, reclaim, or resume one whose runner died. Crew-hosted runs are crew ls and crew view."
 disable-model-invocation: true
 ---
 
-The **run view** is the operator's terminal screen for runs of [`implement-spec-in-workflow`](../implement-spec-in-workflow/SKILL.md) on the Orca runner (ADR-0012). The runner shows it attached, in its own tab, on its own run. This skill opens it **standalone**: every run in the run registry (`~/.claude/orca-runs.jsonl`, or `$CLAUDE_CONFIG_DIR/orca-runs.jsonl` when that is set), finished, paused or dead, with no runner needed.
+The **run view** is the operator's terminal screen for runs of [`implement-spec-in-workflow`](../implement-spec-in-workflow/SKILL.md) on the **session runner** (ADR-0012, ADR-0017). This skill serves **Orca-hosted runs**: those whose session host is Orca. A **crew-hosted run** — crew being the default session host — is not this skill's: the operator lists those with `crew ls` and opens one in the **run console** with `crew view`; point them there and stop. On Orca the runner shows it attached, in its own tab, on its own run. This skill opens it **standalone**: every run in the run registry (`~/.claude/orca-runs.jsonl`, or `$CLAUDE_CONFIG_DIR/orca-runs.jsonl` when that is set), finished, paused or dead, with no runner needed.
 
 The view is code of the `crew` package, not of this skill: one copy, beside the runner that also starts it, reached through the `crew` bin.
 
