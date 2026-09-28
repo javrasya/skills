@@ -40,7 +40,7 @@ const unique = (xs) => [...new Set(xs.filter(Boolean))]
 export async function probeStart({ cwd = process.cwd(), paths, home = homedir(), env = process.env, run = execProgram } = {}) {
   const claudeLast = lastUsedModel('claude', { home, env })
   const piLast = lastUsedModel('pi', { home, env })
-  const [branch, branches, repo, installed, pi] = await Promise.all([currentBranch(cwd, run), branchNames(cwd, run), ghRepo(cwd, run), ghStackInstalled(run), piModels(run)])
+  const [branch, branches, repo, installed, pi] = await Promise.all([currentBranch(cwd, run), branchNames(cwd, run), ghRepo(cwd, run), ghStackInstalled(run), piModels(run, { env })])
   const api = await stacksApi(repo, run)
   return {
     repo,
@@ -172,17 +172,23 @@ function readAnswers(paths) {
   }
 }
 
+// A repo's entry, {} when it is not an object: a hand-edited null only loses
+// the pre-fill, as an unreadable file does.
+const answersIn = (all, key) => {
+  const a = key === undefined ? null : all[key]
+  return a && typeof a === 'object' && !Array.isArray(a) ? a : {}
+}
+
 // The answers last given in the repo, {} when none were.
 export function rememberedAnswers(paths, repo) {
   const all = readAnswers(paths)
-  const key = Object.keys(all).find((k) => samePath(k, repo))
-  return key ? all[key] : {}
+  return answersIn(all, Object.keys(all).find((k) => samePath(k, repo)))
 }
 
 export function rememberAnswers(paths, repo, answers) {
   const all = readAnswers(paths)
   const key = Object.keys(all).find((k) => samePath(k, repo)) ?? repo
-  const before = all[key] ?? {}
+  const before = answersIn(all, key)
   all[key] = {
     ...before,
     ...answers,

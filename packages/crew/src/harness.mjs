@@ -76,8 +76,11 @@ export function lastUsedModel(harness, { home = homedir(), env = process.env } =
 
 // pi's models, from `pi --list-models`: a header row, then one model a row
 // whose first two columns are its provider and id. None when pi cannot say.
-export async function piModels(run) {
-  const r = await run('pi', ['--list-models'])
+// On Windows npm installs pi as a pi.cmd shim, which only a shell starts, so a
+// pi that does not start bare is asked again through ComSpec.
+export async function piModels(run, { platform = process.platform, env = process.env } = {}) {
+  let r = await run('pi', ['--list-models'])
+  if (r.code === null && platform === 'win32') r = await run(env.ComSpec || 'cmd.exe', ['/d', '/c', 'pi', '--list-models'])
   if (r.code !== 0) return []
   return r.stdout.split('\n').slice(1).map((l) => l.trim().split(/\s+/)).filter((w) => w.length >= 2).map(([provider, id]) => `${provider}/${id}`)
 }

@@ -8,6 +8,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { crewPaths } from '../src/daemon/transport.mjs'
 import { DEFAULTS } from '../src/crew-config.mjs'
+import { piModels } from '../src/harness.mjs'
 import {
   STACKS_DOCS,
   flagsToAnswers,
@@ -180,6 +181,20 @@ test('remembered answers: an unreadable answer file only loses the pre-fill', ()
   assert.deepEqual(rememberedAnswers(paths, 'C:/repo'), {})
 })
 
+test('remembered answers: a repo entry that is not an object only loses the pre-fill', () => {
+  const paths = crewPaths({ CREW_HOME: join(scratch('home'), 'crew') })
+  const repo = join(scratch('repo'), 'app')
+  mkdirSync(paths.home, { recursive: true })
+  for (const entry of [null, 'claude', ['claude'], 7]) {
+    writeFileSync(join(paths.home, 'start.json'), JSON.stringify({ [repo]: entry }))
+    assert.deepEqual(rememberedAnswers(paths, repo), {}, JSON.stringify(entry))
+    assert.deepEqual(startForm(facts(), { remembered: rememberedAnswers(paths, repo) }).answers(), { harness: 'claude', model: 'opus[1m]', base: 'develop', stackMode: 'native', permissionMode: 'auto' })
+  }
+  // Answering the form again replaces the bad entry.
+  rememberAnswers(paths, repo, { harness: 'claude', model: 'haiku', base: 'main', stackMode: 'chain', permissionMode: 'auto' })
+  assert.deepEqual(rememberedAnswers(paths, repo), { harness: 'claude', base: 'main', stackMode: 'chain', permissionMode: 'auto', models: { claude: 'haiku' } })
+})
+
 test('flags: each row has one, and flag-only use answers the whole form', () => {
   const { answers, rest } = flagsToAnswers(['94', '--harness', 'claude', '--model', 'sonnet', '--base', 'main', '--stack-mode', 'chain', '--permission-mode', 'acceptEdits'])
   assert.deepEqual(answers, ALL_FLAGS)
@@ -254,6 +269,24 @@ test('probeStart: no pi, no gh-stack, no settings still makes a form', async () 
   assert.equal(f.branch, null)
   assert.deepEqual(startForm(f).answers(), { harness: 'claude', model: 'opus', base: 'main', stackMode: 'chain', permissionMode: 'auto' })
   assert.ok(!run.calls.some((c) => c.startsWith('gh extension install')), 'probing never installs')
+})
+
+test('pi models: a pi.cmd shim that does not start bare on Windows is asked through ComSpec', async () => {
+  const list = { stdout: 'provider   model   context\nanthropic  claude-opus-4-6  1M\n' }
+  const shim = fakeRun({ 'C:\\Windows\\cmd.exe /d /c pi --list-models': list })
+  assert.deepEqual(await piModels(shim, { platform: 'win32', env: { ComSpec: 'C:\\Windows\\cmd.exe' } }), ['anthropic/claude-opus-4-6'])
+  assert.deepEqual(shim.calls, ['pi --list-models', 'C:\\Windows\\cmd.exe /d /c pi --list-models'])
+  // A pi that starts bare is asked once; elsewhere a pi that does not start is not retried.
+  const bare = fakeRun({ 'pi --list-models': list })
+  assert.deepEqual(await piModels(bare, { platform: 'win32', env: {} }), ['anthropic/claude-opus-4-6'])
+  assert.deepEqual(bare.calls, ['pi --list-models'])
+  const linux = fakeRun({ 'cmd.exe': list })
+  assert.deepEqual(await piModels(linux, { platform: 'linux', env: {} }), [])
+  assert.deepEqual(linux.calls, ['pi --list-models'])
+  // No pi at all, even through the shell: pi cannot say.
+  const none = fakeRun({})
+  assert.deepEqual(await piModels(none, { platform: 'win32', env: {} }), [])
+  assert.deepEqual(none.calls, ['pi --list-models', 'cmd.exe /d /c pi --list-models'])
 })
 
 test('crew config: claudeModels replaces the static Claude list, and must be model names', async () => {
