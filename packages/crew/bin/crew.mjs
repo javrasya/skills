@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 // crew: the session runner's command line.
 //
-//   crew run --host orca <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]
+//   crew run [--host crew|orca] <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]
+//                     on the crew host, its default, the runner is a crew
+//                     session of the daemon's, entered from `crew console`;
+//                     on orca it is this process, in the operator's Orca tab
 //   crew view --attached <run-dir> | --standalone [--registry <file>]
 //   crew daemon start | status | stop [--force] | restart [--force]
 //   crew session spawn [--cwd <dir>] -- <command…> | list | screen <id> | kill <id>
@@ -14,14 +17,14 @@
 //                     preamble (crew-host.mjs) names it; no Orca involved
 //
 // Every command but `daemon stop` starts the per-machine crew daemon when none
-// answers (src/daemon/). run and view carry on without it if it cannot start:
-// nothing they do needs it yet.
+// answers (src/daemon/). view, and run on orca, carry on without it if it
+// cannot start: nothing they do needs it yet.
 //
 // Each entry keeps its own argv parsing and its own "am I main" check, so this
 // hands it the argv it would have had launched directly, then loads it in this
 // process: a child process would split the terminal and its signals between two.
-import { realpathSync } from 'fs'
-import { resolve } from 'path'
+import { existsSync, realpathSync } from 'fs'
+import { basename, resolve } from 'path'
 import { fileURLToPath, pathToFileURL } from 'url'
 import { HOST_NAMES as HOSTS } from '../src/hosts.mjs'
 import { crewPaths } from '../src/daemon/transport.mjs'
@@ -31,7 +34,7 @@ import { runConsole } from '../src/console.mjs'
 import { crewHost } from '../src/crew-host.mjs'
 
 const USAGE = [
-  'usage: crew run --host <host> <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]',
+  'usage: crew run [--host <host>] <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]',
   '       crew view --attached <run-dir> | --standalone [--registry <run registry, for a fixture>]',
   '       crew daemon start | status | stop [--force] | restart [--force]',
   '       crew session spawn [--cwd <dir>] -- <command…> | list | screen <id> | kill <id>',
@@ -153,13 +156,38 @@ async function orchestration([verb, ...args]) {
   console.log(`crew orchestration send: ${m.type} ${id} sent to the run's mailbox`)
 }
 
+// The runner as a session of the daemon's, on the crew host: it outlives this
+// command, as a runner outlives its Orca tab, and `crew console` enters it.
+// Its own argv errors would land on a screen nobody has entered yet, so the
+// script is checked here first.
+async function crewRun(args) {
+  const scripts = args.filter((a, i) => !a.startsWith('--') && !['--state-dir', '--permission-mode'].includes(args[i - 1]))
+  if (scripts.length !== 1) usage(`crew run: ${scripts.length ? `one script, not ${scripts.join(', ')}` : 'the rendered script is required'}`)
+  if (!existsSync(scripts[0])) throw new Error(`no script ${resolve(scripts[0])}`)
+  await ensureDaemon(paths)
+  const { session: s } = await request(paths, {
+    op: 'session.spawn',
+    command: [process.execPath, entry('../src/runner.mjs'), ...args, '--host', 'crew'],
+    cwd: process.cwd(),
+    env: process.env,
+    title: `crew run ${basename(scripts[0])}`,
+    cols: process.stdout.columns || 120,
+    rows: process.stdout.rows || 30,
+  })
+  console.log(`crew run: the runner is crew session ${s.id}; enter it from \`crew console\``)
+}
+
 const [command, ...rest] = process.argv.slice(2)
 if (command === 'run') {
   const at = rest.indexOf('--host')
-  const host = at >= 0 ? rest[at + 1] : null
-  if (!HOSTS.includes(host)) usage(host ? `crew: unknown host ${host}` : 'crew run: --host is required')
-  await daemonAnyway()
-  await launch(entry('../src/runner.mjs'), rest)
+  const host = at >= 0 ? rest[at + 1] : 'crew'
+  if (!HOSTS.includes(host)) usage(host ? `crew: unknown host ${host}` : 'crew run: --host needs a host')
+  if (host === 'crew') {
+    await crewRun(rest.filter((_, i) => at < 0 || (i !== at && i !== at + 1))).catch(fail)
+  } else {
+    await daemonAnyway()
+    await launch(entry('../src/runner.mjs'), rest)
+  }
 } else if (command === 'view') {
   await daemonAnyway()
   await launch(entry('../src/run-view/view.mjs'), rest)

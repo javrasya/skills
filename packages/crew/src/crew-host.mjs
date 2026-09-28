@@ -20,7 +20,7 @@ import { ensureDaemon, request } from './daemon/client.mjs'
 import { launchCommand, launchedSession, resumeCommand } from './harness.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { sessionTranscripts } from './transcript.mjs'
-import { repoConfig, samePath } from './crew-config.mjs'
+import { readCrewConfig, repoConfig, samePath } from './crew-config.mjs'
 import { gitIn, porcelainLines, worktreeOwnCommits } from './git.mjs'
 import { reuseWorktree } from './orca-cli.mjs'
 import { copyMcpAnswers } from './mcp-answers.mjs'
@@ -94,14 +94,15 @@ const TAIL = "const fs=require('fs');const p=process.argv[1];let at=0;const show
 // and the checkout whose MCP answers a child worktree gets (`project`);
 // `env` the environment its harness gets. `harnesses` maps a harness to the
 // program words its launch line starts with in place of the harness's own
-// name, as the contract suite puts its fake harness there; the rest of the
-// line is the runner's launch command, word for word. A harness is ready for
+// name, as the contract suite puts its fake harness there, crew's config's
+// `harnesses` by default; the rest of the line is the runner's launch
+// command, word for word. A harness is ready for
 // its prompt once it has drawn and then been quiet for `quietMs`, and a start
 // fails if it is not ready within `readyMs`. A worker is idle once its session
 // transcript says its latest turn ended, or, where the transcript does not
 // say, once its terminal has been quiet for `quietMs`. Git calls are bounded
 // at `callMs`, and a worktree's making, its setup hook included, at `createMs`.
-export function crewHost({ paths = crewPaths(), env = process.env, cwd = process.cwd(), project = cwd, harnesses = {}, transcripts = sessionTranscripts({ env }), quietMs = RUNNER_SETTINGS.quietOutputMs, readyMs = 180_000, endMs = 10_000, pollMs = 100, callMs = RUNNER_SETTINGS.hostCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs } = {}) {
+export function crewHost({ paths = crewPaths(), env = process.env, cwd = process.cwd(), project = cwd, harnesses = readCrewConfig(paths).harnesses ?? {}, transcripts = sessionTranscripts({ env }), quietMs = RUNNER_SETTINGS.quietOutputMs, readyMs = 180_000, endMs = 10_000, pollMs = 100, callMs = RUNNER_SETTINGS.hostCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs } = {}) {
   // This adapter's side of the Runs it creates or takes over, as a runner's
   // terminal is on Orca: the daemon fences every other coordinator out.
   const coordinator = `coord_${randomBytes(6).toString('hex')}`

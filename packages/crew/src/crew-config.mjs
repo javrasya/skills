@@ -4,6 +4,10 @@
 //                          per repo, by its main checkout's path, never in the
 //                          repo: `setup` is the hook run in each worktree crew
 //                          makes of it (crew-host.mjs), relative to the repo
+//   "harnesses": { "<harness>": ["<program>", "<arg>", …] }
+//                          the program words a worker's launch line starts
+//                          with in place of the harness's own name, as a test
+//                          puts a fake harness there (crew-host.mjs)
 import { readFileSync } from 'fs'
 import { isAbsolute, resolve } from 'path'
 
@@ -61,6 +65,7 @@ export function readCrewConfig(paths) {
   try {
     backKeySequences(merged.backKey)
     reposOf(merged.repos)
+    harnessesOf(merged.harnesses)
   } catch (e) {
     throw new Error(`${paths.config}: ${e.message}`)
   }
@@ -76,6 +81,14 @@ function reposOf(repos = {}) {
     if (c.setup !== undefined && (typeof c.setup !== 'string' || !c.setup)) throw new Error(`repos[${JSON.stringify(repo)}].setup: not a script path`)
   }
   return repos
+}
+
+function harnessesOf(harnesses = {}) {
+  if (!isObject(harnesses)) throw new Error('harnesses: not an object of harness names')
+  for (const [name, words] of Object.entries(harnesses)) {
+    if (!Array.isArray(words) || !words.length || !words.every((w) => typeof w === 'string' && w)) throw new Error(`harnesses.${name}: not a list of program words`)
+  }
+  return harnesses
 }
 
 // One path however it is spelled: Windows paths match whatever their case and slashes.

@@ -17,7 +17,17 @@
 //   [unrecorded]  the turn leaves no trace in the transcript
 //   [die]         the harness dies mid-turn: its prompt is in the transcript,
 //                 no reply ever is, and it exits 1
-import { appendFileSync, mkdirSync } from 'fs'
+//
+// It plays a worker's part in a run too, from what the session was told, the
+// prompts of the transcript it resumed included. Given the runner's submit
+// command and a preamble's IDs (the latest one), it submits at the end of
+// every turn, before its reply: the note of the latest doctor's note prompt,
+// else the text of the latest [answer <text>], else `done`. Told it is a
+// doctor, it plays nothing else: it sends the text of the patient's
+// [cure <text>] as its handoff, `no note` without one, then its worker_done,
+// with the `orchestration send` its preamble names.
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { spawnSync } from 'child_process'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
 import { randomUUID } from 'crypto'
@@ -42,6 +52,51 @@ const write = (entry) => {
 }
 let piStarted = !!earlier
 let piHeld = null
+
+// Every prompt the session was told, the latest last.
+const told = []
+try {
+  const was = harness === 'pi' ? earlier : argv.includes('--resume') ? transcript : null
+  for (const line of (was && existsSync(was) ? readFileSync(was, 'utf8') : '').split('\n').filter(Boolean)) {
+    const e = JSON.parse(line)
+    if (e.type === 'user' && typeof e.message?.content === 'string') told.push(e.message.content)
+    if (e.type === 'message' && e.message?.role === 'user') told.push(e.message.content.map((c) => c.text ?? '').join(''))
+  }
+} catch {}
+const latest = (re) => {
+  for (const p of [...told].reverse()) {
+    const m = re.exec(p)
+    if (m) return m
+  }
+  return null
+}
+const idsOf = () => {
+  const m = latest(/--from ([\w-]+) --dispatch-capability ([\w-]+) --task-id ([\w-]+) --dispatch-id ([\w-]+)/)
+  return m && ['--from', m[1], '--dispatch-capability', m[2], '--task-id', m[3], '--dispatch-id', m[4]]
+}
+const run = (args) => {
+  const r = spawnSync(process.execPath, args, { encoding: 'utf8', env: process.env })
+  said.push(`$ exit ${r.status}: ${`${r.stdout}${r.stderr}`.replace(/\s+/g, ' ').trim()}`.slice(0, 200))
+}
+
+function doctor(prompt) {
+  const bin = /node "([^"]+)" orchestration send/.exec(prompt)?.[1]
+  const ids = idsOf()
+  if (!bin || !ids) return
+  const note = /\[cure ([^\]]*)\]/.exec(prompt)?.[1] ?? 'no note'
+  run([bin, 'orchestration', 'send', ...ids, '--type', 'handoff', '--subject', 'note', '--body', note])
+  run([bin, 'orchestration', 'send', ...ids, '--type', 'worker_done', '--subject', 'diagnosed', '--body', 'note sent', '--outcome', 'succeeded'])
+}
+
+function submit() {
+  const command = latest(/node "([^"]*submit\.mjs)".*/)
+  const ids = idsOf()
+  if (!command || !ids) return
+  const flag = (name) => new RegExp(`--${name} "([^"]+)"`).exec(command[0])?.[1] ?? null
+  const note = latest(/## The doctor's note\n([\s\S]*)$/)?.[1].trim()
+  writeFileSync(flag('payload'), note ?? latest(/\[answer ([^\]]*)\]/)?.[1] ?? 'done')
+  run([command[1], ...(flag('schema') ? ['--schema', flag('schema')] : []), '--result', flag('result'), '--payload', flag('payload'), ...ids])
+}
 
 function asked(prompt) {
   const timestamp = new Date().toISOString()
@@ -92,7 +147,12 @@ let drawing = null
 async function turn(prompt) {
   const recorded = !/\[unrecorded\]/.test(prompt)
   said.push(...prompt.split('\n').map((l) => `> ${l}`))
+  told.push(prompt)
   if (recorded) asked(prompt)
+  if (/You are a doctor in a workflow run/.test(prompt)) {
+    doctor(prompt)
+    return reply(prompt, recorded)
+  }
   if (/\[draw\]/.test(prompt) && !drawing) {
     drawing = setInterval(() => {
       status = `· ${new Date().toISOString()}`
@@ -115,9 +175,14 @@ async function turn(prompt) {
     clearInterval(spinner)
     status = ''
   } else if (how === 'turn') await sleep(Number(ms))
-  const reply = `echo: ${prompt.replace(/\s+/g, ' ').trim()}`
-  said.push(reply)
-  if (recorded) replied(reply)
+  submit()
+  reply(prompt, recorded)
+}
+
+function reply(prompt, recorded) {
+  const text = `echo: ${prompt.replace(/\s+/g, ' ').trim()}`
+  said.push(text)
+  if (recorded) replied(text)
   draw()
 }
 

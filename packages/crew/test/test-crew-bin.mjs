@@ -2,13 +2,13 @@
 //   node packages/crew/test/test-crew-bin.mjs
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { crewPaths } from '../src/daemon/transport.mjs'
-import { stopDaemon } from '../src/daemon/client.mjs'
+import { request, stopDaemon } from '../src/daemon/client.mjs'
 
 const PACKAGE = fileURLToPath(new URL('..', import.meta.url))
 const CREW = join(PACKAGE, 'bin', 'crew.mjs')
@@ -17,16 +17,36 @@ const CREW = join(PACKAGE, 'bin', 'crew.mjs')
 const ENV = { ...process.env, CLAUDE_CONFIG_DIR: mkdtempSync(join(tmpdir(), 'crew-bin-claude-')), CREW_HOME: join(mkdtempSync(join(tmpdir(), 'crew-bin-home-')), 'home') }
 after(() => stopDaemon(crewPaths(ENV), { force: true }))
 const crew = (...args) => spawnSync(process.execPath, [CREW, ...args], { encoding: 'utf8', env: ENV })
+// crew's config in that home: every Claude worker is the fake harness.
+const FAKE_HARNESS = fileURLToPath(new URL('./fixtures/crew/fake-harness.mjs', import.meta.url))
+mkdirSync(ENV.CREW_HOME, { recursive: true })
+writeFileSync(crewPaths(ENV).config, JSON.stringify({ harnesses: { claude: [process.execPath, FAKE_HARNESS] } }))
+
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
+async function eventually(what, check, ms) {
+  const deadline = Date.now() + ms
+  for (;;) {
+    const value = check()
+    if (value) return value
+    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`)
+    await sleep(200)
+  }
+}
 
 test('crew: no command, or an unknown one, is a usage error', () => {
   for (const r of [crew(), crew('launch')]) {
     assert.equal(r.status, 2)
-    assert.match(r.stderr, /usage: crew run --host <host>/)
+    assert.match(r.stderr, /usage: crew run \[--host <host>\]/)
   }
 })
 
-test('crew run: the host is required, and must be one crew knows', () => {
-  assert.match(crew('run', 'w.js').stderr, /--host is required/)
+test('crew run: one script, there, on a host crew knows', () => {
+  const none = crew('run')
+  assert.equal(none.status, 2)
+  assert.match(none.stderr, /the rendered script is required/)
+  const missing = crew('run', join(mkdtempSync(join(tmpdir(), 'crew-bin-')), 'w.js'))
+  assert.equal(missing.status, 1)
+  assert.match(missing.stderr, /no script /)
   const bad = crew('run', '--host', 'tmux', 'w.js')
   assert.equal(bad.status, 2)
   assert.match(bad.stderr, /unknown host tmux/)
@@ -44,6 +64,30 @@ test('crew run --host orca: it is the runner, with the runner\'s own argv', () =
   const summary = JSON.parse(readFileSync(join(dir, 'state', 'summary.json'), 'utf8'))
   assert.equal(summary.ok, true)
   assert.equal(summary.result, 7)
+})
+
+test('crew run: on the crew host, a whole run of fake-harness agents in crew sessions, registered, ends in summary.json', async () => {
+  const project = realpathSync(mkdtempSync(join(tmpdir(), 'crew-bin-run-')))
+  const script = join(project, 'workflow.js')
+  copyFileSync(fileURLToPath(new URL('./fixtures/crew-run/two-agents.workflow.js', import.meta.url)), script)
+  const r = spawnSync(process.execPath, [CREW, 'run', 'workflow.js'], { encoding: 'utf8', env: ENV, cwd: project })
+  assert.equal(r.status, 0, r.stderr)
+  const [, runner] = /the runner is crew session (\S+);/.exec(r.stdout)
+  const runDir = join(project, 'orca-run')
+  const summary = await eventually('summary.json', () => existsSync(join(runDir, 'summary.json')) && JSON.parse(readFileSync(join(runDir, 'summary.json'), 'utf8')), 120_000)
+  assert.deepEqual(summary, { runner: 'orca', ok: true, result: { first: 'hello', second: 'world' } }, readFileSync(join(runDir, 'runner.log'), 'utf8'))
+  const { sessions } = await request(crewPaths(ENV), { op: 'session.list' })
+  assert.equal(sessions.find((s) => s.id === runner)?.title, 'crew run workflow.js')
+  const lines = (path) => readFileSync(path, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+  const workers = lines(join(runDir, 'journal.jsonl')).filter((e) => e.type === 'started')
+  assert.equal(workers.length, 2)
+  for (const w of workers) assert.ok(sessions.some((s) => s.id === w.terminal && s.command.includes(FAKE_HARNESS)), `${w.title} ran in a crew session of the fake harness`)
+  const rows = lines(join(ENV.CLAUDE_CONFIG_DIR, 'orca-runs.jsonl'))
+  const armed = rows.find((e) => e.type === 'armed')
+  assert.ok(armed, 'the run is registered')
+  assert.deepEqual({ project: armed.project, runDir: armed.runDir, spec: armed.spec, script: armed.script }, { project, runDir, spec: 'crew-run-fixture', script })
+  assert.match(armed.runId, /^run_/)
+  assert.ok(rows.some((e) => e.type === 'ended' && e.runId === armed.runId && e.outcome === 'ok'))
 })
 
 test('crew orchestration send: a worker\'s message needs its IDs and a type, and names a dispatch crew made', () => {

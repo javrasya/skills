@@ -3,3 +3,4 @@
 //   node scripts/test-orca-runner.mjs
 import '../packages/crew/test/test-orca-runner.mjs'
 import '../packages/crew/test/test-crew-bin.mjs'
+import '../packages/crew/test/test-crew-run.mjs'

@@ -1,7 +1,7 @@
-// The session hosts crew runs on, by the name `crew run --host` takes. A
-// launch that names none — the runner started directly, as a resume from the
-// run view types it — is on DEFAULT_HOST, the only host a run could be on
-// before hosts had names. A worker's own commands (submit, `crew
+// The session hosts crew runs on, by the name `crew run --host` takes; a
+// `crew run` that names none is on crew. A runner started directly that names
+// none, as a resume from the Orca run view types it, is on DEFAULT_HOST, the
+// only host a run could be on before hosts had names. A worker's own commands (submit, `crew
 // orchestration send`) are on the host its session's CREW_HOST names, which
 // the crew host sets, else DEFAULT_HOST: an Orca worker has no CREW_HOST.
 import { sessionHost } from './session-host.mjs'
