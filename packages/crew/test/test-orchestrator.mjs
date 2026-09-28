@@ -133,6 +133,17 @@ test('draft: the checks as validation.md, each under its source; none is an empt
   await assert.rejects(draftValidation(ask(invalid.host), { repoDir: 'C:/repo' }), /missing required property "source"/)
 })
 
+test("draft: a command the workflow's String.raw list cannot hold (backtick, ${, trailing backslash) is no answer; a source holding one is only a comment, so it is cleaned", async () => {
+  for (const [command, why] of [['echo `date`', /holds a backtick/], ['npm test -- --shard=${{ matrix.shard }}', /holds \$\{/], ['make \\', /ends in a backslash/]]) {
+    const bad = standIn(submitted({ checks: [{ command: 'npm test', source: 'package.json' }, { command, source: 'ci.yml' }] }))
+    await assert.rejects(draftValidation(ask(bad.host), { repoDir: 'C:/repo' }), (e) => e instanceof OrchestratorError && why.test(e.message) && e.message.includes(JSON.stringify(command)), command)
+  }
+  assert.equal(validationText({ checks: [{ command: 'npm test', source: 'ci.yml `test` ${{ matrix.os }} \\' }] }), "# ci.yml 'test' $ {{ matrix.os }}\nnpm test\n")
+  const prompt = standIn(submitted({ checks: [] }))
+  await draftValidation(ask(prompt.host), { repoDir: 'C:/repo' })
+  assert.match(prompt.calls.find(([c]) => c === 'workerStart')[1].prompt, /resolve every CI expression \(a GitHub Actions \$\{\{ matrix\.x \}\}.*no command holding a backtick, a \$\{ or a trailing backslash/)
+})
+
 test("graph: a journal naming an orchestrator session shows no row for it, in any phase", async () => {
   const stateDir = scratch('run')
   const started = (n, title) => ({ type: 'started', n, title, at: new Date(0).toISOString(), run: 'run_1', dispatchId: `ctx_${n}`, harness: 'claude', sessionId: `sid-${n}`, worktree: null, terminal: `term_${n}` })

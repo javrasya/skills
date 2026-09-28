@@ -14,6 +14,7 @@ import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { checkSchema } from './schema.mjs'
 import { readResult, workerPrompt } from './lifecycle.mjs'
+import { validationLineProblem } from './validation-list.mjs'
 
 export const ORCHESTRATOR_PREFIX = 'orchestrator/'
 export const orchestratorTitle = (name) => `${ORCHESTRATOR_PREFIX}${name}`
@@ -123,14 +124,21 @@ export const validationPrompt = (repoDir) => `You are crew's orchestrator. Crew 
 
 Find the checks the repo already runs, and nothing else: read its CI config and workflow files (.github/workflows, .gitlab-ci.yml, azure-pipelines.yml and the like), its Makefile or justfile, and its package scripts (package.json scripts, pyproject.toml, Cargo.toml, and their kin). Never read source files, and never run anything but the submit command below.
 
-Answer with every check you found, in the order CI runs them, each as { "command": the one-line command as run from the repo's root, "source": the file, and the job or script in it, you found it in }. A repo with no discoverable checks is answered with an empty checks list: never invent one.`
+Answer with every check you found, in the order CI runs them, each as { "command": the one-line command as run from the repo's root, "source": the file, and the job or script in it, you found it in }. A repo with no discoverable checks is answered with an empty checks list: never invent one.
+
+Each command must be one a shell runs as written: resolve every CI expression (a GitHub Actions \${{ matrix.x }} or \${{ env.X }}, say) to the concrete value it takes, one command per value, and write no command holding a backtick, a \${ or a trailing backslash.`
 
 // validation.md's text for an answer: each check under a comment naming its
-// source; '' for none. A command that is not one line is no answer.
+// source; '' for none. A command that is not one line, or one the rendered
+// workflow.js cannot hold (validation-list.mjs), is no answer. A source is
+// only a comment, so what the workflow cannot hold is dropped from it.
 export function validationText({ checks }) {
   const bad = checks.find((c) => !c.command.trim() || /[\r\n]/.test(c.command))
   if (bad) throw new Error(`a check's command is not one line: ${JSON.stringify(bad.command)}`)
-  return checks.map((c) => `# ${c.source.replace(/[\r\n]+/g, ' ')}\n${c.command.trim()}\n`).join('')
+  const unheld = checks.find((c) => validationLineProblem(c.command))
+  if (unheld) throw new Error(`a check's command ${validationLineProblem(unheld.command)}: ${JSON.stringify(unheld.command)}`)
+  const comment = (s) => s.replace(/[\r\n]+/g, ' ').replace(/`/g, "'").replace(/\$\{/g, '$ {').replace(/[\\\s]+$/, '')
+  return checks.map((c) => `# ${comment(c.source)}\n${c.command.trim()}\n`).join('')
 }
 
 // The orchestrator's draft of a spec's validation list: { text, empty }.

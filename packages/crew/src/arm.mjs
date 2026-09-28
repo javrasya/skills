@@ -14,6 +14,7 @@ import { flagsToAnswers, probeStart, rememberAnswers, rememberedAnswers, settleS
 import { draftEditor, drawDrafting, runDraftStep, runStartForm } from './start-tui.mjs'
 import { crewHost } from './crew-host.mjs'
 import { draftValidation, orchestrator } from './orchestrator.mjs'
+import { validationListProblem } from './validation-list.mjs'
 
 // The copy `npm pack` bundles (scripts/pack-template.mjs), else, in a checkout
 // of this repo, the skill folder's own: the copy is taken from it.
@@ -33,10 +34,13 @@ const PLACEHOLDER = new RegExp(`__(${PLACEHOLDERS.join('|')})__`, 'g')
 
 // SKILL.md step 3: substitute, never rewrite. One pass, so a value that
 // happens to hold a placeholder's text (a validation comment, say) is left as
-// the operator wrote it.
+// the operator wrote it. A validation list the template's String.raw literal
+// cannot hold is refused, never rendered into a workflow.js that dies on load.
 export function renderTemplate(template, values) {
   const missing = PLACEHOLDERS.filter((k) => values[k] === undefined || values[k] === null)
   if (missing.length) throw new Error(`no value for ${missing.map((k) => `__${k}__`).join(', ')}`)
+  const problem = validationListProblem(values.VALIDATION)
+  if (problem) throw new Error(`the validation list cannot be armed: its ${problem}`)
   return template.replace(PLACEHOLDER, (_, k) => String(values[k]))
 }
 
@@ -185,6 +189,8 @@ export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdi
     if (missing.length) throw new StartError(`no terminal to show the form at, so every row needs its flag: missing ${missing.join(', ')}`, 2)
   }
   let target = await resolveArming({ repoDir, spec, repo: facts.repo, run, home })
+  const problem = target.validation === null ? null : validationListProblem(target.validation)
+  if (problem) throw new StartError(`${target.validationFile} cannot be armed: its ${problem}; the workflow holds the list in a template literal, so write the command without it; nothing armed`)
   if (!tty && target.validation === null) {
     throw new StartError(`spec #${spec} has no validation list, and with no terminal nobody can confirm the orchestrator's draft of one: write the project's checks to ${target.validationFile}, one command per line (# for comments), or run crew start at a terminal`)
   }

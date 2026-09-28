@@ -3,6 +3,8 @@
 // Enter all the way through takes every default. Resolves to the form's
 // answers, or null when the operator cancels (Esc, Ctrl+C). A spec with no
 // validation list gets one more step, the orchestrator's draft (runDraftStep).
+import { validationListProblem } from './validation-list.mjs'
+
 const KEYS = [
   ['\x1b[A', 'up'], ['\x1bOA', 'up'], ['\x1b[B', 'down'], ['\x1bOB', 'down'],
   ['\x1b[C', 'right'], ['\x1bOC', 'right'], ['\x1b[D', 'left'], ['\x1bOD', 'left'],
@@ -190,8 +192,9 @@ export function draftEditor(text) {
 export const NO_CHECKS = "The orchestrator found no checks in this repo's CI config, workflow files, Makefile or package scripts, so the list is empty. Add the commands a change must pass, or confirm an empty list."
 
 // `file` is where the list is written once confirmed; `empty` whether the
-// orchestrator found no checks, which the step says.
-export function drawDraft(editor, { heading = '', file = 'validation.md', empty = false } = {}) {
+// orchestrator found no checks, which the step says; `problem` why the last
+// confirm was refused, if it was.
+export function drawDraft(editor, { heading = '', file = 'validation.md', empty = false, problem = null } = {}) {
   const { row, col } = editor.cursor()
   const lines = heading ? [BOLD(heading), ''] : []
   lines.push(`Validation list, drafted by crew's orchestrator; confirming writes it to ${file}`)
@@ -201,19 +204,28 @@ export function drawDraft(editor, { heading = '', file = 'validation.md', empty 
   editor.lines().forEach((l, i) => {
     lines.push(i === row ? `> ${l.slice(0, col)}${INVERSE(l[col] ?? ' ')}${l.slice(col + 1)}` : `  ${l}`)
   })
+  if (problem) lines.push('', `Not confirmed: the list's ${problem}. The workflow holds the list in a template literal; write the command without it.`)
   lines.push('', DIM('Arrows: move   Enter: new line   Ctrl+S: confirm, write it and arm   Esc: cancel, nothing written or armed'))
   return lines
 }
 
-// Resolves to the confirmed text, or null when the operator cancels.
+// Resolves to the confirmed text, or null when the operator cancels. A text
+// the rendered workflow.js cannot hold (validation-list.mjs) is not
+// confirmed: the step stays, saying why.
 export function runDraftStep({ editor, stdin, stdout, heading = '', file, empty = false }) {
+  let problem = null
   return interact({
     stdin,
-    draw: () => paint(stdout, drawDraft(editor, { heading, file, empty })),
+    draw: () => paint(stdout, drawDraft(editor, { heading, file, empty, problem })),
     onData(chunk, done) {
       for (const key of editKeysOf(chunk)) {
         if (key === 'cancel') return done(null)
-        if (key === 'confirm') return done(editor.text())
+        if (key === 'confirm') {
+          problem = validationListProblem(editor.text())
+          if (problem) return
+          return done(editor.text())
+        }
+        problem = null
         editor.key(key)
       }
     },

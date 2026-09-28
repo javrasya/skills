@@ -50,6 +50,15 @@ test('render: a validation list is substituted as written, whatever it holds', (
   assert.equal(out, "A=`echo $& __SPEC__ $'x'` B=94")
 })
 
+test("render: a validation list the template's String.raw literal cannot hold is refused, naming the line, not rendered into a workflow.js that dies on load", () => {
+  const template = readFileSync(templatePath(), 'utf8')
+  const BS = '\\'
+  for (const [list, why] of [['npm test\necho `date`\n', /line 2 holds a backtick: "echo `date`"/], ['npm test -- ${{ matrix.x }}\n', /line 1 holds \$\{/], [`make ${BS}\nnpm test\n`, /line 1 ends in a backslash/], [`npm test ${BS}`, /line 1 ends in a backslash/]]) {
+    assert.throws(() => renderTemplate(template, { ...VALUES, RUNNER: 'session', VALIDATION: list }), (e) => /the validation list cannot be armed/.test(e.message) && why.test(e.message), list)
+  }
+  assert.doesNotThrow(() => renderTemplate(template, { ...VALUES, RUNNER: 'session', VALIDATION: `# a ${BS} in the middle is held\nnpm test -- a${BS}b $HOME\n` }))
+})
+
 test('form keys: arrows, Enter, Tab, Esc and Ctrl+C from raw input', () => {
   assert.deepEqual(keysOf('\x1b[A\x1b[B\x1b[C\x1b[D\r\t\x1b[Z'), ['up', 'down', 'right', 'left', 'enter', 'down', 'up'])
   assert.deepEqual(keysOf('\x1b'), ['cancel'])
@@ -220,6 +229,29 @@ test('crew start at a terminal: cancelling the draft writes nothing and arms not
   await assert.rejects(w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r']), stdout: fakeStdout(), orchestrate: failing }), (e) => e.code === 1 && /the orchestrator gave no valid answer to validation-list: its session settled failed; no validation list written, nothing armed/.test(e.message))
   assert.equal(w.launches.length, 0)
   assert.ok(!existsSync(join(w.notesDir, 'validation.md')))
+  assert.ok(!existsSync(join(w.notesDir, 'workflow.js')))
+})
+
+test("crew start at a terminal: a draft edited to hold a backtick is not confirmed; the step stays, says why, and confirms once it is gone", async () => {
+  const w = world({ validation: null })
+  await w.ready
+  const out = fakeStdout()
+  const one = () => ({ ask: async () => ({ checks: [{ command: 'npm test', source: 'package.json' }] }) })
+  const keys = ['\r', '\r', '\r', '\r', '\r', '\x1b[B', '\x1b[F', ' `x`', '\x13', '\b', '\b', '\b', '\b', '\x13']
+  const armed = await w.start(['94'], { tty: true, stdin: new FakeStdin(keys), stdout: out, orchestrate: one })
+  const refused = out.text.split('\x1b[2J\x1b[H').map(strip).find((screen) => screen.includes('Not confirmed'))
+  assert.ok(refused, out.text)
+  assert.match(refused, /Not confirmed: the list's line 2 holds a backtick: "npm test `x`"/)
+  assert.equal(readFileSync(join(w.notesDir, 'validation.md'), 'utf8'), '# package.json\nnpm test\n')
+  assert.equal(armed.target.validation, '# package.json\nnpm test\n')
+  assert.equal(w.launches.length, 1)
+})
+
+test('crew start: a hand-written validation.md the workflow cannot hold is refused at arming, naming the file and line; nothing armed', async () => {
+  const w = world({ validation: 'npm test\nnpm run e2e -- --shard ${{ matrix.shard }}\n' })
+  await w.ready
+  await assert.rejects(w.start(['94', ...FLAGS]), (e) => e.code === 1 && e.message.includes(join(w.notesDir, 'validation.md')) && /line 2 holds \$\{/.test(e.message) && /nothing armed/.test(e.message))
+  assert.equal(w.launches.length, 0)
   assert.ok(!existsSync(join(w.notesDir, 'workflow.js')))
 })
 
