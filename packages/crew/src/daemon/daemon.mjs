@@ -7,8 +7,10 @@
 //   hello                                  → { pid, version, endpoint }
 //   stop { force }                         → refused, naming them, while runs are
 //     live, unless force
-//   session.spawn { command, cwd, env, cols, rows, title } → { session }: its
-//     program gets its session's id as CREW_SESSION
+//   session.spawn { command, cwd, env, cols, rows, title, runDir } → { session }:
+//     its program gets its session's id as CREW_SESSION. With runDir it is that
+//     run's runner, refused run_live while the run has one: a runner session
+//     still running, or one this daemon is starting for it itself (recovery)
 //   session.list                           → { sessions }
 //   session.screen { id }                  → { screen: { lines, cursor, alternate } }
 //   session.write { id, data, paste }      → { session }: data typed as keys,
@@ -27,10 +29,12 @@
 //
 // Started after a daemon that died with runs live (a crash, a kill, a reboot,
 // a forced stop), it starts each such run's runner again, resuming the run
-// (#104): the runner continues every session lost with the old daemon.
+// (#104): the runner continues every session lost with the old daemon. Such a
+// run is claimed before the daemon answers anyone, so a run view's R that
+// started this daemon cannot give the run a second runner.
 import net from 'net'
 import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync } from 'fs'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { StringDecoder } from 'string_decoder'
 import { fileURLToPath } from 'url'
 import { connect, crewPaths, lineDecoder, noDaemon, send } from './transport.mjs'
@@ -93,6 +97,9 @@ const pidIn = (runDir) => {
   }
 }
 
+// A run dir as one key, however it is spelled.
+const runKey = (dir) => (process.platform === 'win32' ? resolve(dir).toLowerCase() : resolve(dir))
+
 // liveRuns: the runs this daemon is host to that are not over, which stop
 // refuses over (runs.mjs). registry: the run registry, which says which runs
 // are; a lost runner still running after `runnerGoneMs` (a pty's children may
@@ -104,11 +111,25 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
   liveRuns ??= book.liveRuns
   const sockets = new Set()
   let stopping = false
+  // Session id -> the run dir it is the runner of; run dir -> the run recover()
+  // is starting a runner for, claimed until that runner's session holds it.
+  const runnerDirs = new Map()
+  const recovering = new Map()
 
-  function spawnOne({ command, cwd, env, cols, rows, title }) {
+  // A run has one runner at a time.
+  function vacant(runDir) {
+    const key = runKey(runDir)
+    if (recovering.has(key)) throw new Error(`run_live: crew is resuming run ${recovering.get(key)} itself, its runner lost with the last daemon; that runner carries it on`)
+    for (const [id, dir] of runnerDirs) {
+      if (dir === key && sessions.get(id)?.info().alive) throw new Error(`run_live: ${runDir} has its runner already, in crew session ${id}`)
+    }
+  }
+
+  function spawnOne({ command, cwd, env, cols, rows, title, runDir = null }) {
     const id = book.sessionId()
     const session = open({ id, command, cwd: cwd ?? process.cwd(), env: { ...(env ?? process.env), CREW_SESSION: id }, cols, rows, title })
     sessions.set(id, session)
+    if (runDir !== null) runnerDirs.set(id, runKey(runDir))
     book.started(id)
     // A session a stopping daemon ends died with the daemon, as in a crash.
     session.onExit?.(() => stopping || book.ended(id))
@@ -116,8 +137,8 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
     return session
   }
 
-  async function recover() {
-    for (const run of book.recoverable()) {
+  async function recover(runs) {
+    for (const run of runs) {
       const { runId, script, runDir, project, permissionMode } = run
       try {
         if (!script || !runDir || !existsSync(script)) {
@@ -130,11 +151,13 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
           say(`run ${runId}: its runner, pid ${pid}, still runs: not resumed`)
           continue
         }
-        const session = spawnOne({ command: runnerCommand({ script, stateDir: runDir, permissionMode }), cwd: project ?? undefined, title: runnerTitle(script) })
+        const session = spawnOne({ command: runnerCommand({ script, stateDir: runDir, permissionMode }), cwd: project ?? undefined, title: runnerTitle(script), runDir })
         book.recovered(runId, session.id)
         say(`run ${runId} was live when the last daemon went: its runner resumes it in session ${session.id}`)
       } catch (e) {
         say(`run ${runId}: could not resume it: ${e?.stack ?? e}`)
+      } finally {
+        if (runDir) recovering.delete(runKey(runDir))
       }
     }
   }
@@ -165,9 +188,10 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
       setImmediate(() => shutdown(force ? 'stop --force' : 'stop'))
       return { pid: process.pid }
     },
-    'session.spawn': ({ command, cwd, env, cols, rows, title = null }) => {
+    'session.spawn': ({ command, cwd, env, cols, rows, title = null, runDir = null }) => {
       if (!Array.isArray(command) || !command.length || !command.every((a) => typeof a === 'string')) throw new Error('session.spawn needs a command: a non-empty list of strings')
-      return { session: spawnOne({ command, cwd, env, cols, rows, title: title === null ? null : text(title, 'title') }).info() }
+      if (runDir !== null) vacant(text(runDir, 'run dir'))
+      return { session: spawnOne({ command, cwd, env, cols, rows, title: title === null ? null : text(title, 'title'), runDir }).info() }
     },
     'session.list': () => ({ sessions: [...sessions.values()].map((s) => s.info()) }),
     'session.screen': async ({ id }) => ({ screen: await sessionOf(id).screen() }),
@@ -266,10 +290,14 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
     })
   })
 
+  // Claimed before the first request can be answered: a runner started for one
+  // of these by anyone else meanwhile would be its second.
+  const lost = book.recoverable()
+  for (const { runId, runDir } of lost) if (runDir) recovering.set(runKey(runDir), runId)
   mkdirSync(paths.home, { recursive: true })
   await claim(server, paths.endpoint)
   say(`crew daemon ${VERSION} pid ${process.pid} listening on ${paths.endpoint}`)
-  const recovered = recover().catch((e) => say(`could not resume the runs live when the last daemon went: ${e?.stack ?? e}`))
+  const recovered = recover(lost).catch((e) => say(`could not resume the runs live when the last daemon went: ${e?.stack ?? e}`))
   return { server, sessions, shutdown, recovered }
 }
 

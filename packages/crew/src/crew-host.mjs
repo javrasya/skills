@@ -103,7 +103,8 @@ const TAIL = "const fs=require('fs');const p=process.argv[1];let at=0;const show
 // transcript says its latest turn ended, or, where the transcript does not
 // say, once its terminal has been quiet for `quietMs`. Git calls are bounded
 // at `callMs`, and a worktree's making, its setup hook included, at `createMs`.
-export function crewHost({ paths = crewPaths(), env = process.env, cwd = process.cwd(), project = cwd, harnesses = readCrewConfig(paths).harnesses ?? {}, transcripts = sessionTranscripts({ env }), quietMs = RUNNER_SETTINGS.quietOutputMs, readyMs = 180_000, endMs = 10_000, pollMs = 100, callMs = RUNNER_SETTINGS.hostCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs } = {}) {
+// `start` answers with the daemon, starting it when none does.
+export function crewHost({ paths = crewPaths(), env = process.env, cwd = process.cwd(), project = cwd, harnesses = readCrewConfig(paths).harnesses ?? {}, transcripts = sessionTranscripts({ env }), quietMs = RUNNER_SETTINGS.quietOutputMs, readyMs = 180_000, endMs = 10_000, pollMs = 100, callMs = RUNNER_SETTINGS.hostCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, start = ensureDaemon } = {}) {
   // This adapter's side of the Runs it creates or takes over, as a runner's
   // terminal is on Orca: the daemon fences every other coordinator out.
   const coordinator = `coord_${randomBytes(6).toString('hex')}`
@@ -115,7 +116,7 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
   let daemon = null
   let outage = null
   async function once(message) {
-    daemon ??= ensureDaemon(paths).catch((e) => {
+    daemon ??= start(paths).catch((e) => {
       daemon = null
       throw e
     })
@@ -229,7 +230,7 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     guardWith(o) {
       outage = o
     },
-    probe: () => ensureDaemon(paths),
+    probe: () => start(paths),
 
     // Crew makes the run id; the Run is bound to this adapter from then on.
     async runCreate({ objective }) {
@@ -358,7 +359,8 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     },
     async resumeRunner({ worktree, title, runner, script, stateDir, permissionMode = null }) {
       const command = runnerCommand({ runner, script, stateDir, permissionMode })
-      const { session } = await call({ op: 'session.spawn', command, cwd: worktree, env: sessionEnv, title })
+      // Refused run_live while the run has a runner, crew's own resuming it included.
+      const { session } = await call({ op: 'session.spawn', command, cwd: worktree, env: sessionEnv, title, runDir: stateDir })
       return { terminal: session.id, command: command.join(' ') }
     },
 

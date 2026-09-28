@@ -15,6 +15,8 @@ import { daemonHello, request, stopDaemon } from '../src/daemon/client.mjs'
 import { startDaemon } from '../src/daemon/daemon.mjs'
 import { resolveCommand } from '../src/daemon/session.mjs'
 import { runRegistry } from '../src/registry.mjs'
+import { crewHost } from '../src/crew-host.mjs'
+import { runsView } from '../src/run-view-model.mjs'
 
 const CREW = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url))
 const homes = []
@@ -305,5 +307,104 @@ test('daemon: one that died with a run live is followed by one that starts its r
     assert.equal((await request(paths, { op: 'session.list' })).sessions.length, 1)
   } finally {
     third.shutdown('test over')
+  }
+})
+
+// The run list asks nothing of crew until R: with the daemon down, its R is the
+// call that starts the daemon, whose recovery starts the run's runner. The run
+// still gets one runner, and R tells why it started none.
+test('daemon: R on a run whose runner died with the daemon, starting the daemon, leaves the run one runner, the recovered one', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const registry = join(dir, 'orca-runs.jsonl')
+  const project = join(dir, 'project')
+  const runDir = join(project, 'orca-run')
+  mkdirSync(runDir, { recursive: true })
+  const script = join(project, 'workflow.js')
+  writeFileSync(script, 'return 1\n')
+  // Its runner died with the daemon: runner.pid names a process gone.
+  writeFileSync(join(runDir, 'runner.pid'), String(spawnSync(process.execPath, ['-e', '0']).pid))
+  const spawnSession = fakeSession
+  const exits = []
+  await startDaemon({ paths, registry, spawnSession, exit: () => exits.push(1), log: () => {} })
+  const { session: first } = await request(paths, { op: 'session.spawn', command: ['node', 'runner.mjs'], cwd: project, runDir })
+  const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c1', runner: first.id })
+  runRegistry(registry).armed({ runId: run.id, project, runDir, spec: 'the-spec', script })
+  await request(paths, { op: 'stop', force: true })
+  await until('the first daemon to stop', () => exits.length === 1)
+
+  let second = null
+  const start = async () => {
+    second ??= await startDaemon({ paths, registry, spawnSession, exit: () => {}, log: () => {} })
+    return { started: true }
+  }
+  const view = () => runsView({ host: crewHost({ paths, cwd: project, harnesses: {}, start }), registry, clock: { now: () => Date.parse('2026-01-01T00:00:00Z') }, transcripts: { usage: () => null }, unpushed: () => 0, runner: 'runner.mjs' })
+  const runs = view()
+  try {
+    await runs.refresh()
+    assert.equal(runs.model.rows.find((r) => r.kind === 'run').run.alive, false, 'its runner looks dead to the list')
+    const refused = await runs.resume(run.id)
+    assert.ok(second, 'R started the daemon')
+    await second.recovered
+    const runners = async () => (await request(paths, { op: 'session.list' })).sessions.filter((s) => s.alive && s.command.includes('--resume'))
+    const [recovered, ...more] = await runners()
+    assert.deepEqual(more, [], 'one runner for the run')
+    assert.equal(recovered.title, 'crew run workflow.js', "crew's own, recovering it")
+    assert.match(refused.message, new RegExp(`could not resume the-spec .*: run_live: .* has its runner already, in crew session ${recovered.id}`))
+    assert.equal(refused.resumed, undefined)
+    // The recovered runner has not written its runner.pid yet: R still starts none.
+    assert.match((await runs.resume(run.id)).message, new RegExp(`run_live: .* has its runner already, in crew session ${recovered.id}`))
+    assert.equal((await runners()).length, 1)
+    // Once it ends, R starts the run's runner, and the next R, from another list, none.
+    await request(paths, { op: 'session.kill', id: recovered.id })
+    const resumed = await runs.resume(run.id)
+    assert.ok(resumed.resumed, resumed.message)
+    const other = view()
+    await other.refresh()
+    assert.match((await other.resume(run.id)).message, new RegExp(`has its runner already, in crew session ${resumed.resumed}`))
+    assert.deepEqual((await runners()).map((s) => s.id), [resumed.resumed])
+  } finally {
+    second?.shutdown('test over')
+  }
+})
+
+// While recovery waits out the old runner, the run is claimed from before the
+// daemon answers anyone: a runner started for it then is refused.
+test('daemon: a run it is recovering takes no other runner while its old runner trails', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const registry = join(dir, 'orca-runs.jsonl')
+  const project = join(dir, 'project')
+  const runDir = join(project, 'orca-run')
+  mkdirSync(runDir, { recursive: true })
+  const script = join(project, 'workflow.js')
+  writeFileSync(script, 'return 1\n')
+  const exits = []
+  await startDaemon({ paths, registry, spawnSession: fakeSession, exit: () => exits.push(1), log: () => {} })
+  const { session: first } = await request(paths, { op: 'session.spawn', command: ['node', 'runner.mjs'], cwd: project, runDir })
+  const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c1', runner: first.id })
+  runRegistry(registry).armed({ runId: run.id, project, runDir, spec: 'the-spec', script })
+  await request(paths, { op: 'stop', force: true })
+  await until('the first daemon to stop', () => exits.length === 1)
+  // The old runner outlives its session a moment.
+  const trailing = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+  writeFileSync(join(runDir, 'runner.pid'), String(trailing.pid))
+  const second = await startDaemon({ paths, registry, spawnSession: fakeSession, exit: () => {}, log: () => {}, runnerGoneMs: 30_000 })
+  try {
+    const again = { op: 'session.spawn', command: ['node', 'runner.mjs', '--resume'], cwd: project, runDir: join(project, '.', 'orca-run') }
+    await assert.rejects(request(paths, again), new RegExp(`run_live: crew is resuming run ${run.id} itself`))
+    assert.deepEqual((await request(paths, { op: 'session.list' })).sessions, [])
+    trailing.kill()
+    await second.recovered
+    const { sessions } = await request(paths, { op: 'session.list' })
+    assert.equal(sessions.length, 1)
+    await assert.rejects(request(paths, again), new RegExp(`has its runner already, in crew session ${sessions[0].id}`))
+    // A session with no run dir is no runner, and is never refused as one.
+    assert.ok((await request(paths, { op: 'session.spawn', command: ['node', 'runner.mjs', '--resume'], cwd: project })).session)
+  } finally {
+    trailing.kill()
+    second.shutdown('test over')
   }
 })
