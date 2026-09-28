@@ -1,6 +1,11 @@
 // Crew's own config: ~/.crew/config.json (crewPaths().config), every key optional.
-//   { "backKey": "f12" }   the key that leaves an entered session for the list
+//   "backKey": "f12"       the key that leaves an entered session for the list
+//   "repos": { "<repo path>": { "setup": "<script>" } }
+//                          per repo, by its main checkout's path, never in the
+//                          repo: `setup` is the hook run in each worktree crew
+//                          makes of it (crew-host.mjs), relative to the repo
 import { readFileSync } from 'fs'
+import { isAbsolute, resolve } from 'path'
 
 export const DEFAULTS = Object.freeze({ backKey: 'f12' })
 
@@ -55,8 +60,35 @@ export function readCrewConfig(paths) {
   const merged = { ...DEFAULTS, ...config }
   try {
     backKeySequences(merged.backKey)
+    reposOf(merged.repos)
   } catch (e) {
     throw new Error(`${paths.config}: ${e.message}`)
   }
   return merged
+}
+
+const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
+
+function reposOf(repos = {}) {
+  if (!isObject(repos)) throw new Error('repos: not an object of repo paths')
+  for (const [repo, c] of Object.entries(repos)) {
+    if (!isObject(c)) throw new Error(`repos[${JSON.stringify(repo)}]: not an object`)
+    if (c.setup !== undefined && (typeof c.setup !== 'string' || !c.setup)) throw new Error(`repos[${JSON.stringify(repo)}].setup: not a script path`)
+  }
+  return repos
+}
+
+// One path however it is spelled: Windows paths match whatever their case and slashes.
+export const samePath = (a, b, platform = process.platform) => {
+  const norm = (p) => resolve(p).replace(/[\\/]+$/, '')
+  return platform === 'win32' ? norm(a).replace(/\\/g, '/').toLowerCase() === norm(b).replace(/\\/g, '/').toLowerCase() : norm(a) === norm(b)
+}
+
+// The repo's own config, {} when crew has none for it; `setup`, when named,
+// made absolute against the repo.
+export function repoConfig(paths, repo) {
+  const repos = readCrewConfig(paths).repos ?? {}
+  const key = Object.keys(repos).find((k) => samePath(k, repo))
+  const c = key ? repos[key] : {}
+  return { ...c, ...(c.setup && { setup: isAbsolute(c.setup) ? c.setup : resolve(repo, c.setup) }) }
 }

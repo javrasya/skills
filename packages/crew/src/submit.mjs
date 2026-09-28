@@ -6,7 +6,7 @@
 import { readFileSync, writeFileSync, renameSync, realpathSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { validate } from './schema.mjs'
-import { openHost } from './hosts.mjs'
+import { openHost, workerHost } from './hosts.mjs'
 
 export const USAGE =
   'usage: node submit.mjs --result <file> --payload <file> [--schema <file>] --from <worker_handle> --dispatch-capability <capability> --task-id <task_id> --dispatch-id <dispatch_id>'
@@ -93,7 +93,7 @@ export async function submit(argv, { host, stdout = (s) => process.stdout.write(
   renameSync(a.result + '.tmp', a.result)
 
   try {
-    await (host ?? await openHost()).workerDone({
+    await (host ?? await openHost(workerHost())).workerDone({
       from: a.from,
       capability: a.capability,
       taskId: a.taskId,
@@ -103,7 +103,7 @@ export async function submit(argv, { host, stdout = (s) => process.stdout.write(
     })
   } catch (e) {
     stderr(`submit: the result is recorded at ${a.result}, but worker_done failed: ${e.message}`)
-    stderr('Check the IDs against your Orca preamble and run submit again.')
+    stderr('Check the IDs against your preamble and run submit again.')
     return 3
   }
   stdout(`submit accepted: result recorded at ${a.result}; worker_done sent. Stop here and idle.`)

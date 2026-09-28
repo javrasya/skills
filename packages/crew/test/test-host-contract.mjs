@@ -5,29 +5,42 @@
 // adapter it also covers the daemon's client protocol, which that adapter is
 // the only client of. A scenario is { name, run(h) }, h being what a host's
 // open() gives: { host, stopped(w), dead(w), title(w) }, `w` a started
-// worker; one that needs more of a host adds it to both HOSTS. Words in a
+// worker; one that needs more of a host adds it to both HOSTS: ids(w), the
+// IDs a worker's preamble gave it; send(ids, message) and submit(ids, files),
+// a worker's own `orchestration send` and submit (on crew the real agent-side
+// commands, run with no Orca there); other(), the same host as another
+// coordinator; status(path) and removed(path), what it holds of a worktree.
+// Every worker starts into a run the host made (runOf). Words in a
 // prompt script the worker's turn, as fake-harness.mjs reads them ([turn
 // <ms>], [spin <ms>], [draw], [unrecorded], [die]); the fake host's workers
 // play them too.
 //   node packages/crew/test/test-host-contract.mjs
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { dirname, join, resolve } from 'path'
 import { randomUUID } from 'crypto'
+import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { fakeOrca } from '../src/fake-orca.mjs'
-import { crewHost } from '../src/crew-host.mjs'
-import { SESSION_METHODS } from '../src/session-host.mjs'
+import { crewHost, crewWorktrees } from '../src/crew-host.mjs'
+import { repoConfig } from '../src/crew-config.mjs'
+import { RUN_METHODS, SESSION_METHODS } from '../src/session-host.mjs'
+import { openHost } from '../src/hosts.mjs'
 import { launchCommand, resumeCommand } from '../src/harness.mjs'
 import { RUNNER_SETTINGS } from '../src/settings.mjs'
-import { sessionTranscripts } from '../src/transcript.mjs'
+import { sessionTranscripts, transcriptPath } from '../src/transcript.mjs'
+import { worktreeName } from '../src/git.mjs'
+import { submit } from '../src/submit.mjs'
+import { SUBMIT } from '../src/lifecycle.mjs'
 import { crewPaths } from '../src/daemon/transport.mjs'
 import { request, stopDaemon } from '../src/daemon/client.mjs'
 
 const FAKE_HARNESS = fileURLToPath(new URL('./fixtures/crew/fake-harness.mjs', import.meta.url))
-const RUN = 'run_contract'
+const CREW_BIN = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url))
+// What a setup hook leaves in a new worktree, on both hosts.
+const SETUP_LEAVES = ['?? setup.out']
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
 async function eventually(what, check, ms = 15_000) {
@@ -40,7 +53,9 @@ async function eventually(what, check, ms = 15_000) {
   }
 }
 
-// One scratch crew home and daemon for every crew scenario.
+// One scratch crew home and daemon for every crew scenario. The run's
+// worktree is a git repo whose per-repo config in that home names a setup
+// hook, which writes setup.out, or fails when its environment says so.
 const homes = []
 after(async () => {
   for (const paths of homes) await stopDaemon(paths, { force: true }).catch(() => {})
@@ -54,9 +69,21 @@ function crewScratch() {
   homes.push(paths)
   const cwd = join(root, 'worktree')
   mkdirSync(cwd)
-  crew = { root, env, paths, cwd }
+  const git = (...args) => assert.equal(spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).status, 0, `git ${args.join(' ')}`)
+  git('init', '-q')
+  writeFileSync(join(cwd, 'README.md'), 'contract\n')
+  git('add', 'README.md')
+  git('-c', 'user.name=contract', '-c', 'user.email=contract@example.com', 'commit', '-q', '-m', 'init')
+  const hook = join(root, 'setup-hook.mjs')
+  writeFileSync(hook, "import { writeFileSync } from 'fs'\nif (process.env.FAIL_SETUP) { console.error('setup refused'); process.exit(4) }\nwriteFileSync('setup.out', `${process.env.CREW_REPO}\\n${process.env.CREW_WORKTREE}\\n`)\n")
+  mkdirSync(paths.home, { recursive: true })
+  writeFileSync(paths.config, JSON.stringify({ repos: { [cwd]: { setup: hook } } }))
+  // The agent-side commands' environment: crew's, with any Orca out of reach.
+  const agentEnv = { ...env, CREW_HOST: 'crew', CREW_HOME: paths.home, ORCA_BIN: join(root, 'no-such-orca') }
+  crew = { root, env, paths, cwd, agentEnv }
   return crew
 }
+const scratchDir = () => mkdtempSync(join(crewScratch().root, 'files-'))
 const harnessAs = (argv) => ({ claude: argv, pi: argv })
 
 // A fake-host worker's turn, as the fake harness plays it: busy for the turn,
@@ -78,32 +105,81 @@ async function fakeWorker({ prompt, state }) {
   await fakeTurn(prompt, state)
 }
 
+// A worker's submit files: a payload valid against its schema.
+function submitFiles() {
+  const dir = scratchDir()
+  const files = { schema: join(dir, 'schema.json'), payload: join(dir, 'payload.json'), result: join(dir, 'result.json') }
+  writeFileSync(files.schema, JSON.stringify({ type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } }))
+  writeFileSync(files.payload, JSON.stringify({ ok: true }))
+  return files
+}
+const submitArgs = (ids, f) => ['--schema', f.schema, '--result', f.result, '--payload', f.payload, '--from', ids.from, '--dispatch-capability', ids.capability, '--task-id', ids.taskId, '--dispatch-id', ids.dispatchId]
+const sendArgs = (ids, m) => ['--from', ids.from, '--dispatch-capability', ids.capability, '--task-id', ids.taskId, '--dispatch-id', ids.dispatchId, '--type', m.type, '--subject', m.subject, '--body', m.body, ...(m.outcome ? ['--outcome', m.outcome] : [])]
+
 const HOSTS = [
   {
     name: 'fake',
     open() {
-      const orca = fakeOrca({ worker: fakeWorker })
+      const orca = fakeOrca({ worker: fakeWorker, setupLeaves: SETUP_LEAVES })
       const d = (w) => orca.dispatches.get(w.dispatchId)
-      return { host: orca, stopped: async (w) => d(w)?.stopped === true, dead: async (w) => d(w)?.exited === true, title: async (w) => d(w)?.tabTitle }
+      return {
+        host: orca, stopped: async (w) => d(w)?.stopped === true, dead: async (w) => d(w)?.exited === true, title: async (w) => d(w)?.tabTitle,
+        ids: async (w) => ({ from: d(w).handle, capability: d(w).capability, taskId: d(w).taskId, dispatchId: d(w).dispatchId }),
+        send: (ids, m) => orca.mailSend({ ...ids, ...m }),
+        submit: (ids, f) => submit(submitArgs(ids, f), { host: orca, stdout: () => {}, stderr: () => {} }),
+        other: () => orca.as('term_other'),
+        status: async (path) => orca.worktrees.get(path)?.status ?? null,
+        removed: async (path) => orca.worktrees.get(path)?.removed === true,
+      }
     },
   },
   {
     name: 'crew',
-    open({ harness = [process.execPath, FAKE_HARNESS] } = {}) {
-      const { env, paths, cwd } = crewScratch()
-      const host = crewHost({ paths, env, cwd, harnesses: harnessAs(harness), quietMs: 300, readyMs: 20_000 })
+    open({ harness = [process.execPath, FAKE_HARNESS], env: extra = {} } = {}) {
+      const { env, paths, cwd, agentEnv } = crewScratch()
+      const make = () => crewHost({ paths, env: { ...env, ...extra }, cwd, harnesses: harnessAs(harness), quietMs: 300, readyMs: 20_000 })
       const info = async (w) => (await request(paths, { op: 'session.list' })).sessions.find((s) => s.id === w.terminal)
       const ended = async (w) => (await info(w))?.alive === false
-      return { host, paths, stopped: ended, dead: ended, title: async (w) => (await info(w))?.title, info }
+      // As the worker reads them: from its preamble, in its session's transcript.
+      const ids = async (w) => {
+        const text = await eventually('the preamble in the transcript', () => {
+          const path = transcriptPath({ harness: 'claude', sessionId: w.sessionId, worktree: w.worktree, env })
+          return path && existsSync(path) && /--dispatch-id/.test(readFileSync(path, 'utf8')) && readFileSync(path, 'utf8')
+        })
+        const [, from, capability, taskId, dispatchId] = /--from ([\w-]+) --dispatch-capability ([\w-]+) --task-id ([\w-]+) --dispatch-id ([\w-]+)/.exec(text)
+        return { from, capability, taskId, dispatchId }
+      }
+      const run = (args) => spawnSync(process.execPath, args, { encoding: 'utf8', env: agentEnv })
+      return {
+        host: make(), paths, stopped: ended, dead: ended, title: async (w) => (await info(w))?.title, info, ids,
+        async send(ids, m) {
+          const r = run([CREW_BIN, 'orchestration', 'send', ...sendArgs(ids, m)])
+          if (r.status !== 0) throw new Error(r.stderr)
+          return { id: /(msg_\S+)/.exec(r.stdout)[1] }
+        },
+        submit: async (ids, f) => run([SUBMIT, ...submitArgs(ids, f)]).status,
+        other: make,
+        status: async (path) => (await request(paths, { op: 'worktree.statuses' })).statuses[resolve(path)] ?? null,
+        removed: async (path) => !existsSync(path),
+      }
     },
   },
 ]
 
+// The run every worker of `h` starts into, made by the host the first time.
+const runOf = async (h) => (h.runId ??= (await h.host.runCreate({ objective: 'host contract' })).runId)
+const shown = async (h, w) => {
+  const { settled, outcome, gone, exited, terminal } = await h.host.workerShow({ dispatch: w.dispatchId })
+  return { settled, outcome, gone, exited, terminal }
+}
+const child = (name, extra = {}) => ({ name, displayName: name, retry: false, dispatched: false, baseline: null, ...extra })
+
 async function start(h, title, launch = {}) {
   const sessionId = randomUUID()
   const { prompt = `Contract prompt for ${title}.`, ...rest } = launch
-  const w = await h.host.workerStart({ run: RUN, prompt, title, harness: 'claude', sessionId, ...rest })
-  return { ...w, sessionId, prompt }
+  const run = await runOf(h)
+  const w = await h.host.workerStart({ run, prompt, title, harness: 'claude', sessionId, ...rest })
+  return { ...w, run, sessionId, prompt }
 }
 const delivered = (h, w, needle) => h.host.promptDelivered({ harness: 'claude', sessionId: w.sessionId, worktree: w.worktree, needle })
 const idle = (h, w, timeoutMs = 0) => h.host.terminalIdle({ terminal: w.terminal, timeoutMs })
@@ -112,7 +188,7 @@ const PAST_QUIET = 800
 async function died(h, title) {
   const w = await start(h, title, { prompt: `Contract prompt for ${title}. [die]` })
   await eventually('the harness dead', () => h.dead(w))
-  const next = await h.host.workerContinue({ run: RUN, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: 'Carry on from where you stopped.', harness: 'claude', sessionId: w.sessionId, reopen: false })
+  const next = await h.host.workerContinue({ run: w.run, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: 'Carry on from where you stopped.', harness: 'claude', sessionId: w.sessionId, reopen: false })
   return { w, next: { ...next, sessionId: w.sessionId } }
 }
 
@@ -126,7 +202,7 @@ export const SCENARIOS = [
       assert.ok(Array.isArray(w.warnings))
       assert.ok((await h.host.terminalList()).includes(w.terminal))
       await eventually('the prompt in the session', () => delivered(h, w, w.prompt))
-      await assert.rejects(h.host.workerStart({ run: RUN, prompt: 'x', title: 'no session id', harness: 'claude' }), /session id/)
+      await assert.rejects(h.host.workerStart({ run: w.run, prompt: 'x', title: 'no session id', harness: 'claude' }), /session id/)
     },
   },
   {
@@ -221,12 +297,121 @@ export const SCENARIOS = [
       await assert.rejects(h.host.terminalRename({ terminal: 'no-such-terminal', title: 'x' }))
     },
   },
+  {
+    name: 'run: the host makes the run id; a take-over binds the run and its unacknowledged mail to the new coordinator and fences the old',
+    async run(h) {
+      const run = await runOf(h)
+      assert.equal(typeof run, 'string')
+      const w = await start(h, 'run')
+      assert.equal(w.run, run)
+      const ids = await h.ids(w)
+      await h.send(ids, { type: 'handoff', subject: 'note', body: 'before the take-over' })
+      const batch = await h.host.mailCheck()
+      const other = h.other()
+      assert.equal((await other.runUse({ runId: run })).runId, run)
+      const taken = await other.mailCheck()
+      assert.deepEqual(taken.messages.map((m) => m.id), batch.messages.map((m) => m.id))
+      assert.equal((await h.host.mailCheck()).deliveryId, null, 'the old coordinator reads no run')
+      await assert.rejects(start(h, 'fenced'), /consumer_fenced/)
+      await assert.rejects(other.runUse({ runId: 'run_nosuch' }), /run_not_found/)
+    },
+  },
+  {
+    name: 'worker show and submit: live until submit\'s worker_done settles it succeeded, which the mailbox then holds; submit with IDs not its own fails',
+    async run(h) {
+      const w = await start(h, 'show')
+      assert.deepEqual(await shown(h, w), { settled: false, outcome: null, gone: false, exited: false, terminal: w.terminal })
+      const ids = await h.ids(w)
+      const files = submitFiles()
+      assert.equal(await h.submit({ ...ids, taskId: 'task_not_its_own' }, files), 3)
+      assert.equal((await shown(h, w)).settled, false)
+      assert.equal(await h.submit(ids, files), 0)
+      assert.deepEqual(JSON.parse(readFileSync(files.result, 'utf8')), { ok: true })
+      assert.deepEqual(await shown(h, w), { settled: true, outcome: 'succeeded', gone: false, exited: false, terminal: w.terminal })
+      const { messages } = await h.host.mailCheck()
+      const done = messages.filter((m) => m.type === 'worker_done')
+      assert.equal(done.length, 1)
+      assert.equal(done[0].dispatchId, w.dispatchId)
+      assert.equal(done[0].taskId, ids.taskId)
+      assert.equal(done[0].outcome, 'succeeded')
+    },
+  },
+  {
+    name: 'worker show: a stopped worker is settled cancelled, a dead harness has exited unsettled, and a closed terminal is gone unsettled',
+    async run(h) {
+      const stopped = await start(h, 'show stopped')
+      await h.host.workerStop({ dispatch: stopped.dispatchId })
+      await eventually('the worker stopped', () => h.stopped(stopped))
+      const s0 = await shown(h, stopped)
+      assert.deepEqual([s0.settled, s0.outcome, s0.gone], [true, 'cancelled', false])
+      const dead = await start(h, 'show dead', { prompt: 'Contract prompt for show dead. [die]' })
+      await eventually('the harness dead', () => h.dead(dead))
+      assert.deepEqual(await shown(h, dead), { settled: false, outcome: null, gone: false, exited: true, terminal: dead.terminal })
+      const closed = await start(h, 'show closed')
+      await h.host.terminalClose({ terminal: closed.terminal })
+      const s = await shown(h, closed)
+      assert.equal(s.gone, true)
+      assert.equal(s.settled, false)
+      await assert.rejects(h.host.workerShow({ dispatch: 'no-such-dispatch' }), /dispatch_not_found/)
+    },
+  },
+  {
+    name: 'mailbox: a worker\'s handoff and escalation wait in order until checked; a batch comes back replayed until acknowledged, and the ack answers the next',
+    async run(h) {
+      const w = await start(h, 'mail')
+      const ids = await h.ids(w)
+      assert.equal((await h.host.mailCheck()).deliveryId, null)
+      await h.send(ids, { type: 'handoff', subject: 'note', body: 'the note' })
+      await h.send(ids, { type: 'escalation', subject: 'Blocked: login', body: 'log in to the registry' })
+      const first = await h.host.mailCheck()
+      assert.equal(typeof first.deliveryId, 'string')
+      assert.equal(first.replayed, false)
+      assert.deepEqual(first.messages.map((m) => [m.type, m.subject, m.body, m.dispatchId, m.taskId, m.outcome]), [
+        ['handoff', 'note', 'the note', w.dispatchId, ids.taskId, null],
+        ['escalation', 'Blocked: login', 'log in to the registry', w.dispatchId, ids.taskId, null],
+      ])
+      const again = await h.host.mailCheck()
+      assert.equal(again.deliveryId, first.deliveryId)
+      assert.equal(again.replayed, true)
+      assert.deepEqual(again.messages.map((m) => m.id), first.messages.map((m) => m.id))
+      await h.send(ids, { type: 'worker_done', subject: 'gave up', body: 'nothing to be done', outcome: 'failed' })
+      const next = await h.host.mailCheck({ ack: first.deliveryId })
+      assert.equal(next.acknowledged, first.deliveryId)
+      assert.notEqual(next.deliveryId, first.deliveryId)
+      assert.deepEqual(next.messages.map((m) => [m.type, m.outcome]), [['worker_done', 'failed']])
+      assert.deepEqual(await shown(h, w), { settled: true, outcome: 'failed', gone: false, exited: false, terminal: w.terminal })
+      await assert.rejects(h.host.mailCheck({ ack: 'delivery_nosuch' }), /stale_delivery/)
+      const last = await h.host.mailCheck({ ack: next.deliveryId })
+      assert.equal(last.deliveryId, null)
+      assert.deepEqual(last.messages, [])
+      await assert.rejects(h.send({ ...ids, taskId: 'task_not_its_own' }, { type: 'handoff', subject: 'note', body: 'x' }), /consumer_fenced/)
+    },
+  },
+  {
+    name: 'child worktree: named <runId>-<n>, its setup hook\'s output in its baseline and none with skip; its status set, and removed with its terminal',
+    async run(h) {
+      const run = await runOf(h)
+      const baselines = []
+      const w = await start(h, 'child', { prompt: (b) => `Contract prompt for child, baseline ${JSON.stringify(b)}.`, child: child(`${run}-1`, { onBaseline: (b) => baselines.push(b) }) })
+      assert.equal(worktreeName(w.worktree), `${run}-1`)
+      assert.deepEqual(baselines, [{ worktree: w.worktree, lines: SETUP_LEAVES }])
+      const skipped = await start(h, 'doctor', { child: child(`${run}-2`, { setup: 'skip', onBaseline: (b) => baselines.push(b) }) })
+      assert.deepEqual(baselines.at(-1), { worktree: skipped.worktree, lines: [] })
+      await h.host.worktreeStatus({ worktree: w.worktree, status: 'in-progress' })
+      assert.equal(await h.status(w.worktree), 'in-progress')
+      await assert.rejects(h.host.worktreeStatus({ worktree: join(dirname(w.worktree), 'nope'), status: 'todo' }), /selector_not_found/)
+      await h.host.worktreeRemove({ path: w.worktree })
+      assert.equal(await h.removed(w.worktree), true)
+      assert.ok(!(await h.host.terminalList()).includes(w.terminal), 'its terminal went with it')
+      await assert.rejects(h.host.worktreeRemove({ path: w.worktree }), /selector_not_found/)
+    },
+  },
 ]
 
 for (const kind of HOSTS) {
-  test(`${kind.name} host: has every session-level method`, () => {
+  test(`${kind.name} host: has every session-level method, and every run, worker and mailbox one`, () => {
     const { host } = kind.open()
-    assert.deepEqual(SESSION_METHODS.filter((m) => typeof host[m] !== 'function'), [])
+    assert.deepEqual([...SESSION_METHODS, ...RUN_METHODS].filter((m) => typeof host[m] !== 'function'), [])
   })
   for (const scenario of SCENARIOS) test(`${kind.name} host: ${scenario.name}`, () => scenario.run(kind.open()))
 }
@@ -246,13 +431,13 @@ test('crew host: the harness starts from the runner\'s launch line word for word
   assert.equal(s.title, 'launch line')
 })
 
-test('crew host: the fake harness is a TUI on the alternate screen that echoes each prompt', async () => {
+test('crew host: the fake harness is a TUI on the alternate screen that echoes each prompt, crew\'s preamble first', async () => {
   const h = crewKind.open()
   const w = await start(h, 'tui')
   await eventually('the start prompt', () => delivered(h, w, w.prompt))
   const screen = await eventually('the echo', async () => {
     const s = (await request(h.paths, { op: 'session.screen', id: w.terminal })).screen
-    return s.lines.some((l) => l.includes(`echo: ${w.prompt}`)) && s
+    return s.lines.some((l) => l.startsWith('echo: === Your Orca preamble, from crew ===')) && s
   })
   assert.equal(screen.alternate, true)
   assert.ok(screen.lines.some((l) => l.startsWith(`> ${w.prompt}`)))
@@ -311,7 +496,7 @@ test('crew host: a harness still in its turn is ended before its session is cont
   const h = crewKind.open()
   const w = await start(h, 'stalled', { prompt: 'Contract prompt for stalled. [turn 600000]' })
   await eventually('the prompt in the session', () => delivered(h, w, w.prompt))
-  const next = await h.host.workerContinue({ run: RUN, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title: 'stalled', prompt: 'Carry on, stalled.', harness: 'claude', sessionId: w.sessionId })
+  const next = await h.host.workerContinue({ run: w.run, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title: 'stalled', prompt: 'Carry on, stalled.', harness: 'claude', sessionId: w.sessionId })
   await eventually('the continue prompt in the session', () => delivered(h, { ...next, sessionId: w.sessionId }, 'Carry on, stalled.'))
   assert.deepEqual((await h.host.terminalList()).filter((t) => t === w.terminal || t === next.terminal), [next.terminal])
 })
@@ -325,6 +510,65 @@ test('crew host: an ended harness is idle, and a session the daemon does not hol
   await eventually('the worker stopped', () => h.stopped(w))
   assert.equal(await idle(h, w), true)
   await assert.rejects(h.host.terminalIdle({ terminal: 'no-such-terminal' }), /no crew session/)
+})
+
+test('crew host: a child worktree is at <repo-parent>/<repo>.crew/<runId>-<n>, on a branch of that name, set up by the repo\'s hook after it is made', async () => {
+  const h = crewKind.open()
+  const { cwd, root } = crewScratch()
+  const run = await runOf(h)
+  const w = await start(h, 'layout', { child: child(`${run}-1`) })
+  assert.equal(w.worktree, join(root, 'worktree.crew', `${run}-1`))
+  assert.equal(crewWorktrees(cwd), join(root, 'worktree.crew'))
+  assert.equal((await h.info(w)).cwd, w.worktree)
+  assert.equal(spawnSync('git', ['-C', w.worktree, 'branch', '--show-current'], { encoding: 'utf8' }).stdout.trim(), `${run}-1`)
+  const [repo, worktree] = readFileSync(join(w.worktree, 'setup.out'), 'utf8').trim().split('\n')
+  assert.equal(resolve(repo), resolve(cwd))
+  assert.equal(resolve(worktree), w.worktree)
+})
+
+test('crew host: a retry takes the worktree an earlier attempt made up again, hook not rerun; a start that did not ask to retry is refused it for good', async () => {
+  const h = crewKind.open()
+  const run = await runOf(h)
+  const w = await start(h, 'first', { child: child(`${run}-1`) })
+  await h.host.workerStop({ dispatch: w.dispatchId })
+  await eventually('the worker stopped', () => h.stopped(w))
+  writeFileSync(join(w.worktree, 'setup.out'), 'left as it was\n')
+  const again = await start(h, 'retried', { child: child(`${run}-1`, { retry: true }) })
+  assert.equal(again.worktree, w.worktree)
+  assert.equal(readFileSync(join(w.worktree, 'setup.out'), 'utf8'), 'left as it was\n')
+  await assert.rejects(start(h, 'taken', { child: child(`${run}-1`) }), (e) => e.code === 'worktree_name_taken' && e.final === true && e.worktree === w.worktree)
+})
+
+test('crew host: a setup hook that fails fails the start and leaves no worktree or branch behind', async () => {
+  const h = crewKind.open({ env: { FAIL_SETUP: '1' } })
+  const run = await runOf(h)
+  const path = join(crewWorktrees(crewScratch().cwd), `${run}-1`)
+  await assert.rejects(start(h, 'unset', { child: child(`${run}-1`) }), /setup_failed: the setup hook .* failed[\s\S]*setup refused/)
+  assert.equal(existsSync(path), false)
+  assert.equal(spawnSync('git', ['-C', crewScratch().cwd, 'rev-parse', '--verify', '--quiet', `refs/heads/${run}-1`]).status, 1)
+})
+
+test('crew host: remove takes only a worktree crew made, never the operator\'s own', async () => {
+  const h = crewKind.open()
+  await assert.rejects(h.host.worktreeRemove({ path: crewScratch().cwd }), /not a worktree crew made/)
+  assert.ok(existsSync(join(crewScratch().cwd, 'README.md')))
+})
+
+test('crew config: a repo\'s setup hook is keyed by its path in crew\'s home, and a repo it does not name has none', () => {
+  const { paths, cwd, root } = crewScratch()
+  assert.equal(repoConfig(paths, cwd).setup, join(root, 'setup-hook.mjs'))
+  assert.equal(repoConfig(paths, process.platform === 'win32' ? cwd.toUpperCase().replace(/\\/g, '/') : cwd).setup, join(root, 'setup-hook.mjs'))
+  assert.deepEqual(repoConfig(paths, join(root, 'elsewhere')), {})
+  assert.ok(!existsSync(join(cwd, '.crew')), 'nothing of crew\'s in the repo')
+})
+
+test('crew host: a whole session host by its name, whose agent-side send refuses a dispatch crew never made', async () => {
+  const { paths } = crewScratch()
+  const host = await openHost('crew', { paths })
+  assert.equal(host.id, 'crew')
+  const r = spawnSync(process.execPath, [CREW_BIN, 'orchestration', 'send', '--task-id', 't', '--dispatch-id', 'no-such', '--type', 'handoff', '--subject', 's', '--body', 'b'], { encoding: 'utf8', env: crewScratch().agentEnv })
+  assert.equal(r.status, 1)
+  assert.match(r.stderr, /dispatch_not_found/)
 })
 
 test('the quiet-output threshold is a runner setting, 5 seconds by default', () => {

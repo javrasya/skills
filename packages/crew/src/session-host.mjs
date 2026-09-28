@@ -33,12 +33,15 @@ export const SESSION_HOST = Object.freeze([
 
 // The session-level methods: a worker's session and its terminal, apart from
 // the run, worktrees and mailbox around it. The host contract suite
-// (test/test-host-contract.mjs) runs every host through them.
+// (test/test-host-contract.mjs) runs every host through them, and through
+// the run, worker and mailbox methods of RUN_METHODS.
 export const SESSION_METHODS = Object.freeze([
   'workerStart', 'workerStop', 'workerContinue',
   'terminalIdle', 'terminalSend', 'terminalEnter', 'terminalClearInput', 'terminalScreen',
   'terminalList', 'terminalClose', 'terminalRename',
 ])
+
+export const RUN_METHODS = Object.freeze(['runCreate', 'runUse', 'workerShow', 'workerRelease', 'workerDone', 'mailCheck', 'worktreeStatus', 'worktreeRemove'])
 
 // The methods of the interface `host` lacks, [] for a whole one.
 export const missingMethods = (host) => SESSION_HOST.filter((m) => typeof host?.[m] !== 'function')

@@ -25,7 +25,7 @@ test('crew: no command, or an unknown one, is a usage error', () => {
   }
 })
 
-test('crew run: the host is required, and orca is the one host', () => {
+test('crew run: the host is required, and must be one crew knows', () => {
   assert.match(crew('run', 'w.js').stderr, /--host is required/)
   const bad = crew('run', '--host', 'tmux', 'w.js')
   assert.equal(bad.status, 2)
@@ -44,6 +44,16 @@ test('crew run --host orca: it is the runner, with the runner\'s own argv', () =
   const summary = JSON.parse(readFileSync(join(dir, 'state', 'summary.json'), 'utf8'))
   assert.equal(summary.ok, true)
   assert.equal(summary.result, 7)
+})
+
+test('crew orchestration send: a worker\'s message needs its IDs and a type, and names a dispatch crew made', () => {
+  const missing = crew('orchestration', 'send', '--type', 'handoff')
+  assert.equal(missing.status, 2)
+  assert.match(missing.stderr, /missing --task-id, --dispatch-id/)
+  assert.equal(crew('orchestration', 'ask').status, 2)
+  const stranger = crew('orchestration', 'send', '--task-id', 't', '--dispatch-id', 'd', '--type', 'handoff', '--subject', 's', '--body', 'b')
+  assert.equal(stranger.status, 1)
+  assert.match(stranger.stderr, /dispatch_not_found/)
 })
 
 test('crew view: it is the run view, with the view\'s own argv', () => {

@@ -20,11 +20,14 @@
 //     turns into the session's raw byte stream both ways: its screen repaint
 //     and live output out, the terminal's keys in. Hanging up leaves the
 //     session, which keeps running; the daemon hangs up when it ends.
+//   run.*, worker.*, mail.*, worktree.*    crew's Runs, their workers'
+//     dispatches and their mailboxes (runs.mjs)
 import net from 'net'
 import { mkdirSync, readFileSync, realpathSync, unlinkSync } from 'fs'
 import { StringDecoder } from 'string_decoder'
 import { fileURLToPath } from 'url'
 import { connect, crewPaths, lineDecoder, noDaemon, send } from './transport.mjs'
+import { runBook } from './runs.mjs'
 
 const VERSION = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
 const log = (...parts) => console.log(new Date().toISOString(), ...parts)
@@ -65,11 +68,13 @@ async function claim(server, endpoint) {
   return listen(server, endpoint)
 }
 
-// liveRuns: the runs this daemon is host to that are not over. No run runs on
-// the daemon yet, so it is none, and stop never has one to refuse over.
-export async function startDaemon({ paths = crewPaths(), liveRuns = () => [], spawnSession, exit = (code) => process.exit(code), log: say = log } = {}) {
+// liveRuns: the runs this daemon is host to that are not over, which stop
+// refuses over: by default those with a worker still running (runs.mjs).
+export async function startDaemon({ paths = crewPaths(), liveRuns = null, spawnSession, exit = (code) => process.exit(code), log: say = log } = {}) {
   const open = spawnSession ?? (await import('./session.mjs')).ptySession
   const sessions = new Map()
+  const book = runBook({ sessions })
+  liveRuns ??= book.liveRuns
   const sockets = new Set()
   let next = 1
   let stopping = false
@@ -92,6 +97,7 @@ export async function startDaemon({ paths = crewPaths(), liveRuns = () => [], sp
   }
 
   const ops = {
+    ...book.ops,
     hello: () => ({ pid: process.pid, version: VERSION, endpoint: paths.endpoint }),
     stop: ({ force }) => {
       const runs = liveRuns()

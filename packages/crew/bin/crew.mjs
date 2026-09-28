@@ -7,6 +7,11 @@
 //   crew session spawn [--cwd <dir>] -- <command…> | list | screen <id> | kill <id>
 //   crew console      the daemon's sessions; Enter enters one, the back key (F12,
 //                     or backKey in ~/.crew/config.json) comes back
+//   crew orchestration send --from <h> --dispatch-capability <c> --task-id <t>
+//        --dispatch-id <d> --type <worker_done|handoff|escalation> --subject <s>
+//        --body <b> [--outcome succeeded|failed]
+//                     a worker's message to its crew Run's mailbox, as its
+//                     preamble (crew-host.mjs) names it; no Orca involved
 //
 // Every command but `daemon stop` starts the per-machine crew daemon when none
 // answers (src/daemon/). run and view carry on without it if it cannot start:
@@ -23,6 +28,7 @@ import { crewPaths } from '../src/daemon/transport.mjs'
 import { ensureDaemon, request, stopDaemon } from '../src/daemon/client.mjs'
 import { readCrewConfig } from '../src/crew-config.mjs'
 import { runConsole } from '../src/console.mjs'
+import { crewHost } from '../src/crew-host.mjs'
 
 const USAGE = [
   'usage: crew run --host <host> <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]',
@@ -30,6 +36,7 @@ const USAGE = [
   '       crew daemon start | status | stop [--force] | restart [--force]',
   '       crew session spawn [--cwd <dir>] -- <command…> | list | screen <id> | kill <id>',
   '       crew console',
+  '       crew orchestration send --from <h> --dispatch-capability <c> --task-id <t> --dispatch-id <d> --type <worker_done|handoff|escalation> --subject <s> --body <b> [--outcome succeeded|failed]',
   `hosts: ${HOSTS.join(', ')}`,
 ].join('\n')
 
@@ -130,6 +137,22 @@ async function consoleCommand(args) {
   process.exit(0)
 }
 
+const SEND_FLAGS = { '--from': 'from', '--dispatch-capability': 'capability', '--task-id': 'taskId', '--dispatch-id': 'dispatchId', '--type': 'type', '--subject': 'subject', '--body': 'body', '--outcome': 'outcome' }
+
+async function orchestration([verb, ...args]) {
+  if (verb !== 'send') usage(`crew orchestration: ${verb ? `unexpected ${verb}` : 'send'}`)
+  const m = {}
+  for (let i = 0; i < args.length; i += 2) {
+    const key = SEND_FLAGS[args[i]]
+    if (!key || args[i + 1] === undefined) usage(`crew orchestration send: ${key ? `${args[i]} needs a value` : `unexpected ${args[i]}`}`)
+    m[key] = args[i + 1]
+  }
+  const missing = ['taskId', 'dispatchId', 'type'].filter((k) => !m[k])
+  if (missing.length) usage(`crew orchestration send: missing ${missing.map((k) => Object.keys(SEND_FLAGS).find((f) => SEND_FLAGS[f] === k)).join(', ')}`)
+  const { id } = await crewHost({ paths }).mailSend(m)
+  console.log(`crew orchestration send: ${m.type} ${id} sent to the run's mailbox`)
+}
+
 const [command, ...rest] = process.argv.slice(2)
 if (command === 'run') {
   const at = rest.indexOf('--host')
@@ -146,6 +169,8 @@ if (command === 'run') {
   await session(rest).catch(fail)
 } else if (command === 'console') {
   await consoleCommand(rest).catch(fail)
+} else if (command === 'orchestration') {
+  await orchestration(rest).catch(fail)
 } else {
   console.error(USAGE)
   process.exit(command === '--help' || command === '-h' ? 0 : 2)
