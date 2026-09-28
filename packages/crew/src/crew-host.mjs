@@ -9,7 +9,8 @@
 // is not one of hosts.mjs's hosts.
 import { crewPaths } from './daemon/transport.mjs'
 import { ensureDaemon, request } from './daemon/client.mjs'
-import { launchCommand } from './harness.mjs'
+import { launchCommand, launchedSession, resumeCommand } from './harness.mjs'
+import { RUNNER_SETTINGS } from './settings.mjs'
 import { sessionTranscripts } from './transcript.mjs'
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
@@ -20,8 +21,10 @@ const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
 // name, as the contract suite puts its fake harness there; the rest of the
 // line is the runner's launch command, word for word. A harness is ready for
 // its prompt once it has drawn and then been quiet for `quietMs`, and a start
-// fails if it is not ready within `readyMs`.
-export function crewHost({ paths = crewPaths(), env = process.env, cwd = process.cwd(), harnesses = {}, transcripts = sessionTranscripts({ env }), quietMs = 5_000, readyMs = 180_000, pollMs = 100 } = {}) {
+// fails if it is not ready within `readyMs`. A worker is idle once its session
+// transcript says its latest turn ended, or, where the transcript does not
+// say, once its terminal has been quiet for `quietMs`.
+export function crewHost({ paths = crewPaths(), env = process.env, cwd = process.cwd(), harnesses = {}, transcripts = sessionTranscripts({ env }), quietMs = RUNNER_SETTINGS.quietOutputMs, readyMs = 180_000, endMs = 10_000, pollMs = 100 } = {}) {
   let daemon = null
   async function call(message) {
     daemon ??= ensureDaemon(paths).catch((e) => {
@@ -58,6 +61,32 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     await type(terminal, '\r')
   }
 
+  // The harness from `line` (launchCommand's or resumeCommand's) in a new
+  // session, typed its prompt once ready; a session that fails that is closed.
+  async function launch(line, { harness, dir, title, prompt }) {
+    const [program, ...args] = line.split(' ')
+    const command = [...(harnesses[harness] ?? [program]), ...args]
+    const { session } = await call({ op: 'session.spawn', command, cwd: dir, env, title })
+    try {
+      await ready(session.id, command)
+      await terminalSend({ terminal: session.id, text: typeof prompt === 'function' ? prompt(null) : prompt })
+    } catch (e) {
+      await call({ op: 'session.close', id: session.id }).catch(() => {})
+      throw e
+    }
+    return session.id
+  }
+
+  async function idleNow(terminal) {
+    const s = await sessionOf(terminal)
+    if (!s) throw new Error(`no crew session ${terminal}`)
+    // An ended program has no turn going.
+    if (!s.alive) return true
+    const { harness, sessionId } = launchedSession(s.command)
+    const ended = sessionId ? transcripts.idle({ harness, sessionId, worktree: s.cwd }) : null
+    return ended ?? (s.quietMs !== null && s.quietMs >= quietMs)
+  }
+
   return {
     id: 'crew',
     name: 'crew',
@@ -66,17 +95,31 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     async workerStart({ prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null }) {
       if (!sessionId) throw new Error(`workerStart: ${title} has no session id; the runner assigns one to every worker`)
       if (child) throw new Error(`workerStart: ${title} asks for a child worktree, which the crew host does not make yet`)
-      const [program, ...args] = launchCommand({ harness, model, effort, permissionMode, sessionId }).split(' ')
-      const command = [...(harnesses[harness] ?? [program]), ...args]
-      const { session } = await call({ op: 'session.spawn', command, cwd, env, title })
-      try {
-        await ready(session.id, command)
-        await terminalSend({ terminal: session.id, text: typeof prompt === 'function' ? prompt(null) : prompt })
-      } catch (e) {
-        await call({ op: 'session.close', id: session.id }).catch(() => {})
-        throw e
+      const id = await launch(launchCommand({ harness, model, effort, permissionMode, sessionId }), { harness, dir: cwd, title, prompt })
+      return { dispatchId: id, taskId: null, terminal: id, worktree: cwd, warnings: [] }
+    },
+
+    // The session carried on in a new crew session running the harness's
+    // resume line, in the same worktree; the old session, its harness ended
+    // first if still running (two harnesses on one session id would both
+    // write its transcript), is closed once the new one has its prompt. A pty
+    // whose program ended cannot take another, and a harness run straight in
+    // its pty has no shell to type a resume line into.
+    async workerContinue({ dispatch, terminal = dispatch, worktree = null, title, prompt, harness = 'claude', model, effort, permissionMode, sessionId }) {
+      const line = resumeCommand({ harness, model, effort, permissionMode, sessionId })
+      const old = await sessionOf(terminal)
+      if (old?.alive) {
+        await call({ op: 'session.kill', id: old.id })
+        const deadline = Date.now() + endMs
+        while ((await sessionOf(old.id))?.alive) {
+          if (Date.now() > deadline) throw new Error(`workerContinue: ${title}'s harness in crew session ${old.id} did not end within ${Math.round(endMs / 1000)}s`)
+          await sleep(pollMs)
+        }
       }
-      return { dispatchId: session.id, taskId: null, terminal: session.id, worktree: cwd, warnings: [] }
+      const dir = old?.cwd ?? worktree ?? cwd
+      const id = await launch(line, { harness, dir, title: old?.title ?? title, prompt })
+      if (old) await call({ op: 'session.close', id: old.id }).catch(() => {})
+      return { dispatchId: id, taskId: null, terminal: id, worktree: dir, reopened: true }
     },
 
     // The harness ends; its session and last screen stay until closed.
@@ -84,6 +127,15 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
       await call({ op: 'session.kill', id: dispatch })
     },
 
+    // Whether the worker is idle, waiting up to `timeoutMs` for it to be.
+    async terminalIdle({ terminal, timeoutMs = 0 }) {
+      const deadline = Date.now() + timeoutMs
+      for (;;) {
+        if (await idleNow(terminal)) return true
+        if (Date.now() >= deadline) return false
+        await sleep(pollMs)
+      }
+    },
     terminalSend,
     async terminalEnter({ terminal }) {
       await type(terminal, '\r')

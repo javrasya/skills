@@ -381,6 +381,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
         record({ verb: 'workerContinue', dispatchId: c.dispatchId, from: id, terminal: c.handle, worktree, command, text, argv, reopened: true, interrupted: false })
       }
       c.continued = continued + 1
+      c.resumedWith = [...(c.resumedWith ?? []), text]
       play(c, () => c.onContinue?.({ prompt: d.prompt, text, preamble: preambleIn(c), worktree: c.worktree, orca, state: c }))
       return { dispatchId: c.dispatchId, taskId: c.taskId, terminal: c.handle, worktree: c.worktree, reopened: c !== d }
     },
@@ -412,11 +413,11 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     // the input box until an Enter; one `lost` needs typing again; `never`
     // takes nothing. Not recorded: the adapter reads it from the session's
     // transcript, never from Orca. As in a transcript, `needle` must be in
-    // its prompt or in something typed to it since.
+    // its prompt or in something typed to it since, a continuation's prompt included.
     async promptDelivered({ sessionId, needle }) {
       const d = [...dispatches.values()].filter((x) => x.sessionId === sessionId).at(-1)
       const flat = (s) => String(s ?? '').replace(/\s+/g, ' ').trim()
-      return !!d && !d.delivery && (!flat(needle) || [d.prompt, ...d.nudges].some((t) => flat(t).includes(flat(needle))))
+      return !!d && !d.delivery && (!flat(needle) || [d.prompt, ...d.nudges, ...(d.resumedWith ?? [])].some((t) => flat(t).includes(flat(needle))))
     },
 
     async terminalEnter({ terminal: handle }) {

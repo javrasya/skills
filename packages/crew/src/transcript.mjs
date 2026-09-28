@@ -154,11 +154,67 @@ export function promptDelivered(text, needle) {
   return false
 }
 
+// Whether the session's latest turn has ended, from the last transcript entry
+// that tells: true once the model's reply ends it; false while a prompt or a
+// tool's result waits on the model, or the model on a tool; null when no
+// entry tells. A subagent's and a meta line are not the session's turn.
+//   Claude: an assistant message's stop_reason (tool_use keeps the turn
+//           going), a turn_duration system line (ends it), a user line (a
+//           prompt or a tool result: one going, but for an interrupt's marker).
+//   pi:     an assistant message's stopReason (toolUse keeps it going), a user
+//           or toolResult message (one going).
+const INTERRUPTED = /^\[Request interrupted by user/
+function turnOf(e) {
+  if (!e || typeof e !== 'object' || e.isSidechain || e.isMeta) return null
+  const m = e.message
+  if (e.type === 'assistant') return m?.stop_reason ? m.stop_reason !== 'tool_use' : null
+  if (e.type === 'system') return e.subtype === 'turn_duration' ? true : null
+  if (e.type === 'user') {
+    const c = m?.content
+    const said = typeof c === 'string' ? c : Array.isArray(c) ? c.find((b) => b?.type === 'text')?.text : null
+    return INTERRUPTED.test(said ?? '')
+  }
+  if (e.type === 'message') {
+    if (m?.role === 'assistant') return m.stopReason ? m.stopReason !== 'toolUse' : null
+    if (m?.role === 'user' || m?.role === 'toolResult') return false
+  }
+  return null
+}
+export function turnEnded(text) {
+  const lines = String(text).split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let e
+    try {
+      e = JSON.parse(lines[i])
+    } catch {
+      continue
+    }
+    const ended = turnOf(e)
+    if (ended !== null) return ended
+  }
+  return null
+}
+
+// The transcript's last `bytes`: the latest turn is at its end, and a long
+// session's whole file runs to megabytes. A line cut at the start is skipped.
+function tail(path, bytes = 256 * 1024) {
+  const size = statSync(path).size
+  const chunk = Buffer.alloc(Math.min(size, bytes))
+  const fd = openSync(path, 'r')
+  try {
+    readSync(fd, chunk, 0, chunk.length, size - chunk.length)
+  } finally {
+    closeSync(fd)
+  }
+  return chunk.toString('utf8')
+}
+
 // size({ harness, sessionId, worktree }) is the transcript's length in bytes,
 // or null while it has none; path(…) is where it is, or null; usage(…) is
 // { path, context, tokens }, context and tokens null until an assistant turn
 // is written, or null with no transcript; delivered({ …, needle }) is
-// promptDelivered on it, false with no transcript. None throws: a transcript the
+// promptDelivered on it, false with no transcript; idle(…) is turnEnded on its
+// tail, null with no transcript. None throws: a transcript the
 // caller cannot see is a signal missing, not a dead worker. A found path is
 // remembered; the scan of every project dir runs on the first miss and every
 // `scanEvery`-th one after, since a runner looks at every live worker every
@@ -195,6 +251,10 @@ export function sessionTranscripts({ home = homedir(), env = process.env, scanEv
     delivered: quiet((q) => {
       const path = locate(q)
       return path ? promptDelivered(readFileSync(path, 'utf8'), q.needle) : false
+    }),
+    idle: quiet((q) => {
+      const path = locate(q)
+      return path ? turnEnded(tail(path)) : null
     }),
     usage: quiet((q) => {
       const path = locate(q)

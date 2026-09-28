@@ -22,7 +22,7 @@ import { worktreeUnpushed } from '../src/git.mjs'
 import { hostOutage, probesBy } from '../src/outage.mjs'
 import { sessionHost, missingMethods } from '../src/session-host.mjs'
 import { runRegistry, readRegistry, OUTCOMES } from '../src/registry.mjs'
-import { transcriptPath, sessionTranscripts, claudeSlug, piDir, promptDelivered } from '../src/transcript.mjs'
+import { transcriptPath, sessionTranscripts, claudeSlug, piDir, promptDelivered, turnEnded } from '../src/transcript.mjs'
 import { agentsOf, reclaimAgent, reclaimRun } from '../src/reclaim.mjs'
 import { runView, runsView, bandOf, STATES, RUNNER_PATH, runnerAlive, runEnded } from '../src/run-view-model.mjs'
 import { draw, drawRuns, strip, TREE_HELP, marqueeOffset, NAME_W } from '../src/run-view/draw.mjs'
@@ -5636,6 +5636,44 @@ test("transcripts: a prompt is delivered once a user message of the session carr
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, `${SID}.jsonl`), `${line({ type: 'user', message: { role: 'user', content: 'Do a thing.' } })}\n`)
   assert.equal(t.delivered(q), true)
+})
+
+test("transcripts: a turn has ended once the model's reply ends it, and not while a prompt, a tool, or a tool's result waits; a subagent's, a meta line and other entries do not tell", () => {
+  const line = (e) => JSON.stringify(e)
+  const said = (stop_reason) => line({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }], stop_reason } })
+  const prompt = line({ type: 'user', message: { role: 'user', content: 'Do a thing.' } })
+  const toolResult = line({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: 'done' }] } })
+  assert.equal(turnEnded(''), null)
+  assert.equal(turnEnded([line({ type: 'permission-mode' }), line({ type: 'attachment' })].join('\n')), null)
+  assert.equal(turnEnded(prompt), false)
+  assert.equal(turnEnded([prompt, said('tool_use')].join('\n')), false)
+  assert.equal(turnEnded([prompt, said('tool_use'), toolResult].join('\n')), false)
+  assert.equal(turnEnded([prompt, said('end_turn'), line({ type: 'attachment' }), line({ type: 'system', subtype: 'stop_hook_summary' })].join('\n')), true)
+  assert.equal(turnEnded([prompt, said('end_turn'), line({ type: 'user', isMeta: true, message: { role: 'user', content: 'hook' } })].join('\n')), true)
+  assert.equal(turnEnded([prompt, said('end_turn'), line({ type: 'user', isSidechain: true, message: { role: 'user', content: 'sub' } })].join('\n')), true)
+  assert.equal(turnEnded([prompt, line({ type: 'system', subtype: 'turn_duration' })].join('\n')), true)
+  assert.equal(turnEnded([prompt, line({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user for tool use]' }] } })].join('\n')), true)
+  assert.equal(turnEnded(`{"type":"assistant","message":{"stop_reason":"end_turn"}}\n${prompt}\n{"type":"assis`), false, 'a torn last line waits')
+
+  const pi = (role, stopReason) => line({ type: 'message', id: 'a', message: { role, content: [], ...(stopReason ? { stopReason } : {}) } })
+  assert.equal(turnEnded([line({ type: 'session' }), pi('user')].join('\n')), false)
+  assert.equal(turnEnded([pi('user'), pi('assistant', 'toolUse'), pi('toolResult')].join('\n')), false)
+  assert.equal(turnEnded([pi('user'), pi('assistant', 'toolUse')].join('\n')), false)
+  assert.equal(turnEnded([pi('user'), pi('assistant', 'stop'), line({ type: 'compaction' })].join('\n')), true)
+  assert.equal(turnEnded([pi('user'), pi('assistant', 'length')].join('\n')), true)
+
+  const home = tmp()
+  const wt = join(home, 'wt')
+  const t = sessionTranscripts({ home, env: {} })
+  const q = { harness: 'claude', sessionId: SID, worktree: wt }
+  assert.equal(t.idle(q), null, 'no transcript yet')
+  const dir = join(home, '.claude', 'projects', claudeSlug(wt))
+  mkdirSync(dir, { recursive: true })
+  const file = join(dir, `${SID}.jsonl`)
+  writeFileSync(file, `${line({ type: 'user', message: { role: 'user', content: 'x'.repeat(300 * 1024) } })}\n${prompt}\n`)
+  assert.equal(t.idle(q), false)
+  appendFileSync(file, `${said('end_turn')}\n`)
+  assert.equal(t.idle(q), true)
 })
 
 const PROMPT_MS = RUNNER_SETTINGS.promptDeliveryMs

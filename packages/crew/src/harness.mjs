@@ -24,6 +24,13 @@ export function resumeCommand({ harness = 'claude', model, effort, permissionMod
   return commandLine(harness, harness === 'claude' ? ['--resume', sessionId] : ['--session-id', sessionId], { model, effort, permissionMode })
 }
 
+// The harness and session id a launch or resume line, split into words, runs,
+// whatever its program word; sessionId is null in any other command.
+export function launchedSession(words) {
+  const after = (flag) => (words.includes(flag) ? words[words.indexOf(flag) + 1] ?? null : null)
+  return { harness: words.includes('--approve') ? 'pi' : 'claude', sessionId: after('--session-id') ?? after('--resume') }
+}
+
 function commandLine(harness, session, { model, effort, permissionMode }) {
   let argv
   if (harness === 'pi') {

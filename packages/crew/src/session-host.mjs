@@ -35,8 +35,8 @@ export const SESSION_HOST = Object.freeze([
 // the run, worktrees and mailbox around it. The host contract suite
 // (test/test-host-contract.mjs) runs every host through them.
 export const SESSION_METHODS = Object.freeze([
-  'workerStart', 'workerStop',
-  'terminalSend', 'terminalEnter', 'terminalClearInput', 'terminalScreen',
+  'workerStart', 'workerStop', 'workerContinue',
+  'terminalIdle', 'terminalSend', 'terminalEnter', 'terminalClearInput', 'terminalScreen',
   'terminalList', 'terminalClose', 'terminalRename',
 ])
 
