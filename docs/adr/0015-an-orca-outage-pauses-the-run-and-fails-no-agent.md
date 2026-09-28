@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-09-27. Extends ADR-0013. Applies to the **Orca runner only**.
+Accepted — 2026-09-27. Extends ADR-0013. Applies to the **session runner** on either session host (amended 2026-09-28 by ADR-0017): an outage of crew is a session host outage like Orca's, except that crew takes its sessions down with it, and they are carried on by session continuation when it comes back.
 
 ## Context
 
