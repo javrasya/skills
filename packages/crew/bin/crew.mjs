@@ -48,7 +48,7 @@ import { ensureDaemon, request, stopDaemon } from '../src/daemon/client.mjs'
 import { readCrewConfig } from '../src/crew-config.mjs'
 import { runConsole, runsConsole } from '../src/console.mjs'
 import { crewHost } from '../src/crew-host.mjs'
-import { launchRunner, startCommand } from '../src/arm.mjs'
+import { launchRunner, runOrchestrator, startCommand } from '../src/arm.mjs'
 import { REGISTRY_PATH } from '../src/registry.mjs'
 import { runsView, samePath } from '../src/run-view-model.mjs'
 import { listRuns } from '../src/run-view/draw.mjs'
@@ -194,7 +194,7 @@ async function view(args) {
   // Each run's tree, reclaim and resume go to the host the registry names for it.
   const callMs = RUNNER_SETTINGS.viewCallMs
   const hosts = await openHosts({ paths, callMs })
-  const runs = runsView({ host: hosts[DEFAULT_HOST], hostOf: (name) => hosts[name] ?? hosts[DEFAULT_HOST], registry, enter: true })
+  const runs = runsView({ host: hosts[DEFAULT_HOST], hostOf: (name) => hosts[name] ?? hosts[DEFAULT_HOST], registry, enter: true, orchestrator: runOrchestrator({ paths }) })
   await runs.refresh()
   const run = runs.model.projects.flatMap((p) => p.runs).find((r) => r.runId === target || samePath(r.runDir, target))
   if (!run) throw new Error(`no run ${target} in the run registry ${registry}`)

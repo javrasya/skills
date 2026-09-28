@@ -95,7 +95,8 @@ export function keyNames(text) {
 //   page.show(status)  starts drawing, status being why it is back ('' for none)
 //   page.hide()        stops drawing, for a session entered or a quit
 //   page.key(chunk)    a chunk of keys, answering (or resolving to) { enter:
-//                      <session id> }, { quit: true } or nothing
+//                      <session id>, close? }, { quit: true } or nothing; a
+//                      session entered with close is closed once left
 //   page.resize()      the terminal's new size
 // Returns { done, mode }: done settles on quit; mode() is 'list' (the page),
 // 'entering', 'entered' or 'quit'.
@@ -113,10 +114,10 @@ function consoleOn({ paths, stdin, stdout, backKey = 'f12', holdMs = 50, page })
     page.show(why)
   }
 
-  async function enter(id) {
+  async function enter(id, close = false) {
     mode = 'entering'
     page.hide()
-    const e = { id, open: true, socket: null, filter: null, pending: [] }
+    const e = { id, close, open: true, socket: null, filter: null, pending: [] }
     entered = e
     try {
       const { socket } = await enterSession(paths, { id, ...size() }, (output) => e.open && stdout.write(output))
@@ -129,6 +130,7 @@ function consoleOn({ paths, stdin, stdout, backKey = 'f12', holdMs = 50, page })
       for (const chunk of e.pending.splice(0)) if (entered === e) e.filter.push(chunk)
     } catch (err) {
       entered = null
+      if (close) request(paths, { op: 'session.close', id }).catch(() => {})
       if (mode !== 'quit') show(err.message)
     }
   }
@@ -144,6 +146,7 @@ function consoleOn({ paths, stdin, stdout, backKey = 'f12', holdMs = 50, page })
       e.socket.end()
       setTimeout(() => e.socket.destroy(), 1000).unref()
     }
+    if (e.close) request(paths, { op: 'session.close', id: e.id }).catch(() => {})
     stdout.write(RESET)
     if (mode !== 'quit') show(why)
   }
@@ -154,7 +157,7 @@ function consoleOn({ paths, stdin, stdout, backKey = 'f12', holdMs = 50, page })
     if (mode !== 'list') return
     const then = (r) => {
       if (r?.quit) quit()
-      else if (r?.enter && mode === 'list') enter(r.enter)
+      else if (r?.enter && mode === 'list') enter(r.enter, !!r.close)
     }
     // A page that answers at once enters at once: keys typed next are the session's.
     const r = page.key(chunk)
@@ -258,7 +261,9 @@ export function runConsole({ paths, stdin, stdout, backKey = 'f12', refreshMs = 
 // Ctrl+C. The model takes every key and click; an action that answers
 // { enter: { session } } (Enter on a crew run's agent or runner) enters that
 // session, and the back key returns to the tree as it was left, its selected
-// row and all. Actions run one at a time, as the run view's do.
+// row and all. `?` on an opened run enters a fresh orchestrator session,
+// closed once left (runsView's consult). Actions run one at a time, as the run
+// view's do.
 export function runsConsole({ paths, stdin, stdout, runs, backKey = 'f12', refreshMs = 2_000, holdMs = 50, now = () => Date.now(), onError = () => {} }) {
   let flash = null
   let shown = false
@@ -305,6 +310,10 @@ export function runsConsole({ paths, stdin, stdout, runs, backKey = 'f12', refre
       return runs.click(i)
     }
     flash = null
+    if (key === '?' && t && !t.model?.dialog) {
+      flash = 'starting an orchestrator session on this run…'
+      paint()
+    }
     return runs.key(key)
   }
 
@@ -332,7 +341,7 @@ export function runsConsole({ paths, stdin, stdout, runs, backKey = 'f12', refre
             const r = await one(key)
             flash = r?.message ?? flash
             if (r?.quit) return { quit: true }
-            if (r?.enter) return { enter: r.enter.session }
+            if (r?.enter) return { enter: r.enter.session, close: !!r.enter.close }
           }
           return null
         })

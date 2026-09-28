@@ -13,7 +13,8 @@ import { execProgram } from './git.mjs'
 import { flagsToAnswers, probeStart, rememberAnswers, rememberedAnswers, settleStackMode, startForm } from './start-form.mjs'
 import { draftEditor, drawDrafting, runDraftStep, runStartForm } from './start-tui.mjs'
 import { crewHost } from './crew-host.mjs'
-import { draftValidation, orchestrator } from './orchestrator.mjs'
+import { consultSession, draftValidation, orchestrator } from './orchestrator.mjs'
+import { triageHalt } from './triage.mjs'
 import { validationListProblem } from './validation-list.mjs'
 
 // The copy `npm pack` bundles (scripts/pack-template.mjs), else, in a checkout
@@ -73,6 +74,17 @@ export function renderRoles(script, { runDefault, roles = {} }) {
     .replace(ROLE_ROW, (row, indent, name) => (roles[name] ? `${indent}${name}: ${literal(roleRow(roles[name], claudeModel))},` : row))
 }
 
+// The run default a rendered script's RUN_DEFAULT line holds, as the form's
+// { harness, model }: what the orchestrator of a run already armed runs on.
+// Null for a script with no such line.
+export function runDefaultOf(script) {
+  const line = /^const RUN_DEFAULT = \{([^\n]*)\}\r?$/m.exec(script)
+  if (!line) return null
+  const row = Object.fromEntries([...line[1].matchAll(/(\w+): '((?:[^'\\]|\\.)*)'/g)].map(([, k, v]) => [k, v.replace(/\\(.)/g, '$1')]))
+  if (!row.harness) return null
+  return { harness: row.harness, model: (row.harness === 'pi' ? row.piModel : row.model) ?? null }
+}
+
 // SKILL.md step 2's __NOTES_DIR__.
 export const notesDirOf = (repo, spec, home = homedir()) => join(home, '.claude', 'spec-notes', `${repo.split('/').pop()}-${spec}`)
 
@@ -118,6 +130,25 @@ export async function resolveArming({ repoDir, spec, repo, run = execProgram, ho
 // crew host, in the checkout, on the harness and model the form answered.
 export const crewOrchestrator = ({ paths, repoDir, harness, model, permissionMode }) =>
   orchestrator({ host: crewHost({ paths, cwd: repoDir }), harness, model, permissionMode, dir: join(paths.home, 'orchestrator') })
+
+// The orchestrator's two console uses for runsView's runs, on the crew host,
+// in the run's project, on the run default its script was armed with and the
+// runner's permission mode: triage(run) asks about its halt, consult(run)
+// starts a `?` session and answers its id.
+export function runOrchestrator({ paths, host = (cwd) => crewHost({ paths, cwd }) }) {
+  const launchOf = (run) => {
+    let runDefault = null
+    try {
+      if (run.script) runDefault = runDefaultOf(readFileSync(run.script, 'utf8'))
+    } catch {}
+    return { harness: runDefault?.harness ?? 'claude', model: runDefault?.model ?? null, permissionMode: run.permissionMode ?? null }
+  }
+  const cwdOf = (run) => run.project ?? run.runDir
+  return {
+    triage: (run) => triageHalt({ stateDir: run.runDir, orchestrate: () => orchestrator({ host: host(cwdOf(run)), dir: join(paths.home, 'orchestrator'), ...launchOf(run) }) }),
+    consult: (run) => consultSession({ host: host(cwdOf(run)), stateDir: run.runDir, dir: cwdOf(run), ...launchOf(run) }),
+  }
+}
 
 // The orchestrator's draft of the list, shown as the form's last step, and
 // written only once the operator confirms it. Null when they cancel.

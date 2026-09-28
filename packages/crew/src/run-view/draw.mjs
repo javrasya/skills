@@ -171,6 +171,65 @@ function phasePane(p, problems) {
 const HELP = ' ↑↓ move · ←→ / click a phase to fold · ⏎/click focus tab · r reclaim · l log · q quit'
 const TOP = 4
 
+// An agent row's width: the halt panel takes what is right of it, or 30 columns.
+const ROW_W = 97
+const PANEL_MIN = 30
+
+// `text` in lines of at most `w` characters, broken at spaces where it can.
+function wrap(text, w) {
+  const lines = []
+  for (const para of String(text).split(/\r?\n/)) {
+    let line = ''
+    for (let word of para.split(/\s+/).filter(Boolean)) {
+      while (word.length > w) {
+        if (line) lines.push(line)
+        lines.push(word.slice(0, w))
+        word = word.slice(w)
+        line = ''
+      }
+      if (!word) continue
+      if (line && line.length + 1 + word.length > w) {
+        lines.push(line)
+        line = word
+      } else line = line ? `${line} ${word}` : word
+    }
+    lines.push(line)
+  }
+  return lines
+}
+
+// The halt panel (#103): the run's halted.json, and the orchestrator's triage
+// of it (model.halt), in `h` lines `w` wide, drawn right of the tree's rows.
+// A triage asking, failed or never asked says so; R is the run's either way.
+export function haltPanel(halt, w, h) {
+  const tw = w - 2
+  const body = []
+  const add = (text, colour = null, indent = '') => {
+    for (const l of wrap(text, tw - indent.length)) body.push(indent + (colour ? c(colour, l) : l))
+  }
+  const t = halt.triage
+  if (!t) add(`not triaged: ${halt.nodes.join(', ')}`, '90')
+  else if (t.state === 'asking') add(`asking the orchestrator about ${halt.nodes.join(', ')}…`, '36')
+  else if (t.state === 'failed') {
+    add('the triage question failed:', '31')
+    add(t.error ?? 'no reason given', null, '  ')
+    add('R resumes the run all the same', '90')
+  } else {
+    add(t.answer.summary)
+    for (const n of t.answer.nodes) {
+      body.push('')
+      add(n.node, '1')
+      add(`why: ${n.reason}`, null, '  ')
+      for (const q of n.questions) add(`? ${q}`, '33', '  ')
+      add(`decide: ${n.decide}`, '1;33', '  ')
+    }
+  }
+  const room = h - 1
+  const shown = body.length > room ? [...body.slice(0, room - 1), grey(`… ${body.length - room + 1} more lines`)] : body
+  const bar = grey('│') + ' '
+  return [bar + c('1;33', `⏸ halt triage · ${halt.at.slice(11, 19)}`), ...shown.map((l) => bar + l)].slice(0, h)
+}
+
 // The dialog's box lines, each already fitted to mw and coloured, and the
 // index among them of its first option.
 function dialogBox(d, mw) {
@@ -184,7 +243,8 @@ function dialogBox(d, mw) {
   return { box: [head, ...options, plain(''), plain('↑↓ or the mouse moves · Enter reclaims · Esc closes'), plain('')], first: 1 }
 }
 
-// model: runView's model, its dialog drawn over the middle. flash: the flash
+// model: runView's model, its dialog drawn over the middle, and its halt, while
+// halted.json names one, in the halt panel right of the rows. flash: the flash
 // line's text (an action's outcome, or the latest event); alert: a blocked
 // agent's line, drawn loud in its place when there is no flash. help: the key
 // line, for a tree the standalone view opened.
@@ -211,6 +271,11 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
     lines.push(i === selected ? c('7', fit(strip(line), W)) : fit(line, W))
   }
   while (lines.length < TOP + body) lines.push(fit('', W))
+  if (model?.halt) {
+    const pw = Math.min(W, Math.max(PANEL_MIN, W - ROW_W))
+    const panel = haltPanel(model.halt, pw, body)
+    for (let i = 0; i < body; i++) lines[TOP + i] = fit(lines[TOP + i], W - pw) + fit(panel[i] ?? grey('│'), pw)
+  }
   lines.push(fit(grey('─'.repeat(W)), W))
   const pane = model?.pane
   const paneLines = !pane ? [grey(' no agent has started yet')] : pane.kind === 'runner' ? runnerPane(pane.runner, model.header) : pane.kind === 'agent' ? agentPane(pane.agent) : phasePane(pane.phase, pane.problems)
@@ -253,9 +318,10 @@ const RUNS_HELP = ' ↑↓ move · ⏎/click open a run · ←→ fold a project
 
 // The key lines of `crew view`, which enters a crew run's sessions in place
 // and comes back from one with `backKey`; an Orca run's agent is its tab.
+// `?` is crew's orchestrator whatever the run's host.
 export const consoleTreeHelp = (host, backKey) => host === 'crew'
-  ? ` ↑↓ move · ←→ fold · ⏎/click enter a session, ${backKey.toUpperCase()} comes back · r reclaim · l log · R resume · q back to the runs`
-  : TREE_HELP
+  ? ` ↑↓ move · ←→ fold · ⏎/click enter a session, ${backKey.toUpperCase()} back · r reclaim · l log · R resume · ? orchestrator · q back to runs`
+  : `${TREE_HELP} · ? orchestrator`
 export const consoleRunsHelp = (backKey) => `${RUNS_HELP} · ${backKey.toUpperCase()} leaves an entered session`
 
 export function age(ms) {

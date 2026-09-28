@@ -151,3 +151,45 @@ export async function draftValidation(orch, { repoDir }) {
     throw new OrchestratorError(name, e.message)
   }
 }
+
+// The halt triage question (#103), asked once per halted.json `at`
+// (triage.mjs): each held node's reason, its questions, and what the operator
+// must decide, for the run console's halt panel.
+export const TRIAGE_SCHEMA = Object.freeze({
+  type: 'object',
+  required: ['summary', 'nodes'],
+  additionalProperties: false,
+  properties: {
+    summary: { type: 'string' },
+    nodes: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['node', 'reason', 'questions', 'decide'],
+        additionalProperties: false,
+        properties: { node: { type: 'string' }, reason: { type: 'string' }, questions: { type: 'array', items: { type: 'string' } }, decide: { type: 'string' } },
+      },
+    },
+  },
+})
+
+// The run directory's files, as both orchestrator uses name them.
+const runFiles = (stateDir) => `its halted.json (the held nodes, while it is halted), journal.jsonl (every call and what became of it), runner.log, the agents' results (agents/*/result.json) and summary.json (once the run has ended), all in ${stateDir}`
+
+export const triagePrompt = ({ stateDir, notice }) => `You are crew's orchestrator. A workflow run has halted: ${notice.nodes.length === 1 ? 'one node is' : `${notice.nodes.length} nodes are`} held until the operator resumes ${notice.nodes.length === 1 ? 'it' : 'them'} with R: ${notice.nodes.map((n) => n.node).join(', ')}. The run's state is ${runFiles(stateDir)}.
+
+Read what you need of those files, and nothing else: change nothing, and never run anything but the submit command below.
+
+Answer with a short "summary" of the halt, and one entry per held node, in the order halted.json lists them: { "node": its name as halted.json has it, "reason": why it is held, "questions": the questions it left for the operator (empty when it left none), "decide": what the operator must decide before resuming it }.`
+
+// `?` in the run console: the orchestrator for a free conversation with the
+// operator about one run, seeded with its run directory.
+export const consultPrompt = (stateDir) => `You are crew's orchestrator, opened from the run console for a conversation with the operator about one workflow run. The run's state is ${runFiles(stateDir)}. Read what you need of it, then wait for the operator's questions. Change nothing unless the operator asks you to.`
+
+// A fresh `?` session on a host that starts sessions of no Run (the crew
+// host's sessionStart): titled orchestrator/console, in no run's journal, so
+// never a node of any run's graph. Returns its session id.
+export async function consultSession({ host, stateDir, harness = 'claude', model = null, effort = null, permissionMode = null, dir }) {
+  const { terminal } = await host.sessionStart({ title: orchestratorTitle('console'), prompt: consultPrompt(stateDir), harness, model, effort, permissionMode, sessionId: randomUUID(), dir })
+  return terminal
+}

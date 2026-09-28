@@ -155,17 +155,18 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
   // The harness from `line` (launchCommand's or resumeCommand's) in a new
   // session, a dispatch of `run`, typed its preamble and prompt once ready;
   // a session that fails that is closed. `typing` is called as the prompt
-  // starts to go in, past which a worker may have it.
+  // starts to go in, past which a worker may have it. With no `run` it is no
+  // worker: no dispatch, no preamble, only the prompt.
   async function launch(line, { harness, dir, title, prompt, run, typing = () => {} }) {
     const [program, ...args] = line.split(' ')
     const command = [...(harnesses[harness] ?? [program]), ...args]
     const { session } = await call({ op: 'session.spawn', command, cwd: dir, env: sessionEnv, title })
     try {
-      const { worker } = await call({ op: 'run.worker', run, session: session.id, coordinator })
+      const { worker } = run ? await call({ op: 'run.worker', run, session: session.id, coordinator }) : { worker: null }
       await ready(session.id, command)
       typing()
-      await terminalSend({ terminal: session.id, text: crewPreamble({ terminal: session.id, ...worker }) + prompt })
-      return { terminal: session.id, taskId: worker.taskId }
+      await terminalSend({ terminal: session.id, text: (worker ? crewPreamble({ terminal: session.id, ...worker }) : '') + prompt })
+      return { terminal: session.id, taskId: worker?.taskId ?? null }
     } catch (e) {
       await call({ op: 'session.close', id: session.id }).catch(() => {})
       throw e
@@ -277,6 +278,14 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
         if (dispatched && e instanceof Object) e.dispatched = true
         throw e
       }
+    },
+
+    // A harness session of no Run, for a person to talk to: in `dir` (the
+    // host's own directory by default), prompted once ready, and entered from
+    // the console. Nothing settles it, and closing it is its opener's.
+    async sessionStart({ title, prompt, harness = 'claude', model, effort, permissionMode, sessionId, dir = cwd }) {
+      const { terminal } = await launch(launchCommand({ harness, model, effort, permissionMode, sessionId }), { harness, dir, title, prompt, run: null })
+      return { terminal }
     },
 
     // The session carried on in a new crew session running the harness's

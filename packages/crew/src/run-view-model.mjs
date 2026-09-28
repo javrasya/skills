@@ -16,6 +16,7 @@ import { REGISTRY_PATH, readRegistry, runRegistry } from './registry.mjs'
 import { worktreeUnpushed } from './git.mjs'
 import { hostUnreachable } from './session-host.mjs'
 import { isOrchestratorTitle } from './orchestrator.mjs'
+import { haltNoticeOf, readTriage } from './triage.mjs'
 import { probesBy } from './outage.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 
@@ -216,8 +217,12 @@ function latestEvent(path) {
 // runner's row does, when the renderer can (`enter`). An attached view,
 // itself inside the runner's session, cannot, and names where to.
 // header.halted is the fold's halt, { since, nodes }, nodes being every node
-// still failed or needing decisions, or null.
-export function runView({ stateDir, host, clock = { now: () => Date.now() }, transcripts = sessionTranscripts(), registry = REGISTRY_PATH, unpushed = worktreeUnpushed, alive = runnerAlive, resumeHost = null, resumeHalted = null, enter = false }) {
+// still failed or needing decisions, or null. model.halt is the run's
+// halted.json while it has one, { at, nodes, triage }, triage being the halt
+// triage question asked about that `at` (triage.mjs), or null while none is;
+// `triage()`, when given, asks it, once per `at` this view sees, and is never
+// waited on.
+export function runView({ stateDir, host, clock = { now: () => Date.now() }, transcripts = sessionTranscripts(), registry = REGISTRY_PATH, unpushed = worktreeUnpushed, alive = runnerAlive, resumeHost = null, resumeHalted = null, enter = false, triage = null }) {
   const journalPath = join(stateDir, 'journal.jsonl')
   // name -> folded, only for phases the operator folded or unfolded.
   const folds = new Map()
@@ -238,6 +243,8 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   // lines, confirm, queue }: queue holds the confirmations still to ask after
   // this one, each a reclaim's answer.
   let dialog = null
+  let halt = null
+  const triaged = new Set()
   const view = { model: null, refresh, key, click, highlight, focus, reclaim, openLog }
 
   const agentsNow = () => phases.flatMap((p) => p.agents)
@@ -288,7 +295,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
       : row.kind === 'runner' ? { kind: 'runner', runner: row.runner }
       : row.kind === 'agent' ? { kind: 'agent', agent: row.agent }
       : { kind: 'phase', phase: row.phase, problems: problemsOf(row.phase.agents).map((agent) => ({ agent, reason: agent.reason })) }
-    view.model = { header, phases, rows, selected, selectedAt: shown.at, pane, message, latest, alert, dialog: dialogModel(row) }
+    view.model = { header, phases, rows, selected, selectedAt: shown.at, pane, message, latest, alert, dialog: dialogModel(row), halt }
     return view.model
   }
 
@@ -383,6 +390,12 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
       outage,
       halted: fold.halted ? { since: fold.halted.since, nodes: fold.halted.nodes } : null,
     }
+    const notice = haltNoticeOf(stateDir)
+    if (notice && triage && !triaged.has(notice.at)) {
+      triaged.add(notice.at)
+      triage()
+    }
+    halt = notice ? { at: notice.at, nodes: notice.nodes.map((n) => n.node), triage: readTriage(stateDir, notice.at, now) } : null
     return layout()
   }
 
@@ -748,8 +761,11 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
 // needs no takeover. runner is the runner.mjs a resume runs. A run is on the
 // host the registry names (run.host), and hostOf(name) is that host, which
 // its tree, its reclaim and its resume go to: `host`, for every run, by
-// default. The rest is as runView's.
-export function runsView({ host, hostOf = () => host, clock = { now: () => Date.now() }, registry = REGISTRY_PATH, transcripts = sessionTranscripts(), unpushed = worktreeUnpushed, alive = runnerAlive, runner = RUNNER_PATH, enter = false }) {
+// default. orchestrator, when given, is the orchestrator's two console uses
+// (arm.mjs runOrchestrator): an opened run's halt is triaged, and `?` on it
+// answers { enter: { session, close } } for a fresh orchestrator session the
+// renderer enters and closes on leaving it. The rest is as runView's.
+export function runsView({ host, hostOf = () => host, clock = { now: () => Date.now() }, registry = REGISTRY_PATH, transcripts = sessionTranscripts(), unpushed = worktreeUnpushed, alive = runnerAlive, runner = RUNNER_PATH, enter = false, orchestrator = null }) {
   const folds = new Map()
   // runId -> { host, terminal, pid, starting }: the tab R opened, and the runner.pid
   // its run dir held then. While that file is unchanged the new runner has not
@@ -849,7 +865,7 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
     if (!run) return say(`no run ${runId} in the run registry`)
     if (!run.runDir) return say(`${labelOf(run)} has no run directory recorded`)
     // The tree's header asks what the run's row asks, by the same rule.
-    opened = { runId, view: runView({ stateDir: run.runDir, host: hostOf(run.host), enter, clock, transcripts, registry, unpushed, alive: () => (recorded.has(runId) ? liveOf(recorded.get(runId), lastOpen) : null) }) }
+    opened = { runId, view: runView({ stateDir: run.runDir, host: hostOf(run.host), enter, clock, transcripts, registry, unpushed, alive: () => (recorded.has(runId) ? liveOf(recorded.get(runId), lastOpen) : null), triage: orchestrator ? () => orchestrator.triage(run) : null }) }
     await opened.view.refresh()
     message = null
     layout()
@@ -943,6 +959,19 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
 
   const activate = (row) => (!row ? {} : row.kind === 'project' ? toggle(row.project) : open(row.run.runId))
 
+  // `?` on an opened run: a fresh orchestrator session seeded with its run
+  // directory, never a node of its graph.
+  async function consult() {
+    const run = runOf(opened.runId)
+    if (!orchestrator || !enter) return say('? talks to the orchestrator in crew view only')
+    if (!run?.runDir) return say(`${run ? labelOf(run) : opened.runId} has no run directory recorded`)
+    try {
+      return { enter: { session: await orchestrator.consult(run), close: true } }
+    } catch (e) {
+      return say(`could not start an orchestrator session: ${e?.message ?? e}`)
+    }
+  }
+
   // Key names as terminal-kit gives them. With a run open its tree takes the
   // keys, except R, and q or Escape, which go back to the list, unless its
   // dialog is open, which takes every key; q on the list returns { quit }.
@@ -951,6 +980,7 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
       if (opened.view.model?.dialog) return opened.view.key(name)
       if (name === 'q' || name === 'ESCAPE') return close()
       if (name === 'R') return resume()
+      if (name === '?') return consult()
       return opened.view.key(name)
     }
     const rows = runs.model?.rows ?? []

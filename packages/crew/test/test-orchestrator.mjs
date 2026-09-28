@@ -5,13 +5,17 @@
 //   node packages/crew/test/test-orchestrator.mjs
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
-import { OrchestratorError, draftValidation, isOrchestratorTitle, orchestrator, validationText } from '../src/orchestrator.mjs'
-import { runView } from '../src/run-view-model.mjs'
+import { OrchestratorError, consultSession, draftValidation, isOrchestratorTitle, orchestrator, validationText } from '../src/orchestrator.mjs'
+import { runView, runsView } from '../src/run-view-model.mjs'
+import { TRIAGE_STALE_MS, readTriage, triageHalt } from '../src/triage.mjs'
+import { runDefaultOf, runOrchestrator } from '../src/arm.mjs'
+import { runRegistry } from '../src/registry.mjs'
+import { draw, strip } from '../src/run-view/draw.mjs'
 import { crewHost } from '../src/crew-host.mjs'
 import { crewPaths } from '../src/daemon/transport.mjs'
 import { request, stopDaemon } from '../src/daemon/client.mjs'
@@ -169,7 +173,7 @@ function crewScratch() {
   mkdirSync(repo)
   assert.equal(spawnSync('git', ['init', '-q', repo]).status, 0)
   const host = crewHost({ paths, env, cwd: repo, harnesses: { claude: [process.execPath, FAKE_HARNESS] }, quietMs: 300, readyMs: 20_000 })
-  return { paths, repo, orch: orchestrator({ host, harness: 'claude', model: 'opus', dir: join(root, 'orchestrator'), pollMs: 100, idleMs: 1_500, answerMs: 60_000 }) }
+  return { paths, repo, root, host, orch: orchestrator({ host, harness: 'claude', model: 'opus', dir: join(root, 'orchestrator'), pollMs: 100, idleMs: 1_500, answerMs: 60_000 }) }
 }
 
 test('crew host: the fake-harness orchestrator answers through submit, drafts its fixed list, and leaves no session open', async () => {
@@ -183,4 +187,206 @@ test('crew host: the fake-harness orchestrator answers through submit, drafts it
 test('crew host: an answer submit rejects never reaches crew; the orchestrator is nudged, then reported', async () => {
   const { orch } = crewScratch()
   await assert.rejects(orch.ask({ name: 'count', prompt: 'How many? [answer {"n":"seven"}]', schema: SCHEMA }), (e) => e instanceof OrchestratorError && /went idle without submitting an answer, after a nudge/.test(e.message))
+})
+
+// --- halt triage and ? (#103) ---------------------------------------------
+
+const AT = '2026-09-28T10:00:00.000Z'
+const ANSWER = { summary: 'impl:a failed its tests', nodes: [{ node: 'impl:a', reason: 'its tests fail on Windows', questions: ['keep the new API?'], decide: 'whether to keep the new API or revert it' }] }
+
+const notice = (stateDir, at, nodes) => writeFileSync(join(stateDir, 'halted.json'), JSON.stringify({ at, runId: 'run_1', terminal: null, nodes: nodes.map((node) => ({ node, title: `[Implement] ${node}`, reason: 'its tests fail', tab: null })) }))
+// A halted run's state dir: impl:a held, halted.json naming `nodes` at `at`.
+function haltedRun(at = AT, nodes = ['impl:a']) {
+  const stateDir = scratch('halted')
+  const t = new Date(0).toISOString()
+  const journal = [
+    { type: 'started', n: 1, key: 'k1', node: 'impl:a', title: '[Implement] impl:a', at: t, run: 'run_1', dispatchId: 'ctx_1', harness: 'claude', sessionId: 'sid-1', worktree: null, terminal: 'term_1' },
+    { type: 'failed', n: 1, key: 'k1', node: 'impl:a', at: t, reason: 'its tests fail' },
+    { type: 'halted', at: t, node: 'impl:a', reason: 'its tests fail' },
+  ]
+  writeFileSync(join(stateDir, 'journal.jsonl'), journal.map((e) => `${JSON.stringify(e)}\n`).join(''))
+  writeFileSync(join(stateDir, 'runner.log'), '')
+  notice(stateDir, at, nodes)
+  return stateDir
+}
+const treeOf = (stateDir, over = {}) => runView({ stateDir, host: { terminalList: async () => [] }, registry: null, transcripts: { usage: () => null }, alive: () => true, ...over })
+// An orchestrator whose one answer the test gives when it likes.
+function heldAnswer() {
+  let give
+  const asked = []
+  const answer = new Promise((resolve, reject) => (give = { resolve, reject }))
+  return { asked, give, orchestrate: () => ({ ask: (q) => (asked.push(q), answer) }) }
+}
+const settle = () => new Promise((done) => setImmediate(done))
+// The panel's column of the body lines, at 140 wide: right of the 97-wide rows.
+const panelOf = (view) => draw(view.model, { width: 140, height: 30 }).lines.map(strip).slice(4, 23).map((l) => l.slice(97))
+
+test('triage: a new halted.json at is asked exactly once, however often and by however many it is triggered; a new at is a new question', async () => {
+  const stateDir = haltedRun()
+  const { host, calls } = standIn(submitted(ANSWER))
+  const orchestrate = () => ask(host)
+  const starts = () => calls.filter(([c]) => c === 'workerStart').map(([, s]) => s)
+  const both = await Promise.all([triageHalt({ stateDir, orchestrate }), triageHalt({ stateDir, orchestrate })])
+  assert.deepEqual(both.map((r) => r.asked).sort(), [false, true])
+  assert.deepEqual(await triageHalt({ stateDir, orchestrate }), { asked: false, state: null }, 'asked about that at already')
+  assert.equal(starts().length, 1)
+  assert.equal(starts()[0].title, 'orchestrator/halt-triage')
+  assert.match(starts()[0].prompt, /held until the operator resumes it with R: impl:a/)
+  assert.ok(starts()[0].prompt.includes(stateDir), 'the question names the run directory')
+  const recorded = readTriage(stateDir, AT)
+  assert.deepEqual(recorded, { at: AT, since: recorded.since, state: 'answered', answer: ANSWER })
+
+  // The runner rewrites halted.json with a new at when its held nodes change.
+  notice(stateDir, '2026-09-28T10:05:00.000Z', ['impl:a', 'impl:b'])
+  assert.equal((await triageHalt({ stateDir, orchestrate })).asked, true)
+  assert.equal(starts().length, 2)
+  assert.match(starts()[1].prompt, /2 nodes are held until the operator resumes them with R: impl:a, impl:b/)
+  // No halted.json, no question.
+  assert.deepEqual(await triageHalt({ stateDir: scratch('running'), orchestrate }), { asked: false, state: null })
+})
+
+test('triage: the run view asks once per at it sees, shows the question asking at once, and its answer in the halt panel beside the halted nodes', async () => {
+  const stateDir = haltedRun()
+  const held = heldAnswer()
+  let triggered = 0
+  const view = treeOf(stateDir, { triage: () => (triggered++, triageHalt({ stateDir, orchestrate: held.orchestrate })) })
+  await view.refresh()
+  await view.refresh()
+  assert.equal(triggered, 1)
+  assert.equal(held.asked.length, 1)
+  assert.deepEqual([view.model.halt.at, view.model.halt.nodes, view.model.halt.triage.state], [AT, ['impl:a'], 'asking'])
+  let panel = panelOf(view)
+  assert.match(panel[0], /^│ ⏸ halt triage · 10:00:00/)
+  assert.match(panel[1], /^│ asking the orchestrator about impl:a…/)
+
+  held.give.resolve(ANSWER)
+  await settle()
+  await view.refresh()
+  assert.equal(view.model.halt.triage.state, 'answered')
+  panel = panelOf(view)
+  assert.deepEqual(panel.slice(0, 8).map((l) => l.trimEnd()), [
+    '│ ⏸ halt triage · 10:00:00',
+    '│ impl:a failed its tests',
+    '│',
+    '│ impl:a',
+    '│   why: its tests fail on Windows',
+    '│   ? keep the new API?',
+    '│   decide: whether to keep the new API or',
+    '│   revert it',
+  ])
+  const screen = draw(view.model, { width: 140, height: 30 }).lines.map(strip)
+  const row = screen.findIndex((l, i) => i >= 4 && l.slice(0, 97).includes('impl:a'))
+  assert.ok(row >= 4 && row < 23, 'the halted node is drawn left of the panel')
+  assert.equal(screen[row].length, 140)
+
+  // A panel with more than its lines ends in how many are left.
+  const short = draw(view.model, { width: 140, height: 14 }).lines.map(strip)
+  assert.ok(short.some((l) => /^│ … \d+ more lines/.test(l.slice(97))))
+
+  // Once the run leaves halted, halted.json goes, and the panel with it.
+  rmSync(join(stateDir, 'halted.json'))
+  await view.refresh()
+  assert.equal(view.model.halt, null)
+  assert.ok(!draw(view.model, { width: 140, height: 30 }).lines.map(strip).some((l) => l.includes('halt triage')))
+})
+
+test('triage: a question that fails says so in the panel, and R resumes the run all the same, while it is asked and after it failed', async () => {
+  const stateDir = haltedRun()
+  const held = heldAnswer()
+  const resumed = []
+  const view = treeOf(stateDir, { resumeHalted: (node) => resumed.push(node), triage: () => triageHalt({ stateDir, orchestrate: held.orchestrate }) })
+  await view.refresh()
+  assert.equal(view.model.halt.triage.state, 'asking')
+  assert.match((await view.key('R')).message, /asked the runner to resume/)
+  assert.equal(resumed.length, 1, 'R goes to the runner while the question is still asked')
+
+  held.give.reject(new OrchestratorError('halt-triage', 'its session ended without submitting an answer'))
+  await settle()
+  await view.refresh()
+  assert.equal(view.model.halt.triage.state, 'failed')
+  assert.match(view.model.halt.triage.error, /no valid answer to halt-triage: its session ended without submitting an answer/)
+  const panel = panelOf(view).map((l) => l.trimEnd())
+  assert.equal(panel[1], '│ the triage question failed:')
+  assert.match(panel.slice(2).join(' '), /the orchestrator gave no valid answer/)
+  assert.ok(panel.includes('│ R resumes the run all the same'))
+  assert.match((await view.key('R')).message, /asked the runner to resume/)
+  assert.equal(resumed.length, 2)
+
+  // An orchestrator that cannot even be made fails the question the same way.
+  const other = haltedRun()
+  assert.deepEqual(await triageHalt({ stateDir: other, orchestrate: () => { throw new Error('no harness to run it on') } }), { asked: true, state: 'failed' })
+  assert.match(readTriage(other, AT).error, /no harness to run it on/)
+  // A question left asking by an asker that went away is failed once stale.
+  const stale = haltedRun()
+  triageHalt({ stateDir: stale, orchestrate: () => ({ ask: () => new Promise(() => {}) }) })
+  const asking = readTriage(stale, AT)
+  assert.equal(asking.state, 'asking')
+  const aged = readTriage(stale, AT, Date.parse(asking.since) + TRIAGE_STALE_MS + 1)
+  assert.equal(aged.state, 'failed')
+  assert.match(aged.error, /no answer was recorded/)
+})
+
+test('?: on an opened run, a fresh orchestrator session seeded with its run directory, entered and closed on leaving; its halt triaged once; the graph unchanged', async () => {
+  const stateDir = haltedRun()
+  const registry = join(scratch('registry'), 'runs.jsonl')
+  runRegistry(registry).armed({ runId: 'run_1', project: 'C:/repos/app', runDir: stateDir, spec: 'implement-spec-103', host: 'crew' })
+  const consulted = []
+  const triaged = []
+  let n = 0
+  const orchestrator = { triage: async (run) => triaged.push(run.runDir), consult: async (run) => (consulted.push(run.runDir), `sess_${++n}`) }
+  const runs = runsView({ host: { terminalList: async () => [] }, registry, enter: true, transcripts: { usage: () => null }, alive: () => true, orchestrator })
+  await runs.refresh()
+  await runs.open('run_1')
+  const rows = runs.opened().model.rows.map((r) => r.key)
+  await runs.refresh()
+  assert.deepEqual(triaged, [stateDir], 'the opened run\'s halt, once')
+  assert.deepEqual(await runs.key('?'), { enter: { session: 'sess_1', close: true } })
+  assert.deepEqual(await runs.key('?'), { enter: { session: 'sess_2', close: true } }, 'each ? a fresh session')
+  assert.deepEqual(consulted, [stateDir, stateDir])
+  await runs.refresh()
+  assert.deepEqual(runs.opened().model.rows.map((r) => r.key), rows)
+
+  orchestrator.consult = async () => {
+    throw new Error('crew: agent_not_ready')
+  }
+  assert.match((await runs.key('?')).message, /could not start an orchestrator session: crew: agent_not_ready/)
+  const plain = runsView({ host: { terminalList: async () => [] }, registry, transcripts: { usage: () => null }, alive: () => true })
+  await plain.refresh()
+  await plain.open('run_1')
+  assert.match((await plain.key('?')).message, /crew view only/)
+})
+
+test('run default: the orchestrator of an armed run runs on the harness and model its script\'s RUN_DEFAULT names, in its project, with the runner\'s permission mode', async () => {
+  assert.deepEqual(runDefaultOf("x\r\nconst RUN_DEFAULT = { harness: 'claude', model: 'opus' }\r\n"), { harness: 'claude', model: 'opus' })
+  assert.deepEqual(runDefaultOf("const RUN_DEFAULT = { harness: 'pi', piModel: 'lm/q\\'wen', model: 'sonnet' }"), { harness: 'pi', model: "lm/q'wen" })
+  assert.equal(runDefaultOf('no table here'), null)
+  const dir = scratch('armed')
+  const script = join(dir, 'workflow.js')
+  writeFileSync(script, "const RUN_DEFAULT = { harness: 'pi', piModel: 'lm/qwen', model: 'opus' }\n")
+  const starts = []
+  const cwds = []
+  const orch = runOrchestrator({ paths: { home: dir }, host: (cwd) => (cwds.push(cwd), { sessionStart: async (s) => (starts.push(s), { terminal: '42' }) }) })
+  const runDir = join(dir, 'orca-run')
+  assert.equal(await orch.consult({ runDir, script, project: 'C:/repos/app', permissionMode: 'acceptEdits' }), '42')
+  const [s] = starts
+  assert.deepEqual([s.title, s.harness, s.model, s.permissionMode, s.dir, cwds[0]], ['orchestrator/console', 'pi', 'lm/qwen', 'acceptEdits', 'C:/repos/app', 'C:/repos/app'])
+  assert.ok(isOrchestratorTitle(s.title))
+  assert.ok(s.prompt.includes(runDir), 'seeded with the run directory')
+  assert.match(s.prompt, /halted\.json.*journal\.jsonl.*agents\/\*\/result\.json.*summary\.json/)
+  await orch.consult({ runDir, script: join(dir, 'gone.js'), project: null, permissionMode: null })
+  assert.deepEqual([starts[1].harness, starts[1].model, starts[1].dir], ['claude', null, runDir], 'a script it cannot read runs it on Claude')
+})
+
+test('crew host: ? starts the fake harness in a session of no run, titled orchestrator/console, in the project, told the run directory', async () => {
+  const { paths, repo, root, host } = crewScratch()
+  const id = await consultSession({ host, stateDir: 'C:/runs/app/orca-run', harness: 'claude', model: 'opus', dir: repo })
+  const s = (await request(paths, { op: 'session.list' })).sessions.find((x) => x.id === id)
+  assert.deepEqual([s.title, s.alive, realpathSync(s.cwd)], ['orchestrator/console', true, repo])
+  await assert.rejects(request(paths, { op: 'worker.show', id }), /dispatch_not_found/, 'no dispatch of any run: never a node')
+  const transcripts = () => (existsSync(join(root, 'claude')) ? readdirSync(join(root, 'claude'), { recursive: true }).filter((f) => f.endsWith('.jsonl')).map((f) => readFileSync(join(root, 'claude', f), 'utf8')) : [])
+  for (const until = Date.now() + 10_000; !transcripts().length && Date.now() < until;) await new Promise((done) => setTimeout(done, 50))
+  const told = transcripts()
+  assert.ok(told.some((t) => t.includes('opened from the run console') && t.includes('C:/runs/app/orca-run')), 'its first prompt names the run directory')
+  assert.ok(!told.some((t) => t.includes('Your Orca preamble')), 'no worker preamble')
+  await request(paths, { op: 'session.close', id })
 })

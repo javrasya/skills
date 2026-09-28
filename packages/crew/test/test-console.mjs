@@ -394,3 +394,52 @@ test('crew console: needs a terminal, and takes no arguments', () => {
   assert.match(piped.stderr, /crew console: needs a terminal/)
   assert.equal(run('extra').status, 2)
 })
+
+test('crew view: ? on an opened run enters a fresh orchestrator session seeded with its run directory; the back key returns to the graph, the session closed and never a node', async (t) => {
+  const { paths, id } = await scriptedSession(t)
+  const { session: runner } = await request(paths, { op: 'session.spawn', command: [process.execPath, SCRIPTED], cols: 80, rows: 24 })
+  const registry = crewRun(id, runner.id)
+  const consulted = []
+  const orchestrator = {
+    triage: async () => ({ asked: false }),
+    async consult(run) {
+      consulted.push(run.runDir)
+      const { session } = await request(paths, { op: 'session.spawn', command: [process.execPath, SCRIPTED], title: 'orchestrator/console', cols: 80, rows: 24 })
+      return session.id
+    },
+  }
+  const runs = runsView({ host: crewHost({ paths }), registry, enter: true, transcripts: { usage: () => null }, orchestrator })
+  await runs.refresh()
+  await runs.open('run_c1')
+  const tree = () => runs.opened().model
+  const keys = () => tree().rows.map((r) => r.key)
+  const before = keys()
+  const term = fakeTerminal(120, 30)
+  const crew = runsConsole({ paths, stdin: term.stdin, stdout: term.stdout, runs, refreshMs: 100 })
+  await until('the tree', async () => (await term.screen()).lines.some((l) => l.includes('AGENT')))
+  assert.match((await term.screen()).lines.at(-1), /\? orchestrator/)
+
+  term.press('?')
+  await until('the orchestrator session entered', async () => crew.mode() === 'entered' && (await term.screen()).lines[2] === '    ready')
+  assert.deepEqual(consulted, [runs.model.projects[0].runs[0].runDir], 'seeded with the opened run\'s directory')
+  const orch = (await request(paths, { op: 'session.list' })).sessions.find((s) => s.title === 'orchestrator/console')
+  assert.equal(orch.alive, true)
+  term.press(F12)
+  await until('the graph again', async () => crew.mode() === 'list' && (await term.screen()).lines.some((l) => l.includes('AGENT')))
+  assert.equal(runs.opened() !== null, true, 'the run stays open')
+  await runs.refresh()
+  assert.deepEqual(keys(), before, 'the orchestrator session is no node of the graph')
+  await until('the orchestrator session closed', async () => !(await request(paths, { op: 'session.list' })).sessions.some((s) => s.id === orch.id))
+  assert.ok((await request(paths, { op: 'session.list' })).sessions.some((s) => s.id === id && s.alive), 'the run\'s own sessions are left alone')
+
+  // A failed start is said on the flash line, and the tree stays.
+  orchestrator.consult = async () => {
+    throw new Error('crew: agent_not_ready')
+  }
+  term.press('?')
+  await until('the failure said', async () => (await term.screen()).lines.some((l) => l.includes('could not start an orchestrator session: crew: agent_not_ready')))
+  assert.equal(crew.mode(), 'list')
+  term.press('q')
+  term.press('q')
+  await crew.done
+})
