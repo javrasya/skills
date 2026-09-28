@@ -5,11 +5,13 @@
 // as a crew session, as `crew run` does.
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
-import { basename, join, resolve } from 'path'
+import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { repoConfig } from './crew-config.mjs'
 import { ensureDaemon, request } from './daemon/client.mjs'
-import { execProgram } from './git.mjs'
+import { runnerCommand } from './daemon/runs.mjs'
+import { execProgram, repoOf } from './git.mjs'
+import { runnerAlive } from './run-view-model.mjs'
 import { flagsToAnswers, probeStart, rememberAnswers, rememberedAnswers, settleStackMode, startForm } from './start-form.mjs'
 import { draftEditor, drawDrafting, runDraftStep, runStartForm } from './start-tui.mjs'
 import { crewHost } from './crew-host.mjs'
@@ -98,11 +100,22 @@ export function clearEndSignals(stateDir) {
   for (const f of END_SIGNALS) rmSync(join(stateDir, f), { force: true })
 }
 
+// A run has one runner at a time: a state dir whose runner.pid names a live
+// process is that runner's, whichever host it runs on, and nothing is armed
+// or launched over it, its end signals left as they are.
+export function refuseLiveRunner(stateDir, alive = runnerAlive) {
+  if (alive(stateDir) === true) throw new StartError(`${stateDir} has its runner already: the process its runner.pid names is alive, and a run has one runner at a time; enter it from \`crew console\`, or end it, then arm again; nothing armed`)
+}
+
 // The runner as a session of the daemon's, on the crew host: it outlives the
-// command that launched it, and `crew console` enters it.
-export async function launchRunner({ paths, args, cwd, title, env = process.env, cols = 120, rows = 30, runner = fileURLToPath(new URL('./runner.mjs', import.meta.url)) }) {
+// command that launched it, and `crew console` enters it. Its state dir is
+// `stateDir`, else the one the runner takes by default, beside the script,
+// and the daemon refuses it run_live while that run has a runner already.
+export async function launchRunner({ paths, script, stateDir = null, resume = false, permissionMode = null, cwd, title, env = process.env, cols = 120, rows = 30 }) {
+  const path = resolve(cwd, script)
+  const runDir = stateDir ? resolve(cwd, stateDir) : stateDirOf(dirname(path))
   await ensureDaemon(paths)
-  const { session } = await request(paths, { op: 'session.spawn', command: [process.execPath, runner, ...args, '--host', 'crew'], cwd, env, title, cols, rows })
+  const { session } = await request(paths, { op: 'session.spawn', command: runnerCommand({ script: path, stateDir: runDir, resume, permissionMode }), runDir, cwd, env, title, cols, rows })
   return session
 }
 
@@ -167,20 +180,22 @@ async function draftStep({ target, answers, orchestrate, paths, stdin, stdout, h
   return text
 }
 
-// Renders the template into the notes dir, clears the end signals, launches.
-// `answers` are the form's, stackMode settled to the template's value;
-// `roles` the per-role overrides of crew's per-repo config.
-export async function armRun({ target, answers, roles, template = readFileSync(templatePath(), 'utf8'), launch }) {
+// Renders the template into the notes dir, clears the end signals, launches:
+// never over a runner still alive in the state dir. `answers` are the form's,
+// stackMode settled to the template's value; `roles` the per-role overrides
+// of crew's per-repo config.
+export async function armRun({ target, answers, roles, template = readFileSync(templatePath(), 'utf8'), launch, alive = runnerAlive }) {
   const { spec, repo, repoDir, notesDir, title, validation } = target
+  const stateDir = stateDirOf(notesDir)
+  refuseLiveRunner(stateDir, alive)
   const script = join(notesDir, 'workflow.js')
   const rendered = renderRoles(renderTemplate(template, {
     SPEC: spec, REPO: repo, REPO_DIR: repoDir, NOTES_DIR: notesDir, BASE_REF: answers.base, STACK_MODE: answers.stackMode, RUNNER: 'session', VALIDATION: validation,
   }), { runDefault: answers, roles })
   mkdirSync(notesDir, { recursive: true })
   writeFileSync(script, rendered)
-  clearEndSignals(stateDirOf(notesDir))
-  const args = [script, ...(answers.permissionMode ? ['--permission-mode', answers.permissionMode] : [])]
-  const session = await launch({ args, cwd: repoDir, title: `implement-spec #${spec}: ${title}` })
+  clearEndSignals(stateDir)
+  const session = await launch({ script, stateDir, permissionMode: answers.permissionMode ?? null, cwd: repoDir, title: `implement-spec #${spec}: ${title}` })
   return { script, session }
 }
 
@@ -195,8 +210,10 @@ export class StartError extends Error {
 // [--permission-mode p]`. With no terminal each row's flag is required, and so
 // is the spec's validation list, since nobody is there to confirm a draft of
 // one; at one, the form shows, pre-filled from the flags and the repo's
-// remembered answers, then the orchestrator's draft of a missing list.
-export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdin, stdout, run = execProgram, home = homedir(), env = process.env, launch, orchestrate = crewOrchestrator }) {
+// remembered answers, then the orchestrator's draft of a missing list. The
+// repo's config and remembered answers are its main checkout's, whichever of
+// its worktrees crew start runs in; the run itself is armed in this one.
+export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdin, stdout, run = execProgram, home = homedir(), env = process.env, launch, orchestrate = crewOrchestrator, alive = runnerAlive }) {
   let parsed
   try {
     parsed = flagsToAnswers(argv)
@@ -207,11 +224,12 @@ export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdi
   if (rest.length !== 1 || !/^[1-9]\d*$/.test(rest[0])) throw new StartError(rest.length ? `one spec issue number, not ${rest.join(' ')}` : 'the spec issue number is required', 2)
   const spec = Number(rest[0])
   const repoDir = await repoDirOf(cwd, run)
-  const { roles } = repoConfig(paths, repoDir)
+  const repo = await repoOf(repoDir)
+  const { roles } = repoConfig(paths, repo)
   const facts = await probeStart({ cwd: repoDir, paths, home, env, run })
   let form
   try {
-    form = startForm(facts, { remembered: rememberedAnswers(paths, repoDir), flags })
+    form = startForm(facts, { remembered: rememberedAnswers(paths, repo), flags })
   } catch (e) {
     throw new StartError(e.message, 2)
   }
@@ -220,6 +238,7 @@ export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdi
     if (missing.length) throw new StartError(`no terminal to show the form at, so every row needs its flag: missing ${missing.join(', ')}`, 2)
   }
   let target = await resolveArming({ repoDir, spec, repo: facts.repo, run, home })
+  refuseLiveRunner(stateDirOf(target.notesDir), alive)
   const problem = target.validation === null ? null : validationListProblem(target.validation)
   if (problem) throw new StartError(`${target.validationFile} cannot be armed: its ${problem}; the workflow holds the list in a template literal, so write the command without it; nothing armed`)
   if (!tty && target.validation === null) {
@@ -234,6 +253,6 @@ export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdi
     target = { ...target, validation }
   }
   const settled = { ...answers, stackMode: await settleStackMode(answers, run) }
-  rememberAnswers(paths, repoDir, settled)
-  return { ...(await armRun({ target, answers: settled, roles, launch })), target, answers: settled }
+  rememberAnswers(paths, repo, settled)
+  return { ...(await armRun({ target, answers: settled, roles, launch, alive })), target, answers: settled }
 }

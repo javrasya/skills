@@ -6,17 +6,19 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'events'
+import { randomUUID } from 'crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
 import { crewPaths } from '../src/daemon/transport.mjs'
-import { stopDaemon } from '../src/daemon/client.mjs'
+import { request, stopDaemon } from '../src/daemon/client.mjs'
 import { crewHost } from '../src/crew-host.mjs'
 import { OrchestratorError, orchestrator } from '../src/orchestrator.mjs'
 import { execProgram } from '../src/git.mjs'
 import { STACKS_DOCS, rememberedAnswers, startForm } from '../src/start-form.mjs'
-import { END_SIGNALS, PLACEHOLDERS, notesDirOf, renderRoles, renderTemplate, startCommand, templatePath } from '../src/arm.mjs'
+import { END_SIGNALS, PLACEHOLDERS, launchRunner, notesDirOf, renderRoles, renderTemplate, startCommand, templatePath } from '../src/arm.mjs'
+import { launchCommand } from '../src/harness.mjs'
 import { DEFAULTS } from '../src/crew-config.mjs'
 import { loadScript } from '../src/runner.mjs'
 import { drawStartForm, keysOf, runStartForm } from '../src/start-tui.mjs'
@@ -278,7 +280,7 @@ test('crew start at a terminal: Enter through the form renders workflow.js, clea
   assert.match(lastScreen(out), /crew start: acme\/app #94: Crew, the session runner/)
   const script = join(w.notesDir, 'workflow.js')
   assert.equal(armed.script, script)
-  assert.deepEqual(w.launches, [{ args: [script, '--permission-mode', 'auto'], cwd: w.repoDir, title: 'implement-spec #94: Crew, the session runner', signals: [] }])
+  assert.deepEqual(w.launches, [{ script, stateDir, permissionMode: 'auto', cwd: w.repoDir, title: 'implement-spec #94: Crew, the session runner', signals: [] }])
   assert.ok(existsSync(join(stateDir, 'journal.jsonl')), 'only the end signals are cleared: the journal is what --resume replays')
   const template = readFileSync(templatePath(), 'utf8')
   assert.equal(readFileSync(script, 'utf8'), skillRender(template, { SPEC: 94, REPO: 'acme/app', REPO_DIR: w.repoDir, NOTES_DIR: w.notesDir, BASE_REF: 'develop', STACK_MODE: 'native', RUNNER: 'session', VALIDATION: 'npm t\n' }))
@@ -292,7 +294,7 @@ test('crew start by flags alone: pi takes no permission mode, Install and Use in
   await w.start(['94', '--harness', 'pi', '--model', 'lmstudio/qwen3', '--base', 'main', '--stack-mode', 'install'])
   assert.ok(w.calls.includes('gh extension install github/gh-stack'))
   const [launch] = w.launches
-  assert.deepEqual(launch.args, [join(w.notesDir, 'workflow.js')])
+  assert.deepEqual([launch.script, launch.permissionMode], [join(w.notesDir, 'workflow.js'), null])
   const script = readFileSync(join(w.notesDir, 'workflow.js'), 'utf8')
   assert.match(script, /^const STACK_MODE = 'native'/m)
   assert.match(script, /^const BASE_REF = 'main'/m)
@@ -378,4 +380,70 @@ test('the rendered script still runs on the Workflow runner: only role rows diff
   assert.equal(calls.length, 1)
   assert.ok(CLAUDE_MODELS.includes(calls[0].model), calls[0].model)
   assert.equal(calls[0].harness, 'pi')
+})
+
+test('crew start arms with a [1m] model, and a worker starts on it: the crew host spawns the word as it is, and a shell line quotes it', async () => {
+  const { w, script } = await armedWith(['--harness', 'claude', '--model', 'sonnet[1m]', '--permission-mode', 'auto'])
+  const { impl } = rolesOf(script)
+  assert.deepEqual(impl, { harness: 'claude', model: 'sonnet[1m]' })
+  daemons.push(w.paths)
+  const env = { ...process.env, CREW_HOME: w.paths.home, CLAUDE_CONFIG_DIR: join(w.home, '.claude') }
+  const host = crewHost({ paths: w.paths, env, cwd: w.repoDir, harnesses: { claude: [process.execPath, FAKE_HARNESS] }, quietMs: 300, readyMs: 20_000 })
+  const { runId } = await host.runCreate({ objective: 'spec 94' })
+  const sessionId = randomUUID()
+  const started = await host.workerStart({ run: runId, prompt: 'hello', title: 'impl', ...impl, permissionMode: 'auto', sessionId })
+  const { sessions } = await request(w.paths, { op: 'session.list' })
+  const worker = sessions.find((s) => s.id === started.terminal)
+  assert.deepEqual(worker.command.slice(2), ['--session-id', sessionId, '--permission-mode', 'auto', '--model', 'sonnet[1m]'])
+  assert.equal(launchCommand({ ...impl, sessionId }), `claude --session-id ${sessionId} --model 'sonnet[1m]'`, 'a host that types it into a shell quotes it')
+})
+
+// A runner.pid naming a live process: this test's own.
+const liveRunner = (stateDir) => {
+  mkdirSync(stateDir, { recursive: true })
+  writeFileSync(join(stateDir, 'runner.pid'), String(process.pid))
+  writeFileSync(join(stateDir, 'halted.json'), '{}')
+}
+
+test('crew start over a halted run whose runner is alive is refused before the form, and leaves its runner.pid and halted.json', async () => {
+  const w = world()
+  await w.ready
+  const stateDir = join(w.notesDir, 'orca-run')
+  liveRunner(stateDir)
+  await assert.rejects(w.start(['94', ...FLAGS]), (e) => e.code === 1 && e.message.includes(stateDir) && /has its runner already/.test(e.message) && /nothing armed$/.test(e.message))
+  assert.equal(w.launches.length, 0)
+  assert.ok(!existsSync(join(w.notesDir, 'workflow.js')))
+  assert.equal(readFileSync(join(stateDir, 'runner.pid'), 'utf8'), String(process.pid))
+  assert.ok(existsSync(join(stateDir, 'halted.json')))
+})
+
+test('crew run --resume on a state dir whose runner is alive: the daemon refuses a second runner, run_live, and leaves the state dir as it was', async () => {
+  const w = world()
+  await w.ready
+  daemons.push(w.paths)
+  const script = join(w.notesDir, 'workflow.js')
+  writeFileSync(script, '')
+  const stateDir = join(w.notesDir, 'orca-run')
+  liveRunner(stateDir)
+  await assert.rejects(launchRunner({ paths: w.paths, script, resume: true, cwd: w.repoDir, title: 'crew run workflow.js' }), /run_live: .* has its runner already, pid \d+/)
+  const { sessions } = await request(w.paths, { op: 'session.list' })
+  assert.equal(sessions.length, 0, 'no runner session started')
+  assert.equal(readFileSync(join(stateDir, 'runner.pid'), 'utf8'), String(process.pid))
+  assert.ok(existsSync(join(stateDir, 'halted.json')))
+})
+
+test("crew start in a linked worktree: crew's per-repo config and remembered answers are the main checkout's; the run is armed in the worktree", async () => {
+  const w = world()
+  await w.ready
+  configRoles(w, { impl: { harness: 'pi', model: 'openai/gpt-5' } })
+  const worktree = join(scratch('wt'), 'app-wt')
+  const add = await execProgram('git', ['-C', w.repoDir, 'worktree', 'add', '-q', '-b', 'wt', worktree])
+  assert.equal(add.code, 0, add.stderr)
+  const armed = await w.start(['94', '--harness', 'claude', '--model', 'sonnet', '--base', 'main', '--stack-mode', 'chain', '--permission-mode', 'auto'], { cwd: worktree })
+  const roles = rolesOf(readFileSync(armed.script, 'utf8'))
+  assert.deepEqual(roles.impl, { harness: 'pi', piModel: 'openai/gpt-5', model: 'sonnet' }, 'the override keyed by the main checkout holds from its worktree')
+  assert.equal(armed.target.repoDir, realpathSync(worktree))
+  assert.equal(w.launches[0].cwd, realpathSync(worktree))
+  assert.equal(rememberedAnswers(w.paths, w.repoDir).base, 'main', 'remembered for the repo, by its main checkout')
+  assert.deepEqual(rememberedAnswers(w.paths, worktree), {})
 })

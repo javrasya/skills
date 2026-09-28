@@ -30,6 +30,7 @@
 import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync } from 'fs'
 import { dirname, join } from 'path'
 import { claudeDir } from './transcript.mjs'
+import { LEGACY_HOST } from './hosts.mjs'
 
 // In the user's Claude directory, resolved where transcripts resolve it.
 export const REGISTRY_PATH = join(claudeDir(), 'orca-runs.jsonl')
@@ -111,7 +112,7 @@ export function readRegistry(path = REGISTRY_PATH) {
     if (e.type === 'armed') {
       if (!runs.has(e.runId)) {
         runs.set(e.runId, {
-          runId: e.runId, host: e.host ?? 'orca', project: e.project ?? null, runDir: e.runDir ?? null, spec: e.spec ?? null,
+          runId: e.runId, host: e.host ?? LEGACY_HOST, project: e.project ?? null, runDir: e.runDir ?? null, spec: e.spec ?? null,
           script: e.script ?? null, permissionMode: e.permissionMode ?? null, armedAt: e.at ?? null,
           state: 'running', endedAt: null, runner: null, paused: null, reclaimed: false, reclaimedAt: null, reclaimedAgents: [],
         })

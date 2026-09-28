@@ -5,6 +5,7 @@
 import { STATES, bandOf } from '../run-view-model.mjs'
 import { worktreeName } from '../git.mjs'
 import { RUNNER_SETTINGS } from '../settings.mjs'
+import { LEGACY_HOST } from '../hosts.mjs'
 
 const E = '\x1b['
 const c = (code, s) => `${E}${code}m${s}${E}0m`
@@ -409,7 +410,7 @@ export function listRuns(model) {
   for (const p of projects) {
     lines.push(`${p.name}  ${p.path ?? ''}`.trimEnd())
     for (const r of p.runs) {
-      lines.push(`  ${r.runId.padEnd(20)} ${(r.host ?? 'orca').padEnd(5)} ${(r.spec ?? r.name ?? '—').padEnd(8)} ${strip(outcomeOf(r)).padEnd(20)} ${`runner ${strip(runnerOf(r))}`.padEnd(17)} ${String(r.kept).padStart(3)} kept  ${age(r.ageMs).padStart(7)}${r.reclaimed ? '  reclaimed' : ''}`)
+      lines.push(`  ${r.runId.padEnd(20)} ${(r.host ?? LEGACY_HOST).padEnd(5)} ${(r.spec ?? r.name ?? '—').padEnd(8)} ${strip(outcomeOf(r)).padEnd(20)} ${`runner ${strip(runnerOf(r))}`.padEnd(17)} ${String(r.kept).padStart(3)} kept  ${age(r.ageMs).padStart(7)}${r.reclaimed ? '  reclaimed' : ''}`)
     }
   }
   return lines

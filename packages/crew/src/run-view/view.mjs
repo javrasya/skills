@@ -29,7 +29,7 @@ import { fileURLToPath } from 'url'
 import { runView, runsView } from '../run-view-model.mjs'
 import { REGISTRY_PATH } from '../registry.mjs'
 import { worktreeUnpushed } from '../git.mjs'
-import { DEFAULT_HOST, openHosts } from '../hosts.mjs'
+import { LEGACY_HOST, openHosts } from '../hosts.mjs'
 import { RUNNER_SETTINGS } from '../settings.mjs'
 import { TREE_HELP, draw, drawRuns } from './draw.mjs'
 import { VIEW_EXIT } from './exit-codes.mjs'
@@ -115,7 +115,7 @@ const bound = { ms: RUNNER_SETTINGS.viewCallMs }
 // Standalone, each run's tree, reclaim and resume go to the host the registry
 // names for it.
 const hosts = await openHosts({ callMs: bound.ms })
-const host = hosts[option('--host') ?? DEFAULT_HOST]
+const host = hosts[option('--host') ?? LEGACY_HOST]
 if (!host) crash(new Error(`unknown host ${option('--host')}`))
 const unpushed = (path) => worktreeUnpushed(path, bound)
 // Standalone, `runs` takes every key and click, and hands them to the run it

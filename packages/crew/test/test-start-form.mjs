@@ -126,6 +126,15 @@ test('stack mode: a stacks API that does not answer disables GH Stack with gh\'s
   assert.match(native.note, /did not answer: HTTP 502/)
 })
 
+test('stack mode: with the extension missing and a stacks API that does not answer, GH Stack is disabled with gh\'s words, never Install and Use', () => {
+  const opts = stackOptions({ installed: false, api: 'unknown', detail: 'HTTP 502' })
+  assert.deepEqual(opts.map((o) => [o.value, o.disabled]), [['native', true], ['chain', false]])
+  assert.match(opts[0].note, /did not answer: HTTP 502/)
+  const f = facts({ ghStack: { installed: false, api: 'unknown', detail: 'HTTP 502' } })
+  assert.equal(startForm(f).answers().stackMode, 'chain')
+  assert.throws(() => startForm(f, { flags: { stackMode: 'install' } }), /--stack-mode: install is not one of chain/)
+})
+
 test('stack mode: only the Install and Use answer installs the extension', async () => {
   for (const stackMode of ['native', 'chain']) {
     const run = fakeRun({})

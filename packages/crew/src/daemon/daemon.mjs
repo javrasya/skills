@@ -123,6 +123,10 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
     for (const [id, dir] of runnerDirs) {
       if (dir === key && sessions.get(id)?.info().alive) throw new Error(`run_live: ${runDir} has its runner already, in crew session ${id}`)
     }
+    // A runner this daemon did not start, an Orca one or a trailing one, is
+    // known by the runner.pid it writes.
+    const pid = pidIn(runDir)
+    if (pid && alive(pid)) throw new Error(`run_live: ${runDir} has its runner already, pid ${pid}`)
   }
 
   function spawnOne({ command, cwd, env, cols, rows, title, runDir = null }) {

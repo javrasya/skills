@@ -62,7 +62,7 @@ import { checkSchema } from './schema.mjs'
 import { launchCommand, HARNESSES } from './harness.mjs'
 import { realTimer } from './git.mjs'
 import { hostUnreachable } from './session-host.mjs'
-import { DEFAULT_HOST, HOST_NAMES, openHost } from './hosts.mjs'
+import { HOST_NAMES, LEGACY_HOST, openHost } from './hosts.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { agentLifecycle, readResult, decisionsNeeded, setAside } from './lifecycle.mjs'
 import { hostOutage } from './outage.mjs'
@@ -676,7 +676,7 @@ if (isMain) {
   // and the runner prints as it always did.
   const view = process.stdout.isTTY && process.stdin.isTTY
     ? attachView({
-      spawnView: () => spawn(process.execPath, [VIEW, '--attached', dir, '--host', hostName ?? DEFAULT_HOST], { stdio: ['inherit', 'inherit', 'inherit', 'ipc'] }),
+      spawnView: () => spawn(process.execPath, [VIEW, '--attached', dir, '--host', hostName ?? LEGACY_HOST], { stdio: ['inherit', 'inherit', 'inherit', 'ipc'] }),
       tab: (s) => console.log(s),
       log: (s) => say(s),
       tail: () => logTail(dir),

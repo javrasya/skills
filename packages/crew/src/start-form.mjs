@@ -56,12 +56,13 @@ export async function probeStart({ cwd = process.cwd(), paths, home = homedir(),
 
 // The stack modes the facts allow, each { value, label, disabled, note }. A
 // 404 disables GH Stack whether or not the extension is in, since installing
-// nothing enables stacks for a repo.
+// nothing enables stacks for a repo; so does a stacks API that gave no
+// answer, since nothing says installing would make GH Stack usable.
 export function stackOptions({ installed, api, detail }) {
   let first
   if (api === 'disabled') first = { value: 'native', disabled: true, note: `not enabled for this repo: ${STACKS_DOCS}` }
-  else if (!installed) first = { value: 'install', note: `runs gh ${GH_STACK_INSTALL.join(' ')}` }
   else if (api === 'unknown') first = { value: 'native', disabled: true, note: `the stacks API did not answer: ${detail}` }
+  else if (!installed) first = { value: 'install', note: `runs gh ${GH_STACK_INSTALL.join(' ')}` }
   else first = { value: 'native' }
   return [first, { value: 'chain' }].map((o) => ({ label: STACK_MODES[o.value], disabled: false, ...o }))
 }

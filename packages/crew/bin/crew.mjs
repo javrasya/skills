@@ -52,7 +52,7 @@ import { launchRunner, runOrchestrator, startCommand } from '../src/arm.mjs'
 import { REGISTRY_PATH } from '../src/registry.mjs'
 import { runsView, samePath } from '../src/run-view-model.mjs'
 import { listRuns } from '../src/run-view/draw.mjs'
-import { DEFAULT_HOST, openHosts } from '../src/hosts.mjs'
+import { DEFAULT_HOST, LEGACY_HOST, openHosts } from '../src/hosts.mjs'
 import { RUNNER_SETTINGS } from '../src/settings.mjs'
 
 const USAGE = [
@@ -194,7 +194,7 @@ async function view(args) {
   // Each run's tree, reclaim and resume go to the host the registry names for it.
   const callMs = RUNNER_SETTINGS.viewCallMs
   const hosts = await openHosts({ paths, callMs })
-  const runs = runsView({ host: hosts[DEFAULT_HOST], hostOf: (name) => hosts[name] ?? hosts[DEFAULT_HOST], registry, enter: true, orchestrator: runOrchestrator({ paths }) })
+  const runs = runsView({ host: hosts[LEGACY_HOST], hostOf: (name) => hosts[name] ?? hosts[LEGACY_HOST], registry, enter: true, orchestrator: runOrchestrator({ paths }) })
   await runs.refresh()
   const run = runs.model.projects.flatMap((p) => p.runs).find((r) => r.runId === target || samePath(r.runDir, target))
   if (!run) throw new Error(`no run ${target} in the run registry ${registry}`)
@@ -227,13 +227,24 @@ async function orchestration([verb, ...args]) {
 
 // The runner as a session of the daemon's, on the crew host: it outlives this
 // command, as a runner outlives its Orca tab, and `crew console` enters it.
-// Its own argv errors would land on a screen nobody has entered yet, so the
-// script is checked here first.
+// Its own argv errors would land on a screen nobody has entered yet, so its
+// argv is checked here first. The daemon refuses a second runner on a run dir
+// that has one (run_live), --resume or not.
+const RUN_OPTIONS = ['--state-dir', '--permission-mode']
 async function crewRun(args) {
-  const scripts = args.filter((a, i) => !a.startsWith('--') && !['--state-dir', '--permission-mode'].includes(args[i - 1]))
+  const scripts = args.filter((a, i) => !a.startsWith('--') && !RUN_OPTIONS.includes(args[i - 1]))
   if (scripts.length !== 1) usage(`crew run: ${scripts.length ? `one script, not ${scripts.join(', ')}` : 'the rendered script is required'}`)
+  const unknown = args.filter((a, i) => a.startsWith('--') && !RUN_OPTIONS.includes(args[i - 1]) && ![...RUN_OPTIONS, '--resume'].includes(a))
+  if (unknown.length) usage(`crew run: unexpected ${unknown.join(' ')}`)
+  const valueOf = (flag) => {
+    const at = args.indexOf(flag)
+    if (at < 0) return null
+    if (!args[at + 1] || args[at + 1].startsWith('--')) usage(`crew run: ${flag} needs a value`)
+    return args[at + 1]
+  }
+  const [stateDir, permissionMode] = RUN_OPTIONS.map(valueOf)
   if (!existsSync(scripts[0])) throw new Error(`no script ${resolve(scripts[0])}`)
-  const s = await launchRunner({ ...terminalSize(), paths, args, cwd: process.cwd(), title: `crew run ${basename(scripts[0])}` })
+  const s = await launchRunner({ ...terminalSize(), paths, script: scripts[0], stateDir, resume: args.includes('--resume'), permissionMode, cwd: process.cwd(), title: `crew run ${basename(scripts[0])}` })
   console.log(`crew run: the runner is crew session ${s.id}; enter it from \`crew console\``)
 }
 
@@ -260,7 +271,7 @@ async function start(args) {
 const [command, ...rest] = process.argv.slice(2)
 if (command === 'run') {
   const at = rest.indexOf('--host')
-  const host = at >= 0 ? rest[at + 1] : 'crew'
+  const host = at >= 0 ? rest[at + 1] : DEFAULT_HOST
   if (!HOSTS.includes(host)) usage(host ? `crew: unknown host ${host}` : 'crew run: --host needs a host')
   if (host === 'crew') {
     await crewRun(rest.filter((_, i) => at < 0 || (i !== at && i !== at + 1))).catch(fail)

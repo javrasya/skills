@@ -2,6 +2,7 @@
 // host in here: a worktree is git's, whichever host made it.
 import { execFile } from 'child_process'
 import { existsSync } from 'fs'
+import { basename, dirname, resolve } from 'path'
 import { RUNNER_SETTINGS } from './settings.mjs'
 
 // A clock's timer: resolves after ms unless cancelled first. The runner's
@@ -34,6 +35,14 @@ export function execGit(cwd, args, timeoutMs) {
 // is, so a hung git fails as call_timeout and never stalls its caller.
 export function gitIn(cwd, args, { git = execGit, clock = { timer: realTimer }, ms = RUNNER_SETTINGS.hostCallMs } = {}) {
   return bounded(clock, ms, git(cwd, args, ms), () => Object.assign(new Error(`git ${args[0]}: call_timeout: no answer within ${Math.round(ms / 1000)}s`), { code: 'call_timeout' }))
+}
+
+// The main checkout of the repo `dir` is in: crew's per-repo config, its
+// remembered `crew start` answers and a worktree's siblings are keyed on it,
+// whichever worktree of it the command runs in.
+export async function repoOf(dir, bound) {
+  const common = resolve(dir, (await gitIn(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir'], bound)).trim())
+  return basename(common) === '.git' ? dirname(common) : common.replace(/\.git$/, '')
 }
 
 // `git status --porcelain` as its lines, each kept whole: a line's leading

@@ -8,6 +8,7 @@ import { copyMcpAnswers } from './mcp-answers.mjs'
 import { sessionTranscripts } from './transcript.mjs'
 import { bounded, execGit, gitIn, porcelainLines, realTimer, sameLines, worktreeName, worktreeOwnCommits } from './git.mjs'
 import { launchCommand, resumeCommand, SHELL_WORD } from './harness.mjs'
+import { runnerArgs } from './daemon/runs.mjs'
 
 export class OrcaError extends Error {
   constructor(code, message, verb) {
@@ -104,13 +105,14 @@ function quoted(path, platform) {
   return platform === 'win32' ? `'${p.replace(/'/g, "''")}'` : `'${p.replace(/'/g, `'\\''`)}'`
 }
 
-// The runner's own launch (SKILL.md step 4) with --resume, typed into the
-// shell `resumeRunner` starts, quoted as tailCommand quotes. The state dir is
-// always named, so a run armed with a state dir of its own resumes from it.
+// The runner's own launch (SKILL.md step 4) with --resume, runnerArgs' words
+// naming no host (an Orca runner is on LEGACY_HOST), typed into the shell
+// `resumeRunner` starts, each path quoted as tailCommand quotes. The state dir
+// is always named, so a run armed with a state dir of its own resumes from it.
 export function resumeRunnerCommand({ runner, script, stateDir, permissionMode = null }, platform = process.platform) {
   if (permissionMode && !SHELL_WORD.test(permissionMode)) throw new Error(`refusing to type permission mode "${permissionMode}" into a shell`)
-  const q = (p) => quoted(p, platform)
-  return ['node', q(runner), q(script), '--state-dir', q(stateDir), '--resume', ...(permissionMode ? ['--permission-mode', permissionMode] : [])].join(' ')
+  const words = runnerArgs({ runner, script, host: null, stateDir, permissionMode })
+  return ['node', ...words.map((w, i) => (w.startsWith('--') || words[i - 1] === '--permission-mode' ? w : quoted(w, platform)))].join(' ')
 }
 
 // The one worker-start argv: it adopts a terminal the runner made, so it never

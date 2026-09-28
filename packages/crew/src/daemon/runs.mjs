@@ -39,13 +39,21 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { basename } from 'path'
 import { fileURLToPath } from 'url'
 import { readRegistry } from '../registry.mjs'
+import { DEFAULT_HOST } from '../hosts.mjs'
 
-const RUNNER = fileURLToPath(new URL('../runner.mjs', import.meta.url))
+// The runner every launch of one starts: `crew run`, `crew start`, crew's own
+// recovery and the run views' R.
+export const RUNNER_PATH = fileURLToPath(new URL('../runner.mjs', import.meta.url))
 
-// The runner's command line resuming a crew run from its state dir, as the run
-// view's resume and crew's own recovery start it.
-export const runnerCommand = ({ runner = RUNNER, script, stateDir, permissionMode = null }) =>
-  [process.execPath, runner, script, '--host', 'crew', '--state-dir', stateDir, '--resume', ...(permissionMode ? ['--permission-mode', permissionMode] : [])]
+// The runner's words past its program, the one place its command line is
+// built: on `host`, none named when null (a runner that names none is on
+// LEGACY_HOST), always naming its state dir, and resuming from it by default,
+// as the run view's R and crew's own recovery do.
+export const runnerArgs = ({ runner = RUNNER_PATH, script, host = DEFAULT_HOST, stateDir, resume = true, permissionMode = null }) =>
+  [runner, script, ...(host ? ['--host', host] : []), '--state-dir', stateDir, ...(resume ? ['--resume'] : []), ...(permissionMode ? ['--permission-mode', permissionMode] : [])]
+
+// The runner's command line as a crew session runs it.
+export const runnerCommand = (options) => [process.execPath, ...runnerArgs({ ...options, host: 'crew' })]
 
 export const runnerTitle = (script) => `crew run ${basename(script)}`
 

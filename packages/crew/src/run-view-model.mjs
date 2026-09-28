@@ -20,7 +20,8 @@ import { haltNoticeOf, readTriage } from './triage.mjs'
 import { probesBy } from './outage.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 
-export const RUNNER_PATH = fileURLToPath(new URL('./runner.mjs', import.meta.url))
+export { RUNNER_PATH } from './daemon/runs.mjs'
+import { RUNNER_PATH } from './daemon/runs.mjs'
 
 // What every key that needs Orca says, and does nothing else, while Orca is
 // not there (ADR-0015): the run's journal says an outage is under way, or the

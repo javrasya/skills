@@ -18,11 +18,11 @@ import { fileURLToPath } from 'url'
 import { crewPaths } from './daemon/transport.mjs'
 import { daemonGone, ensureDaemon, request } from './daemon/client.mjs'
 import { runnerCommand } from './daemon/runs.mjs'
-import { launchCommand, launchedSession, resumeCommand } from './harness.mjs'
+import { launchedSession, launchWords, resumeWords } from './harness.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { sessionTranscripts } from './transcript.mjs'
 import { readCrewConfig, repoConfig, samePath } from './crew-config.mjs'
-import { gitIn, porcelainLines, worktreeOwnCommits } from './git.mjs'
+import { gitIn, porcelainLines, repoOf, worktreeOwnCommits } from './git.mjs'
 import { reuseWorktree } from './orca-cli.mjs'
 import { copyMcpAnswers } from './mcp-answers.mjs'
 
@@ -42,13 +42,6 @@ Every \`orchestration send\` your instructions name is this command, with those 
   node "${CREW_BIN}" orchestration send ${ids} --type <worker_done|handoff|escalation> --subject "<subject>" --body "<body>" [--outcome succeeded|failed]
 === TASK ===
 `
-}
-
-// The main checkout of the repo `dir` is in: a worktree's config and its
-// siblings are keyed on it, whichever worktree of it the run is in.
-async function repoOf(dir, bound) {
-  const common = resolve(dir, (await gitIn(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir'], bound)).trim())
-  return basename(common) === '.git' ? dirname(common) : common.replace(/\.git$/, '')
 }
 
 // Where crew makes a repo's worktrees: `<repo-parent>/<repo>.crew/`.
@@ -152,13 +145,14 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     await type(terminal, '\r')
   }
 
-  // The harness from `line` (launchCommand's or resumeCommand's) in a new
+  // The harness from `line` (launchWords' or resumeWords' argv, spawned with
+  // no shell, so a model such as `opus[1m]` goes in as it is) in a new
   // session, a dispatch of `run`, typed its preamble and prompt once ready;
   // a session that fails that is closed. `typing` is called as the prompt
   // starts to go in, past which a worker may have it. With no `run` it is no
   // worker: no dispatch, no preamble, only the prompt.
   async function launch(line, { harness, dir, title, prompt, run, typing = () => {} }) {
-    const [program, ...args] = line.split(' ')
+    const [program, ...args] = line
     const command = [...(harnesses[harness] ?? [program]), ...args]
     const { session } = await call({ op: 'session.spawn', command, cwd: dir, env: sessionEnv, title })
     try {
@@ -271,7 +265,7 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
           }
         }
         const text = typeof prompt === 'function' ? prompt(baseline) : prompt
-        const w = await launch(launchCommand({ harness, model, effort, permissionMode, sessionId }), { harness, dir: worktree, title, prompt: text, run, typing: () => { dispatched = true } })
+        const w = await launch(launchWords({ harness, model, effort, permissionMode, sessionId }), { harness, dir: worktree, title, prompt: text, run, typing: () => { dispatched = true } })
         return { dispatchId: w.terminal, taskId: w.taskId, terminal: w.terminal, worktree, warnings }
       } catch (e) {
         if (child && worktree !== cwd && e instanceof Object) e.worktree ??= worktree
@@ -284,7 +278,7 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     // host's own directory by default), prompted once ready, and entered from
     // the console. Nothing settles it, and closing it is its opener's.
     async sessionStart({ title, prompt, harness = 'claude', model, effort, permissionMode, sessionId, dir = cwd }) {
-      const { terminal } = await launch(launchCommand({ harness, model, effort, permissionMode, sessionId }), { harness, dir, title, prompt, run: null })
+      const { terminal } = await launch(launchWords({ harness, model, effort, permissionMode, sessionId }), { harness, dir, title, prompt, run: null })
       return { terminal }
     },
 
@@ -295,7 +289,7 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     // one has its prompt. A pty whose program ended cannot take another, and a
     // harness run straight in its pty has no shell to type a resume line into.
     async workerContinue({ run, dispatch, terminal = dispatch, worktree = null, title, prompt, harness = 'claude', model, effort, permissionMode, sessionId }) {
-      const line = resumeCommand({ harness, model, effort, permissionMode, sessionId })
+      const line = resumeWords({ harness, model, effort, permissionMode, sessionId })
       const old = await sessionOf(terminal)
       if (old?.alive) {
         await call({ op: 'session.kill', id: old.id })
