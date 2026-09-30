@@ -124,7 +124,7 @@ export function keyNames(text) {
 // 'entering', 'entered' or 'quit'.
 // `guard`: the run console's, whose sessions are agents: the BLOCKED keys
 // never reach them.
-function consoleOn({ paths, stdin, stdout, backKey = 'ctrl+left', holdMs = 50, page, guard = false }) {
+function consoleOn({ paths, stdin, stdout, backKey = 'ctrl+shift+left', holdMs = 50, page, guard = false }) {
   const sequences = backKeySequences(backKey)
   let mode = 'list'
   // The session entered, from the moment entering starts until it is left.
@@ -229,7 +229,7 @@ const CONSOLE_KEYS = [...ARROW_KEYS, ...ENTER_KEYS, ['k', 'up'], ['j', 'down'], 
 export const describeSession = (s, sep = '\t') => [s.id, s.alive ? 'running' : `exited ${s.exit?.code ?? s.exit?.signal}`, `pid ${s.pid}`, `${s.cols}x${s.rows}`, s.command.join(' ')].join(sep)
 
 // `crew console`, for debugging: the daemon's sessions in a flat list, until q or Ctrl+C.
-export function runConsole({ paths, stdin, stdout, backKey = 'ctrl+left', refreshMs = 1_000, holdMs = 50 }) {
+export function runConsole({ paths, stdin, stdout, backKey = 'ctrl+shift+left', refreshMs = 1_000, holdMs = 50 }) {
   let sessions = []
   let selected = 0
   let status = ''
@@ -301,7 +301,7 @@ export function runConsole({ paths, stdin, stdout, backKey = 'ctrl+left', refres
 // row and all. `?` on an opened run enters a fresh orchestrator session,
 // closed once left (runsView's consult). Actions run one at a time, as the run
 // view's do.
-export function runsConsole({ paths, stdin, stdout, runs, backKey = 'ctrl+left', refreshMs = 2_000, holdMs = 50, now = () => Date.now(), onError = () => {} }) {
+export function runsConsole({ paths, stdin, stdout, runs, backKey = 'ctrl+shift+left', refreshMs = 2_000, holdMs = 50, now = () => Date.now(), onError = () => {} }) {
   let flash = null
   let shown = false
   let timer = null

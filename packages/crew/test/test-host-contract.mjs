@@ -227,7 +227,8 @@ export const SCENARIOS = [
       await eventually('the start prompt', () => delivered(h, w, w.prompt))
       const screen = await eventually('the input line', async () => {
         const s = await h.host.terminalScreen({ terminal: w.terminal, lines: 3 })
-        return s.at(-1)?.startsWith('❯') && s
+        // The input row: last, or, in Claude's input box, above its bottom rule.
+        return s.slice(-2).some((l) => l.startsWith('❯')) && s
       })
       assert.ok(screen.length <= 3)
       assert.ok(screen.every((l) => typeof l === 'string' && l === l.trimEnd()))
@@ -465,6 +466,12 @@ test('crew host: the fake harness is a TUI on the alternate screen that echoes e
   assert.ok(!screen.lines.some((l) => l.includes('starting')), 'the normal screen is not shown')
 })
 
+test('crew host: a hosted session runs with Claude\'s agent view off, so Left arrow cannot take the person out of it', async () => {
+  const h = crewKind.open()
+  const w = await start(h, 'no agent view')
+  await eventually('the header', async () => (await request(h.paths, { op: 'session.screen', id: w.terminal })).screen.lines.some((l) => l.includes(`fake claude ${w.sessionId} · no agent view`)))
+})
+
 test('crew host: pi\'s transcript is written in pi\'s format, where the runner finds it by the session id', async () => {
   const h = crewKind.open()
   const w = await start(h, 'pi', { harness: 'pi', model: 'sonnet', effort: 'low' })
@@ -480,7 +487,7 @@ test('crew host: Ctrl-U empties a typed input, and a bare Enter submits one', as
   const h = crewKind.open()
   const w = await start(h, 'input')
   await eventually('the start prompt', () => delivered(h, w, w.prompt))
-  const inputLine = async () => (await h.host.terminalScreen({ terminal: w.terminal, lines: 1 }))[0]
+  const inputLine = async () => (await h.host.terminalScreen({ terminal: w.terminal, lines: 2 }))[0]
   await request(h.paths, { op: 'session.write', id: w.terminal, data: 'a draft', paste: true })
   await eventually('the draft in the input', async () => (await inputLine()) === '❯ a draft')
   await h.host.terminalClearInput({ terminal: w.terminal, lines: 2 })
@@ -498,6 +505,38 @@ test('crew host: a harness that ends before its first prompt fails the start and
   const h = crewKind.open({ harness: [process.execPath, exits] })
   const before = await h.host.terminalList()
   await assert.rejects(start(h, 'dies'), /ended before its first prompt \(exit 3\)/)
+  assert.deepEqual(await h.host.terminalList(), before)
+})
+
+test('crew host: a dialog before the first prompt is the person\'s: asking hears of it, nothing is typed into it, and the prompt goes in once they answer it', async () => {
+  const h = crewKind.open({ env: { CREW_FAKE_DIALOG: 'trust' } })
+  const heard = []
+  const starting = start(h, 'trusted', { asking: (seen) => heard.push(seen) })
+  const shown = await eventually('the dialog heard of', () => heard[0])
+  assert.deepEqual([shown.dialog, typeof shown.terminal], ['workspace trust', 'string'])
+  assert.match(shown.ask, /trust this folder: enter the session/)
+  await sleep(PAST_QUIET)
+  assert.equal(heard.length, 1, 'a dialog that stays is heard of once')
+  const screen = await h.host.terminalScreen({ terminal: shown.terminal, lines: 30 })
+  assert.ok(screen.some((l) => l.includes('Yes, I trust this folder')), 'nothing was typed into it')
+  // The person answers it in the session.
+  await request(h.paths, { op: 'session.write', id: shown.terminal, data: '\x1b[B' })
+  await request(h.paths, { op: 'session.write', id: shown.terminal, data: '\r' })
+  const w = await starting
+  assert.equal(w.terminal, shown.terminal)
+  assert.deepEqual(heard.slice(1), [null], 'its going is heard of')
+  await eventually('the start prompt', () => delivered(h, w, w.prompt))
+})
+
+test('crew host: a dialog nobody can answer fails the start at once, and one answered "No" ends it; neither leaves a session', async () => {
+  const h = crewKind.open({ env: { CREW_FAKE_DIALOG: 'trust' } })
+  const before = await h.host.terminalList()
+  await assert.rejects(start(h, 'unasked'), /stopped at a dialog before its first prompt \(workspace trust\): Claude asks whether to trust this folder; answer it in a `claude` session of your own in /)
+  const heard = []
+  const refused = start(h, 'refused', { asking: (seen) => heard.push(seen) })
+  const shown = await eventually('the dialog heard of', () => heard[0])
+  await request(h.paths, { op: 'session.write', id: shown.terminal, data: '\r' })
+  await assert.rejects(refused, /ended before its first prompt \(exit 1\), while it asked: workspace trust/)
   assert.deepEqual(await h.host.terminalList(), before)
 })
 

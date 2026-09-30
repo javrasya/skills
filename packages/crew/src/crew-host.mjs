@@ -18,8 +18,9 @@ import { fileURLToPath } from 'url'
 import { crewPaths } from './daemon/transport.mjs'
 import { daemonGone, ensureDaemon, request } from './daemon/client.mjs'
 import { runnerCommand } from './daemon/runs.mjs'
-import { launchedSession, launchWords, resumeWords } from './harness.mjs'
+import { HOSTED_ENV, launchedSession, launchWords, nativeEnv, resumeWords } from './harness.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
+import { SCREENS, readScreen, readsReady } from './screens.mjs'
 import { sessionTranscripts } from './transcript.mjs'
 import { readCrewConfig, repoConfig } from './crew-config.mjs'
 import { childCommand } from './command.mjs'
@@ -29,6 +30,11 @@ import { gitIn, repoOf } from './git.mjs'
 import { gitProbes, prepareChildWorktree, reuseWorktree } from './worktree.mjs'
 
 export const CREW_BIN = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url))
+
+// The rows of a session's screen read for what it shows.
+const SCREEN_ROWS = 500
+// The dialog name of a screen still not ready when readyMs runs out.
+export const UNRECOGNISED = 'unrecognised screen'
 
 const fail = (code, message, extra = {}) => Object.assign(new Error(`crew: ${code}: ${message}`), { code, ...extra })
 
@@ -90,21 +96,23 @@ const TAIL = "const fs=require('fs');const p=process.argv[1];let at=0;const show
 // program words its launch line starts with in place of the harness's own
 // name, as the contract suite puts its fake harness there, crew's config's
 // `harnesses` by default; the rest of the line is the runner's launch
-// command, word for word. A harness is ready for
-// its prompt once it has drawn and then been quiet for `quietMs`, and a start
-// fails if it is not ready within `readyMs`. A worker is idle once its session
+// command, word for word. A harness is ready for its prompt once its screen
+// is its input prompt (`screens`, screens.mjs), steady for `settleMs`, or,
+// for one whose ready screen crew cannot tell, once it has drawn and then
+// been quiet for `quietMs`; a screen still not ready at `readyMs` fails the
+// start, or, for a worker, needs the person (ready below). A worker is idle once its session
 // transcript says its latest turn ended, or, where the transcript does not
 // say, once its terminal has been quiet for `quietMs`. Git calls are bounded
 // at `callMs`, and a worktree's making, its setup hook included, at `createMs`.
 // `start` answers with the daemon, starting it when none does.
-export function crewHost({ paths = crewPaths(), env = process.env, cwd = process.cwd(), project = cwd, harnesses = readCrewConfig(paths).harnesses ?? {}, transcripts = sessionTranscripts({ env }), quietMs = RUNNER_SETTINGS.quietOutputMs, readyMs = 180_000, endMs = 10_000, pollMs = 100, callMs = RUNNER_SETTINGS.hostCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, start = ensureDaemon } = {}) {
+export function crewHost({ paths = crewPaths(), env = process.env, cwd = process.cwd(), project = cwd, harnesses = readCrewConfig(paths).harnesses ?? {}, transcripts = sessionTranscripts({ env }), quietMs = RUNNER_SETTINGS.quietOutputMs, readyMs = 180_000, settleMs = 1_000, screens = SCREENS, endMs = 10_000, pollMs = 100, callMs = RUNNER_SETTINGS.hostCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, start = ensureDaemon } = {}) {
   // This adapter's side of the Runs it creates or takes over, as a runner's
   // terminal is on Orca: the daemon fences every other coordinator out.
   const coordinator = `coord_${randomBytes(6).toString('hex')}`
   // The crew session this adapter's runner runs in, if any: the daemon starts
   // it again, resuming its Run, should the daemon die under it.
   const runner = env.CREW_SESSION ?? null
-  const sessionEnv = { ...env, CREW_HOST: 'crew', CREW_HOME: paths.home }
+  const sessionEnv = { ...nativeEnv(env), ...HOSTED_ENV, CREW_HOST: 'crew', CREW_HOME: paths.home }
   const bound = { ms: callMs }
   let daemon = null
   let outage = null
@@ -126,14 +134,49 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     return rows.slice(-lines)
   }
 
-  // A prompt typed into a TUI still starting is lost, as on Orca.
-  async function ready(id, command) {
+  // A prompt typed into a TUI still starting is lost, as on Orca, and one
+  // typed into a dialog answers it: a prompt goes in only once the screen is
+  // the harness's input prompt (screens.mjs), steady for `settleMs`, or, for
+  // a harness whose ready screen crew cannot tell, once its terminal is quiet.
+  // A dialog on the screen is the person's to answer: `asking({ terminal,
+  // dialog, ask, detail })` is called when one shows, `asking(null)` once it
+  // is gone, and nothing is typed meanwhile, however long it waits. A screen
+  // still not ready at `readyMs` is asked about the same way, as an
+  // unrecognised screen. With no `asking`, nobody can answer: a dialog, or a
+  // screen not ready at `readyMs`, fails the start.
+  async function ready(id, command, { harness, asking = null }) {
     const deadline = Date.now() + readyMs
+    const byScreen = readsReady(harness, screens)
+    let shown = null
+    let steadySince = null
+    const show = async (seen) => {
+      if ((seen?.dialog ?? null) === (shown?.dialog ?? null)) return
+      shown = seen
+      await asking(seen && { terminal: id, dialog: seen.dialog, ask: seen.ask, detail: seen.detail ?? null })
+    }
     for (;;) {
       const s = await sessionOf(id)
-      if (!s?.alive) throw new Error(`\`${command.join(' ')}\` in crew session ${id} ended before its first prompt${s?.exit ? ` (exit ${s.exit.code})` : ''}; its screen:\n${(await screen(id, 15).catch(() => [])).join('\n')}`)
-      if (s.quietMs !== null && s.quietMs >= quietMs) return
-      if (Date.now() > deadline) throw new Error(`\`${command.join(' ')}\` in crew session ${id} never went quiet within ${Math.round(readyMs / 1000)}s`)
+      if (!s?.alive) throw new Error(`\`${command.join(' ')}\` in crew session ${id} ended before its first prompt${s?.exit ? ` (exit ${s.exit.code})` : ''}${shown ? `, while ${shown.dialog === UNRECOGNISED ? 'its screen was not one crew recognises' : `it asked: ${shown.dialog}`}` : ''}; its screen:\n${(await screen(id, 15).catch(() => [])).join('\n')}`)
+      const seen = readScreen(harness, await screen(id, SCREEN_ROWS), screens)
+      if (seen?.state === 'dialog') {
+        steadySince = null
+        if (!asking) throw Object.assign(new Error(`\`${command.join(' ')}\` in crew session ${id} stopped at a dialog before its first prompt (${seen.dialog}): ${seen.ask.replace(/: enter the session.*$/, '')}; answer it in a \`${harness}\` session of your own in ${s.cwd}, then try again`), { dialog: seen.dialog })
+        await show(seen)
+      } else {
+        const now = Date.now()
+        const isReady = byScreen ? seen?.state === 'ready' : s.quietMs !== null && s.quietMs >= quietMs
+        if (isReady) {
+          steadySince ??= now
+          if (now - steadySince >= (byScreen ? settleMs : 0)) {
+            if (shown) await show(null)
+            return
+          }
+        } else steadySince = null
+        if (now > deadline) {
+          if (!asking) throw new Error(`\`${command.join(' ')}\` in crew session ${id} ${byScreen ? 'never showed its input prompt' : 'never went quiet'} within ${Math.round(readyMs / 1000)}s; its screen:\n${(await screen(id, 15).catch(() => [])).join('\n')}`)
+          if (!isReady) await show({ dialog: UNRECOGNISED, ask: `crew does not recognise ${harness}'s screen after ${Math.round(readyMs / 1000)}s: enter the session and get it to its input prompt`, detail: null })
+        } else if (shown && !isReady) await show(null)
+      }
       await sleep(pollMs)
     }
   }
@@ -151,13 +194,14 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
   // a session that fails that is closed. `typing` is called as the prompt
   // starts to go in, past which a worker may have it. With no `run` it is no
   // worker: no dispatch, no preamble, only the prompt.
-  async function launch(line, { harness, dir, title, prompt, run, typing = () => {} }) {
+  // `asking` is ready's: who hears of a dialog the person must answer first.
+  async function launch(line, { harness, dir, title, prompt, run, typing = () => {}, asking = null }) {
     const [program, ...args] = line
     const command = [...(harnesses[harness] ?? [program]), ...args]
     const { session } = await call({ op: 'session.spawn', command, cwd: dir, env: sessionEnv, title })
     try {
       const { worker } = run ? await call({ op: 'run.worker', run, session: session.id, coordinator }) : { worker: null }
-      await ready(session.id, command)
+      await ready(session.id, command, { harness, asking })
       typing()
       await terminalSend({ terminal: session.id, text: (worker ? crewPreamble({ terminal: session.id, ...worker }) : '') + prompt })
       return { terminal: session.id, taskId: worker?.taskId ?? null }
@@ -242,7 +286,9 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     // `<repo-parent>/<repo>.crew/<name>`. Its baseline, the porcelain lines
     // it holds before its agent, is taken after the setup hook and the MCP
     // answers, and handed to onBaseline and to `prompt` when a function.
-    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null }) {
+    // `asking` hears of a dialog its harness shows before the prompt goes in
+    // (ready above), as workerContinue's does; the start waits it out.
+    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null, asking = null }) {
       if (!sessionId) throw new Error(`workerStart: ${title} has no session id; the runner assigns one to every worker`)
       const warnings = []
       let worktree = cwd
@@ -255,7 +301,7 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
           if (made.made) baseline = await prepareChildWorktree({ project, worktree, bound, child, warnings })
         }
         const text = typeof prompt === 'function' ? prompt(baseline) : prompt
-        const w = await launch(launchWords({ harness, model, effort, permissionMode, sessionId }), { harness, dir: worktree, title, prompt: text, run, typing: () => { dispatched = true } })
+        const w = await launch(launchWords({ harness, model, effort, permissionMode, sessionId }), { harness, dir: worktree, title, prompt: text, run, asking, typing: () => { dispatched = true } })
         return { dispatchId: w.terminal, taskId: w.taskId, terminal: w.terminal, worktree, warnings }
       } catch (e) {
         if (child && worktree !== cwd && e instanceof Object) e.worktree ??= worktree
@@ -279,7 +325,7 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     // one session id would both write its transcript), is closed once the new
     // one has its prompt. A pty whose program ended cannot take another, and a
     // harness run straight in its pty has no shell to type a resume line into.
-    async workerContinue({ run, dispatch, terminal = dispatch, worktree = null, title, prompt, harness = 'claude', model, effort, permissionMode, sessionId }) {
+    async workerContinue({ run, dispatch, terminal = dispatch, worktree = null, title, prompt, harness = 'claude', model, effort, permissionMode, sessionId, asking = null }) {
       const line = resumeWords({ harness, model, effort, permissionMode, sessionId })
       const old = await sessionOf(terminal)
       if (old?.alive) {
@@ -291,7 +337,7 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
         }
       }
       const dir = old?.cwd ?? worktree ?? cwd
-      const w = await launch(line, { harness, dir, title: old?.title ?? title, prompt, run })
+      const w = await launch(line, { harness, dir, title: old?.title ?? title, prompt, run, asking })
       if (old) await call({ op: 'session.close', id: old.id }).catch(() => {})
       return { dispatchId: w.terminal, taskId: w.taskId, terminal: w.terminal, worktree: dir, reopened: true }
     },

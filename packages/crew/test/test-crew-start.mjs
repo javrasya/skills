@@ -17,6 +17,7 @@ import { crewHost } from '../src/crew-host.mjs'
 import { OrchestratorError, orchestrator } from '../src/orchestrator.mjs'
 import { execProgram } from '../src/git.mjs'
 import { STACKS_DOCS, rememberedAnswers, startForm } from '../src/start-form.mjs'
+import { preflight } from '../src/headless.mjs'
 import { END_SIGNALS, PLACEHOLDERS, launchRunner, notesDirOf, renderRoles, renderTemplate, startCommand, templatePath } from '../src/arm.mjs'
 import { launchCommand } from '../src/harness.mjs'
 import { DEFAULTS } from '../src/crew-config.mjs'
@@ -162,12 +163,12 @@ const daemons = []
 after(async () => {
   for (const paths of daemons) await stopDaemon(paths, { force: true }).catch(() => {})
 })
-const fakeOrchestrator = (home) => ({ paths, repoDir, harness, model, permissionMode }) => {
-  daemons.push(paths)
-  const env = { ...process.env, CREW_HOME: paths.home, CLAUDE_CONFIG_DIR: join(home, '.claude'), PI_CODING_AGENT_SESSION_DIR: join(home, '.pi') }
-  const host = crewHost({ paths, env, cwd: repoDir, harnesses: { claude: [process.execPath, FAKE_HARNESS], pi: [process.execPath, FAKE_HARNESS] }, quietMs: 300, readyMs: 20_000 })
-  return orchestrator({ host, harness, model, permissionMode, dir: join(paths.home, 'orchestrator'), pollMs: 100, idleMs: 2_000, answerMs: 60_000 })
+const fakeOrchestrator = (home) => ({ repoDir, harness, model, permissionMode }) => {
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: join(home, '.claude'), PI_CODING_AGENT_SESSION_DIR: join(home, '.pi') }
+  return orchestrator({ harness, model, permissionMode, cwd: repoDir, env, program: [process.execPath, FAKE_HARNESS], answerMs: 60_000 })
 }
+// The preflight as `crew start` runs it, on the fake harness.
+const fakeCheck = ({ repoDir, harness, model }) => preflight({ harness, model, cwd: repoDir, program: [process.execPath, FAKE_HARNESS] })
 
 // A repo on disk for git, and gh and pi answered from a table.
 function world({ validation = 'npm test\n', stackInstalled = true } = {}) {
@@ -202,7 +203,7 @@ function world({ validation = 'npm test\n', stackInstalled = true } = {}) {
     launches.push({ ...o, signals: END_SIGNALS.filter((f) => existsSync(join(notesDir, 'orca-run', f))) })
     return { id: 's7' }
   }
-  const start = (argv, over = {}) => startCommand({ argv, paths, cwd: repoDir, tty: false, run, home, env: {}, launch, orchestrate: fakeOrchestrator(home), ...over })
+  const start = (argv, over = {}) => startCommand({ argv, paths, cwd: repoDir, tty: false, run, home, env: {}, launch, orchestrate: fakeOrchestrator(home), check: fakeCheck, ...over })
   return { home, repoDir, paths, notesDir, calls, launches, start, ready: (async () => {
     await git('init', '-q', '-b', 'develop')
     await git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init')
@@ -223,6 +224,23 @@ test('crew start with no terminal: every missing flag is an error naming it, and
 })
 
 const FLAGS = ['--harness', 'claude', '--model', 'opus', '--base', 'main', '--stack-mode', 'chain', '--permission-mode', 'auto']
+
+test('crew start: the harness is checked on the answered model, in the checkout, before anything is drafted or armed; one that cannot run there arms nothing', async () => {
+  const w = world({ validation: null })
+  await w.ready
+  const checked = []
+  let asked = 0
+  const orchestrate = () => ({ ask: async () => (asked++, { checks: [] }) })
+  const refused = async (c) => {
+    checked.push(c)
+    throw new Error('claude answered with an error: Invalid API key · Please run /login')
+  }
+  await assert.rejects(w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r']), stdout: fakeStdout(), orchestrate, check: refused }), (e) => e.code === 1 && /^claude on \S+ cannot run here: claude answered with an error: Invalid API key · Please run \/login; nothing armed$/.test(e.message))
+  assert.deepEqual([checked[0].repoDir, checked[0].harness, typeof checked[0].model], [w.repoDir, 'claude', 'string'])
+  assert.equal(asked, 0, 'the orchestrator is never asked')
+  assert.equal(w.launches.length, 0)
+  assert.ok(!existsSync(join(w.notesDir, 'workflow.js')))
+})
 
 test('crew start with no terminal: a spec with no validation.md is an error, never a draft nobody confirmed', async () => {
   const w = world({ validation: null })

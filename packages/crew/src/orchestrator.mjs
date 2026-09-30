@@ -1,20 +1,15 @@
 // The orchestrator (#102): crew's brain, an agent on the run default's
-// harness and model that crew hands one question at a time, each in a fresh
-// session. It answers through the agent-call machinery a worker's does: the
-// question's prompt ends in workerPrompt's submit instructions, submit checks
-// its payload against the question's schema, and crew re-reads the recorded
-// result against that schema before taking it. Anything short of a valid
-// answer is an OrchestratorError, never a value.
+// harness and model that crew hands one question at a time, each a fresh
+// headless run in the project (headless.mjs), whose answer must meet the
+// question's schema. Anything short of a valid answer is an
+// OrchestratorError, never a value.
 //
-// Its sessions are titled `orchestrator/<question>`, belong to no run's
-// journal, and are closed once answered: no run's graph shows them. It never
-// answers a scheduling question: the questions are crew's, and none is one.
-import { mkdirSync, writeFileSync } from 'fs'
-import { join } from 'path'
+// It runs in no session: no run's graph shows it. Only the run console's `?`
+// is a session, titled `orchestrator/console`, for a person to talk to. It
+// never answers a scheduling question: the questions are crew's, and none is one.
 import { randomUUID } from 'crypto'
 import { checkSchema } from './schema.mjs'
-import { slug } from './util.mjs'
-import { readResult, workerPrompt } from './lifecycle.mjs'
+import { runHeadless } from './headless.mjs'
 import { validationLineProblem } from './validation-list.mjs'
 
 export const ORCHESTRATOR_PREFIX = 'orchestrator/'
@@ -32,101 +27,44 @@ export class OrchestratorError extends Error {
   }
 }
 
-const NUDGE = 'Crew has not received your answer: your final message is not read. Run the submit command from your instructions until it exits 0.'
-const STOPPED = 'its asker stopped asking, and its session was closed'
+const STOPPED = 'its asker stopped asking, and its run was ended'
 
-// `host` is a session host (session-host.mjs), its worker started in the
-// host's own directory; `dir` where each question's schema, payload and
-// result go. A question is answered within `answerMs`; an orchestrator idle
-// for `idleMs` without an answer is nudged once, then given up on. Its
-// session is stopped and closed once answered, or given up on. close() gives
-// up every question still asked, and asks no more: what its asker calls
-// before it goes (a `crew view` quit, a Ctrl+C at `crew start`'s draft), so
-// no orchestrator session outlives the command that asked.
-export function orchestrator({ host, harness = 'claude', model = null, effort = null, permissionMode = null, dir, pollMs = 1_000, idleMs = 60_000, answerMs = 15 * 60_000 }) {
+// Each question is one headless run of the harness (headless.mjs), in `cwd`,
+// the project's checkout: the user's own harness, with their settings and
+// login, but no TUI, so no dialog can stop it and nobody need be there. Its
+// answer is the run's structured output, checked against the question's
+// schema. `dirs` are directories outside `cwd` it may read too (a run's
+// state dir). `program` is the words the harness starts with (crew's config
+// `harnesses`), its own name by default. A question is answered within
+// `answerMs`. close() gives up every question still asked, its run ended,
+// and asks no more: what its asker calls before it goes (a `crew view` quit,
+// a Ctrl+C at `crew start`'s draft), so no orchestrator run outlives the
+// command that asked.
+export function orchestrator({ harness = 'claude', model = null, effort = null, permissionMode = null, cwd, env = process.env, program = null, answerMs = 15 * 60_000, run = runHeadless }) {
   const pending = new Set()
   let closed = false
 
-  // `name` names the question, in its session's title; `prompt` asks it;
-  // `schema` is its answer's, an object at its root as an agent() call's is.
-  async function ask({ name, prompt, schema }) {
+  // `name` names the question; `prompt` asks it; `schema` is its answer's,
+  // an object at its root as an agent() call's is; `dirs` as above.
+  async function ask({ name, prompt, schema, dirs = [] }) {
     checkSchema(schema)
     const fail = (reason) => new OrchestratorError(name, reason)
-    const stopped = () => new OrchestratorError(name, STOPPED, { stopped: true })
-    if (closed) throw stopped()
-    // A poll's wait, cut short by close().
-    const q = { stopped: false, wake: () => {} }
-    const wait = (ms) => new Promise((done) => {
-      const timer = setTimeout(done, ms)
-      q.wake = () => (clearTimeout(timer), done())
-    })
-    q.done = new Promise((done) => (q.settle = done))
-    pending.add(q)
+    if (closed) throw new OrchestratorError(name, STOPPED, { stopped: true })
+    const abort = new AbortController()
+    pending.add(abort)
     try {
-      const files = join(dir, `${new Date().toISOString().replace(/[:.]/g, '-')}-${slug(name)}`)
-      mkdirSync(files, { recursive: true })
-      const schemaPath = join(files, 'schema.json')
-      const resultPath = join(files, 'result.json')
-      writeFileSync(schemaPath, JSON.stringify(schema, null, 2))
-      const title = orchestratorTitle(name)
-      let w
-      try {
-        const { runId } = await host.runCreate({ objective: title })
-        w = await host.workerStart({
-          run: runId, title, harness, model, effort, permissionMode, sessionId: randomUUID(),
-          prompt: workerPrompt(prompt, { schemaPath, resultPath, payloadPath: join(files, 'payload.json') }),
-        })
-      } catch (e) {
-        throw fail(`its session did not start: ${e?.message ?? e}`)
-      }
-      try {
-        const deadline = Date.now() + answerMs
-        let idleSince = null
-        let nudged = false
-        for (;;) {
-          if (q.stopped) throw stopped()
-          const s = await host.workerShow({ dispatch: w.dispatchId })
-          if (s.settled) {
-            if (s.outcome !== 'succeeded') throw fail(`its session settled ${s.outcome ?? 'without an outcome'}`)
-            const r = readResult(resultPath, schema)
-            if (r.error) throw fail(r.error)
-            return r.value
-          }
-          if (s.gone || s.exited) throw fail('its session ended without submitting an answer')
-          if (Date.now() > deadline) throw fail(`no answer within ${Math.round(answerMs / 60_000)} min`)
-          if (await host.terminalIdle({ terminal: w.terminal, timeoutMs: 0 })) {
-            idleSince ??= Date.now()
-            if (Date.now() - idleSince >= idleMs) {
-              if (nudged) throw fail('it went idle without submitting an answer, after a nudge')
-              await host.terminalSend({ terminal: w.terminal, text: NUDGE })
-              nudged = true
-              idleSince = null
-            }
-          } else idleSince = null
-          await wait(pollMs)
-        }
-      } catch (e) {
-        throw e instanceof OrchestratorError ? e : fail(e?.message ?? String(e))
-      } finally {
-        // A crew session's kill is idempotent (daemon/session.mjs), so the
-        // close that follows the stop straight away is safe.
-        await host.workerStop({ dispatch: w.dispatchId }).catch(() => {})
-        await host.terminalClose({ terminal: w.terminal }).catch(() => {})
-      }
+      return await run({ harness, prompt, schema, model, effort, permissionMode, dirs, cwd, env, program, ms: answerMs, signal: abort.signal })
+    } catch (e) {
+      if (e?.stopped) throw new OrchestratorError(name, STOPPED, { stopped: true })
+      throw fail(e?.message ?? String(e))
     } finally {
-      pending.delete(q)
-      q.settle()
+      pending.delete(abort)
     }
   }
 
   async function close() {
     closed = true
-    const asked = [...pending]
-    for (const q of asked) {
-      q.stopped = true
-      q.wake()
-    }
-    await Promise.all(asked.map((q) => q.done))
+    for (const abort of pending) abort.abort()
   }
 
   return { ask, close }
@@ -153,7 +91,7 @@ export const VALIDATION_SCHEMA = Object.freeze({
 
 export const validationPrompt = (repoDir) => `You are crew's orchestrator. Crew is arming a workflow run in the repo at ${repoDir}, and the run has no validation list: the commands every change must pass before it is done, each run from the repo's root. Draft that list.
 
-Find the checks the repo already runs, and nothing else: read its CI config and workflow files (.github/workflows, .gitlab-ci.yml, azure-pipelines.yml and the like), its Makefile or justfile, and its package scripts (package.json scripts, pyproject.toml, Cargo.toml, and their kin). Never read source files, and never run anything but the submit command below.
+Find the checks the repo already runs, and nothing else: read its CI config and workflow files (.github/workflows, .gitlab-ci.yml, azure-pipelines.yml and the like), its Makefile or justfile, and its package scripts (package.json scripts, pyproject.toml, Cargo.toml, and their kin). Never read source files, and never run anything.
 
 Answer with every check you found, in the order CI runs them, each as { "command": the one-line command as run from the repo's root, "source": the file, and the job or script in it, you found it in }. A repo with no discoverable checks is answered with an empty checks list: never invent one.
 
@@ -209,7 +147,7 @@ const runFiles = (stateDir) => `its halted.json (the held nodes, while it is hal
 
 export const triagePrompt = ({ stateDir, notice }) => `You are crew's orchestrator. A workflow run has halted: ${notice.nodes.length === 1 ? 'one node is' : `${notice.nodes.length} nodes are`} held until the operator resumes ${notice.nodes.length === 1 ? 'it' : 'them'} with R: ${notice.nodes.map((n) => n.node).join(', ')}. The run's state is ${runFiles(stateDir)}.
 
-Read what you need of those files, and nothing else: change nothing, and never run anything but the submit command below.
+Read what you need of those files, and nothing else: change nothing, and never run anything.
 
 Answer with a short "summary" of the halt, and one entry per held node, in the order halted.json lists them: { "node": its name as halted.json has it, "reason": why it is held, "questions": the questions it left for the operator (empty when it left none), "decide": what the operator must decide before resuming it }.`
 

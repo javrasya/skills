@@ -133,7 +133,10 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
 
   function spawnOne({ command, cwd, env, cols, rows, title, runDir = null }) {
     const id = book.sessionId()
-    const session = open({ id, command, cwd: cwd ?? process.cwd(), env: { ...(env ?? process.env), CREW_SESSION: id }, cols, rows, title })
+    // Always the directory it was asked for, never the daemon's own: that is
+    // wherever the crew command that started the daemon happened to run.
+    if (typeof cwd !== 'string' || !cwd) throw new Error(`session.spawn needs the directory to start ${command[0]} in`)
+    const session = open({ id, command, cwd, env: { ...(env ?? process.env), CREW_SESSION: id }, cols, rows, title })
     sessions.set(id, session)
     if (runDir !== null) runnerDirs.set(id, runKey(runDir))
     book.started(id)
@@ -157,7 +160,11 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
           say(`run ${runId}: its runner, pid ${pid}, still runs: not resumed`)
           continue
         }
-        const session = spawnOne({ command: runnerCommand({ script, stateDir: runDir, permissionMode }), cwd: project ?? undefined, title: runnerTitle(script), runDir })
+        if (!project) {
+          say(`run ${runId} was live, but the registry names no project to run it in: not resumed`)
+          continue
+        }
+        const session = spawnOne({ command: runnerCommand({ script, stateDir: runDir, permissionMode }), cwd: project, title: runnerTitle(script), runDir })
         book.recovered(runId, session.id)
         say(`run ${runId} was live when the last daemon went: its runner resumes it in session ${session.id}`)
       } catch (e) {

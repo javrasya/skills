@@ -10,6 +10,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
+import { preflight, runHeadless } from '../src/headless.mjs'
 import { OrchestratorError, consultSession, draftValidation, isOrchestratorTitle, orchestrator, validationText } from '../src/orchestrator.mjs'
 import { runView, runsView } from '../src/run-view-model.mjs'
 import { TRIAGE_STALE_MS, readTriage, triageHalt } from '../src/triage.mjs'
@@ -24,128 +25,63 @@ const FAKE_HARNESS = fileURLToPath(new URL('./fixtures/crew/fake-harness.mjs', i
 const scratch = (name) => realpathSync(mkdtempSync(join(tmpdir(), `crew-orch-${name}-`)))
 const SCHEMA = { type: 'object', required: ['n'], additionalProperties: false, properties: { n: { type: 'integer' } } }
 
-// A host whose one worker is played by `play({ start, resultPath, state })`:
-// it writes the result file as submit would, and sets the state workerShow
-// reports ({ settled, outcome, exited, gone }) and whether it is idle.
-function standIn(play = () => {}) {
+// A headless run played by `answer(call)`: the value it answers, or a throw.
+// Every call is kept, as runHeadless was given it.
+function standIn(answer = () => ({ n: 1 })) {
   const calls = []
-  let state = { settled: false, outcome: null, gone: false, exited: false, idle: false }
-  const host = {
-    async runCreate({ objective }) {
-      calls.push(['runCreate', objective])
-      return { runId: 'run_o1', terminal: 'coord' }
-    },
-    async workerStart(start) {
-      calls.push(['workerStart', start])
-      const resultPath = /--result "([^"]+)"/.exec(start.prompt)[1]
-      await play({ start, resultPath, state, set: (s) => { state = { ...state, ...s } } })
-      return { dispatchId: 'd1', terminal: 't1', taskId: 'task1', worktree: null, warnings: [] }
-    },
-    async workerShow() {
-      return state
-    },
-    async terminalIdle() {
-      return state.idle
-    },
-    async terminalSend({ text }) {
-      calls.push(['terminalSend', text])
-    },
-    async workerStop() {
-      calls.push(['workerStop'])
-    },
-    async terminalClose() {
-      calls.push(['terminalClose'])
-    },
+  const run = async (call) => {
+    calls.push(call)
+    return answer(call)
   }
-  return { host, calls }
+  return { run, calls }
 }
-const ask = (host, over = {}) => orchestrator({ host, harness: 'pi', model: 'lm/qwen', dir: scratch('files'), pollMs: 1, idleMs: 20, endMs: 5, ...over })
-const submitted = (value, outcome = 'succeeded') => ({ resultPath, set }) => {
-  writeFileSync(resultPath, JSON.stringify(value))
-  set({ settled: true, outcome })
-}
+const ask = (run, over = {}) => orchestrator({ run, harness: 'pi', model: 'lm/qwen', cwd: 'C:/repo', ...over })
+const answering = (value) => standIn(() => value).run
 
-test('ask: a fresh session on the given harness and model, titled orchestrator/<question>, prompted to submit against the schema; a valid answer is returned and the session closed', async () => {
-  const { host, calls } = standIn(submitted({ n: 7 }))
-  assert.deepEqual(await ask(host).ask({ name: 'count', prompt: 'How many?', schema: SCHEMA }), { n: 7 })
-  const [, start] = calls.find(([c]) => c === 'workerStart')
-  assert.equal(start.title, 'orchestrator/count')
-  assert.ok(isOrchestratorTitle(start.title))
-  assert.deepEqual([start.harness, start.model, start.child], ['pi', 'lm/qwen', undefined])
-  assert.match(start.sessionId, /^[0-9a-f-]{36}$/)
-  assert.match(start.prompt, /^How many\?/)
-  const schemaPath = /--schema "([^"]+)"/.exec(start.prompt)[1]
-  assert.deepEqual(JSON.parse(readFileSync(schemaPath, 'utf8')), SCHEMA)
-  assert.match(start.prompt, /submit\.mjs" --schema/)
-  assert.deepEqual(calls.map(([c]) => c), ['runCreate', 'workerStart', 'workerStop', 'terminalClose'])
-  assert.equal(calls[0][1], 'orchestrator/count')
+test('ask: one headless run on the given harness and model, in the project, with the question\'s prompt and schema; its answer is returned', async () => {
+  const { run, calls } = standIn(() => ({ n: 7 }))
+  assert.deepEqual(await ask(run, { permissionMode: 'acceptEdits', program: ['node', 'fake.mjs'] }).ask({ name: 'count', prompt: 'How many?', schema: SCHEMA, dirs: ['C:/state'] }), { n: 7 })
+  const [c] = calls
+  assert.deepEqual([c.harness, c.model, c.permissionMode, c.cwd, c.prompt, c.schema, c.dirs, c.program], ['pi', 'lm/qwen', 'acceptEdits', 'C:/repo', 'How many?', SCHEMA, ['C:/state'], ['node', 'fake.mjs']])
+  assert.ok(c.signal instanceof AbortSignal)
 })
 
-test('ask: every answer short of a valid one is an OrchestratorError naming why, and the session is closed all the same', async () => {
-  const cases = [
-    [submitted({ n: 'seven' }), /recorded result fails its schema: \$\.n: expected integer, got string/],
-    [submitted({ n: 7 }, 'failed'), /its session settled failed/],
-    [({ set }) => set({ settled: true, outcome: 'succeeded' }), /settled without submitting a result/],
-    [({ set }) => set({ exited: true }), /its session ended without submitting an answer/],
-    [({ set }) => set({ gone: true }), /its session ended without submitting an answer/],
-  ]
-  for (const [play, reason] of cases) {
-    const { host, calls } = standIn(play)
-    await assert.rejects(ask(host).ask({ name: 'count', prompt: 'How many?', schema: SCHEMA }), (e) => e instanceof OrchestratorError && reason.test(e.message) && /^the orchestrator gave no valid answer to count: /.test(e.message))
-    assert.deepEqual(calls.slice(-2).map(([c]) => c), ['workerStop', 'terminalClose'])
-  }
+test('ask: a run that gives no valid answer is an OrchestratorError naming why; a question with no answer bound is refused', async () => {
+  const failing = standIn(() => {
+    throw new Error('its answer fails its schema: $.n: expected integer, got string')
+  })
+  await assert.rejects(ask(failing.run).ask({ name: 'count', prompt: 'p', schema: SCHEMA }), (e) => e instanceof OrchestratorError && !e.stopped && e.message === 'the orchestrator gave no valid answer to count: its answer fails its schema: $.n: expected integer, got string')
+  await assert.rejects(ask(failing.run).ask({ name: 'q', prompt: 'p', schema: { type: 'string' } }), /schema needs \{type: "object", properties\}/)
 })
 
-test('ask: an orchestrator idle without an answer is nudged once, then given up on; one that answers after the nudge is heard', async () => {
-  const idle = standIn(({ set }) => set({ idle: true }))
-  await assert.rejects(ask(idle.host).ask({ name: 'q', prompt: 'p', schema: SCHEMA }), /went idle without submitting an answer, after a nudge/)
-  assert.equal(idle.calls.filter(([c]) => c === 'terminalSend').length, 1)
-  assert.match(idle.calls.find(([c]) => c === 'terminalSend')[1], /run the submit command/i)
-  const late = standIn(({ set }) => set({ idle: true }))
-  late.host.terminalSend = async () => {
-    late.calls.push(['terminalSend'])
-    const resultPath = /--result "([^"]+)"/.exec(late.calls.find(([c]) => c === 'workerStart')[1].prompt)[1]
-    writeFileSync(resultPath, JSON.stringify({ n: 1 }))
-    const show = late.host.workerShow
-    late.host.workerShow = async () => ({ ...(await show()), settled: true, outcome: 'succeeded' })
-  }
-  assert.deepEqual(await ask(late.host).ask({ name: 'q', prompt: 'p', schema: SCHEMA }), { n: 1 })
-})
-
-test('ask: a session that never starts, or a question with no answer bound, is reported', async () => {
-  const { host } = standIn()
-  host.workerStart = async () => {
-    throw new Error('crew: agent_not_ready')
-  }
-  await assert.rejects(ask(host).ask({ name: 'q', prompt: 'p', schema: SCHEMA }), /its session did not start: crew: agent_not_ready/)
-  const slow = standIn()
-  await assert.rejects(ask(slow.host, { answerMs: 30, idleMs: 1e9 }).ask({ name: 'q', prompt: 'p', schema: SCHEMA }), /no answer within 0 min/)
-  await assert.rejects(ask(slow.host).ask({ name: 'q', prompt: 'p', schema: { type: 'string' } }), /schema needs \{type: "object", properties\}/)
+test('ask: close() ends every run still asked, which is given up as stopped, and asks nothing more', async () => {
+  const run = ({ signal }) => new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(Object.assign(new Error('stopped'), { stopped: true }))))
+  const orch = ask(run)
+  const asked = orch.ask({ name: 'q', prompt: 'p', schema: SCHEMA })
+  await orch.close()
+  await assert.rejects(asked, (e) => e instanceof OrchestratorError && e.stopped)
+  await assert.rejects(orch.ask({ name: 'late', prompt: 'p', schema: SCHEMA }), (e) => e instanceof OrchestratorError && e.stopped)
 })
 
 test('draft: the checks as validation.md, each under its source; none is an empty list, said to be empty; a command of two lines is no answer', async () => {
   assert.equal(validationText({ checks: [{ command: 'npm test', source: 'package.json' }, { command: ' make lint ', source: 'Makefile\nlint' }] }), '# package.json\nnpm test\n# Makefile lint\nmake lint\n')
-  const none = standIn(submitted({ checks: [] }))
-  assert.deepEqual(await draftValidation(ask(none.host), { repoDir: 'C:/repo' }), { text: '', empty: true })
-  const prompt = none.calls.find(([c]) => c === 'workerStart')[1].prompt
+  const none = standIn(() => ({ checks: [] }))
+  assert.deepEqual(await draftValidation(ask(none.run), { repoDir: 'C:/repo' }), { text: '', empty: true })
+  const { prompt } = none.calls[0]
   assert.match(prompt, /repo at C:\/repo/)
   assert.match(prompt, /Never read source files/)
   assert.match(prompt, /empty checks list/)
-  const twoLines = standIn(submitted({ checks: [{ command: 'a\nb', source: 's' }] }))
-  await assert.rejects(draftValidation(ask(twoLines.host), { repoDir: 'C:/repo' }), (e) => e instanceof OrchestratorError && /not one line/.test(e.message))
-  const invalid = standIn(submitted({ checks: [{ command: 'npm test' }] }))
-  await assert.rejects(draftValidation(ask(invalid.host), { repoDir: 'C:/repo' }), /missing required property "source"/)
+  await assert.rejects(draftValidation(ask(answering({ checks: [{ command: 'a\nb', source: 's' }] })), { repoDir: 'C:/repo' }), (e) => e instanceof OrchestratorError && /not one line/.test(e.message))
 })
 
 test("draft: a command the workflow's String.raw list cannot hold (backtick, ${, trailing backslash) is no answer; a source holding one is only a comment, so it is cleaned", async () => {
   for (const [command, why] of [['echo `date`', /holds a backtick/], ['npm test -- --shard=${{ matrix.shard }}', /holds \$\{/], ['make \\', /ends in a backslash/]]) {
-    const bad = standIn(submitted({ checks: [{ command: 'npm test', source: 'package.json' }, { command, source: 'ci.yml' }] }))
-    await assert.rejects(draftValidation(ask(bad.host), { repoDir: 'C:/repo' }), (e) => e instanceof OrchestratorError && why.test(e.message) && e.message.includes(JSON.stringify(command)), command)
+    await assert.rejects(draftValidation(ask(answering({ checks: [{ command: 'npm test', source: 'package.json' }, { command, source: 'ci.yml' }] })), { repoDir: 'C:/repo' }), (e) => e instanceof OrchestratorError && why.test(e.message) && e.message.includes(JSON.stringify(command)), command)
   }
   assert.equal(validationText({ checks: [{ command: 'npm test', source: 'ci.yml `test` ${{ matrix.os }} \\' }] }), "# ci.yml 'test' $ {{ matrix.os }}\nnpm test\n")
-  const prompt = standIn(submitted({ checks: [] }))
-  await draftValidation(ask(prompt.host), { repoDir: 'C:/repo' })
-  assert.match(prompt.calls.find(([c]) => c === 'workerStart')[1].prompt, /resolve every CI expression \(a GitHub Actions \$\{\{ matrix\.x \}\}.*no command holding a backtick, a \$\{ or a trailing backslash/)
+  const prompt = standIn(() => ({ checks: [] }))
+  await draftValidation(ask(prompt.run), { repoDir: 'C:/repo' })
+  assert.match(prompt.calls[0].prompt, /resolve every CI expression \(a GitHub Actions \$\{\{ matrix\.x \}\}.*no command holding a backtick, a \$\{ or a trailing backslash/)
 })
 
 test("graph: a journal naming an orchestrator session shows no row for it, in any phase", async () => {
@@ -159,34 +95,51 @@ test("graph: a journal naming an orchestrator session shows no row for it, in an
   assert.deepEqual(titles, ['[Implement] impl:a', '[Implement] orchestrator/x'])
 })
 
-// The crew host, its harness the fake one, in a scratch crew home and Claude dir.
+// The crew host, and the fake harness run headless, in a scratch crew home
+// and Claude dir; crew's config names the fake harness as Claude.
 const homes = []
 after(async () => {
   for (const paths of homes) await stopDaemon(paths, { force: true }).catch(() => {})
 })
-function crewScratch() {
+function crewScratch({ program = [process.execPath, FAKE_HARNESS] } = {}) {
   const root = scratch('crew')
   const env = { ...process.env, CREW_HOME: join(root, 'home'), CLAUDE_CONFIG_DIR: join(root, 'claude'), PI_CODING_AGENT_SESSION_DIR: join(root, 'pi') }
   const paths = crewPaths(env)
   homes.push(paths)
+  mkdirSync(paths.home, { recursive: true })
+  writeFileSync(paths.config, JSON.stringify({ harnesses: { claude: program } }))
   const repo = join(root, 'repo')
   mkdirSync(repo)
   assert.equal(spawnSync('git', ['init', '-q', repo]).status, 0)
   const host = crewHost({ paths, env, cwd: repo, harnesses: { claude: [process.execPath, FAKE_HARNESS] }, quietMs: 300, readyMs: 20_000 })
-  return { paths, repo, root, host, orch: orchestrator({ host, harness: 'claude', model: 'opus', dir: join(root, 'orchestrator'), pollMs: 100, idleMs: 1_500, answerMs: 60_000 }) }
+  return { paths, repo, root, host, orch: orchestrator({ harness: 'claude', model: 'opus', cwd: repo, env, program, answerMs: 60_000 }) }
 }
 
-test('crew host: the fake-harness orchestrator answers through submit, drafts its fixed list, and leaves no session open', async () => {
+test('headless: the fake-harness orchestrator answers in the project, drafts its fixed list, and opens no session', async () => {
   const { paths, repo, orch } = crewScratch()
   assert.deepEqual(await orch.ask({ name: 'count', prompt: 'How many? [answer {"n":7}]', schema: SCHEMA }), { n: 7 })
   assert.deepEqual(await draftValidation(orch, { repoDir: repo }), { text: '# package.json scripts.test\nnpm test\n# .github/workflows/ci.yml job lint\nnpm run lint\n', empty: false })
-  const { sessions } = await request(paths, { op: 'session.list' })
-  assert.deepEqual(sessions.filter((s) => s.alive), [], 'each question\'s session is closed once answered')
+  assert.equal((await request(paths, { op: 'session.list' }).catch(() => null)), null, 'no daemon was started: no session was needed')
 })
 
-test('crew host: an answer submit rejects never reaches crew; the orchestrator is nudged, then reported', async () => {
-  const { orch } = crewScratch()
-  await assert.rejects(orch.ask({ name: 'count', prompt: 'How many? [answer {"n":"seven"}]', schema: SCHEMA }), (e) => e instanceof OrchestratorError && /went idle without submitting an answer, after a nudge/.test(e.message))
+test('headless: an answer that fails its schema, an error result, and a run past its time are each reported', async () => {
+  const { orch, repo } = crewScratch()
+  await assert.rejects(orch.ask({ name: 'count', prompt: 'How many? [answer {"n":"seven"}]', schema: SCHEMA }), (e) => e instanceof OrchestratorError && /its answer fails its schema: \$\.n: expected integer, got string/.test(e.message))
+  await assert.rejects(orch.ask({ name: 'count', prompt: '[error Invalid API key · Please run /login]', schema: SCHEMA }), /claude answered with an error: Invalid API key · Please run \/login/)
+  const slow = orchestrator({ harness: 'claude', cwd: repo, program: [process.execPath, FAKE_HARNESS], answerMs: 300 })
+  await assert.rejects(slow.ask({ name: 'q', prompt: '[hang]', schema: SCHEMA }), /no answer within 0 min/)
+})
+
+test('preflight: a harness that answers passes; one whose login or model fails is refused in its own words; it runs in the project', async () => {
+  const { repo } = crewScratch()
+  const program = [process.execPath, FAKE_HARNESS]
+  await preflight({ harness: 'claude', model: 'opus', cwd: repo, program })
+  await preflight({ harness: 'pi', model: 'lm/qwen', cwd: repo, program })
+  const seen = []
+  await preflight({ harness: 'claude', model: 'opus', cwd: repo, run: async (c) => (seen.push(c), 'ok') })
+  assert.deepEqual([seen[0].cwd, seen[0].model, seen[0].schema], [repo, 'opus', undefined])
+  await assert.rejects(preflight({ harness: 'claude', model: 'nope', cwd: repo, run: () => runHeadless({ harness: 'claude', prompt: '[error model nope not found]', cwd: repo, program }) }), /claude answered with an error: model nope not found/)
+  await assert.rejects(preflight({ harness: 'claude', cwd: repo, program: [join(repo, 'no-such-claude')] }), /could not be started/)
 })
 
 // --- halt triage and ? (#103) ---------------------------------------------
@@ -223,14 +176,14 @@ const panelOf = (view) => draw(view.model, { width: 140, height: 30 }).lines.map
 
 test('triage: a new halted.json at is asked exactly once, however often and by however many it is triggered; a new at is a new question', async () => {
   const stateDir = haltedRun()
-  const { host, calls } = standIn(submitted(ANSWER))
-  const orchestrate = () => ask(host)
-  const starts = () => calls.filter(([c]) => c === 'workerStart').map(([, s]) => s)
+  const { run, calls } = standIn(() => ANSWER)
+  const orchestrate = () => ask(run)
+  const starts = () => calls
   const both = await Promise.all([triageHalt({ stateDir, orchestrate }), triageHalt({ stateDir, orchestrate })])
   assert.deepEqual(both.map((r) => r.asked).sort(), [false, true])
   assert.deepEqual(await triageHalt({ stateDir, orchestrate }), { asked: false, state: null }, 'asked about that at already')
   assert.equal(starts().length, 1)
-  assert.equal(starts()[0].title, 'orchestrator/halt-triage')
+  assert.deepEqual(starts()[0].dirs, [stateDir], 'it may read the run directory')
   assert.match(starts()[0].prompt, /held until the operator resumes it with R: impl:a/)
   assert.ok(starts()[0].prompt.includes(stateDir), 'the question names the run directory')
   const recorded = readTriage(stateDir, AT)
@@ -421,23 +374,28 @@ test('crew host: ? starts the fake harness in a session of no run, titled orches
   await request(paths, { op: 'session.close', id })
 })
 
-test('crew host: a console quit with its halt triage still asked leaves no orchestrator session running, holds no `crew daemon stop` up, and the next console asks again', async () => {
-  const { paths, repo, host } = crewScratch()
-  await host.probe()
+test('headless: a console quit with its halt triage still asked ends its run, and the next console asks again', async () => {
+  const root = scratch('hang')
+  const pidFile = join(root, 'pid')
+  const hang = join(root, 'hang.mjs')
+  writeFileSync(hang, `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000)`.replace("require('fs')", "(await import('fs'))"))
+  const { paths, repo } = crewScratch({ program: [process.execPath, hang] })
   const stateDir = haltedRun()
-  const orch = runOrchestrator({ paths, host: () => host })
+  const orch = runOrchestrator({ paths })
   const triaged = orch.triage({ runDir: stateDir, script: null, project: repo, permissionMode: null })
-  const questions = async () => (await request(paths, { op: 'session.list' })).sessions.filter((s) => isOrchestratorTitle(s.title))
-  for (const until = Date.now() + 20_000; !(await questions()).some((s) => s.alive); await new Promise((done) => setTimeout(done, 100))) {
+  for (const until = Date.now() + 20_000; !existsSync(pidFile); await new Promise((done) => setTimeout(done, 50))) {
     if (Date.now() > until) assert.fail('the triage question never started')
   }
   assert.equal(readTriage(stateDir, AT).state, 'asking')
   await orch.close()
   assert.deepEqual(await triaged, { asked: true, state: null })
-  assert.deepEqual(await questions(), [], 'its session closed, not left running')
+  const alive = (pid) => {
+    try {
+      return process.kill(pid, 0)
+    } catch {
+      return false
+    }
+  }
+  assert.equal(alive(Number(readFileSync(pidFile, 'utf8'))), false, 'its run ended, not left running')
   assert.equal(readTriage(stateDir, AT), null, 'no answer and no failure: the next console asks it again')
-  const closed = orchestrator({ host, dir: scratch('files') })
-  await closed.close()
-  await assert.rejects(closed.ask({ name: 'late', prompt: 'x', schema: SCHEMA }), (e) => e instanceof OrchestratorError && e.stopped, 'a closed orchestrator asks nothing more')
-  assert.ok((await request(paths, { op: 'stop' })).pid, 'crew daemon stop is not refused')
 })

@@ -65,6 +65,23 @@ function commandWords(harness, session, { model, effort, permissionMode }) {
   return words
 }
 
+// A Claude Code session marks the programs it starts as its own (CLAUDECODE,
+// its session id, CLAUDE_CODE_CHILD_SESSION…), and a Claude started under
+// those marks is a child session: one that saves no transcript, which crew
+// reads a worker's turns from. A crew started from inside Claude Code would
+// hand them on to every session it starts: each is left out, so every
+// session is the one a person would start in a terminal of their own. Only
+// the marks go: a CLAUDE_CODE_* setting (a provider, a token) stays.
+const SESSION_MARKS = ['CLAUDECODE', 'CLAUDE_PID', 'CLAUDE_EFFORT', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_CODE_EXECPATH']
+export const nativeEnv = (env) => Object.fromEntries(Object.entries(env).filter(([k]) => !SESSION_MARKS.includes(k)))
+
+// A session crew hosts stays in crew's terminal: Claude's agent view (Left
+// arrow at an empty prompt, /background, --bg) would take the person out of
+// the session into a list of Claude's own, and background it where crew no
+// longer watches it. Set in the session's environment, so it holds alike on
+// macOS and Windows; pi reads nothing of it.
+export const HOSTED_ENV = { CLAUDE_CODE_DISABLE_AGENT_VIEW: '1' }
+
 const settingsOf = (path) => {
   try {
     const s = JSON.parse(readFileSync(path, 'utf8'))

@@ -68,7 +68,7 @@ export function triageHalt({ stateDir, orchestrate, now = () => Date.now() }) {
     } catch {}
     return { asked: true, state: entry.state }
   }
-  return (async () => orchestrate().ask({ name: 'halt-triage', prompt: triagePrompt({ stateDir, notice }), schema: TRIAGE_SCHEMA }))()
+  return (async () => orchestrate().ask({ name: 'halt-triage', prompt: triagePrompt({ stateDir, notice }), schema: TRIAGE_SCHEMA, dirs: [stateDir] }))()
     .then((answer) => record({ state: 'answered', answer }), (e) => {
       if (!e?.stopped) return record({ state: 'failed', error: e?.message ?? String(e) })
       rmSync(file, { force: true })

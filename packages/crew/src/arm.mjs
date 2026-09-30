@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
-import { repoConfig } from './crew-config.mjs'
+import { readCrewConfig, repoConfig } from './crew-config.mjs'
 import { ensureDaemon, request } from './daemon/client.mjs'
 import { runnerCommand } from './daemon/runs.mjs'
 import { execProgram, repoOf } from './git.mjs'
@@ -18,6 +18,7 @@ import { crewHost } from './crew-host.mjs'
 import { consultSession, draftValidation, orchestrator } from './orchestrator.mjs'
 import { triageHalt } from './triage.mjs'
 import { validationListProblem } from './validation-list.mjs'
+import { preflight } from './headless.mjs'
 
 // The copy `npm pack` bundles (scripts/pack-template.mjs), else, in a checkout
 // of this repo, the skill folder's own: the copy is taken from it.
@@ -140,10 +141,18 @@ export async function resolveArming({ repoDir, spec, repo, run = execProgram, ho
   return { spec, repo, repoDir, notesDir, title: issue.stdout.trim(), validationFile, validation }
 }
 
-// The orchestrator `crew start` drafts a missing validation list with: on the
-// crew host, in the checkout, on the harness and model the form answered.
+// The words crew's config starts `harness` with in place of its name, or null.
+const programOf = (paths, harness) => readCrewConfig(paths).harnesses?.[harness] ?? null
+
+// The orchestrator `crew start` drafts a missing validation list with: in the
+// checkout, on the harness and model the form answered.
 export const crewOrchestrator = ({ paths, repoDir, harness, model, permissionMode }) =>
-  orchestrator({ host: crewHost({ paths, cwd: repoDir }), harness, model, permissionMode, dir: join(paths.home, 'orchestrator') })
+  orchestrator({ harness, model, permissionMode, cwd: repoDir, program: programOf(paths, harness) })
+
+// `crew start`'s check, before it drafts or arms anything, that the harness
+// the form answered is logged in and reaches its model: one headless turn in
+// the checkout (headless.mjs preflight).
+export const crewPreflight = ({ paths, repoDir, harness, model }) => preflight({ harness, model, cwd: repoDir, program: programOf(paths, harness) })
 
 // The orchestrator's two console uses for runsView's runs, on the crew host,
 // in the run's project, on the run default its script was armed with and the
@@ -162,7 +171,8 @@ export function runOrchestrator({ paths, host = (cwd) => crewHost({ paths, cwd }
   const cwdOf = (run) => run.project ?? run.runDir
   return {
     triage: (run) => {
-      const orch = orchestrator({ host: host(cwdOf(run)), dir: join(paths.home, 'orchestrator'), ...launchOf(run) })
+      const launch = launchOf(run)
+      const orch = orchestrator({ cwd: cwdOf(run), program: programOf(paths, launch.harness), ...launch })
       asking.add(orch)
       return triageHalt({ stateDir: run.runDir, orchestrate: () => orch }).finally(() => asking.delete(orch))
     },
@@ -239,7 +249,7 @@ export class StartError extends Error {
 // remembered answers, then the orchestrator's draft of a missing list. The
 // repo's config and remembered answers are its main checkout's, whichever of
 // its worktrees crew start runs in; the run itself is armed in this one.
-export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdin, stdout, run = execProgram, home = homedir(), env = process.env, launch, orchestrate = crewOrchestrator, alive = runnerAlive, interrupt = sigint }) {
+export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdin, stdout, run = execProgram, home = homedir(), env = process.env, launch, orchestrate = crewOrchestrator, check = crewPreflight, alive = runnerAlive, interrupt = sigint }) {
   let parsed
   try {
     parsed = flagsToAnswers(argv)
@@ -273,6 +283,11 @@ export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdi
   const heading = `crew start: ${target.repo} #${spec}: ${target.title}`
   const answers = tty ? await runStartForm({ form, stdin, stdout, heading }) : form.answers()
   if (!answers) throw new StartError('cancelled; nothing armed', 130)
+  try {
+    await check({ paths, repoDir, harness: answers.harness, model: answers.model })
+  } catch (e) {
+    throw new StartError(`${answers.harness}${answers.model ? ` on ${answers.model}` : ''} cannot run here: ${e?.message ?? e}; nothing armed`)
+  }
   if (target.validation === null) {
     const validation = await draftStep({ target, answers, orchestrate, paths, stdin, stdout, heading, interrupt })
     if (validation === null) throw new StartError('cancelled; no validation list written, nothing armed', 130)

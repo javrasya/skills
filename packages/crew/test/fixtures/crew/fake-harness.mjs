@@ -49,6 +49,35 @@ const earlier = harness === 'pi' ? transcriptPath({ harness, sessionId, worktree
 const transcript = harness === 'pi'
   ? earlier ?? join(process.env.PI_CODING_AGENT_SESSION_DIR || join(homedir(), '.pi', 'agent', 'sessions'), piDir(cwd), `${new Date().toISOString().replace(/[:.]/g, '-')}_${sessionId}.jsonl`)
   : join(claudeDir(), 'projects', claudeSlug(cwd), `${sessionId}.jsonl`)
+// Headless (-p), as crew's orchestrator and preflight run it: the prompt on
+// stdin, one answer printed, then it exits. Claude's is its --output-format
+// json result, the answer its structured_output; pi's is text ending in the
+// answer. Asked for a validation list it answers FIXED_DRAFT; a prompt's
+// [answer <json>] is its answer, [error <text>] an error result, and [hang]
+// never answers. Anything else is answered `ok`.
+if (argv.includes('-p')) {
+  let prompt = ''
+  process.stdin.setEncoding('utf8')
+  process.stdin.on('data', (d) => (prompt += d))
+  process.stdin.on('end', () => {
+    if (/\[hang\]/.test(prompt)) return setInterval(() => {}, 1000)
+    const error = /\[error ([^\]]*)\]/.exec(prompt)?.[1]
+    const answer = /You are crew's orchestrator\. [\s\S]*no validation list/.test(prompt) ? FIXED_DRAFT : /\[answer ([^\]]*)\]/.exec(prompt) ? JSON.parse(/\[answer ([^\]]*)\]/.exec(prompt)[1]) : null
+    if (harness === 'pi') {
+      process.stdout.write(answer ? `Here it is:\n${JSON.stringify(answer)}\n` : 'ok\n')
+      return process.exit(error ? 1 : 0)
+    }
+    const schema = argv.includes('--json-schema')
+    process.stdout.write(`${JSON.stringify(error
+      ? { type: 'result', subtype: 'success', is_error: true, result: error }
+      : { type: 'result', subtype: 'success', is_error: false, result: answer ? JSON.stringify(answer) : 'ok', ...(schema && answer && { structured_output: answer }), cwd })}\n`)
+    process.exit(error ? 1 : 0)
+  })
+} else {
+  tui()
+}
+
+function tui() {
 let parent = null
 const write = (entry) => {
   mkdirSync(dirname(transcript), { recursive: true })
@@ -136,15 +165,26 @@ function replied(reply) {
 }
 
 const said = []
+// CREW_FAKE_DIALOG=trust: it first asks, as Claude does, whether to trust its
+// folder. Down then Enter trusts it, and the input box shows; Enter alone
+// picks "No, exit" and it exits 1.
+let dialog = process.env.CREW_FAKE_DIALOG === 'trust'
+let choice = 0
 let input = ''
 let status = ''
 function draw() {
   const [cols, rows] = process.stdout.getWindowSize?.() ?? [120, 30]
-  const shown = said.slice(-(rows - 5)).map((l) => l.slice(0, cols - 1))
-  process.stdout.write(`\x1b[2J\x1b[H\x1b[1mfake ${harness} ${sessionId}\x1b[0m`)
+  if (dialog) {
+    process.stdout.write(`\x1b[2J\x1b[H${'─'.repeat(cols - 1)}\r\nAccessing workspace:\r\n\r\n${cwd}\r\n\r\nQuick safety check: Is this a project you created or one you trust?\r\n\r\n❯ No, exit\r\n  Yes, I trust this folder\r\n\r\nEnter to confirm · Esc to cancel`)
+    return
+  }
+  const shown = said.slice(-(rows - 7)).map((l) => l.slice(0, cols - 1))
+  process.stdout.write(`\x1b[2J\x1b[H\x1b[1mfake ${harness} ${sessionId}${process.env.CLAUDE_CODE_DISABLE_AGENT_VIEW === '1' ? ' · no agent view' : ''}\x1b[0m`)
   shown.forEach((l, i) => process.stdout.write(`\x1b[${i + 3};1H${l}`))
-  if (status) process.stdout.write(`\x1b[${rows - 1};1H${status.slice(0, cols - 1)}`)
-  process.stdout.write(`\x1b[${rows};1H\x1b[2K❯ ${input.replace(/\n/g, '⏎').slice(-(cols - 3))}`)
+  if (status) process.stdout.write(`\x1b[${rows - 3};1H${status.slice(0, cols - 1)}`)
+  // Claude's input box: a `❯` row between two rules.
+  const rule = '─'.repeat(cols - 1)
+  process.stdout.write(`\x1b[${rows - 2};1H${rule}\x1b[${rows - 1};1H\x1b[2K❯ ${input.replace(/\n/g, '⏎').slice(-(cols - 3))}\x1b[${rows};1H${rule}`)
 }
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
@@ -211,6 +251,17 @@ process.stdin.on('data', (chunk) => {
     } else if (pending.startsWith('\x1b') && pending.length < 6 && '\x1b[20'.startsWith(pending.slice(0, 4))) {
       // A paste bracket split across reads.
       break
+    } else if (dialog) {
+      if (pending.startsWith('\x1b[B')) {
+        choice = 1
+        pending = pending.slice(3)
+        continue
+      }
+      const key = pending[0]
+      pending = pending.slice(1)
+      if (key !== '\r') continue
+      if (choice === 0) process.exit(1)
+      dialog = false
     } else {
       const key = pending[0]
       pending = pending.slice(1)
@@ -227,3 +278,4 @@ process.stdin.on('data', (chunk) => {
   draw()
 })
 process.stdout.on('resize', draw)
+}

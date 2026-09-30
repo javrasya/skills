@@ -187,8 +187,12 @@ test('crew ls: every run of the registry, crew\'s and Orca\'s, by project; crew 
   }
 })
 
-test('crew view: it is the run view, with the view\'s own argv', () => {
-  assert.equal(crew('view').status, 2)
+test('crew view: with no run, the runs list; --attached and --standalone are the run view\'s own argv', () => {
+  const list = crew('view', '--registry', join(mkdtempSync(join(tmpdir(), 'crew-bin-')), 'runs.jsonl'))
+  assert.equal(list.status, 3, 'no run named: the runs list, which needs a terminal')
+  assert.match(list.stderr, /crew view: needs a terminal/)
+  assert.equal(crew('view', 'a', 'b').status, 2)
+  assert.equal(crew().status, 2, 'bare crew with no terminal: the usage')
   const alone = crew('view', '--standalone', '--registry', join(mkdtempSync(join(tmpdir(), 'crew-bin-')), 'runs.jsonl'))
   assert.equal(alone.status, 3)
   assert.match(alone.stderr, /needs a terminal/)

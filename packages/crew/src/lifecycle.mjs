@@ -548,6 +548,16 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
     }
   }
 
+  // What a host that can see its harness's screen calls while the worker's
+  // prompt waits on a dialog only the person can answer (the crew host's
+  // ready): its row needs you, entered at `terminal`, until the dialog is
+  // gone, `null`, and the prompt goes in.
+  const asking = ({ key, n, title }) => (seen) => {
+    if (!seen) return void journal({ type: 'dialogClosed', key, n, title })
+    out(`?? ${title}: ${seen.ask}${seen.detail ? ` (its screen: ${seen.detail})` : ''}: crew session ${seen.terminal}`)
+    journal({ type: 'dialog', key, n, title, terminal: seen.terminal, dialog: seen.dialog, ask: seen.ask })
+  }
+
   // Starts the call's worker, retried as the settings table says. Once it
   // has failed for good, the call's null, or, for an agent() call, its
   // patient's failure, handed to its doctors. again: a doctor's remedy, the
@@ -585,6 +595,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
         try {
           const w = await host.workerStart({
             run: runId,
+            asking: asking(call),
             prompt: patient != null ? prompt : (baseline) => (sent = workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline, note: again?.note ?? null })),
             title,
             ...launch,
@@ -685,7 +696,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
         out(`>> ${title}: ${end.dead}; continuing session ${sessionId} (${end.hostDied ? 'not counted against the cap' : `continuation ${attempt} of ${limits.maxContinuations}`}) ${reopen ? `in a new terminal in ${w.worktree ?? 'its worktree'}` : `in terminal ${w.terminal}`}`)
         let next
         try {
-          next = await host.workerContinue({ run: runId, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: (patient != null ? doctorContinuePrompt : continuePrompt)(end.dead), ...launch, sessionId, reopen })
+          next = await host.workerContinue({ run: runId, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: (patient != null ? doctorContinuePrompt : continuePrompt)(end.dead), ...launch, sessionId, reopen, asking: asking(call) })
         } catch (e) {
           end = { dead: `${end.dead}, and continuing its session failed: ${e?.message ?? e}` }
           break
@@ -880,7 +891,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
     out(`>> ${title}: resuming node ${call.node}: continuing session ${adopt.sessionId} ${gone ? `in a new terminal in ${w.worktree ?? 'its worktree'}` : `in terminal ${w.terminal}`}`)
     let next
     try {
-      next = await host.workerContinue({ run: runId, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: haltedPrompt(!!halted.needsDecision), ...launch, sessionId: adopt.sessionId, reopen: gone })
+      next = await host.workerContinue({ run: runId, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: haltedPrompt(!!halted.needsDecision), ...launch, sessionId: adopt.sessionId, reopen: gone, asking: asking(call) })
     } catch (e) {
       return failAgent(call, { reason: `resuming its session failed: ${e?.message ?? e}`, attempts: 0, run: runId, retained: keep(call, w) })
     }
@@ -898,7 +909,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
     out(`>> ${title}: doctor round ${round} handed off a note; continuing session ${sessionId} with it ${failure.gone ? `in a new terminal in ${w.worktree ?? 'its worktree'}` : `in terminal ${w.terminal}`}`)
     let next
     try {
-      next = await host.workerContinue({ run: failure.run, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: notePrompt(note), ...launch, sessionId, reopen: failure.gone })
+      next = await host.workerContinue({ run: failure.run, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: notePrompt(note), ...launch, sessionId, reopen: failure.gone, asking: asking(call) })
     } catch (e) {
       return failAgent(call, { ...failure, reason: `${failure.reason}, and continuing its session with its doctor's note failed: ${e?.message ?? e}`, retained: keep(call, w) })
     }

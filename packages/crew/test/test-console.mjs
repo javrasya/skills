@@ -19,7 +19,7 @@ import { request } from '../src/daemon/client.mjs'
 import { startDaemon } from '../src/daemon/daemon.mjs'
 import { ptySession } from '../src/daemon/session.mjs'
 import { RESET, repaint, stripHostModes, trackModes } from '../src/daemon/modes.mjs'
-import { backKeySequences, readCrewConfig } from '../src/crew-config.mjs'
+import { backKeyLabel, backKeySequences, readCrewConfig } from '../src/crew-config.mjs'
 import { backKeyFilter, blockKeys, keyNames, runConsole, runsConsole } from '../src/console.mjs'
 import { crewHost } from '../src/crew-host.mjs'
 import { runRegistry } from '../src/registry.mjs'
@@ -29,8 +29,8 @@ const { Terminal } = xterm
 const CREW = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url))
 const SCRIPTED = fileURLToPath(new URL('./fixtures/crew/scripted.mjs', import.meta.url))
 const F12 = '\x1b[24~'
-// Ctrl+Left, the default back key.
-const BACK = '\x1b[1;5D'
+// Ctrl+Shift+Left, the default back key.
+const BACK = '\x1b[1;6D'
 const F5 = '\x1b[15~'
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
@@ -87,10 +87,13 @@ test('back key: every other key is forwarded byte for byte, and the back key nev
   assert.deepEqual(backs, [])
 })
 
-test('crew config: the back key is Ctrl+Left unless ~/.crew/config.json names another; Ctrl+] is refused', () => {
+test('crew config: the back key is Ctrl+Shift+Left unless ~/.crew/config.json names another; Ctrl+] is refused', () => {
   const paths = crewPaths({ CREW_HOME: mkdtempSync(join(tmpdir(), 'crew-config-')) })
-  assert.equal(readCrewConfig(paths).backKey, 'ctrl+left')
-  assert.deepEqual(backKeySequences('ctrl+left'), [BACK, '\x1bOd', '\x1b[1;5:1D', '\x1b[1;5:2D'], "xterm's, rxvt's, and kitty's press and repeat, never its release")
+  assert.equal(readCrewConfig(paths).backKey, 'ctrl+shift+left')
+  assert.deepEqual(backKeySequences('ctrl+shift+left'), [BACK, '\x1b[1;6:1D', '\x1b[1;6:2D'], "xterm's, and kitty's press and repeat, never its release")
+  assert.deepEqual(backKeySequences('ctrl+left'), ['\x1b[1;5D', '\x1bOd', '\x1b[1;5:1D', '\x1b[1;5:2D'], "xterm's, rxvt's, and kitty's press and repeat, never its release")
+  assert.equal(backKeyLabel('ctrl+shift+left'), 'Ctrl+Shift+←')
+  assert.equal(backKeyLabel('ctrl+left'), 'Ctrl+←')
   assert.deepEqual(backKeySequences('f12'), [F12])
 
   writeFileSync(paths.config, JSON.stringify({ backKey: 'F5' }))
@@ -197,7 +200,7 @@ async function scriptedSession(t) {
     },
   })
   t.after(() => daemon.shutdown('test over'))
-  const { session } = await request(paths, { op: 'session.spawn', command: [process.execPath, SCRIPTED], cols: 80, rows: 24 })
+  const { session } = await request(paths, { op: 'session.spawn', command: [process.execPath, SCRIPTED], cwd: tmpdir(), cols: 80, rows: 24 })
   const screen = async () => (await request(paths, { op: 'session.screen', id: session.id })).screen
   await until('the program to draw its alternate screen', async () => (await screen()).lines[2].includes('ready'))
   const info = async () => (await request(paths, { op: 'session.list' })).sessions.find((s) => s.id === session.id)
@@ -349,7 +352,7 @@ function crewRun(agent, runner) {
 
 test('crew view: the tree is phases and agents, no runner row; Enter on an agent enters its session in place, and the back key returns to the tree, the same row selected and the session still running', async (t) => {
   const { paths, id, info, typed } = await scriptedSession(t)
-  const { session: runner } = await request(paths, { op: 'session.spawn', command: [process.execPath, SCRIPTED], cols: 80, rows: 24 })
+  const { session: runner } = await request(paths, { op: 'session.spawn', command: [process.execPath, SCRIPTED], cwd: tmpdir(), cols: 80, rows: 24 })
   const registry = crewRun(id, runner.id)
   const runs = runsView({ host: crewHost({ paths }), registry, enter: true, transcripts: { usage: () => null } })
   await runs.refresh()
@@ -391,7 +394,7 @@ test('run console guard: Ctrl+C and Ctrl+D never reach a session, legacy or kitt
 
 test('crew view: Ctrl+C and Ctrl+D typed in an agent\'s session never reach it; the other keys do', async (t) => {
   const { paths, id, typed } = await scriptedSession(t)
-  const { session: runner } = await request(paths, { op: 'session.spawn', command: [process.execPath, SCRIPTED], cols: 80, rows: 24 })
+  const { session: runner } = await request(paths, { op: 'session.spawn', command: [process.execPath, SCRIPTED], cwd: tmpdir(), cols: 80, rows: 24 })
   const registry = crewRun(id, runner.id)
   const runs = runsView({ host: crewHost({ paths }), registry, enter: true, transcripts: { usage: () => null } })
   await runs.refresh()
@@ -425,14 +428,14 @@ test('crew console: needs a terminal, and takes no arguments', () => {
 
 test('crew view: ? on an opened run enters a fresh orchestrator session seeded with its run directory; the back key returns to the graph, the session closed and never a node', async (t) => {
   const { paths, id } = await scriptedSession(t)
-  const { session: runner } = await request(paths, { op: 'session.spawn', command: [process.execPath, SCRIPTED], cols: 80, rows: 24 })
+  const { session: runner } = await request(paths, { op: 'session.spawn', command: [process.execPath, SCRIPTED], cwd: tmpdir(), cols: 80, rows: 24 })
   const registry = crewRun(id, runner.id)
   const consulted = []
   const orchestrator = {
     triage: async () => ({ asked: false }),
     async consult(run) {
       consulted.push(run.runDir)
-      const { session } = await request(paths, { op: 'session.spawn', command: [process.execPath, SCRIPTED], title: 'orchestrator/console', cols: 80, rows: 24 })
+      const { session } = await request(paths, { op: 'session.spawn', command: [process.execPath, SCRIPTED], cwd: tmpdir(), title: 'orchestrator/console', cols: 80, rows: 24 })
       return session.id
     },
   }

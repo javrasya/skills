@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-09-28.
+Accepted — 2026-09-28. Its orchestrator's questions run headless since ADR-0019.
 
 ## Context
 

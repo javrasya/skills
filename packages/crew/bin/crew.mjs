@@ -16,10 +16,11 @@
 //                     `crew view <run dir>` does; with none it prints that
 //   crew ls [--registry <file>]
 //                     every run in the run registry, crew's and Orca's, by project
-//   crew view <run> [--registry <file>]
-//                     the run console: the run's tree (by run id or run dir);
+//   crew [view [<run>] [--registry <file>]]
+//                     the run console: the run's tree (by run id or run dir),
+//                     or with no run the runs list (bare `crew` at a terminal);
 //                     Enter, Right or a click goes in (list to tree, tree to
-//                     an agent's session), Ctrl+Left comes out of a session
+//                     an agent's session), Ctrl+Shift+Left comes out of a session
 //                     and Left from the tree to the list; Enter on a crew run's agent enters that
 //                     session, and the back key comes back to the tree; an Orca
 //                     run's agent is brought to the front in Orca
@@ -31,7 +32,7 @@
 //   crew session spawn [--cwd <dir>] -- <command…> | list | screen <id> | kill <id>
 //   crew console      debug only: the daemon's raw sessions, whatever run they
 //                     are of, in a flat list; Enter enters one, the back key
-//                     (Ctrl+Left, or backKey in ~/.crew/config.json) comes back. An
+//                     (Ctrl+Shift+Left, or backKey in ~/.crew/config.json) comes back. An
 //                     operator enters a run's agents and runner from `crew view`
 //   crew orchestration send --from <h> --dispatch-capability <c> --task-id <t>
 //        --dispatch-id <d> --type <worker_done|handoff|escalation> --subject <s>
@@ -70,7 +71,7 @@ const USAGE = [
   'usage: crew run [--host <host>] <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]',
   '       crew start <spec#> [--harness claude|pi] [--model <m>] [--base <branch>] [--stack-mode native|install|chain] [--permission-mode <mode>]',
   '       crew ls [--registry <run registry, for a fixture>]',
-  '       crew view <run id or run dir> [--registry <run registry, for a fixture>]',
+  '       crew [view [<run id or run dir>] [--registry <run registry, for a fixture>]]  (no run: the runs list)',
   '       crew view --attached <run-dir> | --standalone [--registry <run registry, for a fixture>]',
   '       crew daemon start | status | stop [--force] | restart [--force]',
   '       crew orchestration send --from <h> --dispatch-capability <c> --task-id <t> --dispatch-id <d> --type <worker_done|handoff|escalation> --subject <s> --body <b> [--outcome succeeded|failed]',
@@ -213,14 +214,15 @@ async function ls(args) {
 
 // waitMs: how long to wait for a run just launched to be in the registry,
 // which its runner records once it has started; 0 for a run already there.
+// With no run named, the console opens on the runs list rather than a tree.
 async function view(args, { waitMs = 0 } = {}) {
-  if (!args.length || args[0].startsWith('--')) {
+  if (['--attached', '--standalone'].includes(args[0])) {
     await daemonAnyway()
     return launch(entry('../src/run-view/view.mjs'), args)
   }
-  const [target, ...more] = args
-  const { registry, rest } = registryOf(more, 'crew view')
-  if (rest.length) usage(`crew view: unexpected ${rest.join(' ')}`)
+  const { registry, rest } = registryOf(args, 'crew view')
+  if (rest.length > 1) usage(`crew view: unexpected ${rest.slice(1).join(' ')}`)
+  const [target = null] = rest
   // Each run's tree, reclaim and resume go to the host the registry names for it.
   const callMs = RUNNER_SETTINGS.viewCallMs
   const hosts = await openHosts({ paths, callMs })
@@ -231,19 +233,20 @@ async function view(args, { waitMs = 0 } = {}) {
     return runs.model.projects.flatMap((p) => p.runs).find((r) => r.runId === target || samePath(r.runDir, target))
   }
   const deadline = Date.now() + waitMs
-  let run = await find()
-  while (!run && Date.now() < deadline) {
+  let run = target && await find()
+  while (target && !run && Date.now() < deadline) {
     await sleep(250)
     run = await find()
   }
-  if (!run) throw new Error(`no run ${target} in the run registry ${registry}`)
+  if (target && !run) throw new Error(`no run ${target} in the run registry ${registry}`)
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     console.error('crew view: needs a terminal')
     process.exit(3)
   }
   const { backKey } = readCrewConfig(paths)
   await daemonAnyway()
-  await runs.open(run.runId)
+  if (run) await runs.open(run.runId)
+  else await runs.refresh()
   await runsConsole({ paths, stdin: process.stdin, stdout: process.stdout, runs, backKey }).done
   // A halt triage still asked is given up, its session closed, before the
   // exit: none outlives the view to hold `crew daemon stop` up.
@@ -337,6 +340,9 @@ if (command === 'run') {
   await consoleCommand(rest).catch(fail)
 } else if (command === 'orchestration') {
   await orchestration(rest).catch(fail)
+} else if (command === undefined && process.stdin.isTTY && process.stdout.isTTY) {
+  // Bare `crew` at a terminal: the run console on its runs list.
+  await view([]).catch(fail)
 } else {
   console.error(USAGE)
   process.exit(command === '--help' || command === '-h' ? 0 : 2)

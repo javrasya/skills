@@ -74,3 +74,37 @@ test('a doctor round on the crew host: the patient dies, its doctor hands off a 
   const fold = readJournal(join(stateDir, 'journal.jsonl'))
   assert.equal(fold.agents.find((a) => a.n === doctor.n)?.state, 'done', JSON.stringify(fold.agents))
 })
+
+test('a harness dialog before the prompt: the agent needs you in the session showing it, nothing is typed into it, and once answered its prompt goes in and it finishes', async () => {
+  const cwd = join(root, 'dialog-repo')
+  mkdirSync(cwd)
+  const host = sessionHost(crewHost({ paths, env: { ...env, CREW_FAKE_DIALOG: 'trust' }, cwd, harnesses: { claude: [process.execPath, FAKE_HARNESS] }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
+  const stateDir = join(root, 'dialog-state')
+  const said = []
+  const running = runScript(fixture('dialog.workflow.js'), { host, stateDir, out: (s) => said.push(s), settings: FAST, transcripts: sessionTranscripts({ env }), project: cwd })
+  const journal = join(stateDir, 'journal.jsonl')
+  const asker = () => {
+    try {
+      return readJournal(journal).agents[0] ?? null
+    } catch {
+      return null
+    }
+  }
+  for (const until = Date.now() + 20_000; asker()?.state !== 'needs you'; await new Promise((done) => setTimeout(done, 50))) {
+    if (Date.now() > until) assert.fail(`the agent never needed you: ${JSON.stringify(asker())}\n${said.join('\n')}`)
+  }
+  const a = asker()
+  assert.match(a.reason, /Claude asks whether to trust this folder: enter the session and answer it/)
+  assert.ok(said.some((l) => l.startsWith('?? [Trust] asker: Claude asks whether to trust this folder')), said.join('\n'))
+  const { request } = await import('../src/daemon/client.mjs')
+  const { sessions } = await request(paths, { op: 'session.list' })
+  const session = sessions.find((s) => s.id === a.terminal)
+  assert.deepEqual([session?.alive, realpathSync(session.cwd)], [true, cwd], 'the dialog is in a live session, started in the project')
+  // The person enters the session and trusts the folder.
+  await request(paths, { op: 'session.write', id: a.terminal, data: '\x1b[B' })
+  await request(paths, { op: 'session.write', id: a.terminal, data: '\r' })
+  assert.deepEqual(await running, { word: 'trusted' }, said.join('\n'))
+  const types = readFileSync(journal, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l).type)
+  assert.deepEqual(types.filter((t) => ['starting', 'dialog', 'dialogClosed', 'started'].includes(t)), ['starting', 'dialog', 'dialogClosed', 'started'])
+  assert.equal(readJournal(journal).agents[0].state, 'done')
+})
