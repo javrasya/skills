@@ -71,7 +71,7 @@ import { HOST_NAMES, LEGACY_HOST, openHost } from './hosts.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { agentLifecycle, readResult, decisionsNeeded, setAside } from './lifecycle.mjs'
 import { hostOutage } from './outage.mjs'
-import { runHalt } from './halt.mjs'
+import { RESUME_REQUEST, runHalt } from './halt.mjs'
 import { JOURNAL_ENTRIES, readJournal, madeByRun, journalLines } from './journal.mjs'
 import { runRegistry, REGISTRY_PATH } from './registry.mjs'
 import { sessionTranscripts } from './transcript.mjs'
@@ -623,6 +623,32 @@ export function attachView({ spawnView, tab, log, tail = () => [], clock = realC
   }
 }
 
+// The tree's R reaches the runner as a file: the run console's tree is no
+// child of the runner's, so it writes RESUME_REQUEST in the state dir
+// ({ node }, node null for every held one) and the runner, polling, takes it
+// (deletes it) and resumes as the attached view's IPC R does.
+export function watchResumeRequests({ stateDir, resume, log = () => {}, pollMs = 1_000 }) {
+  const file = join(stateDir, RESUME_REQUEST)
+  const take = () => {
+    let text
+    try {
+      text = readFileSync(file, 'utf8')
+    } catch {
+      return
+    }
+    rmSync(file, { force: true })
+    let node = null
+    try {
+      const m = JSON.parse(text)
+      node = typeof m?.node === 'string' ? m.node : null
+    } catch {}
+    Promise.resolve().then(() => resume({ node })).catch((e) => log(`!! R: could not resume: ${e?.message ?? e}`))
+  }
+  const timer = setInterval(take, pollMs)
+  timer.unref?.()
+  return { take, stop: () => clearInterval(timer) }
+}
+
 const VIEW = join(dirname(fileURLToPath(import.meta.url)), 'run-view', 'view.mjs')
 
 // Mouse reporting off, cursor shown, the main screen back, the keyboard out
@@ -675,8 +701,9 @@ if (isMain) {
   const ignore = () => {}
   const control = {}
   // With no terminal (the offline tests, a redirected launch) there is no view,
-  // and the runner prints as it always did.
-  const view = process.stdout.isTTY && process.stdin.isTTY
+  // and the runner prints as it always did. On crew there is none either: the
+  // operator's one tree is `crew view`'s, and nobody enters the runner's session.
+  const view = process.stdout.isTTY && process.stdin.isTTY && hostName !== 'crew'
     ? attachView({
       spawnView: () => spawn(process.execPath, [VIEW, '--attached', dir, '--host', hostName ?? LEGACY_HOST], { stdio: ['inherit', 'inherit', 'inherit', 'ipc'] }),
       tab: (s) => console.log(s),
@@ -691,6 +718,7 @@ if (isMain) {
   const say = runnerLog(dir, gate((s) => console.log(s)))
   const sayError = runnerLog(dir, gate((s) => console.error(s)))
   view?.start()
+  watchResumeRequests({ stateDir: dir, resume: (m) => control.resume?.(m), log: (s) => say(s) })
   const host = await openHost(hostName)
   // A halted run waits on its held promises alone, which keep no process
   // alive: this does, so the runner stays in its tab, halted, as the registry

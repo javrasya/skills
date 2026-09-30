@@ -6,6 +6,7 @@ import { STATES, bandOf } from '../run-view-model.mjs'
 import { worktreeName } from '../git.mjs'
 import { RUNNER_SETTINGS } from '../settings.mjs'
 import { LEGACY_HOST } from '../hosts.mjs'
+import { backKeyLabel } from '../crew-config.mjs'
 
 const E = '\x1b['
 const c = (code, s) => `${E}${code}m${s}${E}0m`
@@ -147,29 +148,17 @@ function agentPane(a) {
   ]
 }
 
-// The runner's row, first on a crew-hosted run: its session, entered like an
-// agent's, where its attached view takes R and shows its log.
-const runnerLine = (r, h) =>
-  ` ${bold('▶ runner')}   ${grey('crew session')} ${cyan(r.session)}${r.open === false ? grey(' (closed)') : ''}   ${h?.alive === true ? c('32', '● alive') : h?.alive === false ? c('31', '○ gone') : grey('? unknown')}`
-
-function runnerPane(r, h) {
-  return [
-    ` ${bold('the runner')}  crew session ${cyan(r.session)}${r.open === true ? grey(' (open)') : r.open === false ? grey(' (closed)') : ''}  ${h?.alive === true ? c('32', '● alive') : h?.alive === false ? c('31', '○ gone') : grey('? unknown')}`,
-    grey('   Enter enters its session: its attached view, its log, and R to resume a halted run'),
-  ]
-}
-
 function phasePane(p, problems) {
   const lines = [` ${bold(p.name)}  ${p.total} agent${p.total === 1 ? '' : 's'}  ${mixOf(p.mix)}`]
   const room = PANE - 2
   const shown = problems.length > room ? room - 1 : room
   for (const { agent, reason } of problems.slice(0, shown)) lines.push(`   ${c(COLOUR[agent.state], GLYPH[agent.state])} ${agent.label}: ${grey(reason ?? agent.state)}`)
   if (problems.length > shown) lines.push(grey(`   … ${problems.length - shown} more`))
-  lines.push(grey(`   ${p.folded ? '→ / Enter / click to unfold' : '← / Enter / click to fold'}`))
+  lines.push(grey(`   ${p.folded ? '→ / Enter / click to unfold' : 'Enter / click to fold'}`))
   return lines
 }
 
-const HELP = ' ↑↓ move · ←→ / click a phase to fold · ⏎/click focus tab · r reclaim · l log · q quit'
+const HELP = ' ↑↓ move · ⏎/click a phase to fold · ⏎/→/click focus tab · r reclaim · l log · q quit'
 const TOP = 4
 
 // An agent row's width: the halt panel takes what is right of it, or 30 columns.
@@ -271,7 +260,7 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
   const scrolling = chosen?.kind === 'agent' && nameCell(chosen.agent, chosen.depth, elapsed).overflows
   for (let i = top; i < Math.min(rows.length, top + body); i++) {
     const r = rows[i]
-    const line = r.kind === 'runner' ? runnerLine(r.runner, model.header) : r.kind === 'phase' ? phaseLine(r.phase) : agentLine(r.agent, r.depth, i === selected ? elapsed : null)
+    const line = r.kind === 'phase' ? phaseLine(r.phase) : agentLine(r.agent, r.depth, i === selected ? elapsed : null)
     lines.push(i === selected ? c('7', fit(strip(line), W)) : fit(line, W))
   }
   while (lines.length < TOP + body) lines.push(fit('', W))
@@ -282,7 +271,7 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
   }
   lines.push(fit(grey('─'.repeat(W)), W))
   const pane = model?.pane
-  const paneLines = !pane ? [grey(' no agent has started yet')] : pane.kind === 'runner' ? runnerPane(pane.runner, model.header) : pane.kind === 'agent' ? agentPane(pane.agent) : phasePane(pane.phase, pane.problems)
+  const paneLines = !pane ? [grey(' no agent has started yet')] : pane.kind === 'agent' ? agentPane(pane.agent) : phasePane(pane.phase, pane.problems)
   for (let i = 0; i < PANE; i++) lines.push(fit(paneLines[i] ?? '', W))
   lines.push(fit(flash ? ' ' + c('1;36', flash) : alert ? ' ' + c(COLOUR[alert.startsWith('NEEDS YOU') ? 'needs you' : 'blocked'], alert) : '', W))
   lines.push(fit(grey(help), W))
@@ -317,16 +306,16 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
 // --- standalone: every run the registry knows (runsView's model) ----------
 
 // The tree's key line once the standalone view opened it.
-export const TREE_HELP = ' ↑↓ move · ←→ / click a phase to fold · ⏎/click focus tab · r reclaim · l log · R resume · q back to the runs'
-const RUNS_HELP = ' ↑↓ move · ⏎/click open a run · ←→ fold a project · r reclaim the run · R resume a dead runner · q quit'
+export const TREE_HELP = ' ↑↓ move · ⏎/→/click focus tab · ⏎/click a phase to fold · ← back to the runs · r reclaim · l log · R resume'
+const RUNS_HELP = ' ↑↓ move · ⏎/→/click open a run · ←→ fold a project · r reclaim the run · R resume a dead runner · q quit'
 
 // The key lines of `crew view`, which enters a crew run's sessions in place
 // and comes back from one with `backKey`; an Orca run's agent is its tab.
 // `?` is crew's orchestrator whatever the run's host.
 export const consoleTreeHelp = (host, backKey) => host === 'crew'
-  ? ` ↑↓ move · ←→ fold · ⏎/click enter a session, ${backKey.toUpperCase()} back · r reclaim · l log · R resume · ? orchestrator · q back to runs`
+  ? ` ↑↓ move · ⏎/→/click enter · ${backKeyLabel(backKey)} out of a session · ← runs · r reclaim · l log · R resume · ? orchestrator`
   : `${TREE_HELP} · ? orchestrator`
-export const consoleRunsHelp = (backKey) => `${RUNS_HELP} · ${backKey.toUpperCase()} leaves an entered session`
+export const consoleRunsHelp = (backKey) => `${RUNS_HELP} · ${backKeyLabel(backKey)} leaves an entered session`
 
 export function age(ms) {
   if (ms == null) return '—'
@@ -350,11 +339,11 @@ const runLine = (r) =>
 function runPane(r) {
   // The tab outlives its runner, so whether it is open says nothing of the runner.
   const tab = r.terminal ? cyan(shortHandle(r.terminal)) : grey('—')
-  const runner = r.host === 'crew' ? 'runner session' : 'runner tab'
-  const does = ['Enter opens its tree', r.reclaimed ? null : r.closable ? 'r reclaims every agent and closes the run' : 'r reclaims every agent it may; the run stays open', r.resumable ? 'R resumes it: its runner is dead' : null].filter(Boolean).join(' · ')
+  const does = ['Enter / → opens its tree', r.reclaimed ? null : r.closable ? 'r reclaims every agent and closes the run' : 'r reclaims every agent it may; the run stays open', r.resumable ? 'R resumes it: its runner is dead' : null].filter(Boolean).join(' · ')
   return [
     ` ${bold(r.name ?? r.runId)}  ${grey(r.runId)}${r.spec ? `  spec ${r.spec}` : ''}  ${outcomeOf(r)}  ${r.kept} kept${r.reclaimed ? grey('  reclaimed') : ''}`,
-    ` ${runner} ${tab}   project ${grey(r.project ?? '—')}`,
+    // A crew run's runner has no screen of its own to go to: its tree is the run.
+    r.host === 'crew' ? ` project ${grey(r.project ?? '—')}` : ` runner tab ${tab}   project ${grey(r.project ?? '—')}`,
     grey(` run dir ${r.runDir ?? '—'}`),
     grey(`   ${does}`),
   ]

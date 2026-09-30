@@ -11,12 +11,16 @@
 //                     each row a flag (every one of them with no terminal),
 //                     and launches it as `crew run` does; a spec with no
 //                     validation.md gets the orchestrator's draft as the
-//                     form's last step, and is an error with no terminal
+//                     form's last step, and is an error with no terminal.
+//                     At a terminal it then opens the run's view, as
+//                     `crew view <run dir>` does; with none it prints that
 //   crew ls [--registry <file>]
 //                     every run in the run registry, crew's and Orca's, by project
 //   crew view <run> [--registry <file>]
 //                     the run console: the run's tree (by run id or run dir);
-//                     Enter on a crew run's agent, or its runner, enters that
+//                     Enter, Right or a click goes in (list to tree, tree to
+//                     an agent's session), Ctrl+Left comes out of a session
+//                     and Left from the tree to the list; Enter on a crew run's agent enters that
 //                     session, and the back key comes back to the tree; an Orca
 //                     run's agent is brought to the front in Orca
 //   crew view --attached <run-dir> | --standalone [--registry <file>]
@@ -27,7 +31,7 @@
 //   crew session spawn [--cwd <dir>] -- <command…> | list | screen <id> | kill <id>
 //   crew console      debug only: the daemon's raw sessions, whatever run they
 //                     are of, in a flat list; Enter enters one, the back key
-//                     (F12, or backKey in ~/.crew/config.json) comes back. An
+//                     (Ctrl+Left, or backKey in ~/.crew/config.json) comes back. An
 //                     operator enters a run's agents and runner from `crew view`
 //   crew orchestration send --from <h> --dispatch-capability <c> --task-id <t>
 //        --dispatch-id <d> --type <worker_done|handoff|escalation> --subject <s>
@@ -60,6 +64,7 @@ import { runsView } from '../src/run-view-model.mjs'
 import { listRuns } from '../src/run-view/draw.mjs'
 import { DEFAULT_HOST, LEGACY_HOST, openHosts } from '../src/hosts.mjs'
 import { RUNNER_SETTINGS } from '../src/settings.mjs'
+import { sleep } from '../src/util.mjs'
 
 const USAGE = [
   'usage: crew run [--host <host>] <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]',
@@ -206,7 +211,9 @@ async function ls(args) {
   console.log(listRuns(runs.model).join('\n'))
 }
 
-async function view(args) {
+// waitMs: how long to wait for a run just launched to be in the registry,
+// which its runner records once it has started; 0 for a run already there.
+async function view(args, { waitMs = 0 } = {}) {
   if (!args.length || args[0].startsWith('--')) {
     await daemonAnyway()
     return launch(entry('../src/run-view/view.mjs'), args)
@@ -219,8 +226,16 @@ async function view(args) {
   const hosts = await openHosts({ paths, callMs })
   const orchestrator = runOrchestrator({ paths })
   const runs = runsView({ host: hosts[LEGACY_HOST], hostOf: (name) => hosts[name] ?? hosts[LEGACY_HOST], registry, enter: true, orchestrator })
-  await runs.refresh()
-  const run = runs.model.projects.flatMap((p) => p.runs).find((r) => r.runId === target || samePath(r.runDir, target))
+  const find = async () => {
+    await runs.refresh()
+    return runs.model.projects.flatMap((p) => p.runs).find((r) => r.runId === target || samePath(r.runDir, target))
+  }
+  const deadline = Date.now() + waitMs
+  let run = await find()
+  while (!run && Date.now() < deadline) {
+    await sleep(250)
+    run = await find()
+  }
   if (!run) throw new Error(`no run ${target} in the run registry ${registry}`)
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     console.error('crew view: needs a terminal')
@@ -278,6 +293,15 @@ async function start(args) {
       launch: (o) => launchRunner({ ...terminalSize(), ...o, paths }),
     })
     console.log(`crew start: armed ${script}; the runner is crew session ${s.id}; enter it from \`crew view "${s.runDir}"\``)
+    // At a terminal the operator is taken to the run straight away. With none
+    // (the skill's crew path, an agent's shell) the view would take over a
+    // screen nobody watches, so only the command is printed.
+    if (process.stdin.isTTY && process.stdout.isTTY) {
+      await view([s.runDir], { waitMs: 15_000 }).catch((e) => {
+        console.error(`crew start: the run is launched, but its view did not open: ${e.message}; open it with \`crew view "${s.runDir}"\``)
+        process.exit(1)
+      })
+    }
   } catch (e) {
     if (e.code === 2) usage(`crew start: ${e.message}`)
     console.error(`crew start: ${e.message}`)

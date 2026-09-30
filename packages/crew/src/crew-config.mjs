@@ -1,5 +1,5 @@
 // Crew's own config: ~/.crew/config.json (crewPaths().config), every key optional.
-//   "backKey": "f12"       the key that leaves an entered session for the list
+//   "backKey": "ctrl+left" the key that leaves an entered session for the tree
 //   "repos": { "<repo path>": { "setup": "<script>", "roles": { "<role>": { "harness": "pi", "model": "<model>" } } } }
 //                          per repo, by its main checkout's path, never in the
 //                          repo: `setup` is the hook run in each worktree crew
@@ -19,7 +19,7 @@ import { isAbsolute, resolve } from 'path'
 import { HARNESSES } from './harness.mjs'
 import { samePath } from './paths.mjs'
 
-export const DEFAULTS = Object.freeze({ backKey: 'f12', claudeModels: Object.freeze(['opus', 'sonnet', 'haiku', 'opus[1m]', 'sonnet[1m]']) })
+export const DEFAULTS = Object.freeze({ backKey: 'ctrl+left', claudeModels: Object.freeze(['opus', 'sonnet', 'haiku', 'opus[1m]', 'sonnet[1m]']) })
 
 // The bytes each key arrives as in raw input. The F-keys have a few spellings:
 // xterm's, the VT220's, and libuv's on the Windows console (F12 is ESC[24~ in all).
@@ -37,17 +37,26 @@ const FKEYS = {
   f11: ['\x1b[23~'],
   f12: ['\x1b[24~'],
 }
-// pi binds both, so a back key there would take them from the session.
-const REFUSED = { 'ctrl+left': 'pi binds Ctrl+Left', 'ctrl+]': 'pi binds Ctrl+]' }
+// Ctrl+Left: xterm's CSI 1;5D, rxvt's ESC O d, and the kitty keyboard
+// protocol's press and repeat events (its release, :3, is never the key).
+// pi binds it to a word left and to folding its tree, which it also has on
+// Alt+Left and Alt+B; as the back key it never reaches the session.
+const NAMED = { 'ctrl+left': ['\x1b[1;5D', '\x1bOd', '\x1b[1;5:1D', '\x1b[1;5:2D'] }
+// pi binds Ctrl+], so a back key there would take it from the session.
+const REFUSED = { 'ctrl+]': 'pi binds Ctrl+]' }
 // Ctrl+H, I, J and M are Backspace, Tab and Enter to a program.
 const CTRL = 'abcdefgklnopqrstuvwxyz'
 
-export const BACK_KEYS = [...Object.keys(FKEYS), ...[...CTRL].map((c) => `ctrl+${c}`)]
+export const BACK_KEYS = [...Object.keys(NAMED), ...Object.keys(FKEYS), ...[...CTRL].map((c) => `ctrl+${c}`)]
+
+// How a back key is named on screen: Ctrl+←, F12, Ctrl+B.
+export const backKeyLabel = (name) => String(name).trim().toLowerCase().replace(/^ctrl\+left$/, 'ctrl+←').replace(/(^|\+)([a-z←]\w*)/g, (_, sep, w) => sep + (w.length === 1 ? w.toUpperCase() : w[0].toUpperCase() + w.slice(1)))
 
 // The byte sequences a back key name arrives as.
 export function backKeySequences(name) {
   const key = String(name).trim().toLowerCase()
   if (REFUSED[key]) throw new Error(`back key ${name} cannot be used: ${REFUSED[key]}`)
+  if (NAMED[key]) return NAMED[key]
   if (FKEYS[key]) return FKEYS[key]
   const ctrl = /^ctrl\+([a-z])$/.exec(key)
   if (ctrl && CTRL.includes(ctrl[1])) return [String.fromCharCode(ctrl[1].charCodeAt(0) - 96)]

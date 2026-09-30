@@ -85,3 +85,7 @@ export function runHalt({ journal, out, record = () => {}, runId = () => null, o
 
   return { on: () => on, hold, settle, gate, resume, nodes: () => [...held.keys()] }
 }
+
+// The file the tree's R writes in a run's state dir for its runner to take
+// (runner.mjs watchResumeRequests): { node }, null for every held node.
+export const RESUME_REQUEST = 'resume-request.json'

@@ -11,7 +11,7 @@ import { join, dirname } from 'path'
 import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { submit } from '../src/submit.mjs'
-import { runScript, journalKey, failureSummary, finish, SUBMIT, SETTINGS, realClock, JOURNAL_ENTRIES, readJournal, attachView, runnerLog } from '../src/runner.mjs'
+import { runScript, journalKey, failureSummary, finish, SUBMIT, SETTINGS, realClock, JOURNAL_ENTRIES, readJournal, attachView, runnerLog, watchResumeRequests } from '../src/runner.mjs'
 import { agentLifecycle, notePrompt, workerPrompt, doctorPrompt, NO_ASK } from '../src/lifecycle.mjs'
 import { mergeMcpAnswers, copyMcpAnswers } from '../src/mcp-answers.mjs'
 import { foldJournal } from '../src/journal.mjs'
@@ -4357,12 +4357,11 @@ function crewHosted(orca) {
   return { ...orca, id: 'crew', name: 'crew', inPlace: true, terminalList: async () => [...(await orca.terminalList()), 'term_runner'] }
 }
 
-test('run console: on a crew run the runner\'s row comes first; Enter or a click on it or on an agent answers its session to enter, brings no tab forward, and the selection stays on that row', async () => {
+test('run console: a crew run\'s tree is its phases and agents, no runner row; Enter or a click on an agent answers its session to enter, brings no tab forward, and the selection stays on that row', async () => {
   const { view, rowOf, orca, after } = await viewedRun('console', { crew: true })
   const press = pressOn(view)
-  assert.deepEqual(view.model.rows.slice(0, 3).map((r) => r.key), ['runner', 'phase:Discover', 'phase:Implement'])
-  assert.deepEqual([view.model.selected, view.model.pane], [0, { kind: 'runner', runner: { session: 'term_runner', open: true } }])
-  assert.deepEqual(await press('ENTER'), { enter: { session: 'term_runner', title: 'the runner' } })
+  assert.ok(!view.model.rows.some((r) => r.kind === 'runner'), 'no runner row')
+  assert.deepEqual(view.model.rows.slice(0, 2).map((r) => r.key), ['phase:Discover', 'phase:Implement'])
   const at = rowOf('agent:2')
   assert.deepEqual(await clickOn(view)(at), { enter: { session: 'term_fake2', title: '[Implement] impl:a' } })
   // Back from the session, the console refreshes the tree: the selection is where it was.
@@ -4376,6 +4375,57 @@ test('run console: on a crew run the runner\'s row comes first; Enter or a click
   assert.deepEqual(await press('ENTER'), { message: "[Implement] impl:b's crew session term_fake3 is closed" })
   assert.deepEqual(await view.click(rowOf('agent:5')), { message: '[Implement] impl:d has no session: its worker never started here' })
   assert.deepEqual(after().filter((c) => c.verb === 'terminalSwitch'), [])
+})
+
+test('run console: arrows walk list → tree → session: Right opens a run and enters an agent, Right unfolds a folded phase, Left goes back from the tree to the list', async () => {
+  const { view, rowOf } = await viewedRun('console', { crew: true })
+  const runs = listOf.get(view)
+  // Left in the tree goes back to the list, whatever row is selected.
+  await runs.key('LEFT')
+  assert.equal(runs.opened(), null, 'back on the list')
+  // On the run's row Right opens its tree again, as Enter does.
+  while (runs.model.rows[runs.model.selected].kind !== 'run') await runs.key('DOWN')
+  await runs.key('RIGHT')
+  const tree = runs.opened()
+  assert.ok(tree, 'the tree is open')
+  // Right on an agent enters its session.
+  while (tree.model.rows[tree.model.selected].key !== 'agent:2') await runs.key('DOWN')
+  assert.deepEqual(await runs.key('RIGHT'), { enter: { session: 'term_fake2', title: '[Implement] impl:a' } })
+  // Right on a folded phase unfolds it; on an unfolded one it does nothing.
+  const discover = tree.model.rows.findIndex((r) => r.key === 'phase:Discover')
+  await tree.click(discover)
+  const folded = tree.model.rows[discover].phase.folded
+  await runs.key('RIGHT')
+  assert.equal(tree.model.rows[discover].phase.folded, false, folded ? 'Right unfolded it' : 'it stays unfolded')
+  await runs.key('LEFT')
+  assert.equal(runs.opened(), null, 'Left from the tree is the list again')
+})
+
+test('run console: on a crew run, l enters the runner\'s log as a session, closed once left', async () => {
+  const { view, host } = await viewedRun('console', { crew: true })
+  host.logTail = async () => ({ terminal: 'term_log' })
+  assert.deepEqual(await pressOn(view)('l'), { enter: { session: 'term_log', title: 'runner.log', close: true } })
+})
+
+test('run console: R in a halted crew run\'s tree writes the resume request its runner takes, and the runner resumes from it', async () => {
+  const { stateDir, registry, view } = await viewedRun('console', { crew: true })
+  const runs = listOf.get(view)
+  appendFileSync(join(stateDir, 'journal.jsonl'), JSON.stringify({ type: 'halted', at: new Date(0).toISOString(), node: 'n/x', reason: 'it died' }) + '\n')
+  runRegistry(registry, { now: () => 0 }).halted({ runId: 'run_fake1', node: 'n/x', reason: 'it died' })
+  await runs.refresh()
+  await view.refresh()
+  assert.ok(view.model.header.halted, 'the tree knows the run is halted')
+  const r = await runs.key('R')
+  assert.match(r.message, /^asked the runner to resume/)
+  const file = join(stateDir, 'resume-request.json')
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { node: null })
+  const got = []
+  const watch = watchResumeRequests({ stateDir, resume: (m) => got.push(m), pollMs: 60_000 })
+  watch.take()
+  watch.stop()
+  await new Promise((done) => setImmediate(done))
+  assert.deepEqual(got, [{ node: null }])
+  assert.equal(existsSync(file), false, 'the runner took the request')
 })
 
 test('run console: the attached view of a crew run, itself in the runner\'s session, has no runner row and names where to enter an agent\'s session', async () => {
@@ -4412,7 +4462,7 @@ test('run console: reclaim on a crew run goes to the crew host by the same rules
   assert.deepEqual(touched(after()), [['workerRelease', 'ctx_fake2'], ['terminalClose', 'term_fake2'], ['worktreeRemove', wt(2)]])
 })
 
-test('run console: R on a crew run whose runner lives names its session; once it is dead, R resumes it on the crew host', async () => {
+test('run console: R on a crew run whose runner lives has nothing to resume; once it is dead, R resumes it on the crew host', async () => {
   const { view, stateDir, host } = await viewedRun('console', { crew: true })
   const press = pressOn(view)
   const resumed = []
@@ -4420,29 +4470,27 @@ test('run console: R on a crew run whose runner lives names its session; once it
     resumed.push(o)
     return { terminal: '9', command: 'node runner.mjs' }
   }
-  assert.deepEqual(await press('R'), { message: "implement-spec-783 run_fake1's runner is alive, in crew session term_runner: nothing to resume" })
+  assert.deepEqual(await press('R'), { message: "implement-spec-783 run_fake1's runner is alive: nothing to resume" })
   rmSync(join(stateDir, 'runner.pid'))
   await listOf.get(view).refresh()
   assert.deepEqual(await press('R'), { message: 'resumed implement-spec-783 run_fake1 in crew session 9', resumed: '9' })
   assert.deepEqual(resumed.map((o) => [o.stateDir, o.worktree]), [[stateDir, 'C:/repos/controlayer']])
 })
 
-test('run console: the frames — the runner\'s row and pane, the key line naming the back key, the runs list as crew runs, and crew ls\'s lines', async () => {
+test('run console: the frames — no runner row, the key line naming the back key, the runs list as crew runs, and crew ls\'s lines', async () => {
   const { view } = await viewedRun('console', { crew: true })
   const screen = draw(view.model, { width: 140, height: 30, help: consoleTreeHelp('crew', 'f12') })
   const lines = screen.lines.map(strip)
-  assert.match(lines[4], /^ ▶ runner {3}crew session term_runner {3}● alive/)
-  assert.equal(screen.rowAt(5), 0)
-  assert.match(lines[5], /▸ Discover/)
-  assert.match(lines.find((l) => l.startsWith(' the runner')), /crew session term_runner \(open\) {2}● alive/)
-  assert.ok(lines.some((l) => l.includes('Enter enters its session: its attached view, its log, and R to resume a halted run')))
-  assert.match(lines.at(-1), /⏎\/click enter a session, F12 back · r reclaim · l log · R resume · \? orchestrator · q back to runs/)
+  const discover = lines.findIndex((l) => /▸ Discover/.test(l))
+  assert.equal(screen.rowAt(discover + 1), 0, 'the first row is the first phase (rowAt takes a 1-based y)')
+  assert.ok(!lines.some((l) => /runner {3}crew session|the runner {2}crew session/.test(l)), 'no runner row or pane')
+  assert.match(lines.at(-1), /⏎\/→\/click enter · F12 out of a session · ← runs · r reclaim · l log · R resume · \? orchestrator/)
   assert.equal(consoleTreeHelp('orca', 'f12'), `${TREE_HELP} · ? orchestrator`, 'an Orca run\'s agent is its tab; ? is crew\'s orchestrator whatever the host')
   const runs = listOf.get(view)
   await runs.key('q')
   const list = drawRuns(runs.model, { width: 140, height: 30, title: 'crew runs', help: consoleRunsHelp('f5') }).lines.map(strip)
   assert.match(list[0], /^ crew runs · 1 run · 1 project/)
-  assert.ok(list.some((l) => /^ runner session term_runner {3}project C:\/repos\/controlayer/.test(l)), list.join('\n'))
+  assert.ok(list.some((l) => /^ project C:\/repos\/controlayer/.test(l)), list.join('\n'))
   assert.match(list.at(-1), /q quit · F5 leaves an entered session/)
   const ls = listRuns(runs.model)
   assert.equal(ls[0], 'controlayer  C:/repos/controlayer')
@@ -4861,7 +4909,7 @@ viewTest('run view: the screen is the design\'s tree, a click lands on the row d
   assert.match(lines[10], /^ +6 +impl:e +✗ failed +░{10} +— +— /, 'an agent that never started')
   assert.ok(!lines.some((l) => /PROTOTYPE|Tab ▸|Timeline/.test(l)), 'no status bar')
   assert.match(lines.at(-2), /== Discover/)
-  assert.match(lines.at(-1), /↑↓ move · ←→ \/ click a phase to fold · ⏎\/click focus tab · r reclaim · l log · q quit/)
+  assert.match(lines.at(-1), /↑↓ move · ⏎\/click a phase to fold · ⏎\/→\/click focus tab · r reclaim · l log · q quit/)
 
   // The selected row is inverted; a selected phase's pane names its problems.
   await view.key('DOWN')
@@ -5046,7 +5094,7 @@ test('standalone: two concurrent runs in one repo are separate rows, and a hand-
   const lines = draw(tree.model, { width: 140, height: 30, help: TREE_HELP }).lines.map(strip)
   assert.ok(lines.some((l) => /^ worktree — +tab term_fake3/.test(l)), 'the checkout is not named as its worktree')
   assert.ok(!lines.some((l) => /my-feature/.test(l)))
-  assert.match(lines.at(-1), /R resume · q back to the runs/)
+  assert.match(lines.at(-1), /← back to the runs · r reclaim · l log · R resume/)
   assert.deepEqual(orca.calls.filter((c) => MUTATING.includes(c.verb)), [])
 })
 

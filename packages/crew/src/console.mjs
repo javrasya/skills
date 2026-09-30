@@ -4,12 +4,12 @@
 // output, with every key but the back key passed to it byte for byte and every
 // resize forwarded. The back key leaves for the page; the session keeps
 // running. Two pages: `crew view`'s runs and their trees (runsConsole), the
-// run console, where an operator enters a crew run's agent, or its runner;
+// run console, where an operator enters a crew run's agents;
 // and `crew console`'s flat list of the daemon's raw sessions (runConsole), a
 // debug view that knows no runs.
 import { enterSession, request } from './daemon/client.mjs'
 import { RESET } from './daemon/modes.mjs'
-import { backKeySequences } from './crew-config.mjs'
+import { backKeyLabel, backKeySequences } from './crew-config.mjs'
 import { ARROW_KEYS, ENTER_KEYS, decodeKeys } from './keys.mjs'
 import { consoleRunsHelp, consoleTreeHelp, draw, drawRuns } from './run-view/draw.mjs'
 
@@ -69,20 +69,40 @@ export function backKeyFilter({ sequences, forward, back, holdMs = 50 }) {
   }
 }
 
+// The keys a run console never passes to an entered session: Ctrl+C and
+// Ctrl+D, which end pi and Claude Code (twice, or on an empty prompt). Each
+// comes as its legacy byte, or, once an agent has switched the terminal to
+// one, as the kitty keyboard protocol's CSI 99;5u / 100;5u or xterm's
+// modifyOtherKeys CSI 27;5;99~ / 27;5;100~ (pi asks for kitty, else
+// modifyOtherKeys). Esc still reaches the session.
+const BLOCKED = /\x03|\x04|\x1b\[(?:99|100)(?::\d*)*;(\d+)(?::\d+)?u|\x1b\[27;(\d+);(?:99|100)~/g
+const ctrl = (mods) => ((Number(mods) - 1) & 4) !== 0
+export const blockKeys = (text) => text.replace(BLOCKED, (all, kitty, other) => (kitty === undefined && other === undefined) || ctrl(kitty ?? other) ? '' : all)
+
+// The kitty keyboard protocol's flags set to none, and modifyOtherKeys off;
+// a terminal that knows neither ignores both.
+const KEYBOARD_RESET = '\x1b[=0;1u\x1b[>4;0m'
+
 // Raw input as the key names the run view's model takes (terminal-kit's), and
 // a left click as { click: { x, y } } (1-based, from SGR mouse reports).
-const CSI_KEYS = { A: 'UP', B: 'DOWN', C: 'RIGHT', D: 'LEFT', H: 'HOME', F: 'END' }
+// A key's modifiers do not change what it does here: Ctrl+Left is Left.
+// ESC O c / d are rxvt's Ctrl+Right / Ctrl+Left. A kitty keyboard protocol
+// release event (event type 3, after a colon) is no key at all.
+const CSI_KEYS = { A: 'UP', B: 'DOWN', C: 'RIGHT', D: 'LEFT', H: 'HOME', F: 'END', c: 'RIGHT', d: 'LEFT' }
 export function keyNames(text) {
   const keys = []
   for (let i = 0; i < text.length;) {
     const rest = text.slice(i)
     const mouse = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])/.exec(rest)
-    const csi = /^\x1b(?:\[[0-9;]*|O)([A-Za-z~])/.exec(rest)
+    const csi = /^\x1b(?:\[([0-9;:]*)|O)([A-Za-z~])/.exec(rest)
     if (mouse) {
       if (mouse[1] === '0' && mouse[4] === 'M') keys.push({ click: { x: Number(mouse[2]), y: Number(mouse[3]) } })
       i += mouse[0].length
     } else if (csi) {
-      if (CSI_KEYS[csi[1]]) keys.push(CSI_KEYS[csi[1]])
+      const release = /:3(?:$|;)/.test(csi[1] ?? '')
+      // c and d are keys only after ESC O; after ESC [ they are other sequences.
+      const name = csi[1] !== undefined && /[cd]/.test(csi[2]) ? null : CSI_KEYS[csi[2]]
+      if (name && !release) keys.push(name)
       i += csi[0].length
     } else {
       const ch = rest[0]
@@ -102,7 +122,9 @@ export function keyNames(text) {
 //   page.resize()      the terminal's new size
 // Returns { done, mode }: done settles on quit; mode() is 'list' (the page),
 // 'entering', 'entered' or 'quit'.
-function consoleOn({ paths, stdin, stdout, backKey = 'f12', holdMs = 50, page }) {
+// `guard`: the run console's, whose sessions are agents: the BLOCKED keys
+// never reach them.
+function consoleOn({ paths, stdin, stdout, backKey = 'ctrl+left', holdMs = 50, page, guard = false }) {
   const sequences = backKeySequences(backKey)
   let mode = 'list'
   // The session entered, from the moment entering starts until it is left.
@@ -126,7 +148,11 @@ function consoleOn({ paths, stdin, stdout, backKey = 'f12', holdMs = 50, page })
       e.socket = socket
       socket.on('close', () => entered === e && leave(`left session ${id}: its connection closed (the program ended, or the daemon stopped)`))
       if (!e.open) return socket.destroy()
-      e.filter = backKeyFilter({ sequences, holdMs, forward: (keys) => socket.write(keys), back: () => leave('') })
+      const forward = guard ? (keys) => {
+        const text = blockKeys(bytes(keys))
+        if (text) socket.write(Buffer.from(text, 'latin1'))
+      } : (keys) => socket.write(keys)
+      e.filter = backKeyFilter({ sequences, holdMs, forward, back: () => leave('') })
       mode = 'entered'
       // Keys typed while the enter was in flight go through the filter first, in order.
       for (const chunk of e.pending.splice(0)) if (entered === e) e.filter.push(chunk)
@@ -149,7 +175,10 @@ function consoleOn({ paths, stdin, stdout, backKey = 'f12', holdMs = 50, page })
       setTimeout(() => e.socket.destroy(), 1000).unref()
     }
     if (e.close) request(paths, { op: 'session.close', id: e.id }).catch(() => {})
-    stdout.write(RESET)
+    // An agent may have switched the terminal's keyboard to the kitty
+    // protocol or modifyOtherKeys while entered: back on the page, keys come
+    // as they did before.
+    stdout.write(RESET + KEYBOARD_RESET)
     if (mode !== 'quit') show(why)
   }
 
@@ -200,7 +229,7 @@ const CONSOLE_KEYS = [...ARROW_KEYS, ...ENTER_KEYS, ['k', 'up'], ['j', 'down'], 
 export const describeSession = (s, sep = '\t') => [s.id, s.alive ? 'running' : `exited ${s.exit?.code ?? s.exit?.signal}`, `pid ${s.pid}`, `${s.cols}x${s.rows}`, s.command.join(' ')].join(sep)
 
 // `crew console`, for debugging: the daemon's sessions in a flat list, until q or Ctrl+C.
-export function runConsole({ paths, stdin, stdout, backKey = 'f12', refreshMs = 1_000, holdMs = 50 }) {
+export function runConsole({ paths, stdin, stdout, backKey = 'ctrl+left', refreshMs = 1_000, holdMs = 50 }) {
   let sessions = []
   let selected = 0
   let status = ''
@@ -212,7 +241,7 @@ export function runConsole({ paths, stdin, stdout, backKey = 'f12', refreshMs = 
     if (!shown) return
     const { cols, rows } = size()
     const fit = (line) => line.slice(0, cols)
-    const lines = [fit(`crew sessions: Up/Down choose, Enter enters, ${backKey.toUpperCase()} comes back to this list, q quits`), '']
+    const lines = [fit(`crew sessions: Up/Down choose, Enter enters, ${backKeyLabel(backKey)} comes back to this list, q quits`), '']
     sessions.forEach((s, i) => {
       const line = fit(`${i === selected ? '>' : ' '} ${describeSession(s, '  ')}`)
       lines.push(i === selected ? `\x1b[7m${line}\x1b[0m` : line)
@@ -272,7 +301,7 @@ export function runConsole({ paths, stdin, stdout, backKey = 'f12', refreshMs = 
 // row and all. `?` on an opened run enters a fresh orchestrator session,
 // closed once left (runsView's consult). Actions run one at a time, as the run
 // view's do.
-export function runsConsole({ paths, stdin, stdout, runs, backKey = 'f12', refreshMs = 2_000, holdMs = 50, now = () => Date.now(), onError = () => {} }) {
+export function runsConsole({ paths, stdin, stdout, runs, backKey = 'ctrl+left', refreshMs = 2_000, holdMs = 50, now = () => Date.now(), onError = () => {} }) {
   let flash = null
   let shown = false
   let timer = null
@@ -326,7 +355,7 @@ export function runsConsole({ paths, stdin, stdout, runs, backKey = 'f12', refre
   }
 
   return consoleOn({
-    paths, stdin, stdout, backKey, holdMs,
+    paths, stdin, stdout, backKey, holdMs, guard: true,
     page: {
       show(why) {
         flash = why || null

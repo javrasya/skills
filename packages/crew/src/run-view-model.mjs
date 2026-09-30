@@ -18,6 +18,8 @@ import { worktreeUnpushed } from './git.mjs'
 import { hostUnreachable } from './session-host.mjs'
 import { isOrchestratorTitle } from './orchestrator.mjs'
 import { haltNoticeOf, readTriage } from './triage.mjs'
+import { RESUME_REQUEST } from './halt.mjs'
+import { writeJsonAtomic } from './fsutil.mjs'
 import { probesBy } from './outage.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 
@@ -158,11 +160,7 @@ function latestEvent(path) {
 //           null: { phase: 'waiting' | 'paused', since, elapsedMs, probes },
 //           probes being how many it has had by the outage settings
 //   phases  [{ name, folded, done, total, mix: {state: n}, peakContext, agents }]
-//   rows    [{ kind: 'runner', key, runner } | { kind: 'phase', key, phase } | { kind: 'agent', key, agent, phase, depth }],
-//           the runner's row first, for a renderer that enters sessions (`enter`) on a host whose sessions are entered in
-//           place (crew) once the registry names the runner's session: runner
-//           is { session, open }, open being whether the host still lists it,
-//           null when that could not be read. Then
+//   rows    [{ kind: 'phase', key, phase } | { kind: 'agent', key, agent, phase, depth }]:
 //           the phases in the order the script's meta declares them (the
 //           journal's `phases`), then any it does not declare in the order
 //           their agents were called; each unfolded one followed by its
@@ -171,7 +169,7 @@ function latestEvent(path) {
 //   selected  the index of the selected row
 //   selectedAt  clock.now() when the selection last moved to another row,
 //           which the selected row's scrolling name counts from (draw.mjs)
-//   pane    { kind: 'runner', runner } | { kind: 'agent', agent } | { kind: 'phase', phase, problems: [{ agent, reason }] },
+//   pane    { kind: 'agent', agent } | { kind: 'phase', phase, problems: [{ agent, reason }] },
 //           a phase's problems being its blocked, needs-you, failed and stuck agents
 //   message the latest action's outcome, for the flash line, or null
 //   latest  the last line of runner.log, the run's latest event, or null
@@ -210,9 +208,8 @@ function latestEvent(path) {
 // it asks the runner to resume that node, or with null every held one.
 // Enter on an agent, or a click, brings its tab to the front (focus), except
 // on a host whose sessions are entered in place (host.inPlace, crew): there it
-// answers { enter: { session, title } } for the renderer to enter, as the
-// runner's row does, when the renderer can (`enter`). An attached view,
-// itself inside the runner's session, cannot, and names where to.
+// answers { enter: { session, title } } for the renderer to enter, when the
+// renderer can (`enter`: crew view's tree, the only view of a crew run).
 // header.halted is the fold's halt, { since, nodes }, nodes being every node
 // still failed or needing decisions, or null. model.halt is the run's
 // halted.json while it has one, { at, nodes, triage }, triage being the halt
@@ -227,7 +224,6 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   // The superseded attempts: no row, but Reclaim All's.
   let superseded = []
   let header = null
-  let runner = null
   let selectedKey = null
   let selected = 0
   // The row the selection was on at the last layout, and since when.
@@ -277,7 +273,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   }
 
   function layout() {
-    const rows = runner ? [{ kind: 'runner', key: 'runner', runner }] : []
+    const rows = []
     for (const phase of phases) {
       phase.folded = folds.get(phase.name) ?? (phase.total > 0 && phase.agents.every((a) => a.state === 'done' || a.state === 'reclaimed'))
       rows.push({ kind: 'phase', key: `phase:${phase.name}`, phase })
@@ -289,7 +285,6 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     selectedKey = row?.key ?? null
     if (shown.key !== selectedKey) shown = { key: selectedKey, at: clock.now() }
     const pane = !row ? null
-      : row.kind === 'runner' ? { kind: 'runner', runner: row.runner }
       : row.kind === 'agent' ? { kind: 'agent', agent: row.agent }
       : { kind: 'phase', phase: row.phase, problems: problemsOf(row.phase.agents).map((agent) => ({ agent, reason: agent.reason })) }
     view.model = { header, phases, rows, selected, selectedAt: shown.at, pane, message, latest, alert, dialog: dialogModel(row), halt }
@@ -312,14 +307,12 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
         run = (runId && runs.find((r) => r.runId === runId)) || runs.filter((r) => samePath(r.runDir, stateDir)).at(-1) || null
       } catch {}
     }
-    const session = enter && host?.inPlace ? run?.runner?.terminal ?? null : null
     let open = null
-    if (session || every.some((a) => a.terminal)) {
+    if (every.some((a) => a.terminal)) {
       try {
         open = new Set(await host.terminalList())
       } catch {}
     }
-    runner = session ? { session, open: open ? open.has(session) : null } : null
     const reclaimedNames = new Set(run?.reclaimedAgents?.map((r) => r.agent) ?? [])
     for (const a of every) {
       const usage = a.sessionId ? transcripts.usage({ harness: a.harness, sessionId: a.sessionId, worktree: a.worktree }) : null
@@ -435,7 +428,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   }
   const enterAgent = (agent) => (agent.terminal ? enterSession(agent.terminal, agent.title, agent.tabOpen) : say(`${agent.title} has no session: its worker never started here`))
 
-  const activate = (row) => (!row ? {} : row.kind === 'phase' ? toggle(row.phase) : row.kind === 'runner' ? enterSession(row.runner.session, 'the runner', row.runner.open) : host?.inPlace ? enterAgent(row.agent) : focus(row.agent))
+  const activate = (row) => (!row ? {} : row.kind === 'phase' ? toggle(row.phase) : host?.inPlace ? enterAgent(row.agent) : focus(row.agent))
 
   // One agent's reclaim through reclaim.mjs, as the journal names it for
   // reclaim, recorded in the registry once done: reclaimAgent's answer, or
@@ -639,10 +632,23 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   // runner.log in a tab of its own that follows it (host.logTail): Orca's
   // editor opens no file outside a worktree, and the run dir is outside every
   // checkout. While that tab is open, `l` again brings it back.
+  // In crew view's tree the log is a session like an agent's: entered at
+  // once, and closed once left.
   async function openLog() {
     if (hostAway()) return say(HOST_GONE)
     const path = join(stateDir, 'runner.log')
     if (!existsSync(path)) return say(`could not open ${path}: the runner has not written it yet`)
+    if (enter && host?.inPlace) {
+      try {
+        const { terminal } = await host.logTail({ path, title: 'runner.log' })
+        message = null
+        layout()
+        return { enter: { session: terminal, title: 'runner.log', close: true } }
+      } catch (e) {
+        if (hostUnreachable(host, e)) return say(HOST_GONE)
+        return say(`could not open ${path}: ${e?.message ?? e}`)
+      }
+    }
     if (logTab) {
       try {
         await host.terminalSwitch({ terminal: logTab })
@@ -695,9 +701,18 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
         return {}
       case 'ENTER':
         return activate(current())
-      case 'LEFT':
-      case 'RIGHT':
-        return current()?.kind === 'phase' ? toggle(current().phase) : {}
+      // Right goes in: it unfolds a folded phase and enters (or, on Orca,
+      // focuses) an agent, as Enter does. Left folds an unfolded phase; in a
+      // run list's tree (runsView) Left goes back to the list before this.
+      case 'RIGHT': {
+        const row = current()
+        if (row?.kind === 'phase') return row.phase.folded ? toggle(row.phase) : {}
+        return row?.kind === 'agent' ? activate(row) : {}
+      }
+      case 'LEFT': {
+        const row = current()
+        return row?.kind === 'phase' && !row.phase.folded ? toggle(row.phase) : {}
+      }
       case 'r':
         if (hostAway()) return say(HOST_GONE)
         dialog = { kind: 'choose', highlight: 0 }
@@ -862,7 +877,10 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
     if (!run) return say(`no run ${runId} in the run registry`)
     if (!run.runDir) return say(`${labelOf(run)} has no run directory recorded`)
     // The tree's header asks what the run's row asks, by the same rule.
-    opened = { runId, view: runView({ stateDir: run.runDir, host: hostOf(run.host), enter, clock, transcripts, registry, unpushed, alive: () => (recorded.has(runId) ? liveOf(recorded.get(runId), lastOpen) : null), triage: orchestrator ? () => orchestrator.triage(run) : null }) }
+    // R reaches the run's runner as a request file it takes (runner.mjs), since
+    // this tree is no child of it.
+    const request = (node) => writeJsonAtomic(join(run.runDir, RESUME_REQUEST), { node: node ?? null })
+    opened = { runId, view: runView({ stateDir: run.runDir, host: hostOf(run.host), enter, clock, transcripts, registry, unpushed, resumeHost: () => request(null), resumeHalted: request, alive: () => (recorded.has(runId) ? liveOf(recorded.get(runId), lastOpen) : null), triage: orchestrator ? () => orchestrator.triage(run) : null }) }
     await opened.view.refresh()
     message = null
     layout()
@@ -933,10 +951,10 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
     if (run.reclaimed) return say(`${label} is reclaimed: its agents are gone and the registry closed it, so there is nothing to resume`)
     if (run.alive === true && run.paused) {
       const host = run.paused.reason === 'crew outage' ? 'crew' : 'Orca'
-      return say(`${label}'s runner is alive and paused on ${host === 'crew' ? 'a' : 'an'} ${host} outage: it carries on by itself once ${host} is back, and R in its ${where(run)} probes ${host} at once`)
+      return say(`${label}'s runner is alive and paused on ${host === 'crew' ? 'a' : 'an'} ${host} outage: it carries on by itself once ${host} is back, and R in its ${run.host === 'crew' ? 'tree' : where(run)} probes ${host} at once`)
     }
-    if (run.alive === true && run.outcome === 'halted') return say(`${label}'s runner is alive and halted, in ${where(run)}: R there resumes it`)
-    if (run.alive === true) return say(`${label}'s runner is alive, in ${where(run)}: nothing to resume`)
+    if (run.alive === true && run.outcome === 'halted') return say(run.host === 'crew' ? `${label}'s runner is alive and halted: open its tree and press R there to resume it` : `${label}'s runner is alive and halted, in ${where(run)}: R there resumes it`)
+    if (run.alive === true) return say(run.host === 'crew' ? `${label}'s runner is alive: nothing to resume` : `${label}'s runner is alive, in ${where(run)}: nothing to resume`)
     if (run.alive === null) return say(`could not tell whether ${label}'s runner is alive: its runner.pid, or Orca's list of the tab R opened, did not answer`)
     if (!run.project || !run.runDir) return say(`${label} has no ${run.project ? 'run directory' : 'worktree'} recorded to resume in`)
     // A run armed before the registry named its script was launched by the
@@ -975,8 +993,13 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
   async function key(name) {
     if (opened) {
       if (opened.view.model?.dialog) return opened.view.key(name)
-      if (name === 'q' || name === 'ESCAPE') return close()
-      if (name === 'R') return resume()
+      if (name === 'q' || name === 'ESCAPE' || name === 'LEFT') return close()
+      if (name === 'R') {
+        // A live runner that is halted or paused is resumed from its tree,
+        // through its request file; a dead one gets a new runner.
+        const run = runOf(opened.runId)
+        return run?.alive === true && (run.paused || run.outcome === 'halted') ? opened.view.key('R') : resume()
+      }
       if (name === '?') return consult()
       return opened.view.key(name)
     }
@@ -992,9 +1015,17 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
         return {}
       case 'ENTER':
         return activate(current())
-      case 'LEFT':
-      case 'RIGHT':
-        return current()?.kind === 'project' ? toggle(current().project) : {}
+      // Right opens a run's tree, as Enter does; on a project it unfolds, and
+      // Left folds.
+      case 'RIGHT': {
+        const row = current()
+        if (row?.kind === 'project') return row.project.folded ? toggle(row.project) : {}
+        return row?.kind === 'run' ? activate(row) : {}
+      }
+      case 'LEFT': {
+        const row = current()
+        return row?.kind === 'project' && !row.project.folded ? toggle(row.project) : {}
+      }
       case 'r':
         return reclaim()
       case 'R':
