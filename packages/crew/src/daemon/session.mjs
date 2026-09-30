@@ -5,8 +5,25 @@ import pty from 'node-pty'
 import xterm from '@xterm/headless'
 import { repaint, stripHostModes, trackModes } from './modes.mjs'
 import { resolveCommand } from '../command.mjs'
+import { chmodSync, statSync } from 'fs'
+import { createRequire } from 'module'
+import { dirname, join } from 'path'
 
 const { Terminal } = xterm
+
+// node-pty 1.1.0's prebuilds ship spawn-helper without its execute bit, and
+// every spawn then fails with "posix_spawnp failed". Set it once, best-effort:
+// a read-only install keeps the bit it has.
+export function ensureSpawnHelper() {
+  if (process.platform === 'win32') return
+  try {
+    const root = dirname(createRequire(import.meta.url).resolve('node-pty/package.json'))
+    const helper = join(root, 'prebuilds', `${process.platform}-${process.arch}`, 'spawn-helper')
+    const { mode } = statSync(helper)
+    if ((mode & 0o111) !== 0o111) chmodSync(helper, mode | 0o755)
+  } catch {}
+}
+ensureSpawnHelper()
 
 // conpty finds a bare name on Path only with its extension given, so a
 // Windows command is looked up first (command.mjs).

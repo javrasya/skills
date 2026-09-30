@@ -21,7 +21,7 @@ import { END_SIGNALS, PLACEHOLDERS, launchRunner, notesDirOf, renderRoles, rende
 import { launchCommand } from '../src/harness.mjs'
 import { DEFAULTS } from '../src/crew-config.mjs'
 import { loadScript } from '../src/runner.mjs'
-import { drawStartForm, keysOf, runStartForm } from '../src/start-tui.mjs'
+import { WINDOW, drawStartForm, keysOf, runStartForm } from '../src/start-tui.mjs'
 
 const FAKE_HARNESS = fileURLToPath(new URL('./fixtures/crew/fake-harness.mjs', import.meta.url))
 const SKILL_TEMPLATE = fileURLToPath(new URL('../../../skills/engineering/implement-spec-in-workflow/workflow.template.js', import.meta.url))
@@ -64,8 +64,9 @@ test("render: a validation list the template's String.raw literal cannot hold is
 test('form keys: arrows, Enter, Tab, Esc and Ctrl+C from raw input', () => {
   assert.deepEqual(keysOf('\x1b[A\x1b[B\x1b[C\x1b[D\r\t\x1b[Z'), ['up', 'down', 'right', 'left', 'enter', 'down', 'up'])
   assert.deepEqual(keysOf('\x1b'), ['cancel'])
-  assert.deepEqual(keysOf('\x03'), ['cancel'])
-  assert.deepEqual(keysOf('\x1b[24~x'), [], 'an unknown sequence and a letter are no key of the form\'s')
+  assert.deepEqual(keysOf('\x03'), ['interrupt'])
+  assert.deepEqual(keysOf('\x1b[24~'), [], 'an unknown sequence is no key of the form\'s')
+  assert.deepEqual(keysOf('op\x7f'), [{ char: 'o' }, { char: 'p' }, 'backspace'], 'a letter is typed into the search')
 })
 
 const FACTS = {
@@ -123,7 +124,35 @@ test('form at a terminal: Enter through it takes every default; arrows change a 
   const picked = await runStartForm({ form: startForm(FACTS), stdin: new FakeStdin(['\x1b[C', '\r', '\r', '\x1b[C', '\r', '\r']), stdout: out })
   assert.deepEqual(picked, { harness: 'pi', model: 'lmstudio/qwen3', base: 'main', stackMode: 'chain' })
   assert.deepEqual(await runStartForm({ form: startForm(FACTS), stdin: new FakeStdin(['\r', '\x1b']), stdout: fakeStdout() }), null)
-  assert.match(lastScreen(through), /> Permission mode/)
+  assert.match(lastScreen(through), /› Permission mode/)
+})
+
+const MANY = { ...FACTS, models: { ...FACTS.models, pi: { last: 'm000', list: Array.from({ length: 120 }, (_, i) => `m${String(i).padStart(3, '0')}`).concat(['lmstudio/qwen3-coder']) } } }
+
+test('form at a terminal: a focused row lists at most WINDOW options, saying how many more', () => {
+  const lines = drawStartForm(startForm(MANY, { flags: { harness: 'pi' } }), 1).map(strip)
+  assert.equal(lines.filter((l) => /^\s+(●\s)?m\d{3}$/.test(l.trimEnd())).length, WINDOW, lines.join('\n'))
+  assert.ok(lines.some((l) => l.includes(`↓ ${121 - WINDOW} more`)), lines.join('\n'))
+  const other = drawStartForm(startForm(MANY, { flags: { harness: 'pi' } }), 0).map(strip)
+  assert.ok(!other.some((l) => /m05\d/.test(l)), 'an unfocused row lists none of its options')
+})
+
+test('form at a terminal: typing searches the focused row, Left/Right step through the matches, Esc clears the search before it cancels', async () => {
+  const form = () => startForm(MANY, { flags: { harness: 'pi' } })
+  const out = fakeStdout()
+  // Down to Model, type "qwen": the only match is picked.
+  assert.equal((await runStartForm({ form: form(), stdin: new FakeStdin(['\x1b[B', 'qwen', '\r', '\r', '\r']), stdout: out })).model, 'lmstudio/qwen3-coder')
+  assert.match(lastScreen(out), /Stack mode/)
+  // "m11" matches m110..m119; Right steps to the second, Left wraps back past the first.
+  assert.equal((await runStartForm({ form: form(), stdin: new FakeStdin(['\x1b[B', 'm11', '\x1b[C', '\r', '\r', '\r']), stdout: fakeStdout() })).model, 'm111')
+  assert.equal((await runStartForm({ form: form(), stdin: new FakeStdin(['\x1b[B', 'm11', '\x1b[D', '\r', '\r', '\r']), stdout: fakeStdout() })).model, 'm119')
+  // Backspace widens; a query matching nothing keeps the value.
+  const screen = fakeStdout()
+  assert.equal((await runStartForm({ form: form(), stdin: new FakeStdin(['\x1b[B', 'zzz', '\r', '\r', '\r']), stdout: screen })).model, 'm000')
+  // Esc with a query only clears it; the second one cancels.
+  assert.equal((await runStartForm({ form: form(), stdin: new FakeStdin(['\x1b[B', 'qwen', '\x1b', '\r', '\r', '\r']), stdout: fakeStdout() })).model, 'lmstudio/qwen3-coder')
+  assert.equal(await runStartForm({ form: form(), stdin: new FakeStdin(['\x1b[B', 'q', '\x1b', '\x1b']), stdout: fakeStdout() }), null)
+  assert.equal(await runStartForm({ form: form(), stdin: new FakeStdin(['\x1b[B', 'q', '\x03']), stdout: fakeStdout() }), null, 'Ctrl+C cancels at once')
 })
 
 // The orchestrator as `crew start` builds it, on the crew host of the scratch
