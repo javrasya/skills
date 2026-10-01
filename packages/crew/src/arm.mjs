@@ -1,8 +1,8 @@
 // Arming a run (#100): in code, with no agent session in between, what the
 // implement-spec skill's arming steps do (SKILL.md steps 2-4): resolve the
-// repo, its path and the notes directory, render the bundled template into the
-// notes directory, clear the previous run's end signals, and launch the runner
-// as a crew session, as `crew run` does.
+// repo, its path and the notes directory, render the bundled template into a
+// new run's own folder under it, and launch the runner there as a crew
+// session, as `crew run` does.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { randomBytes } from 'crypto'
 import { homedir } from 'os'
@@ -91,17 +91,24 @@ export function runDefaultOf(script) {
 // SKILL.md step 2's __NOTES_DIR__.
 export const notesDirOf = (repo, spec, home = homedir()) => join(home, '.claude', 'spec-notes', `${repo.split('/').pop()}-${spec}`)
 
-// The runner's state dir under the notes dir, and the files in it that tell an
-// arming session the last run ended, halted or died. The notes dir outlives a
-// run, so a re-arm launches over the last run's (SKILL.md step 4).
-export const stateDirOf = (notesDir) => join(notesDir, 'orca-run')
+// The runner's state dir in the folder its script is rendered into.
+export const stateDirOf = (dir) => join(dir, 'orca-run')
 // Every crew start arms a run of its own, never one an earlier start made: its
 // own folder under the spec's notes dir, named by its spec and a part of its
 // own (UTC time and a random tail), holding its workflow.js, its research
 // notes and its state dir. Only validation.md is the spec's, shared by its runs.
-export const newRunId = (spec, at = new Date()) => `${spec}-${at.toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)}-${randomBytes(2).toString('hex')}`
+// A tail this process already drew is drawn again, so two ids of one second
+// never match here; across processes armRun's exclusive mkdir is the guard.
+const drawn = new Set()
+export function newRunId(spec, at = new Date()) {
+  const stamp = `${spec}-${at.toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)}`
+  let id
+  do id = `${stamp}-${randomBytes(2).toString('hex')}`
+  while (drawn.has(id))
+  drawn.add(id)
+  return id
+}
 export const runDirOf = (notesDir, id) => join(notesDir, 'runs', id)
-export const END_SIGNALS = ['summary.json', 'runner.pid', 'halted.json']
 
 // The runner as a session of the daemon's, on the crew host: it outlives the
 // command that launched it, and the run console (`crew view <run dir>`)
@@ -222,7 +229,13 @@ export async function armRun({ target, answers, roles, id, template = readFileSy
   const rendered = renderRoles(renderTemplate(template, {
     SPEC: spec, REPO: repo, REPO_DIR: repoDir, NOTES_DIR: runDir, BASE_REF: answers.base, STACK_MODE: answers.stackMode, RUN_ORDER: answers.runOrder, RUNNER: 'session', VALIDATION: validation,
   }), { runDefault: answers, roles })
-  mkdirSync(runDir, { recursive: true })
+  mkdirSync(dirname(runDir), { recursive: true })
+  try {
+    mkdirSync(runDir)
+  } catch (e) {
+    if (e.code === 'EEXIST') throw new StartError(`run folder ${runDir} exists already: another run's, left as it is; nothing armed`)
+    throw e
+  }
   writeFileSync(script, rendered)
   const session = await launch({ script, stateDir, permissionMode: answers.permissionMode ?? null, cwd: repoDir, title: `implement-spec #${spec}: ${title}` })
   return { script, session }

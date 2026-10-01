@@ -1,5 +1,5 @@
 // Offline tests for `crew start`: the form at a terminal, flag-only use,
-// arming (resolve, render, clear the end signals, launch), and the
+// arming (resolve, render into a run folder of its own, launch), and the
 // orchestrator's draft of a missing validation list, played by the fake
 // harness on the crew host.
 //   node packages/crew/test/test-crew-start.mjs
@@ -18,7 +18,7 @@ import { OrchestratorError, orchestrator } from '../src/orchestrator.mjs'
 import { execProgram } from '../src/git.mjs'
 import { STACKS_DOCS, rememberAnswers, rememberedAnswers, startForm } from '../src/start-form.mjs'
 import { preflight } from '../src/headless.mjs'
-import { END_SIGNALS, PLACEHOLDERS, launchRunner, newRunId, notesDirOf, renderRoles, renderTemplate, startCommand, templatePath } from '../src/arm.mjs'
+import { PLACEHOLDERS, launchRunner, newRunId, notesDirOf, renderRoles, renderTemplate, startCommand, templatePath } from '../src/arm.mjs'
 import { launchCommand } from '../src/harness.mjs'
 import { DEFAULTS } from '../src/crew-config.mjs'
 import { loadScript } from '../src/runner.mjs'
@@ -200,7 +200,7 @@ function world({ validation = 'npm test\n', stackInstalled = true } = {}) {
   }
   const launches = []
   const launch = async (o) => {
-    launches.push({ ...o, signals: END_SIGNALS.filter((f) => existsSync(join(o.stateDir, f))) })
+    launches.push(o)
     return { id: 's7' }
   }
   // Each start's own run id, in order: r1, r2, …
@@ -358,7 +358,8 @@ test('crew start at a terminal: Enter through the form renders workflow.js into 
   const script = join(runDir, 'workflow.js')
   const stateDir = join(runDir, 'orca-run')
   assert.equal(armed.script, script)
-  assert.deepEqual(w.launches, [{ script, stateDir, permissionMode: 'auto', cwd: w.repoDir, title: 'implement-spec #94: Crew, the session runner', signals: [] }])
+  assert.deepEqual(w.launches, [{ script, stateDir, permissionMode: 'auto', cwd: w.repoDir, title: 'implement-spec #94: Crew, the session runner' }])
+  assert.ok(!existsSync(join(runDir, 'validation.md')), 'the validation list is read from the spec\'s notes dir, never copied into the run')
   const template = readFileSync(templatePath(), 'utf8')
   // Its research notes are its own too; the validation list stays the spec's.
   assert.equal(readFileSync(script, 'utf8'), skillRender(template, { SPEC: 94, REPO: 'acme/app', REPO_DIR: w.repoDir, NOTES_DIR: runDir, BASE_REF: 'develop', STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session', VALIDATION: 'npm t\n' }))
@@ -515,6 +516,20 @@ test('a run id is its spec number and a part of its own, so two runs of one spec
   const [a, b] = [newRunId(827, at), newRunId(827, at)]
   assert.match(a, /^827-20261001-172031-[0-9a-f]{4}$/)
   assert.notEqual(a, b)
+  const many = Array.from({ length: 2000 }, () => newRunId(827, at))
+  assert.equal(new Set([a, b, ...many]).size, 2002, 'ids of one second never repeat, however many are drawn')
+})
+
+test('crew start whose run folder exists already refuses, and leaves that run exactly as it was', async () => {
+  const w = world()
+  await w.ready
+  const first = await w.start(['94', ...FLAGS], { newRunId: () => '94-same' })
+  liveRunner(join(w.notesDir, 'runs', '94-same', 'orca-run'))
+  const written = readFileSync(first.script, 'utf8')
+  await assert.rejects(w.start(['94', ...FLAGS, '--run-order', 'sequential'], { newRunId: () => '94-same' }), /run folder .*94-same exists already: another run's, left as it is; nothing armed/)
+  assert.equal(w.launches.length, 1)
+  assert.equal(readFileSync(first.script, 'utf8'), written)
+  assert.equal(readFileSync(join(w.notesDir, 'runs', '94-same', 'orca-run', 'runner.pid'), 'utf8'), String(process.pid))
 })
 
 test('crew run --resume on a state dir whose runner is alive: the daemon refuses a second runner, run_live, and leaves the state dir as it was', async () => {
