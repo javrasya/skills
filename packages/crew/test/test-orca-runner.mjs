@@ -6371,8 +6371,8 @@ const until = async (pred, what) => {
 // One Orca and one state dir for every runner of a run, each runner in its
 // own terminal; workers played by their prompt's first line (`plays`), the
 // rest submitting GOOD. go() starts a runner and does not wait on it.
-function nodeRig(plays = {}, { faults = {} } = {}) {
-  const orca = fakeOrca({ worker: (w) => (plays[w.prompt.split('\n')[0]] ?? submitGood)(w), faults })
+function nodeRig(plays = {}, { faults = {}, setupLeaves = [] } = {}) {
+  const orca = fakeOrca({ worker: (w) => (plays[w.prompt.split('\n')[0]] ?? submitGood)(w), faults, setupLeaves })
   const stateDir = tmp()
   const registry = join(stateDir, 'orca-runs.jsonl')
   const lines = []
@@ -6410,6 +6410,50 @@ test('resume by node: a finished node after a failed one is kept, not run again,
   assert.deepEqual(ofType(j, 'result').filter((e) => !e.carried).map((e) => [e.node, !!e.replayed]), [['n/b', true], ['n/a', false]])
   assert.ok(ofType(j, 'failed').some((e) => e.node === 'n/a' && e.carried), 'the failed node was carried forward first')
   assert.equal(readRegistry(rig.registry)[0].state, 'ok')
+})
+
+// A sequential run (ADR-0020) halted on its first chained node.
+const CHAIN_PATH = 'C:/fake/worktrees/run_fake1-chain'
+const chainedRun = `const a = await ${nodeCall('a', ", isolation: 'chain'")}
+const b = await ${nodeCall('b', ", isolation: 'chain'")}
+return [a, b]`
+async function haltedChain() {
+  const rig = nodeRig({ 'Do a.': diesThenSubmitsOnContinue }, { setupLeaves: ['?? setup.out'] })
+  rig.go(chainedRun)
+  await until(() => rig.halts.length, 'the halt on a')
+  assert.deepEqual(ofType(rig.journal(), 'started').map((e) => e.worktree), [CHAIN_PATH])
+  return rig
+}
+
+test('resume of a sequential run: the halted node carries on in the chain worktree, and the next agent starts in it, nothing made', async () => {
+  const rig = await haltedChain()
+  const second = rig.go(chainedRun, { resume: true })
+  assert.deepEqual(await second.p, [GOOD, GOOD])
+  const [c] = second.calls().filter((x) => x.verb === 'workerContinue')
+  assert.equal(c.worktree, CHAIN_PATH)
+  assert.doesNotMatch(c.text, /made again/)
+  const starts = second.calls().filter((x) => x.verb === 'workerStart')
+  assert.deepEqual(starts.map((s) => [s.title, s.placement, s.worktree]), [['[P] b', 'chain', CHAIN_PATH]])
+  assert.match(rig.orca.dispatches.get(starts[0].dispatchId).prompt, /left by its setup: setup\.out/, 'the baseline journaled when it was made, by the earlier runner')
+  assert.deepEqual(second.calls().filter((x) => x.verb === 'worktreeCreate'), [])
+  assertEntries(rig.journal())
+  assert.deepEqual(foldJournal(rig.journal()).chain, { runId: 'run_fake1', worktree: CHAIN_PATH, baseline: ['?? setup.out'] }, 'still journaled for the next resume')
+})
+
+test('resume of a sequential run: a chain worktree reclaimed while halted is made again once, setup and all, and the halted node and the next agent carry on in it', async () => {
+  const rig = await haltedChain()
+  await rig.orca.worktreeRemove({ path: CHAIN_PATH })
+  const second = rig.go(chainedRun, { resume: true })
+  assert.deepEqual(await second.p, [GOOD, GOOD])
+  assert.deepEqual(second.calls().filter((x) => x.verb === 'worktreeCreate').map((x) => [x.name, x.worktree]), [['run_fake1-chain', CHAIN_PATH]])
+  const [c] = second.calls().filter((x) => x.verb === 'workerContinue')
+  assert.deepEqual([c.worktree, c.reopened], [CHAIN_PATH, true])
+  assert.match(c.text, /reclaimed while the run was halted and has been made again/)
+  assert.match(c.text, /never commit them\.\n\?\? setup\.out/)
+  const starts = second.calls().filter((x) => x.verb === 'workerStart')
+  assert.deepEqual(starts.map((s) => [s.title, s.placement, s.worktree]), [['[P] b', 'chain', CHAIN_PATH]])
+  assert.equal(rig.orca.worktrees.get(CHAIN_PATH).removed, false)
+  assert.deepEqual(ofType(rig.journal(), 'chain').map((e) => e.worktree), [CHAIN_PATH, CHAIN_PATH], 'the earlier one carried, then the remake')
 })
 
 test('resume by node: a node whose key changed runs live and ends replay for every later call; an unchanged earlier node still replays', async () => {

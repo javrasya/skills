@@ -381,6 +381,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
         Object.assign(d, { gone: false, exited: false, idle: false, waiting: null })
       } else {
         fence(caller, run, 'orchestration worker-start')
+        if (worktree && worktrees.get(worktree)?.removed) throw new OrcaError('selector_not_found', `no worktree ${worktree}`, 'terminal create')
         const preamble = preambleOf(++seq)
         c = { ...d, ...preamble, run, title, command, worktree, ...fresh(), from: id }
         dispatches.set(c.dispatchId, c)

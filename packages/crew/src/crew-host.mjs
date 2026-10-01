@@ -222,10 +222,11 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
   }
 
   // A new worktree `name` at `path`, on a branch of its name from the run's
-  // HEAD, its setup hook run unless `skip`. One whose hook failed is removed
-  // again: nothing in it is anyone's work.
-  async function addWorktree(repo, name, path, skip) {
-    await gitIn(cwd, ['worktree', 'add', '-b', name, path, 'HEAD'], { ms: createMs })
+  // HEAD, or on that branch as it stands when `existing`, its setup hook run
+  // unless `skip`. One whose hook failed is removed again: nothing in it is
+  // anyone's work, and a branch it did not make is left where it was.
+  async function addWorktree(repo, name, path, skip, existing = false) {
+    await gitIn(cwd, ['worktree', 'add', ...(existing ? [path, name] : ['-b', name, path, 'HEAD'])], { ms: createMs })
     const setup = skip ? null : repoConfig(paths, repo).setup ?? null
     if (!setup) return
     try {
@@ -233,7 +234,7 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     } catch (e) {
       try {
         await gitIn(repo, ['worktree', 'remove', '--force', path], bound)
-        await gitIn(repo, ['branch', '-D', name], bound)
+        if (!existing) await gitIn(repo, ['branch', '-D', name], bound)
       } catch (removing) {
         e.message += `; removing ${path} again failed too: ${removing.message}`
         e.worktree = path
@@ -413,14 +414,20 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
 
     // `<runId>-chain` beside the run's `<runId>-<n>` worktrees, made as they
     // are; asked again, the one git holds is the run's as it is, whoever
-    // worked in it last, so it is never refused as a child's would be.
+    // worked in it last, so it is never refused as a child's would be. One
+    // reclaimed meanwhile is made again, setup hook and all, from the tip of
+    // the `<runId>-chain` branch reclaim leaves behind.
     async chainWorktree({ runId, onBaseline = null }) {
       const repo = await repoOf(cwd, bound)
       const name = `${runId}-chain`
       const path = join(crewWorktrees(repo), name)
-      if ((await worktreesOf(repo, bound)).some((w) => samePath(w.path, path))) return { path, made: false, baseline: null, warnings: [] }
-      if (existsSync(path)) throw fail('worktree_name_taken', `${path} already exists and is no worktree git holds`, { worktree: path, final: true })
-      await addWorktree(repo, name, path, false)
+      const held = (await worktreesOf(repo, bound)).some((w) => samePath(w.path, path))
+      if (held && existsSync(path)) return { path, made: false, baseline: null, warnings: [] }
+      // A folder deleted by hand stays listed, and blocks its path, until pruned.
+      if (held) await gitIn(repo, ['worktree', 'prune'], bound)
+      else if (existsSync(path)) throw fail('worktree_name_taken', `${path} already exists and is no worktree git holds`, { worktree: path, final: true })
+      const tip = !!(await gitIn(repo, ['branch', '--list', name], bound)).trim()
+      await addWorktree(repo, name, path, false, tip)
       const warnings = []
       const baseline = await prepareChildWorktree({ project, worktree: path, bound, child: { onBaseline }, warnings })
       return { path, made: true, baseline, warnings }

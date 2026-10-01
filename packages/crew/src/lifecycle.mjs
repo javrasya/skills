@@ -148,10 +148,13 @@ const continuePrompt = (why) => `You were interrupted: the workflow runner stopp
 
 // A node resumed after the run halted on it (ADR-0016): its session carried
 // on, told why. One that needed decisions is told the operator has answered,
-// on the ticket.
-export const haltedPrompt = (needsDecision) => `${needsDecision
+// on the ticket. `remade`: the baseline of the run's chain worktree, made
+// again because it was reclaimed while the run was halted (ADR-0020).
+export const haltedPrompt = (needsDecision, remade = null) => `${needsDecision
   ? 'The workflow run was halted here: your result named decisions only the operator can make, and the operator has answered them. Re-read the ticket, its body and its comments, for the answers, then finish the task'
-  : 'The workflow run was halted here, and the operator has resumed it. Carry on from where you are and finish the task'}, then run the submit command from your instructions until it exits 0. If a session host's preamble came with this message, take the four IDs for submit from it, not from an earlier one.`
+  : 'The workflow run was halted here, and the operator has resumed it. Carry on from where you are and finish the task'}, then run the submit command from your instructions until it exits 0. If a session host's preamble came with this message, take the four IDs for submit from it, not from an earlier one.${remade
+  ? ` Your worktree was reclaimed while the run was halted and has been made again, its setup hook run again: anything you left uncommitted in it is gone, and it is no longer on the ref you were on, so switch back to your work's ref first.${remade.length ? ` Its setup left these files, which are not yours: never commit them.\n${remade.join('\n')}` : ''}`
+  : ''}`
 
 // The convention a result needs the operator by (ADR-0016): a non-empty
 // `decisions_needed` array, its questions. Null for any other value.
@@ -206,7 +209,7 @@ export function readResult(resultPath, schema) {
 // only if journal or out does. life.chain(call) resolves to the run's chain
 // worktree, the host's chainWorktree answer, in the Run it ensures for call;
 // chainBefore is the chain an earlier runner of the run journaled, { baseline,
-// leftovers }, which a chain the host hands back as it is still holds. life.doctors() resolves once every doctor
+// leftovers }, which a chain the host hands back as it is still holds, and lends its baseline to an unmade one at the same path. life.doctors() resolves once every doctor
 // still out has ended: a patient's agent() never waits on its doctor once its
 // own result is in, so the runner awaits them before it ends.
 export function agentLifecycle({ host, clock, limits, out, stateDir, objective, journal, retainWorktree, onRun = () => {}, takeOver = null, transcripts = sessionTranscripts(), nextN, doctorLaunch = () => ({ harness: 'claude' }), history = () => ({ entries: [], log: [] }), mailHandled = [], mailPending = [], outage = { lost: () => 0, sleep: (ms) => clock.sleep(ms) }, chainBefore = null }) {
@@ -909,8 +912,19 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
   // haltedPrompt, then watched as any worker, its continuations counted
   // afresh. call.adopt is the worker it last ran; call.halted { needsDecision }.
   async function carryHalted(runId, call) {
-    const { key, n, title, launch, adopt, halted } = call
-    const w = { dispatchId: adopt.dispatchId, terminal: adopt.terminal, worktree: adopt.worktree }
+    const { key, n, title, launch, adopt, halted, chained = false } = call
+    // A chained node (ADR-0020) carries on in the run's chain worktree, asked
+    // of the host afresh: the operator may have reclaimed it while the run
+    // was halted, and then the host makes it again.
+    let chain = null
+    if (chained) {
+      try {
+        chain = await life.chain(call, { recheck: true })
+      } catch (e) {
+        return failAgent(call, { reason: `resuming it needs the run's chain worktree, which could not be made again: ${e?.message ?? e}`, attempts: 0, run: runId })
+      }
+    }
+    const w = { dispatchId: adopt.dispatchId, terminal: adopt.terminal, worktree: chain?.path ?? adopt.worktree }
     // A dispatch that settled cannot be watched again: its session is
     // continued under a new one, in a new tab, its old tab closed first so no
     // second process holds the session. One kept running (blocked, or past its
@@ -924,7 +938,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
     out(`>> ${title}: resuming node ${call.node}: continuing session ${adopt.sessionId} ${gone ? `in a new terminal in ${w.worktree ?? 'its worktree'}` : `in terminal ${w.terminal}`}`)
     let next
     try {
-      next = await host.workerContinue({ run: runId, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: haltedPrompt(!!halted.needsDecision), ...launch, sessionId: adopt.sessionId, reopen: gone, asking: asking(call) })
+      next = await host.workerContinue({ run: runId, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: haltedPrompt(!!halted.needsDecision, chain?.made ? chain.baseline ?? [] : null), ...launch, sessionId: adopt.sessionId, reopen: gone || !!chain?.made, asking: asking(call) })
     } catch (e) {
       return failAgent(call, { reason: `resuming its session failed: ${e?.message ?? e}`, attempts: 0, run: runId, retained: keep(call, w) })
     }
@@ -952,19 +966,23 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
 
   // The run's chain worktree (ADR-0020), asked of the host once per runner
   // however many calls ask at once, its baseline journaled when the host
-  // makes it; one that failed is asked for again by the next call.
+  // makes it; one that failed is asked for again by the next call, and so is
+  // any with `recheck`, which a halted node carries on in. One the host
+  // hands back unmade has the baseline journaled when it was made.
   let chain = null
   // What the chain holds that no agent starting in it owns: its baseline, and
   // every file an agent before left there past its follow-up.
   let chainBase = chainBefore?.baseline ?? null
   let chainLeft = chainBefore?.leftovers ?? []
-  life.chain = (call) => {
+  let chainAt = chainBefore?.worktree ?? null
+  life.chain = (call, { recheck = false } = {}) => {
+    if (recheck) chain = null
     const making = (chain ??= ensureRun(call)
       .then(({ runId }) => host.chainWorktree({ runId, onBaseline: ({ worktree, lines }) => journal({ type: 'chain', runId, worktree, lines }) }))
       .then((c) => {
         for (const why of c.warnings ?? []) warn(call, why)
-        if (c.made) [chainBase, chainLeft] = [c.baseline, []]
-        return c
+        if (c.made) [chainBase, chainLeft, chainAt] = [c.baseline, [], c.path]
+        return c.made || c.baseline ? c : { ...c, baseline: chainAt === c.path ? chainBase : null }
       }))
     return making.catch((e) => {
       if (chain === making) chain = null

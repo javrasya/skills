@@ -20,7 +20,7 @@
 //   node packages/crew/test/test-host-contract.mjs
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { dirname, join, resolve } from 'path'
 import { randomUUID } from 'crypto'
@@ -433,7 +433,7 @@ export const SCENARIOS = [
     },
   },
   {
-    name: 'chain worktree: made once as <runId>-chain, its setup hook run once and its output its baseline; workers start in it one after another, a child beside it is made as ever, and a doctor\'s with setup skipped',
+    name: 'chain worktree: made once as <runId>-chain, its setup hook run once and its output its baseline; workers start in it one after another, a child beside it is made as ever, and a doctor\'s with setup skipped; reclaimed, it is made again, its hook run once more',
     async run(h) {
       const run = await runOf(h)
       const baselines = []
@@ -461,7 +461,18 @@ export const SCENARIOS = [
       assert.equal(worktreeName(doctor.worktree), `${run}-2`)
       assert.deepEqual(baselines.at(-1), { worktree: doctor.worktree, lines: [] })
       assert.deepEqual([await h.setups(doctor.worktree), await h.setups(chain.path)], [0, 1])
-      for (const path of [chain.path, own.worktree, doctor.worktree]) await h.host.worktreeRemove({ path })
+      for (const path of [own.worktree, doctor.worktree]) await h.host.worktreeRemove({ path })
+      // Reclaimed, then asked for again, as a resume does: made again at the
+      // same path, its hook run once more, and held as ever after.
+      await h.host.worktreeRemove({ path: chain.path })
+      const remade = await h.host.chainWorktree({ runId: run, onBaseline })
+      assert.deepEqual([remade.path, remade.made, remade.baseline], [chain.path, true, SETUP_LEAVES])
+      assert.equal(await h.setups(chain.path), 2, 'its setup hook ran once more, for the remake')
+      assert.equal((await h.host.chainWorktree({ runId: run, onBaseline })).made, false)
+      const third = await start(h, 'third', { chain: chain.path })
+      assert.equal(third.worktree, chain.path)
+      assert.equal(await h.setups(chain.path), 2)
+      await h.host.worktreeRemove({ path: chain.path })
     },
   },
   {
@@ -651,6 +662,17 @@ test('crew host: a retry takes the worktree an earlier attempt made up again, ho
   assert.equal(again.worktree, w.worktree)
   assert.equal(readFileSync(join(w.worktree, 'setup.out'), 'utf8'), 'left as it was\n')
   await assert.rejects(start(h, 'taken', { child: child(`${run}-1`) }), (e) => e.code === 'worktree_name_taken' && e.final === true && e.worktree === w.worktree)
+})
+
+test('crew host: a chain worktree whose folder was deleted by hand, still listed by git, is made again at its path, its hook run once more', async () => {
+  const h = crewKind.open()
+  const run = await runOf(h)
+  const chain = await h.host.chainWorktree({ runId: run })
+  rmSync(chain.path, { recursive: true, force: true })
+  const remade = await h.host.chainWorktree({ runId: run })
+  assert.deepEqual([remade.path, remade.made], [chain.path, true])
+  assert.ok(existsSync(chain.path))
+  assert.equal(await h.setups(chain.path), 2)
 })
 
 test('crew host: a setup hook that fails fails the start and leaves no worktree or branch behind', async () => {
