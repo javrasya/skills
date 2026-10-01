@@ -3277,6 +3277,38 @@ test('reclaim: the journal names each agent this run launched, with its Run, dis
   ])
 })
 
+test('reclaim: two agents whose worktrees share a name are each known by their own <runId>-<n>, reclaimed and shown reclaimed separately', async () => {
+  const run = await endedRun()
+  // b's journal names a's worktree as its own, as agents sharing one folder do (ADR-0020).
+  const journal = join(run.stateDir, 'journal.jsonl')
+  writeFileSync(journal, readFileSync(journal, 'utf8').replaceAll(B_WT, A_WT))
+  const [a, b] = agentsOf(journal)
+  assert.deepEqual([[a.name, a.worktree], [b.name, b.worktree]], [['run_fake1-1', A_WT], ['run_fake1-2', A_WT]])
+  const runId = a.runId
+  const view = runView({ stateDir: run.stateDir, host: run.orca, clock: run.clock, transcripts: { usage: () => null }, registry: run.registry, alive: () => false })
+  const runs = runsView({ host: run.orca, clock: run.clock, registry: run.registry, transcripts: { usage: () => null }, unpushed: run.orca.unpushedOf })
+  const reclaimedNow = async () => {
+    await view.refresh()
+    return view.model.phases.flatMap((p) => p.agents).map((x) => [x.title, x.reclaimed])
+  }
+  const kept = async () => {
+    await runs.refresh()
+    return runs.model.projects.flatMap((p) => p.runs).find((x) => x.runId === runId).kept
+  }
+  const registry = runRegistry(run.registry, run.clock)
+
+  assert.deepEqual((await reclaimRun([a], { host: run.orca, unpushed: run.orca.unpushedOf, registry, closeRun: false })).reclaimed, [a])
+  assert.equal(run.orca.worktrees.get(A_WT).removed, true)
+  assert.deepEqual(readRegistry(run.registry).find((x) => x.runId === runId).reclaimedAgents.map((x) => x.agent), ['run_fake1-1'])
+  assert.deepEqual(await reclaimedNow(), [['[P] a', true], ['[P] b', false], ['[P] c', false]])
+  assert.equal(await kept(), 2, 'b and c are still left to reclaim')
+
+  assert.deepEqual((await reclaimRun([b], { host: run.orca, unpushed: run.orca.unpushedOf, registry, closeRun: false })).reclaimed, [b])
+  assert.deepEqual(readRegistry(run.registry).find((x) => x.runId === runId).reclaimedAgents.map((x) => x.agent), ['run_fake1-1', 'run_fake1-2'])
+  assert.deepEqual(await reclaimedNow(), [['[P] a', true], ['[P] b', true], ['[P] c', false]])
+  assert.equal(await kept(), 1)
+})
+
 test('reclaim: unpushed counts commits no remote-tracking ref contains; uncommitted files do not count', async () => {
   const dir = tmp()
   const git = (...args) => {

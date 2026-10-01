@@ -23,12 +23,14 @@ import { hostUnreachable } from './session-host.mjs'
 //     harness, state, reason, workerLeft }
 // Every agent its Run holds: a resumed run's journal carries forward the ones
 // earlier runners of that Run made, finished, failed or still out, so a
-// resume renames none and drops none. name is its worktree's name, the
-// `<runId>-<n>` Orca made it, where n is its origin, the call that started its
-// worker; one with no worktree of its own is named as it would have been. It is
-// what the run registry records a reclaim under. launched: a worker was started
-// for it. state is 'ok' for a call that returned a value, 'failed' for one
-// that returned null (dead, or settled with no valid result), 'running' for
+// resume renames none and drops none. name is its `<runId>-<n>`, where n is its
+// origin, the call that started its worker: its identity, what the run registry
+// records a reclaim under and the run view marks reclaimed by. It is not read
+// off its worktree, which a sequential run's agents share (ADR-0020), save
+// where the journal lost its origin (agentName); a worktree of its own Orca
+// named the same, so registries written before agree. launched: a worker was
+// started for it. state is 'ok' for a call that returned a value, 'failed' for
+// one that returned null (dead, or settled with no valid result), 'running' for
 // one with no settlement journaled. workerLeft: it failed with its worker's
 // process left running (lifecycle.mjs). A call whose worker never started is an
 // agent only if Orca made it a worktree, and then has no dispatch or tab. A
@@ -45,8 +47,10 @@ export function agentsOf(journalPath) {
 // created, by its name.
 export const ownWorktree = (a) => (a.worktree && worktreeName(a.worktree).startsWith(`${a.runId}-`) ? a.worktree : null)
 
-// The name the run registry records an agent's reclaim under.
-export const agentName = (a) => (ownWorktree(a) ? worktreeName(ownWorktree(a)) : `${a.runId}-${a.origin ?? a.n}`)
+// The name the run registry records an agent's reclaim under. Only a journal
+// whose take-up never carried its origin leaves the worktree's name as the one
+// record of the call that started it.
+export const agentName = (a) => (a.originGuessed && ownWorktree(a) ? worktreeName(ownWorktree(a)) : `${a.runId}-${a.origin ?? a.n}`)
 
 // Whether an agent failed and was kept with its worker's process left
 // running: Orca still shows that worker live, so only `stop` reclaims it.

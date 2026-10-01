@@ -220,7 +220,8 @@ export const readJournal = (path) => foldJournal(journalLines(path))
 // latest line: { origin, n, title, state, reason, continuations, replayed,
 // launched, runId, dispatchId, harness, sessionId, worktree, terminal, from,
 // to, waiting, nextAt, workerLeft, baseline, patient, round, doctors, rounds, failures,
-// attempt }. patient: a
+// attempt }, and originGuessed: true when only a take-up written before
+// take-ups carried their origin names it, so origin is that call's n. patient: a
 // doctor's patient, by origin, or null; round: a patient's latest doctor
 // round, or 0; doctors: the origins of its doctors, in round order; rounds:
 // each of its rounds, { round, doctor (origin), reason (the failure it
@@ -314,6 +315,9 @@ export function foldJournal(entries) {
   // Folds one line into its agent's record, and returns that agent's origin.
   function agent(e) {
     const worker = WORKER_LINES.includes(e.type) || e.type === 'earlier'
+    // A take-up written before take-ups carried their origin, of a worker no
+    // earlier line names: its origin is only this call's n.
+    const guessed = worker && e.type !== 'started' && !Number.isInteger(e.origin) && !(e.dispatchId && byDispatch.has(e.dispatchId))
     const id = Number.isInteger(e.origin) ? e.origin
       : worker && e.dispatchId && byDispatch.has(e.dispatchId) ? byDispatch.get(e.dispatchId)
       : worker ? e.n : agentOfCall.get(e.n) ?? e.n
@@ -326,6 +330,7 @@ export function foldJournal(entries) {
         runId: null, dispatchId: null, harness: null, sessionId: null, worktree: null, terminal: null, from: null, to: null,
         waiting: null, nextAt: null, workerLeft: false, baseline: null, patient: null, round: 0, doctors: [], rounds: [], failures: 0, attempt: 1, dialog: null, beforeDialog: null,
       }
+      if (guessed) a.originGuessed = true
       agents.set(id, a)
     }
     a.n = e.n

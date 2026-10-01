@@ -22,11 +22,11 @@
 //   halted     node, reason: the run halted on a node that failed or needs a
 //              decision (ADR-0016); its runner stays, and R carries it on
 //   unhalted   no failed or needs-decision node is left: it runs again
-//   reclaimed  agent: the reclaimed agent's worktree name, `<runId>-<n>`, n
-//              being the call that started its worker (its origin: a resume
-//              numbers its calls on, never its agents); for an agent with no
-//              worktree of its own, the name it would have had. With no agent,
-//              the whole run was reclaimed
+//   reclaimed  agent: the reclaimed agent's journaled `<runId>-<n>`, n being
+//              the call that started its worker (its origin: a resume numbers
+//              its calls on, never its agents), never its worktree's name, which
+//              agents may share. Entries written before named the worktree, which
+//              Orca named the same. With no agent, the whole run was reclaimed
 import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync } from 'fs'
 import { dirname, join } from 'path'
 import { claudeDir } from './transcript.mjs'
