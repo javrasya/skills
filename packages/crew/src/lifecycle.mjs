@@ -69,6 +69,11 @@ ${note}`)
 // ask`, which blocks until the coordinator replies, and this runner never does.
 export const NO_ASK = "Never run any `orchestration ask` command, whatever your session host's preamble offers, and never wait on a reply from anyone: nobody will answer. Put a question only a human can answer in your result (in `decisions_needed`, where your schema has it), finish everything it does not block, then submit."
 
+// A worker's own subagents are its work, and the runner sees them in its
+// transcript (transcript.mjs). A dynamic workflow inside a workflow run is
+// another orchestrator the runner cannot see or supervise.
+export const NO_WORKFLOW = 'You may use subagents, in the foreground or the background. Never start a dynamic workflow (the Workflow tool, or any workflow extension of your harness): this run is already one, and a second orchestrator inside it is one the runner cannot see.'
+
 // `baseline`: the porcelain lines of the worktree it starts in, or null.
 // `leftovers`: those an agent before it left in its chain worktree.
 // `note`: a doctor's note for a start retried after its retries were spent.
@@ -87,7 +92,9 @@ How this run receives your result: your final message is not read. Your result r
    ${command}
 3. If submit exits non-zero it prints every error: fix the payload and run it again until it exits 0. Then stop and idle.
 
-${NO_ASK}${noteSection(note)}`
+${NO_ASK}
+
+${NO_WORKFLOW}${noteSection(note)}`
 }
 
 // FIFO slots: a freed slot passes straight to the longest-waiting call.

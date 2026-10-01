@@ -12,7 +12,7 @@ import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { submit } from '../src/submit.mjs'
 import { runScript, journalKey, failureSummary, finish, SUBMIT, SETTINGS, realClock, JOURNAL_ENTRIES, readJournal, attachView, runnerLog, watchResumeRequests } from '../src/runner.mjs'
-import { agentLifecycle, notePrompt, workerPrompt, doctorPrompt, NO_ASK } from '../src/lifecycle.mjs'
+import { agentLifecycle, notePrompt, workerPrompt, doctorPrompt, NO_ASK, NO_WORKFLOW } from '../src/lifecycle.mjs'
 import { mergeMcpAnswers, copyMcpAnswers } from '../src/mcp-answers.mjs'
 import { foldJournal } from '../src/journal.mjs'
 import { fakeOrca, fakeTranscripts } from '../src/fake-orca.mjs'
@@ -1380,6 +1380,39 @@ test("transcripts: size is the transcript's bytes as it grows, and null while no
   assert.equal(t.size({ harness: 'claude', sessionId: SID, worktree: wt }), 4)
   appendFileSync(at, 'defg\n')
   assert.equal(t.size({ harness: 'claude', sessionId: SID, worktree: wt }), 9)
+})
+
+test("transcripts: a Claude session's size counts its subagents' transcripts, so a background agent at work is movement", () => {
+  const home = tmp()
+  const wt = join(home, 'wt')
+  const t = sessionTranscripts({ home, env: {} })
+  const at = join(home, '.claude', 'projects', claudeSlug(wt), `${SID}.jsonl`)
+  mkdirSync(dirname(at), { recursive: true })
+  writeFileSync(at, 'abc\n')
+  assert.equal(t.size({ harness: 'claude', sessionId: SID, worktree: wt }), 4, 'no subagents dir yet')
+  const subs = join(dirname(at), SID, 'subagents')
+  mkdirSync(subs, { recursive: true })
+  writeFileSync(join(subs, 'agent-a1.jsonl'), 'xy\n')
+  writeFileSync(join(subs, 'agent-a1.meta.json'), '{"not":"counted"}')
+  assert.equal(t.size({ harness: 'claude', sessionId: SID, worktree: wt }), 7)
+  appendFileSync(join(subs, 'agent-a1.jsonl'), 'z\n')
+  assert.equal(t.size({ harness: 'claude', sessionId: SID, worktree: wt }), 9, 'the main transcript still, a subagent growing')
+})
+
+test("transcripts: a pi session's size counts its subagents' run sessions", () => {
+  const home = tmp()
+  const wt = join(home, 'wt')
+  const t = sessionTranscripts({ home, env: {} })
+  const at = join(home, '.pi', 'agent', 'sessions', piDir(wt), `2026-09-24T16-26-07-244Z_${SID}.jsonl`)
+  mkdirSync(dirname(at), { recursive: true })
+  writeFileSync(at, 'abc\n')
+  assert.equal(t.size({ harness: 'pi', sessionId: SID, worktree: wt }), 4)
+  const run = join(at.replace(/\.jsonl$/, ''), '5a2debb2', 'run-0')
+  mkdirSync(run, { recursive: true })
+  writeFileSync(join(run, 'session.jsonl'), 'xy\n')
+  assert.equal(t.size({ harness: 'pi', sessionId: SID, worktree: wt }), 7)
+  appendFileSync(join(run, 'session.jsonl'), 'z\n')
+  assert.equal(t.size({ harness: 'pi', sessionId: SID, worktree: wt }), 9)
 })
 
 // Board status: in progress while an isolated agent works, in review for a
@@ -6234,6 +6267,8 @@ test("transcripts: a turn has ended once the model's reply ends it, and not whil
   assert.equal(turnEnded([prompt, said('end_turn'), line({ type: 'user', isMeta: true, message: { role: 'user', content: 'hook' } })].join('\n')), true)
   assert.equal(turnEnded([prompt, said('end_turn'), line({ type: 'user', isSidechain: true, message: { role: 'user', content: 'sub' } })].join('\n')), true)
   assert.equal(turnEnded([prompt, line({ type: 'system', subtype: 'turn_duration' })].join('\n')), true)
+  assert.equal(turnEnded([prompt, said('end_turn'), line({ type: 'system', subtype: 'turn_duration', pendingBackgroundAgentCount: 2 })].join('\n')), false, 'background agents still out keep the turn going')
+  assert.equal(turnEnded([prompt, said('end_turn'), line({ type: 'system', subtype: 'turn_duration', pendingBackgroundAgentCount: 0 })].join('\n')), true)
   assert.equal(turnEnded([prompt, line({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user for tool use]' }] } })].join('\n')), true)
   assert.equal(turnEnded(`{"type":"assistant","message":{"stop_reason":"end_turn"}}\n${prompt}\n{"type":"assis`), false, 'a torn last line waits')
 
@@ -6315,6 +6350,13 @@ test('prompt delivery: a pi worker is not checked, since pi writes no transcript
   const r = await runOne(submitGood, { script: oneOn('pi'), promptLoss: lossOnFirst('lost'), settings: NO_DOCTOR })
   assert.deepEqual(r.result, GOOD, 'its nudge delivered it')
   assert.deepEqual([callsOf(r, 'terminalEnter').length, callsOf(r, 'terminalClearInput').length], [0, 0])
+})
+
+test('prompts: every worker may use subagents, and is told never to start a dynamic workflow', () => {
+  const p = workerPrompt('Do a thing.', { schemaPath: 's.json', resultPath: 'r.json', payloadPath: 'p.json' })
+  assert.ok(p.includes(NO_WORKFLOW))
+  assert.match(NO_WORKFLOW, /may use subagents/)
+  assert.match(NO_WORKFLOW, /[Nn]ever start a dynamic workflow/)
 })
 
 test('prompts: every worker, and every doctor, is told never to run orchestration ask', () => {
