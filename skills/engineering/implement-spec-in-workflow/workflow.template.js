@@ -342,10 +342,11 @@ const GRAPH_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['number', 'title', 'blocked_by', 'needs_human', 'human_reason'],
+        required: ['number', 'title', 'map_position', 'blocked_by', 'needs_human', 'human_reason'],
         properties: {
           number: { type: 'integer' },
           title: { type: 'string' },
+          map_position: { type: 'integer', description: "1-based place in the spec's own map of its tickets; 0 when the spec does not place it" },
           blocked_by: { type: 'array', items: { type: 'integer' } },
           needs_human: { type: 'boolean' },
           human_reason: { type: 'string', description: 'empty when needs_human is false' },
@@ -576,6 +577,8 @@ ${POINTERS}
 Find the tickets: sub-issues of #${SPEC}, issues that reference #${SPEC}, and issues linked from the spec body. Search each way — GitHub's sub-issue API is often empty even when the tickets exist.
 
 Blocking relationships: query GitHub's native dependencies first, per ticket — \`gh api "repos/${REPO}/issues/<n>/dependencies/blocked_by" -q '[.[].number]'\`. Only when that returns an empty list or a 404 fall back to prose: read the ticket's "Blocked by" section (or equivalent) and resolve it to issue numbers. A dependency the ticket calls soft or tests-only is still a dependency — record it.
+
+map_position: where the spec itself places the ticket in its map of tickets — the ordered list, table or diagram of its slices — counting from 1. A ticket the spec does not place gets 0. Read it off the spec as written; do not rank the tickets yourself.
 
 Set needs_human on a ticket that cannot be completed by an agent alone: it needs hardware, a running game, a physical device, credentials only a person holds, or its label says so. Put the reason in human_reason.
 
@@ -843,6 +846,7 @@ function enqueuePublish(t, impl, cutFrom, single) {
     const go = goOn(single)
     if (!go) return { stopped: true }
     const base = tip
+    if (RUN_ORDER === 'sequential' && cutFrom !== base) throw new Error(`publish of #${t.number}: the tip moved from ${cutFrom} to ${base} under a sequential run, whose publishes never rebase`)
     // Layers as they will stand once this PR exists — k is the ACTUAL position
     // in the stack, not the ticket's index in the plan, so the map's fourth box
     // says "layer 4". A run that lost three tickets ends "4 of 7 planned",
@@ -1222,8 +1226,10 @@ function ticketDone(n) {
   return memo.get(n)
 }
 
+const awaited = (t) => t.blocked_by.filter((d) => byNum.has(d) && !blocked.has(d))
+
 async function runTicket(t) {
-  const deps = await Promise.all(t.blocked_by.filter((d) => byNum.has(d) && !blocked.has(d)).map(ticketDone))
+  const deps = await Promise.all(awaited(t).map(ticketDone))
   const waits = deps.filter((d) => d.state !== 'published')
   if (waits.length) return { number: t.number, state: 'not started', detail: `waits on ${waits.map((d) => `#${d.number} (${d.state})`).join(', ')}` }
   if (halting) return { number: t.number, state: 'not started', detail: `the run halted before it started` }
@@ -1304,8 +1310,23 @@ async function implementTicket(t) {
   return { number: t.number, state: 'published', ...impl, unfixed: gate.unfixed || [] }
 }
 
+const mapOrder = (a, b) => (a.map_position || Infinity) - (b.map_position || Infinity) || a.number - b.number
+async function runInOrder() {
+  const queue = [...auto].sort(mapOrder)
+  const out = []
+  while (queue.length) {
+    const i = queue.findIndex((t) => awaited(t).every((d) => memo.has(d)))
+    if (i < 0) {
+      out.push(...queue.map((t) => ({ number: t.number, state: 'not started', detail: `blocked in a cycle among ${queue.map((x) => '#' + x.number).join(', ')}` })))
+      break
+    }
+    out.push(await ticketDone(queue.splice(i, 1)[0].number))
+  }
+  return out
+}
+
 phase('Implement')
-const outcomes = await Promise.all(auto.map((t) => ticketDone(t.number)))
+const outcomes = RUN_ORDER === 'sequential' ? await runInOrder() : await Promise.all(auto.map((t) => ticketDone(t.number)))
 const layer0Line = () => (hasLayer0 ? [`layer 0 (pre-existing): ${layer0.pr_url}`] : [])
 
 // --- a halted run: no review, no finalize, nothing more on GitHub ----------

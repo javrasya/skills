@@ -112,10 +112,20 @@ async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel' 
     throw new Error('unrouted label: ' + label)
   }
 
+  // `alongside` counts the agents already in flight when a call starts.
+  const timeline = []
+  let inFlight = 0
   const agent = async (prompt, opts = {}) => {
     const label = opts.label || '?'
-    calls.push({ label, effort: opts.effort || '(inherit)', prompt, opts })
-    return completeToSchema(await h[route(label)](label, prompt, opts), opts, label)
+    calls.push({ label, effort: opts.effort || '(inherit)', prompt, opts, alongside: inFlight })
+    inFlight++
+    timeline.push('start ' + label)
+    try {
+      return completeToSchema(await h[route(label)](label, prompt, opts), opts, label)
+    } finally {
+      inFlight--
+      timeline.push('end ' + label)
+    }
   }
   const parallel = (fns) => Promise.all(fns.map((f) => f()))
   const logs = []
@@ -126,7 +136,7 @@ async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel' 
   const result = await loadScript(render(runner, runOrder))(agent, parallel, phase, log, {})
   EVERY_CALL.push(...calls)
   EVERY_RUN.push(calls)
-  return { result, calls, logs }
+  return { result, calls, logs, timeline }
 }
 
 // Assertions that must hold of EVERY prompt the workflow can emit are checked
@@ -575,6 +585,54 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('O: the Workflow runner refuses a sequential run, and says why', refused && /needs the session runner/.test(refused.message) && /cannot point two agents at one folder/.test(refused.message), refused?.message ?? 'it ran')
   const seq = await run({}, { runner: 'session', runOrder: 'sequential' })
   check('O: a sequential run on the session runner loads and completes', seq.result.state.startsWith('complete'), seq.result.state)
+}
+
+// --- scenario S: sequential order builds one ticket at a time --------------
+// The graph lists its tickets out of map order on purpose: the scheduler must
+// sort, not walk the list. #14 sits second in the map but waits on #13; #11
+// and #15 are unplaced (map_position 0), so they go last, lowest number first.
+{
+  const later = (ms, v) => new Promise((res) => setTimeout(() => res(v), ms))
+  const ticket = (number, map_position, blocked_by = []) => ({ number, title: 'T' + number, map_position, blocked_by, needs_human: false, human_reason: '' })
+  const graph = () => ({
+    tickets: [ticket(15, 0), ticket(11, 0), ticket(14, 2, [13]), ticket(13, 3), ticket(12, 1)],
+    start_ref: 'main',
+    explorations: [{ label: 'area-a', question: 'a?' }, { label: 'area-b', question: 'b?' }],
+  })
+  const overrides = {
+    graph,
+    explore: (label) => later(5, `/tmp/n/${label}.md`),
+    impl: (label) => later(5, { branch: 'ticket/' + label.match(/#(\d+)/)[1], summary: 's', unmet: [] }),
+    review: () => ({ findings: [{ severity: 'major', location: 'c.js:3', issue: 'two helpers', fix: 'merge them' }, { severity: 'major', location: 'd.js:4', issue: 'two contracts', fix: 'pick one' }] }),
+    fixdispatch: (label, prompt) => ({ slices: locationsIn(prompt).map((l) => ({ title: l, brief: `- ${l} — ${issueFor(l)}`, findings: [l], effort: 'medium' })) }),
+  }
+  const ticketsOf = (calls) => calls.filter((c) => c.label.startsWith('dispatch:#')).map((c) => Number(c.label.match(/#(\d+)/)[1]))
+  const { result, calls, timeline } = await run(overrides, { runner: 'session', runOrder: 'sequential' })
+  const seq = calls.map((c) => c.label)
+  const order = ticketsOf(calls)
+  const before = (a, b) => timeline.includes(a) && timeline.indexOf(a) < timeline.indexOf(b)
+  check("S: tickets are taken in the spec map's order, then the lowest number, blockers first", JSON.stringify(order) === '[12,13,14,11,15]', JSON.stringify(order))
+  check('S: the stack is built in that order', JSON.stringify(result.stack_bottom_to_top.map((l) => l.split(':')[0])) === JSON.stringify(['#12', '#13', '#14', '#11', '#15', 'integration']), JSON.stringify(result.stack_bottom_to_top))
+  const crowded = calls.filter((c) => !c.label.startsWith('explore') && c.alongside > 0).map((c) => c.label)
+  check('S: outside Explore no agent ever runs beside another', !crowded.length, crowded.join(' | '))
+  check('S: the explorers still run side by side', calls.filter((c) => c.label.startsWith('explore')).some((c) => c.alongside > 0), '')
+  check("S: each ticket's publish returns before the next ticket's dispatch starts", order.slice(1).every((n, i) => before(`end publish:#${order[i]}`, `start dispatch:#${n}`)), timeline.join(' | '))
+  const publishes = calls.filter((c) => c.label.startsWith('publish:'))
+  check('S: no publisher prompt carries a rebase step', publishes.length === 6 && !publishes.some((c) => /git rebase/.test(c.prompt)), publishes.filter((c) => /git rebase/.test(c.prompt)).map((c) => c.label).join(' | '))
+  check('S: the whole-stack review and its integration fixes run one agent at a time', before('end review:spec-224', 'start integration:dispatch') && before('end integration:dispatch', 'start integration:s1') && before('end integration:s1', 'start integration:s2') && before('end integration:s2', 'start publish:integration'), timeline.join(' | '))
+  check('S: the sequential run completes', result.state.startsWith('complete'), result.state)
+
+  // The same graph in parallel order: the frontier starts at once, map order unread.
+  const par = await run(overrides, { runner: 'session' })
+  const first = ticketsOf(par.calls).slice(0, 4).sort((a, b) => a - b)
+  check('S: parallel order still dispatches every takeable ticket at once', JSON.stringify(first) === '[11,12,13,15]' && par.calls.some((c) => c.label.startsWith('dispatch:#') && c.alongside > 0) && par.result.state.startsWith('complete'), JSON.stringify(ticketsOf(par.calls)))
+
+  const failed = await run({ ...overrides, impl: (label) => (label.includes('#12') ? null : overrides.impl(label)) }, { runner: 'session', runOrder: 'sequential' })
+  const st = Object.fromEntries(failed.result.tickets.map((x) => [x.ticket, x]))
+  check('S: a failed ticket halts a sequential run with nothing else started', failed.result.halted === true && st[12].state === 'failed' && [11, 13, 14, 15].every((n) => st[n].state === 'not started') && !failed.calls.some((c) => /#1[1345]\b/.test(c.label)), JSON.stringify(failed.result.tickets))
+
+  const cycle = await run({ graph: () => ({ tickets: [ticket(10, 1, [11]), ticket(11, 2, [10])], start_ref: 'main', explorations: [] }) }, { runner: 'session', runOrder: 'sequential' })
+  check('S: a blocking cycle halts a sequential run instead of hanging it', cycle.result.halted === true && cycle.result.tickets.every((x) => x.state === 'not started' && /cycle/.test(x.detail)), JSON.stringify(cycle.result.tickets))
 }
 
 // --- run-wide: every prompt of every scenario ------------------------------
