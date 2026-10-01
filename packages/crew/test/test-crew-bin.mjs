@@ -190,11 +190,11 @@ test('crew ls: every run of the registry, crew\'s and Orca\'s, by project; crew 
 test('crew pause | resume <run>: by run id, run folder, its name or state dir; an unknown run is an error naming crew ls', () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-bin-pause-'))
   const registry = join(dir, 'runs.jsonl')
-  const folder = join(dir, 'runs', 'implement-spec-13-20261001-120000-ab12')
+  const folder = join(dir, 'runs', '13-20261001-120000-ab12')
   const stateDir = join(folder, 'orca-run')
   mkdirSync(stateDir, { recursive: true })
   runRegistry(registry).armed({ runId: 'run_c1', project: join(dir, 'proj'), runDir: stateDir, spec: 'implement-spec-13', host: 'crew' })
-  for (const target of ['run_c1', folder, 'implement-spec-13-20261001-120000-ab12', stateDir]) {
+  for (const target of ['run_c1', folder, '13-20261001-120000-ab12', stateDir]) {
     const p = crew('pause', target, '--registry', registry)
     assert.equal(p.status, 0, p.stderr)
     assert.match(p.stdout, /^paused run_c1: /)
@@ -229,7 +229,7 @@ const crewAsync = (...args) => new Promise((resolve) => {
 test('crew rm <run>: asks first, and any answer but y removes nothing; y, or --yes, ends the runner its runner.pid names, forgets the run and deletes its run folder', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-bin-rm-'))
   const registry = join(dir, 'runs.jsonl')
-  const folder = join(dir, 'runs', 'implement-spec-13-20261001-120000-ab12')
+  const folder = join(dir, 'runs', '13-20261001-120000-ab12')
   const stateDir = join(folder, 'orca-run')
   mkdirSync(stateDir, { recursive: true })
   writeFileSync(join(stateDir, 'journal.jsonl'), '')

@@ -33,6 +33,7 @@ This is the README of its code, the **crew** package, `packages/crew` in this re
 | `schema.mjs` | the JSON Schema subset the template's schemas use |
 | `settings.mjs` | every limit the runner enforces, in one table |
 | `arm.mjs` | arming a run in code (`crew start`): the repo, notes dir, rendered template and the runner's launch, as the skill's arming steps do |
+| `run-layout.mjs` | where a run's files live: a `crew start` run's folder, `<notes-dir>/runs/<id>`, its state dir, and the run folder a state dir lies in |
 | `start-form.mjs`, `start-tui.mjs` | the form `crew start` arms a run from, its model and its terminal |
 | `validation-list.mjs` | what a rendered script's validation list may hold |
 | `crew-config.mjs` | crew's own config, `~/.crew/config.json`: the back key, and per repo its setup hook and role overrides |
@@ -52,7 +53,7 @@ The state dir defaults to `orca-run/` beside the rendered script, which is `<not
 
 As it starts, the runner also writes **`runner.pid`**, its own process id. The tab outlives the runner, so an open tab says nothing about whether the runner is alive; a `runner.pid` naming a process that is gone, with no `summary.json`, means the runner died before writing one (killed, out of memory, crashed). The arming session checks it with `node -e "process.kill(+process.argv[1],0)" <pid>`, which sees Windows process ids.
 
-The notes dir outlives a run, so a resume or a re-arm launches over the last run's `summary.json`, `halted.json` and `runner.pid`. The runner removes the old `summary.json` and `halted.json` and overwrites `runner.pid`, but only once node has loaded, after the arming session's wait has begun; so the arming session deletes both itself before launching (SKILL.md step 4), and the runner's removal is defence in depth.
+A `crew start` never launches over an earlier run's files: its run folder is new. A run the skill armed on Orca or the Workflow tool, whose state dir is `<notes-dir>/orca-run`, and any `--resume`, do: the notes dir outlives a run, so a resume or a re-arm launches over the last run's `summary.json`, `halted.json` and `runner.pid`. The runner removes the old `summary.json` and `halted.json` and overwrites `runner.pid`, but only once node has loaded, after the arming session's wait has begun; so the arming session deletes both itself before launching (SKILL.md step 4), and the runner's removal is defence in depth.
 
 ## What a run leaves on disk
 

@@ -5,11 +5,12 @@ import { basename } from 'path'
 import { samePath } from './paths.mjs'
 import { REGISTRY_PATH, readRegistry, runRegistry } from './registry.mjs'
 import { alreadyPaused, notPaused, pauseRun, unpauseRun } from './pause.mjs'
-import { removeRun, runFolderOf, stopRunnerOf } from './remove.mjs'
+import { leftOnDisk, removeRun, stopRunnerOf } from './remove.mjs'
+import { runFolderOfStateDir } from './run-layout.mjs'
 import { worktreeUnpushed } from './git.mjs'
 
 export function findRun(registry, target) {
-  return readRegistry(registry).find((r) => r.runId === target || (r.runDir && (samePath(r.runDir, target) || samePath(runFolderOf(r.runDir), target) || basename(runFolderOf(r.runDir)) === target))) ?? null
+  return readRegistry(registry).find((r) => r.runId === target || (r.runDir && (samePath(r.runDir, target) || samePath(runFolderOfStateDir(r.runDir), target) || basename(runFolderOfStateDir(r.runDir)) === target))) ?? null
 }
 
 function runOf(registry, target) {
@@ -32,25 +33,18 @@ export function resumeCommand({ registry = REGISTRY_PATH, target }) {
 }
 
 // ask(question): the operator's answer, one line. `yes` skips the run's
-// confirmation, never a force-delete's.
-export async function removeCommand({ registry = REGISTRY_PATH, target, host, ask, yes = false, unpushed = worktreeUnpushed, stopRunner = stopRunnerOf, out = () => {} }) {
+// confirmation, never a force-delete's. openHost(run): the run's host, opened
+// only once the run is found.
+export async function removeCommand({ registry = REGISTRY_PATH, target, openHost, ask, yes = false, unpushed = worktreeUnpushed, stopRunner = stopRunnerOf, out = () => {} }) {
   const run = runOf(registry, target)
   if (!yes) {
-    const answer = await ask(`Remove run ${run.runId}? It stops its runner and every agent, reclaims its worktrees, forgets the run and deletes ${runFolderOf(run.runDir)}; its PRs on GitHub stay. [y/N] `)
+    const answer = await ask(`Remove run ${run.runId}? It stops its runner and every agent, reclaims its worktrees, forgets the run and deletes ${runFolderOfStateDir(run.runDir)}; its PRs on GitHub stay. [y/N] `)
     if (!/^y(es)?$/i.test(String(answer ?? '').trim())) return 'nothing removed'
   }
-  const handle = await removeRun({ stateDir: run.runDir, runId: run.runId, host, registry: runRegistry(registry), unpushed, stopRunner, out })
-  const kept = []
-  for (const k of handle.kept) {
-    if (!(k.unpushed > 0)) {
-      kept.push(`${k.agent.title}: ${k.reason}`)
-      continue
-    }
+  const handle = await removeRun({ stateDir: run.runDir, runId: run.runId, host: await openHost(run), registry: runRegistry(registry), unpushed, stopRunner, out })
+  for (const k of handle.kept.filter((k) => k.unpushed > 0)) {
     const answer = await ask(`Force-delete ${k.worktree ?? k.agent.title}? ${k.reason}. [f = force-delete, anything else keeps it] `)
-    if (String(answer ?? '').trim() !== 'f') continue
-    const r = await handle.force(k)
-    if (!r.reclaimed) kept.push(`${k.agent.title}: ${r.reason}`)
+    if (String(answer ?? '').trim() === 'f') await handle.force(k)
   }
-  const { left } = handle.finish()
-  return `removed ${run.runId}${left.length ? `; left on disk: ${left.join(', ')}` : ''}${kept.length ? `; kept ${kept.join('; ')}` : ''}`
+  return `removed ${run.runId}${leftOnDisk(handle.finish().left)}`
 }

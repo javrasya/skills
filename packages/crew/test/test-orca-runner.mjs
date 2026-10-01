@@ -3585,7 +3585,9 @@ test('remove: a worktree not forced is left on disk and named; the run is still 
   run.orca.worktrees.get(A_WT).unpushed = 1
   const runId = readRegistry(run.registry)[0].runId
   const r = await removeRun({ stateDir: run.stateDir, runId, host: run.orca, unpushed: run.orca.unpushedOf, registry: runRegistry(run.registry, run.clock), stopRunner: () => {} })
-  assert.deepEqual(r.finish(), { left: [A_WT] })
+  const { left } = r.finish()
+  assert.deepEqual(left.map((l) => [l.worktree, l.title]), [[A_WT, '[P] a']])
+  assert.match(left[0].reason, /1 unpushed commit/)
   assert.equal(run.orca.worktrees.get(A_WT).removed, false)
   assert.deepEqual(readRegistry(run.registry), [])
 })
@@ -3641,12 +3643,12 @@ test('crew pause, resume, rm: a run is named by its run id, its run folder or it
 })
 
 test('crew pause, resume: a crew start run is named by its run folder or the folder\'s name too; an unknown run is an error naming crew ls', () => {
-  const folder = join(tmp(), 'runs', 'implement-spec-9-20261001-120000-ab12')
+  const folder = join(tmp(), 'runs', '9-20261001-120000-ab12')
   const stateDir = join(folder, 'orca-run')
   mkdirSync(stateDir, { recursive: true })
   const registry = registryIn()
   runRegistry(registry).armed({ runId: 'run_9', project: 'C:/repos/app', runDir: stateDir, spec: 'implement-spec-9', host: 'crew' })
-  for (const target of ['run_9', folder, 'implement-spec-9-20261001-120000-ab12', stateDir]) {
+  for (const target of ['run_9', folder, '9-20261001-120000-ab12', stateDir]) {
     assert.match(pauseCommand({ registry, target }), /^paused run_9: /, target)
     assert.ok(existsSync(join(stateDir, 'paused.json')))
     assert.match(resumeCommand({ registry, target }), /^resumed run_9: /, target)
@@ -3662,11 +3664,11 @@ test('crew rm: asks first, unless --yes; asks f for each worktree with unpushed 
   const asked = []
   const answers = ['n']
   const ask = async (q) => (asked.push(q), answers.shift())
-  const no = await removeCommand({ registry: run.registry, target: r.runId, host: run.orca, unpushed: run.orca.unpushedOf, ask, stopRunner: () => {} })
+  const no = await removeCommand({ registry: run.registry, target: r.runId, openHost: async () => run.orca, unpushed: run.orca.unpushedOf, ask, stopRunner: () => {} })
   assert.match(no, /nothing removed/)
   assert.match(asked[0], /^Remove run .*\? .* \[y\/N\] $/s)
   answers.push('y', 'f')
-  const yes = await removeCommand({ registry: run.registry, target: r.runId, host: run.orca, unpushed: run.orca.unpushedOf, ask, stopRunner: () => {} })
+  const yes = await removeCommand({ registry: run.registry, target: r.runId, openHost: async () => run.orca, unpushed: run.orca.unpushedOf, ask, stopRunner: () => {} })
   assert.match(asked[2], /Force-delete C:\/fake\/worktrees\/run_fake1-1\? .*3 unpushed commits.* \[f = force-delete, anything else keeps it\] $/s)
   assert.equal(run.orca.worktrees.get(A_WT).removed, true)
   assert.match(yes, /^removed /)
@@ -3678,9 +3680,10 @@ test('crew rm --yes asks nothing about the run, and still asks about an unpushed
   run.orca.worktrees.get(A_WT).unpushed = 1
   const [r] = readRegistry(run.registry)
   const asked = []
-  const out = await removeCommand({ registry: run.registry, target: r.runId, host: run.orca, unpushed: run.orca.unpushedOf, yes: true, ask: async (q) => (asked.push(q), 'k'), stopRunner: () => {} })
+  const out = await removeCommand({ registry: run.registry, target: r.runId, openHost: async () => run.orca, unpushed: run.orca.unpushedOf, yes: true, ask: async (q) => (asked.push(q), 'k'), stopRunner: () => {} })
   assert.equal(asked.length, 1)
-  assert.match(out, /left on disk: C:\/fake\/worktrees\/run_fake1-1/)
+  assert.match(out, /; left on disk: C:\/fake\/worktrees\/run_fake1-1 \(.*1 unpushed commit.*\)$/)
+  assert.ok(!/; kept /.test(out), 'every worktree left is named once, in one list')
 })
 
 test('reclaim: a live agent is refused and left untouched; once settled it is reclaimed, its open tab closed', async () => {
@@ -5096,7 +5099,7 @@ test('run console: the frames — no runner row, the key line naming the back ke
   const discover = lines.findIndex((l) => /▸ Discover/.test(l))
   assert.equal(screen.rowAt(discover + 1), 0, 'the first row is the first phase (rowAt takes a 1-based y)')
   assert.ok(!lines.some((l) => /runner {3}crew session|the runner {2}crew session/.test(l)), 'no runner row or pane')
-  assert.match(lines.at(-1), /⏎\/→\/click enter · F12 back · ← runs · Ctrl\+R reclaim · l log · r resume · x remove · \? orchestrator/)
+  assert.match(lines.at(-1), /⏎\/→\/click enter · F12 out of a session · ← runs · Ctrl\+R reclaim · l log · p pause · r resume · x remove · \? orchestrator/)
   assert.equal(consoleTreeHelp('orca', 'f12'), `${TREE_HELP} · ? orchestrator`, 'an Orca run\'s agent is its tab; ? is crew\'s orchestrator whatever the host')
   const runs = listOf.get(view)
   await runs.key('q')
@@ -7158,7 +7161,7 @@ test('run view: x asks before removing; y removes, asking f for each worktree wi
     { agent: { title: '[P] b', worktree: '/wt/b' }, reason: '/wt/b holds 1 unpushed commit; only a forced reclaim removes it', unpushed: 1, worktree: '/wt/b' },
   ]
   let removed = 0
-  const remove = async () => (removed++, { kept, force: async (k) => (forced.push(k.agent.worktree), { reclaimed: true, notes: [] }), finish: () => ({ left: ['/wt/b'] }) })
+  const remove = async () => (removed++, { kept, force: async (k) => (forced.push(k.agent.worktree), { reclaimed: true, notes: [] }), finish: () => ({ left: [{ worktree: '/wt/b', title: '[P] b', reason: kept[1].reason }, { worktree: null, title: '[P] c', reason: 'it is still live' }] }) })
   const { view } = viewOn([startedJ(1, '[Implement] impl:a', 0, 'claude', 'sid-1')], { remove })
   await view.refresh()
   await view.key('x')
@@ -7177,7 +7180,7 @@ test('run view: x asks before removing; y removes, asking f for each worktree wi
   const done = await view.key('k')
   assert.deepEqual(forced, ['/wt/a'])
   assert.equal(done.removed, true)
-  assert.match(done.message, /removed the run; left on disk: \/wt\/b/)
+  assert.equal(done.message, `removed the run; left on disk: /wt/b (${kept[1].reason}); [P] c (it is still live)`)
   assert.equal(view.model.dialog, null)
 })
 
@@ -7192,7 +7195,7 @@ test('runs list: p pauses the run under the cursor and shows it paused; r resume
   assert.match((await runs.key('p')).message, /^paused/)
   assert.ok(existsSync(join(stateDir, 'paused.json')))
   await runs.refresh()
-  assert.equal(runs.model.rows.find((r) => r.kind === 'run').run.onPause, true)
+  assert.equal(runs.model.rows.find((r) => r.kind === 'run').run.operatorPaused, true)
   assert.match(listRuns(runs.model).find((l) => l.includes('run_1')), /run_1 +crew +#103 +paused /)
   assert.match((await runs.key('p')).message, /already paused/)
   assert.match((await runs.key('r')).message, /^resumed/)
@@ -7203,7 +7206,7 @@ test('runs list: p pauses the run under the cursor and shows it paused; r resume
 })
 
 test('runs list: x, then y, removes the run under the cursor: back on the list, the run gone from it and from the registry, its run folder deleted', async () => {
-  const folder = join(tmp(), 'runs', 'implement-spec-103-20261001-120000-ab12')
+  const folder = join(tmp(), 'runs', '103-20261001-120000-ab12')
   const stateDir = join(folder, 'orca-run')
   mkdirSync(stateDir, { recursive: true })
   writeFileSync(join(stateDir, 'journal.jsonl'), '')

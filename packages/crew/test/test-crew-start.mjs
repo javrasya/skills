@@ -513,11 +513,19 @@ test('crew start never shares a run: each start arms a new run in its own folder
 
 test('a run id is its spec number and a part of its own, so two runs of one spec are told apart', () => {
   const at = new Date('2026-10-01T17:20:31Z')
-  const [a, b] = [newRunId(827, at), newRunId(827, at)]
-  assert.match(a, /^827-20261001-172031-[0-9a-f]{4}$/)
-  assert.notEqual(a, b)
-  const many = Array.from({ length: 2000 }, () => newRunId(827, at))
-  assert.equal(new Set([a, b, ...many]).size, 2002, 'ids of one second never repeat, however many are drawn')
+  assert.match(newRunId(827, at), /^827-20261001-172031-[0-9a-f]{4}$/)
+})
+
+test('crew start whose drawn id names a run folder that exists already draws another, and arms a folder of its own', async () => {
+  const w = world()
+  await w.ready
+  const first = await w.start(['94', ...FLAGS], { newRunId: () => '94-same' })
+  const written = readFileSync(first.script, 'utf8')
+  const ids = ['94-same', '94-other']
+  const second = await w.start(['94', ...FLAGS], { newRunId: () => ids.shift() })
+  assert.equal(second.script, join(w.notesDir, 'runs', '94-other', 'workflow.js'))
+  assert.equal(readFileSync(first.script, 'utf8'), written)
+  assert.equal(w.launches.length, 2)
 })
 
 test('crew start whose run folder exists already refuses, and leaves that run exactly as it was', async () => {

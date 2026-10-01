@@ -9,6 +9,7 @@ import { homedir } from 'os'
 import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { readCrewConfig, repoConfig } from './crew-config.mjs'
+import { runFolderOf, stateDirOf } from './run-layout.mjs'
 import { ensureDaemon, request } from './daemon/client.mjs'
 import { runnerCommand } from './daemon/runs.mjs'
 import { execProgram, repoOf } from './git.mjs'
@@ -91,30 +92,21 @@ export function runDefaultOf(script) {
 // SKILL.md step 2's __NOTES_DIR__.
 export const notesDirOf = (repo, spec, home = homedir()) => join(home, '.claude', 'spec-notes', `${repo.split('/').pop()}-${spec}`)
 
-// The runner's state dir in the folder its script is rendered into.
-export const stateDirOf = (dir) => join(dir, 'orca-run')
 // Every crew start arms a run of its own, never one an earlier start made: its
 // own folder under the spec's notes dir, named by its spec and a part of its
 // own (UTC time and a random tail), holding its workflow.js, its research
 // notes and its state dir. Only validation.md is the spec's, shared by its runs.
-// A tail this process already drew is drawn again, so two ids of one second
-// never match here; across processes armRun's exclusive mkdir is the guard.
-const drawn = new Set()
+// Two ids of one second may match; armRun's exclusive mkdir draws again then.
 export function newRunId(spec, at = new Date()) {
   const stamp = `${spec}-${at.toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)}`
-  let id
-  do id = `${stamp}-${randomBytes(2).toString('hex')}`
-  while (drawn.has(id))
-  drawn.add(id)
-  return id
+  return `${stamp}-${randomBytes(2).toString('hex')}`
 }
-export const runDirOf = (notesDir, id) => join(notesDir, 'runs', id)
 
 // The runner as a session of the daemon's, on the crew host: it outlives the
 // command that launched it, and the run console (`crew view <run dir>`)
 // enters it. Its state dir is `stateDir`, else the one the runner takes by
 // default, beside the script, and the daemon refuses it run_live while that
-// run has a runner already. Answers its session, and the run dir as `runDir`.
+// run has a runner already. Answers its session, and its state dir as `runDir`.
 export async function launchRunner({ paths, script, stateDir = null, resume = false, permissionMode = null, cwd, title, env = process.env, cols = 120, rows = 30 }) {
   const path = resolve(cwd, script)
   const runDir = stateDir ? resolve(cwd, stateDir) : stateDirOf(dirname(path))
@@ -220,22 +212,30 @@ async function draftStep({ target, answers, orchestrate, paths, stdin, stdout, h
 
 // Renders the template into a new run's own folder and launches it there.
 // `answers` are the form's, stackMode settled to the template's value; `roles`
-// the per-role overrides of crew's per-repo config; `id` the run's (newRunId).
-export async function armRun({ target, answers, roles, id, template = readFileSync(templatePath(), 'utf8'), launch }) {
+// the per-role overrides of crew's per-repo config; `newId()` draws the run's
+// id (newRunId). A run folder that exists already is another run's: a new id
+// is drawn, `attempts` times in all, before the start is refused.
+export async function armRun({ target, answers, roles, newId, attempts = 5, template = readFileSync(templatePath(), 'utf8'), launch }) {
   const { spec, repo, repoDir, notesDir, title, validation } = target
-  const runDir = runDirOf(notesDir, id)
-  const stateDir = stateDirOf(runDir)
-  const script = join(runDir, 'workflow.js')
-  const rendered = renderRoles(renderTemplate(template, {
-    SPEC: spec, REPO: repo, REPO_DIR: repoDir, NOTES_DIR: runDir, BASE_REF: answers.base, STACK_MODE: answers.stackMode, RUN_ORDER: answers.runOrder, RUNNER: 'session', VALIDATION: validation,
+  const render = (runFolder) => renderRoles(renderTemplate(template, {
+    SPEC: spec, REPO: repo, REPO_DIR: repoDir, NOTES_DIR: runFolder, BASE_REF: answers.base, STACK_MODE: answers.stackMode, RUN_ORDER: answers.runOrder, RUNNER: 'session', VALIDATION: validation,
   }), { runDefault: answers, roles })
-  mkdirSync(dirname(runDir), { recursive: true })
-  try {
-    mkdirSync(runDir)
-  } catch (e) {
-    if (e.code === 'EEXIST') throw new StartError(`run folder ${runDir} exists already: another run's, left as it is; nothing armed`)
-    throw e
+  let runFolder, rendered
+  for (let i = 1; ; i++) {
+    runFolder = runFolderOf(notesDir, newId())
+    // Rendered before any folder is made, so a script refused arms nothing.
+    rendered = render(runFolder)
+    mkdirSync(dirname(runFolder), { recursive: true })
+    try {
+      mkdirSync(runFolder)
+      break
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e
+      if (i >= attempts) throw new StartError(`run folder ${runFolder} exists already: another run's, left as it is; nothing armed`)
+    }
   }
+  const stateDir = stateDirOf(runFolder)
+  const script = join(runFolder, 'workflow.js')
   writeFileSync(script, rendered)
   const session = await launch({ script, stateDir, permissionMode: answers.permissionMode ?? null, cwd: repoDir, title: `implement-spec #${spec}: ${title}` })
   return { script, session }
@@ -300,5 +300,5 @@ export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdi
   }
   const settled = { ...answers, stackMode: await settleStackMode(answers, run) }
   rememberAnswers(paths, repo, settled)
-  return { ...(await armRun({ target, answers: settled, roles, id: runIdFor(spec), launch })), target, answers: settled }
+  return { ...(await armRun({ target, answers: settled, roles, newId: () => runIdFor(spec), launch })), target, answers: settled }
 }

@@ -69,7 +69,7 @@ import { crewHost } from '../src/crew-host.mjs'
 import { launchRunner, runOrchestrator, startCommand } from '../src/arm.mjs'
 import { REGISTRY_PATH } from '../src/registry.mjs'
 import { runsView } from '../src/run-view-model.mjs'
-import { findRun, pauseCommand, removeCommand, resumeCommand } from '../src/run-commands.mjs'
+import { pauseCommand, removeCommand, resumeCommand } from '../src/run-commands.mjs'
 import { listRuns } from '../src/run-view/draw.mjs'
 import { DEFAULT_HOST, LEGACY_HOST, openHosts } from '../src/hosts.mjs'
 import { RUNNER_SETTINGS } from '../src/settings.mjs'
@@ -229,14 +229,15 @@ async function runCommand(verb, args) {
   const [target] = positionals
   if (verb === 'pause') return console.log(pauseCommand({ registry, target }))
   if (verb === 'resume') return console.log(resumeCommand({ registry, target }))
-  // An unknown run is refused before any host is opened.
-  const run = findRun(registry, target)
-  const hosts = run ? await openHosts({ paths, callMs: RUNNER_SETTINGS.viewCallMs }) : {}
-  const host = hosts[run?.host] ?? hosts[LEGACY_HOST]
+  // The host is opened only for a run removeCommand found: an unknown run opens none.
+  const openHost = async (run) => {
+    const hosts = await openHosts({ paths, callMs: RUNNER_SETTINGS.viewCallMs })
+    return hosts[run.host] ?? hosts[LEGACY_HOST]
+  }
   const { createInterface } = await import('readline/promises')
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   try {
-    console.log(await removeCommand({ registry, target, host, yes: !!values['--yes'], ask: (q) => rl.question(q), out: (s) => console.error(s) }))
+    console.log(await removeCommand({ registry, target, openHost, yes: !!values['--yes'], ask: (q) => rl.question(q), out: (s) => console.error(s) }))
   } finally {
     rl.close()
   }

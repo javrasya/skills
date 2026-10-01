@@ -314,7 +314,7 @@ const RUNS_HELP = ' ↑↓ move · ⏎/→/click open a run · ←→ fold a pro
 // and comes back from one with `backKey`; an Orca run's agent is its tab.
 // `?` is crew's orchestrator whatever the run's host.
 export const consoleTreeHelp = (host, backKey) => host === 'crew'
-  ? ` ↑↓ move · ⏎/→/click enter · ${backKeyLabel(backKey)} back · ← runs · Ctrl+R reclaim · l log · r resume · x remove · ? orchestrator`
+  ? ` ↑↓ move · ⏎/→/click enter · ${backKeyLabel(backKey)} out of a session · ← runs · Ctrl+R reclaim · l log · p pause · r resume · x remove · ? orchestrator`
   : `${TREE_HELP} · ? orchestrator`
 export const consoleRunsHelp = (backKey) => `${RUNS_HELP} · ${backKeyLabel(backKey)} leaves an entered session`
 
@@ -330,7 +330,7 @@ export function age(ms) {
 const outageHost = (paused) => (paused.reason === 'crew outage' ? 'crew' : 'Orca')
 const OUTCOME = { ok: '32', partial: '33', failed: '31', halted: '1;33' }
 // A run its live runner paused on an outage of its host, Orca or crew, is not running (ADR-0015).
-const outcomeOf = (r) => (r.outcome ? c(OUTCOME[r.outcome], r.outcome) : r.paused && r.alive !== false ? c('33', `paused (${outageHost(r.paused)} outage)`) : r.onPause ? c('33', 'paused') : r.alive ? c('36', 'running') : grey('unfinished'))
+const outcomeOf = (r) => (r.outcome ? c(OUTCOME[r.outcome], r.outcome) : r.outagePaused && r.alive !== false ? c('33', `paused (${outageHost(r.outagePaused)} outage)`) : r.operatorPaused ? c('33', 'paused') : r.alive ? c('36', 'running') : grey('unfinished'))
 const runnerOf = (r) => (r.alive === true ? c('32', '● alive') : r.alive === false ? c('31', '○ dead') : grey('? unknown'))
 
 const projectLine = (p) => ` ${p.folded ? '▸' : '▾'} ${bold(p.name)}  ${grey(p.path ?? '')}  ${grey(`${p.runs.length} run${p.runs.length === 1 ? '' : 's'}`)}`
