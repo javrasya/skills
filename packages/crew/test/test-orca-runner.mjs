@@ -12,7 +12,7 @@ import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { submit } from '../src/submit.mjs'
 import { runScript, journalKey, failureSummary, finish, SUBMIT, SETTINGS, realClock, JOURNAL_ENTRIES, readJournal, attachView, runnerLog, watchResumeRequests } from '../src/runner.mjs'
-import { agentLifecycle, notePrompt, workerPrompt, doctorPrompt, NO_ASK, NO_WORKFLOW } from '../src/lifecycle.mjs'
+import { agentLifecycle, notePrompt, workerPrompt, doctorPrompt, NO_ASK, NO_WORKFLOW, ATTENDED as ATTENDED_TEXT } from '../src/lifecycle.mjs'
 import { mergeMcpAnswers, copyMcpAnswers } from '../src/mcp-answers.mjs'
 import { foldJournal } from '../src/journal.mjs'
 import { fakeOrca, fakeTranscripts } from '../src/fake-orca.mjs'
@@ -799,6 +799,36 @@ test('attended: an attended session that exits is continued, and still needs you
   assert.equal(r.nudges.length, 0)
   const live = foldJournal(r.journal.filter((e) => e.type !== 'result')).agents[0]
   assert.equal(live.state, 'needs you')
+})
+
+test('attended: true is a person needed with the default reason; its session silent for hours is never nudged, and NEEDS YOU names its terminal', async () => {
+  const r = await runOne(async (w) => {
+    w.clock.at(4 * 60 * MIN, () => submitGood(w))
+  }, { script: `return await agent('Help.', { label: 'unblock', phase: 'Unblock', attended: true, schema: ${JSON.stringify(SCHEMA)} })`, settings: NO_DOCTOR })
+  assert.deepEqual(r.result, GOOD)
+  assert.equal(r.nudges.length, 0)
+  assert.equal(r.continues.length, 0)
+  assert.equal(ofType(r.journal, 'failed').length, 0)
+  const started = ofType(r.journal, 'started')[0]
+  assert.equal(started.attended, 'a person is needed in this session')
+  assert.ok(r.lines.some((l) => l.includes(`[Unblock] unblock NEEDS YOU in terminal ${started.terminal}: a person is needed in this session`)), r.lines.join('\n'))
+})
+
+test('attended: it is part of the call, so its journal key differs from the same call unattended', () => {
+  const opts = { label: 'unblock', phase: 'Unblock', schema: SCHEMA }
+  assert.notEqual(journalKey('p', opts), journalKey('p', { ...opts, attended: 'blockers: x' }))
+  assert.notEqual(journalKey('p', { ...opts, attended: 'blockers: x' }), journalKey('p', { ...opts, attended: 'blockers: y' }))
+})
+
+test('attended: an unattended agent that idles is still nudged and never needs you', async () => {
+  const r = await runOne(async (w) => {
+    w.state.idle = true
+    w.clock.at(10 * MIN, () => submitGood(w))
+  }, { settings: NO_DOCTOR })
+  assert.deepEqual(r.result, GOOD)
+  assert.ok(r.nudges.length > 0)
+  assert.equal(ofType(r.journal, 'started')[0].attended, undefined)
+  assert.ok(!r.lines.some((l) => l.includes('NEEDS YOU')), r.lines.join('\n'))
 })
 
 test('liveness: a worker Orca cannot start, or cannot be watched, is null', async () => {
@@ -6491,6 +6521,11 @@ test('prompts: an attended worker is told a person will join, and never that nob
   assert.ok(!p.includes(NO_ASK))
   assert.match(p, /A person will join this session/)
   assert.match(p, /node ".*submit\.mjs"/)
+  // The swap is all that differs: how it submits, and every other worker's
+  // prompt, are as they were.
+  const paths = { schemaPath: 's.json', resultPath: 'r.json', payloadPath: 'p.json' }
+  assert.equal(p.replace(ATTENDED_TEXT, NO_ASK), workerPrompt('Help.', paths))
+  assert.equal(workerPrompt('Help.', { ...paths, attended: null }), workerPrompt('Help.', paths))
 })
 
 test('prompts: every worker, and every doctor, is told never to run orchestration ask', () => {
@@ -6966,6 +7001,21 @@ const viewOn = (entries, over = {}) => {
   const view = runView({ stateDir, host: fakeOrca({ clock }), clock, registry: null, transcripts: { usage: () => null }, alive: () => true, ...over })
   return { stateDir, view }
 }
+
+test('run view: an attended agent shows needs you with its reason while at work, and the alert names its tab', async () => {
+  const { view } = viewOn([
+    { ...startedJ(1, '[Unblock] unblock', 0, 'claude', 'sid-1'), attended: 'blockers: no signing identity' },
+    startedJ(2, '[Implement] impl:a', 0, 'claude', 'sid-2'),
+  ])
+  await view.refresh()
+  const row = (n) => view.model.rows.find((r) => r.key === `agent:${n}`).agent
+  assert.deepEqual([row(1).state, row(1).reason], ['needs you', 'blockers: no signing identity'])
+  assert.equal(row(2).state, 'running')
+  assert.equal(view.model.alert, 'NEEDS YOU: [Unblock] unblock in tab term_fake1: blockers: no signing identity')
+  const lines = draw(view.model, { width: 200, height: 30, flash: null, alert: view.model.alert }).lines.map(strip)
+  assert.ok(lines.some((l) => /unblock +\? needs you/.test(l)), lines.join('\n'))
+  assert.ok(lines.at(-2).includes('NEEDS YOU: [Unblock] unblock in tab term_fake1: blockers: no signing identity'), lines.at(-2))
+})
 
 test('run view: p pauses the run, the header says how many agents are finishing; r resumes it', async () => {
   const { stateDir, view } = viewOn([startedJ(1, '[Implement] impl:a', 0, 'claude', 'sid-1')])
