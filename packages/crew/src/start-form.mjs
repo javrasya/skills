@@ -1,5 +1,5 @@
 // The form `crew start` arms a run from (#100): harness, model, base branch,
-// stack mode and permission mode, each with a default and a flag. Pure but
+// stack mode, run order and permission mode, each with a default and a flag. Pure but
 // for probeStart, which gathers the facts the form is drawn from, and the
 // answer file, so the command drives it by flags alone or row by row.
 //
@@ -17,9 +17,9 @@ import { samePath } from './paths.mjs'
 import { branchNames, currentBranch, execProgram, ghRepo, ghStackInstalled, stacksApi } from './git.mjs'
 import { HARNESSES, lastUsedModel, piModels } from './harness.mjs'
 
-export const ROWS = ['harness', 'model', 'base', 'stackMode', 'permissionMode']
-export const FLAGS = { harness: '--harness', model: '--model', base: '--base', stackMode: '--stack-mode', permissionMode: '--permission-mode' }
-export const LABELS = { harness: 'Harness', model: 'Model', base: 'Base branch', stackMode: 'Stack mode', permissionMode: 'Permission mode' }
+export const ROWS = ['harness', 'model', 'base', 'stackMode', 'runOrder', 'permissionMode']
+export const FLAGS = { harness: '--harness', model: '--model', base: '--base', stackMode: '--stack-mode', runOrder: '--run-order', permissionMode: '--permission-mode' }
+export const LABELS = { harness: 'Harness', model: 'Model', base: 'Base branch', stackMode: 'Stack mode', runOrder: 'Run order', permissionMode: 'Permission mode' }
 const HARNESS_LABELS = { claude: 'Claude Code', pi: 'pi' }
 
 // A stack mode's answer is the template's STACK_MODE, but for `install`,
@@ -27,6 +27,9 @@ const HARNESS_LABELS = { claude: 'Claude Code', pi: 'pi' }
 export const STACK_MODES = { native: 'GH Stack', install: 'Install and Use GH Stack', chain: 'Basic Git stacking' }
 export const STACKS_DOCS = 'https://docs.github.com/en/pull-requests/tutorials/roll-out-stacked-prs'
 export const GH_STACK_INSTALL = ['extension', 'install', 'github/gh-stack']
+
+// The template's RUN_ORDER (ADR-0020), the default first.
+export const RUN_ORDERS = { parallel: 'Parallel', sequential: 'Sequential' }
 
 // The modes a Claude worker can start in; `auto` first, as it is the default.
 export const PERMISSION_MODES = ['auto', 'acceptEdits', 'bypassPermissions', 'dontAsk', 'default']
@@ -93,6 +96,7 @@ export function startForm(facts, { remembered = {}, flags = {} } = {}) {
     if (row === 'model') return unique([...(facts.models[values.harness]?.list ?? []), values.model]).map((m) => ({ value: m, label: m, disabled: false }))
     if (row === 'base') return unique([...facts.branches, values.base]).map((b) => ({ value: b, label: b, disabled: false }))
     if (row === 'stackMode') return stacks
+    if (row === 'runOrder') return Object.entries(RUN_ORDERS).map(([value, label]) => ({ value, label, disabled: false }))
     if (row === 'permissionMode') return PERMISSION_MODES.map((m) => ({ value: m, label: m, disabled: false }))
     throw new Error(`no row ${row}`)
   }
@@ -102,6 +106,7 @@ export function startForm(facts, { remembered = {}, flags = {} } = {}) {
   values.model = modelFor(values.harness)
   values.base = facts.branches.includes(remembered.base) ? remembered.base : facts.branch ?? facts.branches[0] ?? null
   values.stackMode = usable('stackMode', remembered.stackMode) ? remembered.stackMode : stacks.find((o) => o.value === 'native' && !o.disabled) ? 'native' : 'chain'
+  values.runOrder = Object.hasOwn(RUN_ORDERS, remembered.runOrder) ? remembered.runOrder : 'parallel'
   values.permissionMode = PERMISSION_MODES.includes(remembered.permissionMode) ? remembered.permissionMode : PERMISSION_MODES[0]
 
   const form = {

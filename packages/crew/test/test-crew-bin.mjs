@@ -105,7 +105,7 @@ test('crew start: a spec number, and with no terminal every row\'s flag, each mi
   assert.equal(spawnSync('git', ['init', '-q', repo]).status, 0)
   const r = spawnSync(process.execPath, [CREW, 'start', '94', '--harness', 'claude'], { encoding: 'utf8', env: ENV, cwd: repo })
   assert.equal(r.status, 2, r.stderr)
-  assert.match(r.stderr, /missing --model, --base, --stack-mode, --permission-mode\n/)
+  assert.match(r.stderr, /missing --model, --base, --stack-mode, --run-order, --permission-mode\n/)
 })
 
 test('crew run: crew killed mid-run, stop and restart refused meanwhile; started again, it resumes the run, every lost session continued uncounted, and the run completes', async () => {

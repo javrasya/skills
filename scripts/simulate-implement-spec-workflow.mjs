@@ -8,7 +8,7 @@ const TPL = fileURLToPath(new URL('../skills/engineering/implement-spec-in-workf
 
 const SIM_CHECK = 'npm t'
 
-function render(runner) {
+function render(runner, runOrder = 'parallel') {
   let s = readFileSync(TPL, 'utf8')
   s = s
     .replace(/__SPEC__/g, '224')
@@ -17,6 +17,7 @@ function render(runner) {
     .replace(/__NOTES_DIR__/g, '/tmp/n')
     .replace(/__BASE_REF__/g, 'main')
     .replace(/__STACK_MODE__/g, 'native')
+    .replace(/__RUN_ORDER__/g, runOrder)
     .replace(/__RUNNER__/g, runner)
     .replace(/__VALIDATION__/g, SIM_CHECK)
   return s
@@ -57,7 +58,7 @@ function completeToSchema(result, opts, label) {
   return filled
 }
 
-async function run(overrides = {}, { runner = 'workflow' } = {}) {
+async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel' } = {}) {
   const calls = []
   const defaults = {
     graph: () => ({
@@ -122,7 +123,7 @@ async function run(overrides = {}, { runner = 'workflow' } = {}) {
   const phase = () => {}
 
   // The session runner's own loader, so the script is loaded one way everywhere.
-  const result = await loadScript(render(runner))(agent, parallel, phase, log, {})
+  const result = await loadScript(render(runner, runOrder))(agent, parallel, phase, log, {})
   EVERY_CALL.push(...calls)
   EVERY_RUN.push(calls)
   return { result, calls, logs }
@@ -565,6 +566,15 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   // One template, one rendering: the runner value is the only difference.
   const diff = render('workflow').split('\n').filter((l, i) => l !== render('session').split('\n')[i])
   check('R: the rendered script differs between runners only in RUNNER', diff.length === 1 && /^const RUNNER = 'workflow'/.test(diff[0]), diff.join(' | '))
+}
+
+// --- scenario O: the run order is rendered, and the Workflow runner refuses sequential
+{
+  check('O: the run order reaches the script', /^const RUN_ORDER = 'sequential'/m.test(render('session', 'sequential')) && /^const RUN_ORDER = 'parallel'/m.test(render('workflow')), '')
+  const refused = await run({}, { runner: 'workflow', runOrder: 'sequential' }).then(() => null, (e) => e)
+  check('O: the Workflow runner refuses a sequential run, and says why', refused && /needs the session runner/.test(refused.message) && /cannot point two agents at one folder/.test(refused.message), refused?.message ?? 'it ran')
+  const seq = await run({}, { runner: 'session', runOrder: 'sequential' })
+  check('O: a sequential run on the session runner loads and completes', seq.result.state.startsWith('complete'), seq.result.state)
 }
 
 // --- run-wide: every prompt of every scenario ------------------------------

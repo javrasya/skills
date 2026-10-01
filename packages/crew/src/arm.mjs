@@ -33,7 +33,7 @@ export function templatePath(candidates = TEMPLATES) {
   return found
 }
 
-export const PLACEHOLDERS = ['SPEC', 'REPO', 'REPO_DIR', 'NOTES_DIR', 'BASE_REF', 'STACK_MODE', 'RUNNER', 'VALIDATION']
+export const PLACEHOLDERS = ['SPEC', 'REPO', 'REPO_DIR', 'NOTES_DIR', 'BASE_REF', 'STACK_MODE', 'RUN_ORDER', 'RUNNER', 'VALIDATION']
 const PLACEHOLDER = new RegExp(`__(${PLACEHOLDERS.join('|')})__`, 'g')
 
 // SKILL.md step 3: substitute, never rewrite. One pass, so a value that
@@ -226,7 +226,7 @@ export async function armRun({ target, answers, roles, template = readFileSync(t
   refuseLiveRunner(stateDir, alive)
   const script = join(notesDir, 'workflow.js')
   const rendered = renderRoles(renderTemplate(template, {
-    SPEC: spec, REPO: repo, REPO_DIR: repoDir, NOTES_DIR: notesDir, BASE_REF: answers.base, STACK_MODE: answers.stackMode, RUNNER: 'session', VALIDATION: validation,
+    SPEC: spec, REPO: repo, REPO_DIR: repoDir, NOTES_DIR: notesDir, BASE_REF: answers.base, STACK_MODE: answers.stackMode, RUN_ORDER: answers.runOrder, RUNNER: 'session', VALIDATION: validation,
   }), { runDefault: answers, roles })
   mkdirSync(notesDir, { recursive: true })
   writeFileSync(script, rendered)
@@ -243,7 +243,7 @@ export class StartError extends Error {
 }
 
 // `crew start <spec#> [--harness h] [--model m] [--base b] [--stack-mode s]
-// [--permission-mode p]`. With no terminal each row's flag is required, and so
+// [--run-order o] [--permission-mode p]`. With no terminal each row's flag is required, and so
 // is the spec's validation list, since nobody is there to confirm a draft of
 // one; at one, the form shows, pre-filled from the flags and the repo's
 // remembered answers, then the orchestrator's draft of a missing list. The

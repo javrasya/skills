@@ -45,7 +45,7 @@ This is the README of its code, the **crew** package, `packages/crew` in this re
 
 ```
 crew run [--host crew|orca] <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]
-crew start <spec#> --harness <claude|pi> --model <m> --base <branch> --stack-mode <native|install|chain> [--permission-mode <mode>]
+crew start <spec#> --harness <claude|pi> --model <m> --base <branch> --stack-mode <native|install|chain> --run-order <parallel|sequential> [--permission-mode <mode>]
 ```
 
 The state dir defaults to `orca-run/` beside the rendered script, which is `<notes-dir>/orca-run` for a run the skill armed. When the runner exits it writes `summary.json` there — `{"runner": "session", "host": "crew", "ok": true, "result": …}` (`host` the session host's id, `crew` or `orca`), or `"ok": false` with the `error` and `worktrees_kept`, the worktrees retained because their agent died or never started (below) — and that file, not the terminal's log, is what the arming session reads and reports. The runner writes it when the script ends and asks nothing; it then stays in its tab (on crew, its session) until the operator quits the run view (below). So the arming session waits for the file to appear, not for the tab to exit: the tab stays open once the runner is done. What the operator reclaims, always from the run view, is in the run registry.

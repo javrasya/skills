@@ -430,7 +430,7 @@ const haltsOrEnds = (start) => new Promise((resolve) => {
 })
 
 test('one run: the rendered workflow template names its spec in the Run objective', async () => {
-  const text = readFileSync(TEMPLATE, 'utf8').replace(/__SPEC__/g, '227').replace(/__[A-Z_]+__/g, 'x')
+  const text = readFileSync(TEMPLATE, 'utf8').replace(/__SPEC__/g, '227').replace(/__RUN_ORDER__/g, 'parallel').replace(/__[A-Z_]+__/g, 'x')
   const orca = fakeOrca({ worker: async () => { throw new Error('agent died') } })
   // Its graph node fails, is held, and the run halts: it never settles.
   await haltsOrEnds((onHalt) => runScript(text, { host: orca, stateDir: tmp(), out: () => {}, settings: FAST, onHalt }))
@@ -440,7 +440,7 @@ test('one run: the rendered workflow template names its spec in the Run objectiv
 })
 
 test("RUNNER: a script rendered with 'orca', RUNNER's value before 'session', runs as one rendered with 'session' does, and resumes", async () => {
-  const render = (runner) => readFileSync(TEMPLATE, 'utf8').replace(/__RUNNER__/g, runner).replace(/__SPEC__/g, '227').replace(/__[A-Z_]+__/g, 'x')
+  const render = (runner) => readFileSync(TEMPLATE, 'utf8').replace(/__RUNNER__/g, runner).replace(/__SPEC__/g, '227').replace(/__RUN_ORDER__/g, 'parallel').replace(/__[A-Z_]+__/g, 'x')
   const trace = (orca) => orca.calls.filter((c) => ['runCreate', 'runUse', 'workerStart'].includes(c.verb)).map((c) => [c.verb, c.title ?? c.objective ?? null, c.placement ?? null])
   const runOn = async (runner, { clock = fakeClock(), orca = fakeOrca({ worker: withDoctor(diesPastCap), clock }), stateDir = tmp(), resume = false } = {}) => {
     await haltsOrEnds((onHalt) => runScript(render(runner), { host: orca, stateDir, out: () => {}, clock, transcripts: fakeTranscripts(orca), onHalt, resume }))
@@ -477,7 +477,7 @@ test('session host: no runner module names Orca in its code; only the Orca adapt
 })
 
 test("doctor: the rendered template's recover row is the doctor's harness and model on the Orca runner", async () => {
-  const text = readFileSync(TEMPLATE, 'utf8').replace(/__RUNNER__/g, 'orca').replace(/__SPEC__/g, '227').replace(/__[A-Z_]+__/g, 'x')
+  const text = readFileSync(TEMPLATE, 'utf8').replace(/__RUNNER__/g, 'orca').replace(/__SPEC__/g, '227').replace(/__RUN_ORDER__/g, 'parallel').replace(/__[A-Z_]+__/g, 'x')
   const clock = fakeClock()
   const orca = fakeOrca({ worker: withDoctor(diesPastCap), clock })
   await haltsOrEnds((onHalt) => runScript(text, { host: orca, stateDir: tmp(), out: () => {}, clock, transcripts: fakeTranscripts(orca), onHalt }))

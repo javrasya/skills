@@ -58,6 +58,7 @@ const REPO_DIR = String.raw`__REPO_DIR__`          // main checkout
 const NOTES_DIR = String.raw`__NOTES_DIR__`        // research notes, outside the repo
 const BASE_REF = '__BASE_REF__'                    // branch the stack merges into
 const STACK_MODE = '__STACK_MODE__'                // 'native' (gh-stack + stacks API) or 'chain' (plain --base chain)
+const RUN_ORDER = '__RUN_ORDER__'                  // 'parallel' (the frontier at once) or 'sequential' (one ticket at a time, session runner only; ADR-0020)
 const RUNNER = '__RUNNER__'                        // 'session' on the session runner (crew, on Orca), and 'orca', its value before, still; anything else is the Workflow runner. The one line the two renderings differ in
 // The project's mechanical checks — format, lint, test — one command per line,
 // confirmed by the user before launch and saved in <notes-dir>/validation.md.
@@ -120,6 +121,10 @@ const mirror = (branches) => `\`git fetch origin\`, then mirror origin into the 
 // (ADR-0012). The reclaim steps below therefore hand a session run no path, and
 // the rendered script stays the same under both runners but for RUNNER.
 const ON_SESSION = RUNNER === 'session' || RUNNER === 'orca'
+// The skill refuses this before rendering (SKILL.md step 1); this is the
+// backstop for a script rendered by hand.
+if (RUN_ORDER !== 'parallel' && RUN_ORDER !== 'sequential') throw new Error(`RUN_ORDER is '${RUN_ORDER}': it must be 'parallel' or 'sequential'`)
+if (RUN_ORDER === 'sequential' && !ON_SESSION) throw new Error('sequential run order needs the session runner: a sequential run points its agents one after another at one folder, and the Workflow runner cannot point two agents at one folder; re-arm with run order parallel, or on the session runner')
 // The session runner starts each doctor itself, with no agent() call to spread a
 // row into, so it reads the recover row from meta (ADR-0014).
 if (ON_SESSION) meta.roles = ROLES
