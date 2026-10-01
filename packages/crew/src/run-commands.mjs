@@ -1,13 +1,11 @@
 // crew pause, crew resume and crew rm: what p, r and x do in the run view,
 // from the command line, on a run named by its run id, its run folder (crew
 // start's runs/<id>) or its state dir.
-import { rmSync } from 'fs'
-import { basename, join } from 'path'
+import { basename } from 'path'
 import { samePath } from './paths.mjs'
 import { REGISTRY_PATH, readRegistry, runRegistry } from './registry.mjs'
-import { PAUSE_FILE, pausedAt } from './pause.mjs'
+import { alreadyPaused, notPaused, pauseRun, unpauseRun } from './pause.mjs'
 import { removeRun, runFolderOf, stopRunnerOf } from './remove.mjs'
-import { writeJsonAtomic } from './fsutil.mjs'
 import { worktreeUnpushed } from './git.mjs'
 
 export function findRun(registry, target) {
@@ -23,15 +21,13 @@ function runOf(registry, target) {
 
 export function pauseCommand({ registry = REGISTRY_PATH, target, now = () => new Date() }) {
   const run = runOf(registry, target)
-  if (pausedAt(run.runDir)) return `${run.runId} is already paused: \`crew resume ${run.runId}\` resumes it`
-  writeJsonAtomic(join(run.runDir, PAUSE_FILE), { at: now().toISOString() })
+  if (!pauseRun(run.runDir, now())) return `${run.runId} is ${alreadyPaused(`\`crew resume ${run.runId}\``)}`
   return `paused ${run.runId}: no new agent starts, and every agent at work finishes; \`crew resume ${run.runId}\` resumes it`
 }
 
 export function resumeCommand({ registry = REGISTRY_PATH, target }) {
   const run = runOf(registry, target)
-  if (!pausedAt(run.runDir)) return `${run.runId} is not paused: a halted run or a dead runner is resumed with r in \`crew view ${run.runId}\``
-  rmSync(join(run.runDir, PAUSE_FILE), { force: true })
+  if (!unpauseRun(run.runDir)) return `${run.runId} is ${notPaused(`r in \`crew view ${run.runId}\``)}`
   return `resumed ${run.runId}: the agents held by the pause start`
 }
 

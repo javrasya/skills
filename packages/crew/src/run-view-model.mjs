@@ -6,7 +6,7 @@
 // The model is read from the run's journal, its agents' session transcripts,
 // Orca's terminal list and the run registry; the actions go to Orca, and a
 // reclaim goes through reclaim.mjs, so the view keeps its rules.
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, rmSync } from 'fs'
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from 'fs'
 import { basename, dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { sessionTranscripts } from './transcript.mjs'
@@ -19,7 +19,7 @@ import { hostUnreachable } from './session-host.mjs'
 import { isOrchestratorTitle } from './orchestrator.mjs'
 import { haltNoticeOf, readTriage } from './triage.mjs'
 import { RESUME_REQUEST } from './halt.mjs'
-import { PAUSE_FILE, pausedAt } from './pause.mjs'
+import { alreadyPaused, pauseRun, pausedAt, unpauseRun } from './pause.mjs'
 import { removeRun } from './remove.mjs'
 import { writeJsonAtomic } from './fsutil.mjs'
 import { probesBy } from './outage.mjs'
@@ -792,15 +792,13 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
       case 'l':
         return openLog()
       case 'p': {
-        if (pausedAt(stateDir)) return say('already paused: r resumes it')
-        writeJsonAtomic(join(stateDir, PAUSE_FILE), { at: new Date(clock.now()).toISOString() })
+        if (!pauseRun(stateDir, new Date(clock.now()))) return say(alreadyPaused('r'))
         const n = atWork(agentsNow()).length
         await refresh()
         return say(`paused: no new agent starts; ${n} agent${n === 1 ? ' is' : 's are'} finishing`)
       }
       case 'r':
-        if (pausedAt(stateDir)) {
-          rmSync(join(stateDir, PAUSE_FILE), { force: true })
+        if (unpauseRun(stateDir)) {
           if (header?.halted && resumeHalted) askResume()
           await refresh()
           return say('resumed: the agents held by the pause start')

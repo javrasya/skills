@@ -27,6 +27,9 @@ import { transcriptPath, sessionTranscripts, claudeSlug, piDir, promptDelivered,
 import { agentsOf, reclaimAgent, reclaimRun } from '../src/reclaim.mjs'
 import { removeRun, stopRunnerOf } from '../src/remove.mjs'
 import { findRun, pauseCommand, resumeCommand, removeCommand } from '../src/run-commands.mjs'
+import { holdQueue } from '../src/hold.mjs'
+import { runHalt } from '../src/halt.mjs'
+import { runPause, pauseRun as pauseRunIn, unpauseRun } from '../src/pause.mjs'
 import { runView, runsView, bandOf, STATES, RUNNER_PATH, runnerAlive, runEnded } from '../src/run-view-model.mjs'
 import { consoleRunsHelp, consoleTreeHelp, draw, drawRuns, listRuns, strip, TREE_HELP, marqueeOffset, NAME_W } from '../src/run-view/draw.mjs'
 import { EventEmitter } from 'events'
@@ -6866,10 +6869,43 @@ test('pause: on a run both halted and paused, the runner\'s resume lifts the pau
   const run = rig.go(`return await parallel([() => ${nodeCall('a')}, () => ${nodeCall('b')}])`)
   await until(() => rig.halts.length && ofType(rig.journal(), 'result').some((e) => e.node === 'n/b'), 'the halt, and b done')
   pauseRun(rig.stateDir)
-  assert.deepEqual(await run.control.resume({}), { resumed: ['n/a'] })
+  assert.deepEqual(await run.control.resume({}), { resumed: ['n/a'], unpaused: true })
   assert.ok(!existsSync(join(rig.stateDir, 'paused.json')))
   assert.deepEqual(await run.p, [GOOD, GOOD])
   assert.deepEqual(rig.journal().filter((e) => ['pause', 'unpause'].includes(e.type)).map((e) => e.type), ['pause', 'unpause'])
+})
+
+test('hold queue: a call the halt held, then the pause, keeps its place ahead of a later in-flight call the pause alone held; once both clear they start in call order', async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'crew-hold-'))
+  const entries = []
+  const lines = []
+  const queue = holdQueue()
+  const halt = runHalt({ journal: (e) => entries.push(e), out: (s) => lines.push(s), queue })
+  const pause = runPause({ stateDir, journal: (e) => entries.push(e), out: (s) => lines.push(s), sleep: () => new Promise(() => {}), pollMs: 1, queue })
+  const started = []
+  const call = (title, inFlight = false) => {
+    const held = queue.gate({ key: title, n: 0, node: `n/${title}`, title }, { inFlight })
+    assert.ok(held, `${title} is held`)
+    return held.then(() => started.push(title))
+  }
+  const resumed = halt.hold({ node: 'n/x', title: 'x', reason: 'it failed' })
+  const a = call('a')
+  assert.equal(pauseRunIn(stateDir, new Date()), true)
+  assert.equal(pauseRunIn(stateDir, new Date()), false, 'already paused')
+  const b = call('b', true)
+  halt.resume()
+  await resumed
+  halt.settle('n/x')
+  const c = call('c')
+  await new Promise((r) => setImmediate(r))
+  assert.deepEqual(started, [], 'the pause holds every one')
+  assert.equal(pause.lift(), true)
+  await Promise.all([a, b, c])
+  assert.deepEqual(started, ['a', 'b', 'c'])
+  assert.deepEqual(entries.filter((e) => e.type === 'held').map((e) => [e.node, !!e.paused]), [['n/a', false], ['n/b', true], ['n/a', true], ['n/c', true]])
+  assert.ok(lines.includes('>> no failed or needs-decision node is left: the run is no longer halted, and the 1 call held meanwhile go on'), lines.join('\n'))
+  assert.equal(pause.lift(), false)
+  assert.equal(unpauseRun(stateDir), false, 'not paused')
 })
 
 // A sequential run (ADR-0020) halted on its first chained node.
@@ -6979,7 +7015,7 @@ test('halt: a failed node is held and halts the run: a new call is held unstarte
   assert.deepEqual(fold.halted.nodes, ['n/a'])
   assert.deepEqual(fold.agents.find((a) => a.node === 'n/c').state, 'queued')
 
-  assert.deepEqual(await run.control.resume({}), { resumed: ['n/a'] })
+  assert.deepEqual(await run.control.resume({}), { resumed: ['n/a'], unpaused: false })
   assert.deepEqual(await run.p, [GOOD, [GOOD, GOOD, GOOD]])
   j = rig.journal()
   assertEntries(j)
@@ -7316,7 +7352,7 @@ test('halt: while an Orca outage is on, r probes Orca and resumes no held node; 
   assert.deepEqual(await run.control.resume({}), { back: true, outage: true }, 'this R ends the outage, and still resumes nothing')
   assert.equal(continued(), 0)
   release()
-  assert.deepEqual(await run.control.resume({}), { resumed: ['n/a'] })
+  assert.deepEqual(await run.control.resume({}), { resumed: ['n/a'], unpaused: false })
   assert.deepEqual(await run.p, [GOOD, GOOD])
   assert.equal(continued(), 1)
   assert.deepEqual(phasesOf(rig.journal()), ['start', 'end'])
