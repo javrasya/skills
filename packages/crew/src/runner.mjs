@@ -292,6 +292,10 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
   }
   // So a resume that makes no live call still leaves the Run to the next one.
   if (earlier.run) journal({ type: 'run', ...earlier.run, lastN: earlier.lastN, ...(earlier.phases && { phases: earlier.phases }) })
+  // The run's chain worktree, and what earlier agents left in it, still told
+  // to every chain agent the resume starts.
+  const { chain } = earlier
+  if (chain) journal({ type: 'chain', runId: chain.runId, worktree: chain.worktree, lines: chain.baseline, ...(chain.leftovers.length && { leftovers: chain.leftovers }) })
   // Every Run mailbox message an earlier runner acted on, as it journaled it:
   // the host delivers a batch again until it is acknowledged, and it is never
   // acted on twice.
@@ -338,6 +342,7 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
     host, clock, limits, out, stateDir, objective: () => objectiveOf(meta.value, fallbackObjective), journal, retainWorktree, onRun, takeOver: earlier.run?.runId ?? null, transcripts,
     nextN: () => ++count, doctorLaunch, history, outage, mailHandled: earlier.mail.map((m) => m.messageId),
     mailPending: earlier.mail.filter((m) => m.action === 'pending').map((m) => ({ id: m.messageId, type: m.kind, dispatchId: m.dispatchId, outcome: m.outcome ?? null, subject: m.subject, body: m.body })),
+    chainBefore: chain ?? null,
   })
 
   const phase = (title) => {

@@ -4,7 +4,7 @@
 // in this file. fake-orca.mjs implements the same interface, offline.
 import { execFile } from 'child_process'
 import { RUNNER_SETTINGS } from './settings.mjs'
-import { gitProbes, prepareChildWorktree, reuseWorktree } from './worktree.mjs'
+import { gitProbes, prepareChildWorktree, reuseWorktree, worktreeLines } from './worktree.mjs'
 import { sessionTranscripts } from './transcript.mjs'
 import { bounded, execGit, gitIn, realTimer, worktreeName } from './git.mjs'
 import { launchCommand, resumeCommand, SHELL_WORD } from './harness.mjs'
@@ -321,6 +321,9 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
     async chainWorktree() {
       throw chainRefused()
     },
+
+    // Git's to say, as a child's baseline is: Orca's worktrees are on this machine.
+    worktreeLines: ({ worktree }) => worktreeLines(worktree, bound),
 
     async worktreeStatus({ worktree, status }) {
       await orca(['worktree', 'set', '--worktree', `path:${worktree}`, '--workspace-status', status])

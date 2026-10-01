@@ -34,10 +34,13 @@ export async function reuseWorktree(path, { dispatched, baseline }, { held, line
   return path
 }
 
+// What the worktree at `path` holds uncommitted, as `git status --porcelain` lines.
+export const worktreeLines = async (path, bound) => porcelainLines(await gitIn(path, ['status', '--porcelain'], bound))
+
 // The two probes reuseWorktree reads through git, the same on every host:
 // what the worktree at `path` holds uncommitted, and its commits on `branch`.
 export const gitProbes = (path, branch, bound) => ({
-  lines: async () => porcelainLines(await gitIn(path, ['status', '--porcelain'], bound)),
+  lines: () => worktreeLines(path, bound),
   commits: () => worktreeOwnCommits(path, branch, bound),
 })
 
@@ -54,7 +57,7 @@ export async function prepareChildWorktree({ project, worktree, bound, child, wa
   } catch (e) {
     warnings.push(`could not copy the project's MCP server answers into its worktree: ${e?.message ?? e}`)
   }
-  const baseline = porcelainLines(await gitIn(worktree, ['status', '--porcelain'], bound))
+  const baseline = await worktreeLines(worktree, bound)
   await child.onBaseline?.({ worktree, lines: baseline })
   return baseline
 }

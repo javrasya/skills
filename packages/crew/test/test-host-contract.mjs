@@ -425,6 +425,7 @@ export const SCENARIOS = [
       assert.equal(worktreeName(chain.path), `${run}-chain`)
       assert.deepEqual([chain.made, chain.baseline], [true, SETUP_LEAVES])
       assert.deepEqual(baselines, [{ worktree: chain.path, lines: SETUP_LEAVES }])
+      assert.deepEqual(await h.host.worktreeLines({ worktree: chain.path }), SETUP_LEAVES, 'what it holds now, read as its baseline was')
       const first = await start(h, 'first', { chain: chain.path })
       assert.equal(first.worktree, chain.path)
       await h.host.workerStop({ dispatch: first.dispatchId })

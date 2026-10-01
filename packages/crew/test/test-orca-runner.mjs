@@ -1601,7 +1601,7 @@ test('lifecycle: the run\'s chain worktree is made once for every call that asks
   assert.equal(a.path, 'C:/fake/worktrees/run_fake1-chain')
   assert.deepEqual(orca.calls.filter((c) => ['runCreate', 'worktreeCreate'].includes(c.verb)).map((c) => c.verb), ['runCreate', 'worktreeCreate'])
   assert.deepEqual(journal, [{ type: 'chain', runId: 'run_fake1', worktree: a.path, lines: ['?? setup.out'] }])
-  assert.deepEqual(foldJournal(journal).chain, { runId: 'run_fake1', worktree: a.path, baseline: ['?? setup.out'] })
+  assert.deepEqual(foldJournal(journal).chain, { runId: 'run_fake1', worktree: a.path, baseline: ['?? setup.out'], leftovers: [] })
   assert.equal(foldJournal([]).chain, null)
 })
 
@@ -1894,6 +1894,70 @@ return await agent('Build b.', { label: 'impl:#2', phase: 'Implement', schema: S
   assert.deepEqual(ofType(r.journal, 'chain').map((e) => e.worktree), ['C:/fake/worktrees/run_fake1-chain'])
   for (const s of starts) assert.match(r.orca.dispatches.get(s.dispatchId).prompt, /left by its setup: setup\.out/, s.title)
   assert.deepEqual(ofType(r.journal, 'started').map((e) => e.worktree), starts.map((s) => s.worktree))
+})
+
+// The leftover check (#127). Two chain agents; the first, 'Build a.', plays
+// `first`, handed the chain's porcelain lines, and the second submits clean.
+const TWO_CHAINED = `const S = ${JSON.stringify(SCHEMA)}
+await agent('Build a.', { label: 'impl:#1', phase: 'Implement', schema: S, isolation: 'chain' })
+return await agent('Build b.', { label: 'impl:#2', phase: 'Implement', schema: S, isolation: 'chain' })`
+const leaving = (first) => (w) => (w.prompt.startsWith('Build a.') ? first({ ...w, lines: w.orca.worktrees.get(w.worktree).porcelain }) : submitGood(w))
+// Leaves tmp.log behind and submits; sent back, it runs `cleanUp` and its turn ends.
+const leavesTmp = (cleanUp = () => {}) => leaving(async (w) => {
+  w.lines.push('?? tmp.log')
+  w.state.onNudge = (text) => {
+    cleanUp(w.lines, text)
+    w.state.idle = true
+  }
+  await submitGood(w)
+})
+const followUps = (r) => r.nudges.filter((c) => c.text.startsWith('Your result is in'))
+
+test('leftover check: a chain agent that returns clean is looked at before the next starts, and sent no follow-up', async () => {
+  const r = await runOne(submitGood, { script: TWO_CHAINED, setupLeaves: ['?? setup.out'] })
+  assert.deepEqual(r.result, GOOD)
+  const verbs = r.orca.calls.filter((c) => c.verb === 'workerStart' || c.verb === 'worktreeLines').map((c) => c.verb)
+  assert.deepEqual(verbs, ['workerStart', 'worktreeLines', 'workerStart', 'worktreeLines'])
+  assert.deepEqual(r.nudges, [])
+  assert.deepEqual([...ofType(r.journal, 'followUp'), ...ofType(r.journal, 'leftover')], [])
+})
+
+test('leftover check: a chain agent that leaves a file is sent back once, in its own session, and cleans it up before the next starts', async () => {
+  const r = await runOne(leavesTmp((lines) => lines.splice(lines.indexOf('?? tmp.log'), 1)), { script: TWO_CHAINED, setupLeaves: ['?? setup.out'] })
+  assert.deepEqual(r.result, GOOD)
+  const [first, second] = r.orca.calls.filter((c) => c.verb === 'workerStart')
+  const sent = followUps(r)
+  assert.deepEqual(sent.map((c) => c.dispatchId), [first.dispatchId])
+  assert.match(sent[0].text, /left these files uncommitted .*: tmp\.log\. Commit the ones that are your work and remove the rest/)
+  assert.doesNotMatch(sent[0].text, /setup\.out/, 'the baseline is never its to clean')
+  assert.ok(r.orca.calls.indexOf(r.orca.calls.find((c) => c.verb === 'terminalSend')) < r.orca.calls.indexOf(second), 'the follow-up comes before the next agent starts')
+  assert.deepEqual(ofType(r.journal, 'followUp').map((e) => [e.title, e.lines]), [['[Implement] impl:#1', ['?? tmp.log']]])
+  assert.deepEqual(ofType(r.journal, 'leftover'), [])
+  assert.ok(r.log.some((l) => l.includes('[Implement] impl:#1: the chain worktree is clean after its follow-up')), r.log.join('\n'))
+  assert.doesNotMatch(r.orca.dispatches.get(second.dispatchId).prompt, /tmp\.log/)
+})
+
+test('leftover check: a file still there after the one follow-up is logged, journaled and told to the next chain agent never to commit', async () => {
+  const r = await runOne(leavesTmp(), { script: TWO_CHAINED, setupLeaves: ['?? setup.out'] })
+  assert.deepEqual(r.result, GOOD)
+  const [first, second] = r.orca.calls.filter((c) => c.verb === 'workerStart')
+  assert.deepEqual(followUps(r).map((c) => c.dispatchId), [first.dispatchId], 'exactly one follow-up, and none for the clean second agent')
+  assert.deepEqual(ofType(r.journal, 'leftover').map((e) => [e.title, e.worktree, e.lines]), [['[Implement] impl:#1', 'C:/fake/worktrees/run_fake1-chain', ['?? tmp.log']]])
+  assert.ok(r.log.some((l) => l.includes('[Implement] impl:#1: left tmp.log uncommitted in the chain worktree after its follow-up; every later chain agent is told never to commit them')), r.log.join('\n'))
+  const told = r.orca.dispatches.get(second.dispatchId).prompt
+  assert.match(told, /left by its setup: setup\.out\. These files were left uncommitted in your worktree by an agent before you: tmp\.log\. They are not your work, so never stage or commit them/)
+  assert.deepEqual(foldJournal(r.journal).chain.leftovers, ['?? tmp.log'])
+})
+
+test('leftover check: a chain agent that fails gets no follow-up, whatever it left, and its call ends as ever', async () => {
+  const r = await runOne(leaving(async (w) => {
+    w.lines.push('?? tmp.log')
+    throw new Error('the agent died')
+  }), { script: TWO_CHAINED.slice(0, TWO_CHAINED.indexOf('\nreturn')).replace('await agent', 'return await agent'), settings: NO_DOCTOR })
+  assert.equal(r.result, null)
+  assert.deepEqual(r.orca.calls.filter((c) => c.verb === 'worktreeLines' || c.verb === 'terminalSend'), [])
+  assert.deepEqual([...ofType(r.journal, 'followUp'), ...ofType(r.journal, 'leftover')], [])
+  assert.deepEqual(ofType(r.journal, 'failed').map((e) => e.title), ['[Implement] impl:#1'])
 })
 
 test('sequential run: a chain agent that dies gets a doctor in a <runId>-<n> worktree of its own, setup skipped, never the chain', async () => {

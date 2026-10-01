@@ -52,6 +52,12 @@ export const porcelainLines = (text) => String(text ?? '').split('\n').map((l) =
 // Whether a worktree's porcelain lines are its baseline's, in any order.
 export const sameLines = (lines, baseline) => lines.length === baseline.length && [...lines].sort().join('\n') === [...baseline].sort().join('\n')
 
+// A worktree's porcelain lines that none of `known` is: what it holds beyond them.
+export const extraLines = (lines, known) => {
+  const had = new Set(known)
+  return lines.filter((l) => !had.has(l))
+}
+
 // Commits on a worktree's branch that no other branch and no remote holds:
 // work of its own, which a retry never takes a worktree over with.
 export async function worktreeOwnCommits(path, branch, bound) {

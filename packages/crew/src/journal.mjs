@@ -115,7 +115,12 @@ import { foldMail, heldRounds, mailSupersedes } from './doctor.mjs'
 // chain (ADR-0020): the session host made the run's chain worktree,
 // `<runId>-chain`, which every code agent of a sequential run works in:
 // `lines`, its porcelain lines then, as a baseline line holds a child's. It
-// has no n: the worktree is the run's, no agent's.
+// has no n: the worktree is the run's, no agent's. A resume carries it
+// forward with `leftovers`, the leftover lines so far.
+// followUp (#127): a chain agent returned leaving `lines` in the chain
+// worktree beyond what it was told was there before it, and was sent back
+// once to commit or remove them; leftover: the `lines` still there after,
+// which every later chain agent is told never to commit.
 export const JOURNAL_ENTRIES = Object.freeze({
   queued: ['at', 'key', 'n', 'title'],
   starting: ['at', 'key', 'n', 'title', 'run'],
@@ -147,6 +152,8 @@ export const JOURNAL_ENTRIES = Object.freeze({
   unhalted: ['at'],
   held: ['at', 'key', 'n', 'node', 'title'],
   chain: ['at', 'runId', 'worktree', 'lines'],
+  followUp: ['at', 'key', 'n', 'title', 'worktree', 'lines'],
+  leftover: ['at', 'key', 'n', 'title', 'worktree', 'lines'],
 })
 
 // A needs-decision result's questions, for the run view.
@@ -260,7 +267,7 @@ export const readJournal = (path) => foldJournal(journalLines(path))
 // outage: the Orca outage under way at the journal's end, or null: { phase:
 // 'waiting' | 'paused', since }. No agent's state is changed by it.
 // chain: the run's chain worktree as last journaled, { runId, worktree,
-// baseline }, or null.
+// baseline, leftovers }, or null: leftovers, every leftover line since, once.
 //
 // nodes (ADR-0016): node -> its call's entry as `calls` holds it, the latest
 // call to name that node winning, with `key`, `node`, `n` and `title`; a failed
@@ -470,7 +477,8 @@ export function foldJournal(entries) {
     if (e.type === 'outage') outage = e.phase === 'end' ? null : { phase: e.phase === 'paused' ? 'paused' : 'waiting', since: e.since ?? e.at ?? null }
     if (e.type === 'halted') halted = { since: e.at ?? null, node: e.node ?? null, reason: e.reason ?? null }
     if (e.type === 'unhalted') halted = null
-    if (e.type === 'chain' && typeof e.worktree === 'string') chain = { runId: e.runId ?? null, worktree: e.worktree, baseline: Array.isArray(e.lines) ? e.lines : null }
+    if (e.type === 'chain' && typeof e.worktree === 'string') chain = { runId: e.runId ?? null, worktree: e.worktree, baseline: Array.isArray(e.lines) ? e.lines : null, leftovers: Array.isArray(e.leftovers) ? e.leftovers : [] }
+    if (e.type === 'leftover' && chain && Array.isArray(e.lines)) chain = { ...chain, leftovers: [...new Set([...chain.leftovers, ...e.lines])] }
     // Read as the runner acted on it (doctor.mjs).
     if (e.type === 'mail' && typeof e.messageId === 'string' && mailSupersedes(e, mail.get(e.messageId))) {
       mail.set(e.messageId, e)

@@ -32,7 +32,7 @@
 // 'hang-after' is a create Orca finishes but never answers: the worktree
 // exists, and the call times out at `createMs`. count is how many
 // times that step has run, and orca this fake, so a fault can also change
-// what Orca holds, a worktree's `porcelain` for one. Steps: runCreate, worktreeStatus, and a start's
+// what Orca holds, a worktree's `porcelain` for one. Steps: runCreate, worktreeStatus, worktreeLines, and a start's
 // worktreeCreate, worktreeSet, terminalCreate, waitIdle and workerStart, the
 // order the adapter runs them in, and runUse.
 //
@@ -529,6 +529,13 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       const baseline = [...setupLeaves]
       await onBaseline?.({ worktree: path, lines: baseline })
       return { path, made: true, baseline, warnings: [] }
+    },
+
+    async worktreeLines({ worktree }) {
+      await step('worktreeLines', { worktree })
+      if (!live(worktree)) throw new OrcaError('selector_not_found', `no worktree ${worktree}`, 'git status')
+      record({ verb: 'worktreeLines', worktree })
+      return [...worktrees.get(worktree).porcelain]
     },
 
     async worktreeStatus({ worktree, status }) {

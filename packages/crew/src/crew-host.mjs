@@ -27,7 +27,7 @@ import { childCommand } from './command.mjs'
 import { samePath } from './paths.mjs'
 import { sleep } from './util.mjs'
 import { gitIn, repoOf } from './git.mjs'
-import { gitProbes, prepareChildWorktree, reuseWorktree } from './worktree.mjs'
+import { gitProbes, prepareChildWorktree, reuseWorktree, worktreeLines } from './worktree.mjs'
 
 export const CREW_BIN = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url))
 
@@ -425,6 +425,8 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
       const baseline = await prepareChildWorktree({ project, worktree: path, bound, child: { onBaseline }, warnings })
       return { path, made: true, baseline, warnings }
     },
+
+    worktreeLines: ({ worktree }) => worktreeLines(worktree, bound),
 
     // Crew has no board: the status is kept by the daemon, for a worktree git has.
     async worktreeStatus({ worktree, status }) {

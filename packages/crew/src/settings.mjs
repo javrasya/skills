@@ -32,6 +32,9 @@ export const RUNNER_SETTINGS = Object.freeze({
   // is taken for the nudge landing, not for the worker coming back, however
   // late that look came.
   nudgeEchoMs: 10_000,
+  // A chain agent sent back to clean up after itself (#127) gets this long for
+  // that turn; past it, what it left is read as it stands.
+  followUpMs: 10 * MIN,
   // Neither the worker's transcript nor its terminal's busy or idle state has
   // moved for this long: nudged once, then its session is continued.
   stuckNudgeMs: 20 * MIN,

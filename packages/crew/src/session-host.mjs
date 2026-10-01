@@ -17,7 +17,7 @@
 //   terminal terminalIdle, terminalSend, terminalEnter, terminalClearInput,
 //            terminalScreen, terminalList, terminalClose, terminalSwitch,
 //            terminalRename; logTail, resumeRunner (a tab of the view's)
-//   worktree chainWorktree, worktreeStatus, worktreeRemove
+//   worktree chainWorktree, worktreeLines, worktreeStatus, worktreeRemove
 //            (chainWorktree({ runId, onBaseline }) → { path, made, baseline,
 //            warnings }: the run's one chain worktree, ADR-0020, `<runId>-chain`
 //            beside its `<runId>-<n>` ones, made the first time it is asked
@@ -25,7 +25,8 @@
 //            taken as a child's is and handed to onBaseline; asked again, the
 //            same one, `made` false and no baseline. workerStart({ chain })
 //            starts a worker in it, making nothing. A host that cannot make
-//            one refuses it `chain_unsupported`, final)
+//            one refuses it `chain_unsupported`, final. worktreeLines({
+//            worktree }) → the `git status --porcelain` lines it holds now)
 //   mailbox  mailCheck({ ack }): the run's messages, each a `type` of
 //            worker_done, handoff or escalation; workerDone, sent by submit
 //
@@ -51,7 +52,7 @@ export const SESSION_HOST = Object.freeze([
   'workerStart', 'workerShow', 'workerStop', 'workerContinue', 'workerRelease',
   'terminalIdle', 'terminalSend', 'terminalEnter', 'terminalClearInput', 'terminalScreen',
   'terminalList', 'terminalClose', 'terminalSwitch', 'terminalRename', 'logTail', 'resumeRunner',
-  'chainWorktree', 'worktreeStatus', 'worktreeRemove',
+  'chainWorktree', 'worktreeLines', 'worktreeStatus', 'worktreeRemove',
   'mailCheck', 'workerDone',
 ])
 
@@ -65,7 +66,7 @@ export const SESSION_METHODS = Object.freeze([
   'terminalList', 'terminalClose', 'terminalRename',
 ])
 
-export const RUN_METHODS = Object.freeze(['runCreate', 'runUse', 'workerShow', 'workerRelease', 'workerDone', 'mailCheck', 'chainWorktree', 'worktreeStatus', 'worktreeRemove'])
+export const RUN_METHODS = Object.freeze(['runCreate', 'runUse', 'workerShow', 'workerRelease', 'workerDone', 'mailCheck', 'chainWorktree', 'worktreeLines', 'worktreeStatus', 'worktreeRemove'])
 
 // The methods of the interface `host` lacks, [] for a whole one.
 export const missingMethods = (host) => SESSION_HOST.filter((m) => typeof host?.[m] !== 'function')
