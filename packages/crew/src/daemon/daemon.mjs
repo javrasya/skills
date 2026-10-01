@@ -30,7 +30,7 @@
 // Started after a daemon that died with runs live (a crash, a kill, a reboot,
 // a forced stop), it starts each such run's runner again, resuming the run
 // (#104): the runner continues every session lost with the old daemon. Such a
-// run is claimed before the daemon answers anyone, so a run view's R that
+// run is claimed before the daemon answers anyone, so a run view's r that
 // started this daemon cannot give the run a second runner.
 import net from 'net'
 import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync } from 'fs'

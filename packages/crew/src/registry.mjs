@@ -20,7 +20,7 @@
 //              host gone past its limit (ADR-0015)
 //   unpaused   the runner carries it on again
 //   halted     node, reason: the run halted on a node that failed or needs a
-//              decision (ADR-0016); its runner stays, and R carries it on
+//              decision (ADR-0016); its runner stays, and r carries it on
 //   unhalted   no failed or needs-decision node is left: it runs again
 //   reclaimed  agent: the reclaimed agent's journaled `<runId>-<n>`, n being
 //              the call that started its worker (its origin: a resume numbers

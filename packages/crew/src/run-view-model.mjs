@@ -990,7 +990,7 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
     }
     if (run.alive === true && run.outcome === 'halted') return say(run.host === 'crew' ? `${label}'s runner is alive and halted: open its tree and press r there to resume it` : `${label}'s runner is alive and halted, in ${where(run)}: r there resumes it`)
     if (run.alive === true) return say(run.host === 'crew' ? `${label}'s runner is alive: nothing to resume` : `${label}'s runner is alive, in ${where(run)}: nothing to resume`)
-    if (run.alive === null) return say(`could not tell whether ${label}'s runner is alive: its runner.pid, or Orca's list of the tab R opened, did not answer`)
+    if (run.alive === null) return say(`could not tell whether ${label}'s runner is alive: its runner.pid, or Orca's list of the tab r opened, did not answer`)
     if (!run.project || !run.runDir) return say(`${label} has no ${run.project ? 'run directory' : 'worktree'} recorded to resume in`)
     // A run armed before the registry named its script was launched by the
     // skill, whose state dir is orca-run/ beside the rendered workflow.js.

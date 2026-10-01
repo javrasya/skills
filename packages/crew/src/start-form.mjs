@@ -31,6 +31,11 @@ export const GH_STACK_INSTALL = ['extension', 'install', 'github/gh-stack']
 // The template's RUN_ORDER (ADR-0020), the default first.
 export const RUN_ORDERS = { parallel: 'Parallel', sequential: 'Sequential' }
 
+// The rows flag-only use may leave out, and the answer each then takes, never
+// the remembered one: a script written before Run order existed arms as it
+// did, parallel (ADR-0020).
+export const FLAG_DEFAULTS = { runOrder: 'parallel' }
+
 // The modes a Claude worker can start in; `auto` first, as it is the default.
 export const PERMISSION_MODES = ['auto', 'acceptEdits', 'bypassPermissions', 'dontAsk', 'default']
 
@@ -139,11 +144,17 @@ export function startForm(facts, { remembered = {}, flags = {} } = {}) {
       }
       return form
     },
-    // The flags of the shown rows that flag-only use has not given: each an
-    // error when there is no terminal to ask at.
-    missingFlags: (given = flags) => ROWS.filter((r) => shown(r) && given[r] === undefined).map((r) => FLAGS[r]),
+    // The flags of the shown rows that flag-only use has not given and that
+    // have no FLAG_DEFAULTS answer: each an error when there is no terminal
+    // to ask at.
+    missingFlags: (given = flags) => ROWS.filter((r) => shown(r) && given[r] === undefined && !Object.hasOwn(FLAG_DEFAULTS, r)).map((r) => FLAGS[r]),
     // The answers the run is armed from, permissionMode only for Claude.
     answers: () => Object.fromEntries(ROWS.filter(shown).map((r) => [r, values[r]])),
+    // The answers of flag-only use: a row with no flag takes its FLAG_DEFAULTS answer.
+    flagAnswers() {
+      for (const [row, value] of Object.entries(FLAG_DEFAULTS)) if (flags[row] === undefined) form.set(row, value)
+      return form.answers()
+    },
   }
   for (const row of ROWS) if (flags[row] !== undefined) form.set(row, flags[row])
   return form

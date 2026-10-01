@@ -1,13 +1,13 @@
 export const meta = {
   name: 'implement-spec-__SPEC__',
-  description: 'Implement spec #__SPEC__ as a stack of PRs: discover the ticket graph, implement each ticket in its own worktree, gate it, publish it as one stacked PR, review the whole stack, register it',
+  description: 'Implement spec #__SPEC__ as a stack of PRs: discover the ticket graph, implement each ticket in its own worktree (in sequential order, the run\'s one chain worktree), gate it, publish it as one stacked PR, review the whole stack, register it',
   phases: [
     { title: 'Graph', detail: 'read the spec and its tickets, return the task graph' },
     { title: 'Explore', detail: 'research notes saved outside the repo' },
     { title: 'Setup', detail: 'layer-0 PR when prior work already sits on a branch' },
     { title: 'Implement', detail: 'a dispatcher sizes each ticket; fresh slice agents implement it, frontier-scheduled' },
     { title: 'Gate', detail: 'code-review each ticket branch before it is published' },
-    { title: 'Stack', detail: 'serial publish lane: rebase onto the tip, one draft PR per ticket, reclaim the ticket\'s worktrees' },
+    { title: 'Stack', detail: 'serial publish lane: rebase onto the tip (never in sequential order, whose tip never moves under a ticket), one draft PR per ticket, reclaim the ticket\'s worktrees' },
     { title: 'Review', detail: 'code-review the whole stack; fixes land as the top PR' },
     { title: 'Finalize', detail: 'reconcile the stack, ready the PRs, reclaim the worktrees the lane has not' },
   ],
@@ -348,11 +348,12 @@ const GRAPH_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['number', 'title', 'map_position', 'blocked_by', 'needs_human', 'human_reason'],
+        // map_position orders a sequential run only (runInOrder), so only a sequential run asks for it.
+        required: ['number', 'title', ...(RUN_ORDER === 'sequential' ? ['map_position'] : []), 'blocked_by', 'needs_human', 'human_reason'],
         properties: {
           number: { type: 'integer' },
           title: { type: 'string' },
-          map_position: { type: 'integer', description: "1-based place in the spec's own map of its tickets; 0 when the spec does not place it" },
+          ...(RUN_ORDER === 'sequential' && { map_position: { type: 'integer', description: "1-based place in the spec's own map of its tickets; 0 when the spec does not place it" } }),
           blocked_by: { type: 'array', items: { type: 'integer' } },
           needs_human: { type: 'boolean' },
           human_reason: { type: 'string', description: 'empty when needs_human is false' },
@@ -583,9 +584,9 @@ ${POINTERS}
 Find the tickets: sub-issues of #${SPEC}, issues that reference #${SPEC}, and issues linked from the spec body. Search each way — GitHub's sub-issue API is often empty even when the tickets exist.
 
 Blocking relationships: query GitHub's native dependencies first, per ticket — \`gh api "repos/${REPO}/issues/<n>/dependencies/blocked_by" -q '[.[].number]'\`. Only when that returns an empty list or a 404 fall back to prose: read the ticket's "Blocked by" section (or equivalent) and resolve it to issue numbers. A dependency the ticket calls soft or tests-only is still a dependency — record it.
-
+${RUN_ORDER === 'sequential' ? `
 map_position: where the spec itself places the ticket in its map of tickets — the ordered list, table or diagram of its slices — counting from 1. A ticket the spec does not place gets 0. Read it off the spec as written; do not rank the tickets yourself.
-
+` : ''}
 Set needs_human on a ticket that cannot be completed by an agent alone: it needs hardware, a running game, a physical device, credentials only a person holds, or its label says so. Put the reason in human_reason.
 
 start_ref: if work for this spec already sits on a branch (the spec or a ticket names one, or a branch exists whose commits are for this spec), return that branch — it becomes the bottom layer of the stack rather than being orphaned. Otherwise return "${BASE_REF}".

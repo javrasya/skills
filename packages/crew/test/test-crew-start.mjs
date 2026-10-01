@@ -16,7 +16,7 @@ import { request, stopDaemon } from '../src/daemon/client.mjs'
 import { crewHost } from '../src/crew-host.mjs'
 import { OrchestratorError, orchestrator } from '../src/orchestrator.mjs'
 import { execProgram } from '../src/git.mjs'
-import { STACKS_DOCS, rememberedAnswers, startForm } from '../src/start-form.mjs'
+import { STACKS_DOCS, rememberAnswers, rememberedAnswers, startForm } from '../src/start-form.mjs'
 import { preflight } from '../src/headless.mjs'
 import { END_SIGNALS, PLACEHOLDERS, launchRunner, notesDirOf, renderRoles, renderTemplate, startCommand, templatePath } from '../src/arm.mjs'
 import { launchCommand } from '../src/harness.mjs'
@@ -214,9 +214,9 @@ function world({ validation = 'npm test\n', stackInstalled = true } = {}) {
 test('crew start with no terminal: every missing flag is an error naming it, and nothing is armed', async () => {
   const w = world()
   await w.ready
-  await assert.rejects(w.start(['94']), (e) => e.code === 2 && /missing --harness, --model, --base, --stack-mode, --run-order, --permission-mode$/.test(e.message))
-  await assert.rejects(w.start(['94', '--harness', 'claude', '--model', 'opus', '--base', 'main']), (e) => e.code === 2 && /missing --stack-mode, --run-order, --permission-mode$/.test(e.message))
-  await assert.rejects(w.start(['94', '--harness', 'pi', '--model', 'x/y', '--base', 'main']), (e) => /missing --stack-mode, --run-order$/.test(e.message), 'pi has no permission mode to miss')
+  await assert.rejects(w.start(['94']), (e) => e.code === 2 && /missing --harness, --model, --base, --stack-mode, --permission-mode$/.test(e.message))
+  await assert.rejects(w.start(['94', '--harness', 'claude', '--model', 'opus', '--base', 'main']), (e) => e.code === 2 && /missing --stack-mode, --permission-mode$/.test(e.message))
+  await assert.rejects(w.start(['94', '--harness', 'pi', '--model', 'x/y', '--base', 'main']), (e) => /missing --stack-mode$/.test(e.message), 'pi has no permission mode to miss')
   await assert.rejects(w.start(['--harness', 'pi']), (e) => e.code === 2 && /spec issue number is required/.test(e.message))
   await assert.rejects(w.start(['94', '--base']), (e) => e.code === 2 && /--base needs a value/.test(e.message))
   assert.equal(w.launches.length, 0)
@@ -379,6 +379,16 @@ test('crew start by flags alone: pi takes no permission mode, Install and Use in
   assert.match(script, /^const RUN_ORDER = 'sequential'/m)
   assert.equal(rememberedAnswers(w.paths, w.repoDir).stackMode, 'native')
   assert.equal(rememberedAnswers(w.paths, w.repoDir).runOrder, 'sequential')
+})
+
+test('crew start by flags alone without --run-order: the run is parallel, as before Run order existed, even where sequential was remembered', async () => {
+  const w = world()
+  await w.ready
+  rememberAnswers(w.paths, w.repoDir, { harness: 'claude', model: 'opus', base: 'main', stackMode: 'chain', runOrder: 'sequential', permissionMode: 'auto' })
+  await w.start(['94', '--harness', 'claude', '--model', 'opus', '--base', 'main', '--stack-mode', 'chain', '--permission-mode', 'auto'])
+  assert.equal(w.launches.length, 1)
+  assert.match(readFileSync(join(w.notesDir, 'workflow.js'), 'utf8'), /^const RUN_ORDER = 'parallel'/m)
+  assert.equal(rememberedAnswers(w.paths, w.repoDir).runOrder, 'parallel')
 })
 
 // The rendered script's role table as the script itself evaluates it.

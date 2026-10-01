@@ -82,7 +82,7 @@ test('start form: permission mode is shown for Claude and hidden for pi', () => 
   assert.deepEqual(form.answers(), { harness: 'pi', model: 'lmstudio/qwen3', base: 'develop', stackMode: 'native', runOrder: 'parallel' })
   assert.deepEqual(row(form, 'model').options.map((o) => o.value), ['lmstudio/qwen3', 'anthropic/claude-opus-4-6'])
   assert.throws(() => form.set('permissionMode', 'auto'), /--permission-mode: pi has no permission mode/)
-  assert.deepEqual(form.missingFlags({}), ['--harness', '--model', '--base', '--stack-mode', '--run-order'])
+  assert.deepEqual(form.missingFlags({}), ['--harness', '--model', '--base', '--stack-mode'])
   form.cycle('harness')
   assert.equal(form.answers().permissionMode, 'auto')
   assert.equal(form.answers().model, 'opus[1m]')
@@ -227,8 +227,15 @@ test('flags: each row has one, and flag-only use answers the whole form', () => 
 test('flags: a flag beats the remembered answer, and every missing one is named', () => {
   const form = startForm(facts(), { flags: { base: 'feature/x' }, remembered: { base: 'main' } })
   assert.equal(form.answers().base, 'feature/x')
-  assert.deepEqual(form.missingFlags(), ['--harness', '--model', '--stack-mode', '--run-order', '--permission-mode'])
-  assert.deepEqual(startForm(facts(), { flags: { harness: 'pi' } }).missingFlags(), ['--model', '--base', '--stack-mode', '--run-order'])
+  assert.deepEqual(form.missingFlags(), ['--harness', '--model', '--stack-mode', '--permission-mode'])
+  assert.deepEqual(startForm(facts(), { flags: { harness: 'pi' } }).missingFlags(), ['--model', '--base', '--stack-mode'])
+})
+
+test('flags: --run-order may be left out, and flag-only answers then run parallel, never the remembered order', () => {
+  const form = startForm(facts(), { flags: { harness: 'pi' }, remembered: { runOrder: 'sequential' } })
+  assert.equal(form.answers().runOrder, 'sequential', 'the form at a terminal pre-fills the remembered order')
+  assert.equal(form.flagAnswers().runOrder, 'parallel')
+  assert.equal(startForm(facts(), { flags: { runOrder: 'sequential' } }).flagAnswers().runOrder, 'sequential')
 })
 
 test('flags: a value the form does not allow is an error naming the flag', () => {

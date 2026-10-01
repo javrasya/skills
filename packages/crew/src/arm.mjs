@@ -281,7 +281,7 @@ export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdi
     throw new StartError(`spec #${spec} has no validation list, and with no terminal nobody can confirm the orchestrator's draft of one: write the project's checks to ${target.validationFile}, one command per line (# for comments), or run crew start at a terminal`)
   }
   const heading = `crew start: ${target.repo} #${spec}: ${target.title}`
-  const answers = tty ? await runStartForm({ form, stdin, stdout, heading }) : form.answers()
+  const answers = tty ? await runStartForm({ form, stdin, stdout, heading }) : form.flagAnswers()
   if (!answers) throw new StartError('cancelled; nothing armed', 130)
   try {
     await check({ paths, repoDir, harness: answers.harness, model: answers.model })
