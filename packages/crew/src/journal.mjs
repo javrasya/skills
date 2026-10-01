@@ -155,6 +155,8 @@ export const JOURNAL_ENTRIES = Object.freeze({
   outage: ['at', 'phase', 'since'],
   halted: ['at', 'node', 'reason'],
   unhalted: ['at'],
+  pause: ['at'],
+  unpause: ['at'],
   held: ['at', 'key', 'n', 'node', 'title'],
   chain: ['at', 'runId', 'worktree', 'lines'],
   followUp: ['at', 'key', 'n', 'title', 'worktree', 'lines'],
@@ -369,7 +371,7 @@ export function foldJournal(entries) {
     if (a.dialog && !DIALOG_KEEPS.includes(e.type)) Object.assign(a, { dialog: null, beforeDialog: null })
     switch (e.type) {
       case 'held':
-        Object.assign(a, { state: 'queued', reason: 'held: the run is halted' })
+        Object.assign(a, { state: 'queued', reason: e.paused ? 'held: the run is paused' : 'held: the run is halted' })
         break
       case 'starting':
         a.from ??= at

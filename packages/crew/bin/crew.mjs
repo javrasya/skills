@@ -16,6 +16,13 @@
 //                     `crew view <run dir>` does; with none it prints that
 //   crew ls [--registry <file>]
 //                     every run in the run registry, crew's and Orca's, by project
+//   crew pause <run> | resume <run> | rm <run> [--yes]
+//                     p, r and x of the run view: pause holds every new agent
+//                     while those at work finish, and outlives the runner;
+//                     resume lifts it; rm stops the run, reclaims it (asking
+//                     f for each worktree with unpushed commits), forgets it
+//                     and deletes its folder. A run is named by its run id,
+//                     its run folder or its state dir
 //   crew [view [<run>] [--registry <file>]]
 //                     the run console: the run's tree (by run id or run dir),
 //                     or with no run the runs list (bare `crew` at a terminal);
@@ -62,6 +69,7 @@ import { crewHost } from '../src/crew-host.mjs'
 import { launchRunner, runOrchestrator, startCommand } from '../src/arm.mjs'
 import { REGISTRY_PATH } from '../src/registry.mjs'
 import { runsView } from '../src/run-view-model.mjs'
+import { findRun, pauseCommand, removeCommand, resumeCommand } from '../src/run-commands.mjs'
 import { listRuns } from '../src/run-view/draw.mjs'
 import { DEFAULT_HOST, LEGACY_HOST, openHosts } from '../src/hosts.mjs'
 import { RUNNER_SETTINGS } from '../src/settings.mjs'
@@ -71,6 +79,7 @@ const USAGE = [
   'usage: crew run [--host <host>] <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]',
   '       crew start <spec#> [--harness claude|pi] [--model <m>] [--base <branch>] [--stack-mode native|install|chain] [--run-order parallel|sequential] [--permission-mode <mode>]',
   '       crew ls [--registry <run registry, for a fixture>]',
+  '       crew pause <run> | resume <run> | rm <run> [--yes]  (a run by its run id, run folder or state dir)',
   '       crew [view [<run id or run dir>] [--registry <run registry, for a fixture>]]  (no run: the runs list)',
   '       crew view --attached <run-dir> | --standalone [--registry <run registry, for a fixture>]',
   '       crew daemon start | status | stop [--force] | restart [--force]',
@@ -212,6 +221,26 @@ async function ls(args) {
   console.log(listRuns(runs.model).join('\n'))
 }
 
+// crew pause | resume | rm <run>: the run view's p, r and x.
+async function runCommand(verb, args) {
+  const { values, positionals } = parseFlags(args, { strings: ['--registry'], booleans: verb === 'rm' ? ['--yes'] : [] })
+  if (positionals.length !== 1) usage(`crew ${verb}: one run, by its run id, run folder or state dir`)
+  const registry = values['--registry'] ? resolve(values['--registry']) : REGISTRY_PATH
+  const [target] = positionals
+  if (verb === 'pause') return console.log(pauseCommand({ registry, target }))
+  if (verb === 'resume') return console.log(resumeCommand({ registry, target }))
+  const run = findRun(registry, target)
+  const hosts = await openHosts({ paths, callMs: RUNNER_SETTINGS.viewCallMs })
+  const host = hosts[run?.host] ?? hosts[LEGACY_HOST]
+  const { createInterface } = await import('readline/promises')
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
+  try {
+    console.log(await removeCommand({ registry, target, host, yes: !!values['--yes'], ask: (q) => rl.question(q), out: (s) => console.error(s) }))
+  } finally {
+    rl.close()
+  }
+}
+
 // waitMs: how long to wait for a run just launched to be in the registry,
 // which its runner records once it has started; 0 for a run already there.
 // With no run named, the console opens on the runs list rather than a tree.
@@ -332,6 +361,9 @@ if (command === 'run') {
   await view(rest).catch(fail)
 } else if (command === 'ls') {
   await ls(rest).catch(fail)
+} else if (['pause', 'resume', 'rm'].includes(command)) {
+  await runCommand(command, rest).catch(fail)
+  process.exit(0)
 } else if (command === 'daemon') {
   await daemon(rest).catch(fail)
 } else if (command === 'session') {

@@ -78,6 +78,7 @@ export function runRegistry(path = REGISTRY_PATH, clock = { now: () => Date.now(
     unpaused: ({ runId }) => append({ type: 'unpaused', runId }),
     halted: ({ runId, node, reason }) => append({ type: 'halted', runId, node, reason }),
     unhalted: ({ runId }) => append({ type: 'unhalted', runId }),
+    removed: ({ runId }) => append({ type: 'removed', runId }),
   }
 }
 
@@ -131,6 +132,7 @@ export function readRegistry(path = REGISTRY_PATH) {
     else if (e.type === 'ended' && OUTCOMES.includes(e.outcome)) Object.assign(run, { state: e.outcome, endedAt: e.at ?? null, paused: null })
     else if (e.type === 'paused') run.paused = { reason: e.reason ?? null, at: e.at ?? null }
     else if (e.type === 'unpaused') run.paused = null
+    else if (e.type === 'removed') runs.delete(e.runId)
     else if (e.type === 'halted' && run.state === 'running') run.state = 'halted'
     else if (e.type === 'unhalted' && run.state === 'halted') run.state = 'running'
     else if (e.type === 'reclaimed') {

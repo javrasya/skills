@@ -126,6 +126,10 @@ A dead runner's run is carried on with the standalone view's r, which resumes it
 
 On crew, each new `at` is also one **halt triage** question to crew's orchestrator (ADR-0018), whose answer — each held node's reason, its questions, and what the operator must decide — the run console's halt panel shows. The run console asks it: a run that halts while nobody has it open in `crew view`, or is watched only from the runner's attached view, is triaged when someone next opens it there. Quitting `crew view` while a triage is still asked gives it up, its headless run ended so none outlives the view, and the next console to open the run asks it again. An orchestrator question is a headless run of the harness in the run's project (ADR-0019), never a session or a Run.
 
+### Pausing and removing a run
+
+`p` in a run's tree, or on its row in the runs list, pauses the run: `paused.json` in its state dir holds every new agent while the agents at work finish, and the header reads `⏸ paused — N agents finishing`. The file is the pause, so a runner that restarts stays paused. `r` removes it. `x` asks, then removes the run: its runner and agents stopped, the run reclaimed — each worktree holding unpushed commits asked about in turn, `f` to force-delete it — its registry entry marked `removed`, and its folder deleted. From the command line: `crew pause <run>`, `crew resume <run>`, `crew rm <run> [--yes]`, a run named by its run id, its run folder or its state dir; `--yes` skips only the run's confirmation, never a force-delete's.
+
 ### The run registry
 
 Beyond its state dir, every run is recorded in **`~/.claude/orca-runs.jsonl`** (under `CLAUDE_CONFIG_DIR` instead of `~/.claude` when that is set, as Claude's transcripts are: `claudeDir` in `transcript.mjs` resolves both), one append-only JSON-lines file for the whole machine (ADR-0012). An Orca Run knows no project, run directory, spec or outcome, and cannot be closed, so the registry holds them, keyed by Run id; it is the only list of runs, and runs from before it are not in it. Every entry has `type`, `runId` and `at`:

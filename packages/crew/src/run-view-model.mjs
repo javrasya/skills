@@ -6,7 +6,7 @@
 // The model is read from the run's journal, its agents' session transcripts,
 // Orca's terminal list and the run registry; the actions go to Orca, and a
 // reclaim goes through reclaim.mjs, so the view keeps its rules.
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from 'fs'
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, rmSync } from 'fs'
 import { basename, dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { sessionTranscripts } from './transcript.mjs'
@@ -19,6 +19,8 @@ import { hostUnreachable } from './session-host.mjs'
 import { isOrchestratorTitle } from './orchestrator.mjs'
 import { haltNoticeOf, readTriage } from './triage.mjs'
 import { RESUME_REQUEST } from './halt.mjs'
+import { PAUSE_FILE, pausedAt } from './pause.mjs'
+import { removeRun } from './remove.mjs'
 import { writeJsonAtomic } from './fsutil.mjs'
 import { probesBy } from './outage.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
@@ -217,7 +219,11 @@ function latestEvent(path) {
 // triage question asked about that `at` (triage.mjs), or null while none is;
 // `triage()`, when given, asks it, once per `at` this view sees, and is never
 // waited on.
-export function runView({ stateDir, host, clock = { now: () => Date.now() }, transcripts = sessionTranscripts(), registry = REGISTRY_PATH, unpushed = worktreeUnpushed, alive = runnerAlive, resumeHost = null, resumeHalted = null, enter = false, triage = null }) {
+// The agents of a run still at work: what a pause lets finish.
+const AT_WORK = ['starting', 'running', 'continued', 'stuck', 'blocked', 'needs you']
+const atWork = (agents) => agents.filter((a) => AT_WORK.includes(a.state))
+
+export function runView({ stateDir, host, clock = { now: () => Date.now() }, transcripts = sessionTranscripts(), registry = REGISTRY_PATH, unpushed = worktreeUnpushed, alive = runnerAlive, resumeHost = null, resumeHalted = null, enter = false, triage = null, remove = null }) {
   const journalPath = join(stateDir, 'journal.jsonl')
   // name -> folded, only for phases the operator folded or unfolded.
   const folds = new Map()
@@ -384,6 +390,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
       counts: countOf(agents),
       outage,
       halted: fold.halted ? { since: fold.halted.since, nodes: fold.halted.nodes } : null,
+      paused: pausedAt(stateDir) ? { finishing: atWork(agents).length } : null,
     }
     const notice = haltNoticeOf(stateDir)
     if (notice && triage && !triaged.has(notice.at)) {
@@ -540,6 +547,22 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     if (r.unpushed > 0 && !confirmed.force) return { ...about, confirm: { ...confirmed, force: true }, lines: [r.reason, '', 'f = force the reclaim, and those commits are lost · any other key cancels'] }
     return null
   }
+  // Remove (x): the run removed by remove.mjs, each worktree it kept for its
+  // unpushed commits offered for a force-delete, one at a time; then the run
+  // forgotten, naming whatever was left on disk.
+  const removeHere = () => removeRun({ stateDir, runId: header?.runId ?? null, host, registry: registry && runRegistry(registry, clock), unpushed })
+  function forceNext(handle, queue, others) {
+    const [k, ...rest] = queue
+    if (k) {
+      dialog = { kind: 'confirm', act: 'force', handle, k, queue: rest, others, title: `Force-delete ${k.agent.worktree}?`, lines: [k.reason, '', 'f = force-delete it, and those commits are lost · any other key keeps it'] }
+      layout()
+      return say(`${k.agent.title}: its worktree holds unpushed commits`)
+    }
+    const { left } = handle.finish()
+    layout()
+    return { ...say(`removed the run${left.length ? `; left on disk: ${left.join(', ')}` : ''}${others.length ? `; kept ${others.map((o) => `${o.agent.title}: ${o.reason}`).join('; ')}` : ''}`), removed: true }
+  }
+
   // The first of `queue` that asks for a confirmation, holding the rest.
   function nextConfirmation(queue) {
     for (let i = 0; i < queue.length; i++) {
@@ -615,6 +638,21 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
 
   // A key while the dialog is open: the tree takes none.
   async function dialogKey(name) {
+    if (dialog.act === 'remove') {
+      dialog = null
+      if (name !== 'y') return say('nothing removed')
+      const handle = await (remove ?? removeHere)()
+      return forceNext(handle, handle.kept.filter((k) => k.unpushed > 0), handle.kept.filter((k) => !(k.unpushed > 0)))
+    }
+    if (dialog.act === 'force') {
+      const { handle, k, queue, others } = dialog
+      dialog = null
+      if (name === 'f') {
+        const r = await handle.force(k)
+        if (!r.reclaimed) others.push({ ...k, reason: r.reason })
+      }
+      return forceNext(handle, queue, others)
+    }
     if (dialog.kind === 'confirm') {
       const { n, chain: ofChain, confirm, queue, title } = dialog
       dialog = null
@@ -753,8 +791,25 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
         return {}
       case 'l':
         return openLog()
+      case 'p': {
+        if (pausedAt(stateDir)) return say('already paused: r resumes it')
+        writeJsonAtomic(join(stateDir, PAUSE_FILE), { at: new Date(clock.now()).toISOString() })
+        const n = atWork(agentsNow()).length
+        await refresh()
+        return say(`paused: no new agent starts; ${n} agent${n === 1 ? ' is' : 's are'} finishing`)
+      }
       case 'r':
+        if (pausedAt(stateDir)) {
+          rmSync(join(stateDir, PAUSE_FILE), { force: true })
+          if (header?.halted && resumeHalted) askResume()
+          await refresh()
+          return say('resumed: the agents held by the pause start')
+        }
         return resumeHost || resumeHalted ? askResume() : {}
+      case 'x':
+        dialog = { kind: 'confirm', act: 'remove', title: `Remove run ${header?.runId ?? ''}?`, lines: ['Stops its runner and every agent, reclaims its worktrees (one holding unpushed commits is asked about), forgets the run and deletes its folder. Its PRs on GitHub stay.', '', 'y = remove it · any other key cancels'] }
+        layout()
+        return {}
       case 'q':
         return { quit: true }
       default:
@@ -878,7 +933,7 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
       const run = {
         runId: r.runId, host: r.host, name: r.spec, spec: number ? `#${number}` : null, project: r.project, runDir: r.runDir,
         script: r.script, permissionMode: r.permissionMode, terminal: launched.get(r.runId)?.terminal ?? r.runner?.terminal ?? null,
-        outcome: r.state === 'running' ? null : r.state, paused: r.state === 'running' ? r.paused ?? null : null, alive: live, reclaimed: r.reclaimed,
+        outcome: r.state === 'running' ? null : r.state, paused: r.state === 'running' ? r.paused ?? null : null, onPause: !!r.runDir && pausedAt(r.runDir), alive: live, reclaimed: r.reclaimed,
         kept: r.reclaimed ? 0 : agents.filter((a) => !done.has(a.name)).length,
         closable: !r.reclaimed && live === false,
         armedAt: Number.isFinite(armedAt) ? armedAt : null, ageMs: Number.isFinite(armedAt) ? Math.max(0, now - armedAt) : null, resumable: live === false && !r.reclaimed,
@@ -1027,13 +1082,20 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
   // dialog is open, which takes every key; q on the list returns { quit }.
   async function key(name) {
     if (opened) {
-      if (opened.view.model?.dialog) return opened.view.key(name)
+      // A run its tree removed (x) is gone: back to the list.
+      const gone = async (res) => {
+        if (!res?.removed) return res
+        close()
+        await refresh()
+        return { ...say(res.message), removed: true }
+      }
+      if (opened.view.model?.dialog) return gone(await opened.view.key(name))
       if (name === 'q' || name === 'ESCAPE' || name === 'LEFT') return close()
       if (name === 'r') {
-        // A live runner that is halted or paused is resumed from its tree,
-        // through its request file; a dead one gets a new runner.
+        // A paused run, or a live runner that is halted or paused on an
+        // outage, is resumed from its tree; a dead one gets a new runner.
         const run = runOf(opened.runId)
-        return run?.alive === true && (run.paused || run.outcome === 'halted') ? opened.view.key('r') : resume()
+        return run && (pausedAt(run.runDir) || (run.alive === true && (run.paused || run.outcome === 'halted'))) ? opened.view.key('r') : resume()
       }
       if (name === '?') return consult()
       return opened.view.key(name)
@@ -1063,8 +1125,29 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
       }
       case 'CTRL_R':
         return reclaim()
-      case 'r':
+      // p, r and x on a run's row act on that run as in its tree: x opens
+      // the tree on its remove dialog.
+      case 'p':
+      case 'x': {
+        const row = current()
+        if (row?.kind !== 'run') return {}
+        const res = await open(row.run.runId)
+        if (!opened) return res
+        const out = await opened.view.key(name)
+        if (name === 'p') close()
+        return out
+      }
+      case 'r': {
+        const row = current()
+        if (row?.kind === 'run' && row.run.runDir && pausedAt(row.run.runDir)) {
+          await open(row.run.runId)
+          const out = await opened.view.key('r')
+          close()
+          await refresh()
+          return out
+        }
         return resume()
+      }
       case 'q':
         return { quit: true }
       default:

@@ -243,7 +243,7 @@ export async function reclaimRun(agents, { host, unpushed = worktreeUnpushed, fo
     }
     const r = await reclaimAgent(agent, { host, unpushed, force, open })
     if (!r.reclaimed) {
-      kept.push({ agent, reason: r.reason, ...(r.unreachable && { unreachable: true }) })
+      kept.push({ agent, reason: r.reason, ...(r.unreachable && { unreachable: true }), ...(r.unpushed && { unpushed: r.unpushed }) })
       continue
     }
     for (const note of r.notes) out(`!! ${agent.title}: ${note}`)

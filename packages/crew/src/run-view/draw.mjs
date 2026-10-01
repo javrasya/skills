@@ -81,7 +81,8 @@ function headerLines(h, W) {
   ].filter(Boolean).join(dot)
   const counts = COUNTED.filter((s) => h.counts?.[s]).map((s) => c(COLOUR[s], `${GLYPH[s]} ${h.counts[s]} ${s}`)).join('  ')
   const halted = h.halted ? c('1;33', `⏸ halted — ${h.halted.nodes.length} node${h.halted.nodes.length === 1 ? '' : 's'} need${h.halted.nodes.length === 1 ? 's' : ''} you · r to resume`) : null
-  const lead = [h.outage && outageOf(h.outage), halted].filter(Boolean)
+  const paused = h.paused ? c('1;33', `⏸ paused${h.paused.finishing ? ` — ${h.paused.finishing} agent${h.paused.finishing === 1 ? '' : 's'} finishing` : ''} · r to resume`) : null
+  const lead = [h.outage && outageOf(h.outage), paused, halted].filter(Boolean)
   return [fit(' ' + run, W), fit(' ' + (lead.length ? lead.join(dot) + dot + counts : counts), W)]
 }
 
@@ -306,8 +307,8 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
 // --- standalone: every run the registry knows (runsView's model) ----------
 
 // The tree's key line once the standalone view opened it.
-export const TREE_HELP = ' ↑↓ move · ⏎/→/click focus tab · ⏎/click a phase to fold · ← back to the runs · Ctrl+R reclaim · l log · r resume'
-const RUNS_HELP = ' ↑↓ move · ⏎/→/click open a run · ←→ fold a project · Ctrl+R reclaim the run · r resume a dead runner · q quit'
+export const TREE_HELP = ' ↑↓ move · ⏎/→/click focus tab · ⏎/click a phase to fold · ← back to the runs · Ctrl+R reclaim · l log · p pause · r resume · x remove'
+const RUNS_HELP = ' ↑↓ move · ⏎/→/click open a run · ←→ fold a project · Ctrl+R reclaim the run · p pause · r resume · x remove · q quit'
 
 // The key lines of `crew view`, which enters a crew run's sessions in place
 // and comes back from one with `backKey`; an Orca run's agent is its tab.
@@ -329,7 +330,7 @@ export function age(ms) {
 const outageHost = (paused) => (paused.reason === 'crew outage' ? 'crew' : 'Orca')
 const OUTCOME = { ok: '32', partial: '33', failed: '31', halted: '1;33' }
 // A run its live runner paused on an outage of its host, Orca or crew, is not running (ADR-0015).
-const outcomeOf = (r) => (r.outcome ? c(OUTCOME[r.outcome], r.outcome) : r.paused && r.alive !== false ? c('33', `paused (${outageHost(r.paused)} outage)`) : r.alive ? c('36', 'running') : grey('unfinished'))
+const outcomeOf = (r) => (r.outcome ? c(OUTCOME[r.outcome], r.outcome) : r.paused && r.alive !== false ? c('33', `paused (${outageHost(r.paused)} outage)`) : r.onPause ? c('33', 'paused') : r.alive ? c('36', 'running') : grey('unfinished'))
 const runnerOf = (r) => (r.alive === true ? c('32', '● alive') : r.alive === false ? c('31', '○ dead') : grey('? unknown'))
 
 const projectLine = (p) => ` ${p.folded ? '▸' : '▾'} ${bold(p.name)}  ${grey(p.path ?? '')}  ${grey(`${p.runs.length} run${p.runs.length === 1 ? '' : 's'}`)}`
