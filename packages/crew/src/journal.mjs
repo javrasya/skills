@@ -114,9 +114,10 @@ import { foldMail, heldRounds, mailSupersedes } from './doctor.mjs'
 // halted, not started until it is released. halted and unhalted have no n.
 // chain (ADR-0020): the session host made the run's chain worktree,
 // `<runId>-chain`, which every code agent of a sequential run works in:
-// `lines`, its porcelain lines then, as a baseline line holds a child's. It
-// has no n: the worktree is the run's, no agent's. A resume carries it
-// forward with `leftovers`, the leftover lines so far.
+// `lines`, its porcelain lines then, as a baseline line holds a child's, or
+// null when the host made it but could not take them. It has no n: the
+// worktree is the run's, no agent's. A resume carries it forward with
+// `leftovers`, the leftover lines so far. chainEntry writes it.
 // followUp (#127): a chain agent returned leaving `lines` in the chain
 // worktree beyond what it was told was there before it, and was sent back
 // once to commit or remove them; leftover: the `lines` still there after,
@@ -186,6 +187,12 @@ export const timeOf = (e) => {
 export const madeByRun = (a) => !!a.runId && (a.launched || !!a.worktree)
 
 export const readJournal = (path) => foldJournal(journalLines(path))
+
+// The chain line for a chain as the fold reads it back, { runId, worktree,
+// baseline, leftovers }.
+export function chainEntry({ runId, worktree, baseline, leftovers = [] }) {
+  return { type: 'chain', runId, worktree, lines: baseline, ...(leftovers.length && { leftovers }) }
+}
 
 // The fold of a journal's entries: { calls, retained, run, lastN, phases, agents, mail, outage, chain }.
 //

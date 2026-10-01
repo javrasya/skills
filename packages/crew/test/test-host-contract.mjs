@@ -84,7 +84,7 @@ function crewScratch() {
   git('-c', 'user.name=contract', '-c', 'user.email=contract@example.com', 'commit', '-q', '-m', 'init')
   const hook = join(root, 'setup-hook.mjs')
   const setupLog = join(root, 'setup-runs.log')
-  writeFileSync(hook, `import { appendFileSync, writeFileSync } from 'fs'\nif (process.env.FAIL_SETUP) { console.error('setup refused'); process.exit(4) }\nwriteFileSync('setup.out', \`\${process.env.CREW_REPO}\\n\${process.env.CREW_WORKTREE}\\n\`)\nappendFileSync(${JSON.stringify(setupLog)}, \`\${process.env.CREW_WORKTREE}\\n\`)\n`)
+  writeFileSync(hook, `import { appendFileSync, writeFileSync } from 'fs'\nif (process.env.FAIL_SETUP) { console.error('setup refused'); process.exit(4) }\nif (process.env.BREAK_STATUS) writeFileSync('.git', 'gitdir: /no/such/gitdir\\n')\nwriteFileSync('setup.out', \`\${process.env.CREW_REPO}\\n\${process.env.CREW_WORKTREE}\\n\`)\nappendFileSync(${JSON.stringify(setupLog)}, \`\${process.env.CREW_WORKTREE}\\n\`)\n`)
   mkdirSync(paths.home, { recursive: true })
   writeFileSync(paths.config, JSON.stringify({ repos: { [cwd]: { setup: hook } } }))
   // The agent-side commands' environment: crew's, with any Orca out of reach.
@@ -438,20 +438,18 @@ export const SCENARIOS = [
       const run = await runOf(h)
       const baselines = []
       const onBaseline = (b) => baselines.push(b)
-      const chain = await h.host.chainWorktree({ runId: run, onBaseline })
+      const chain = await h.host.chainWorktree({ runId: run })
       assert.equal(worktreeName(chain.path), `${run}-chain`)
       assert.deepEqual([chain.made, chain.baseline], [true, SETUP_LEAVES])
-      assert.deepEqual(baselines, [{ worktree: chain.path, lines: SETUP_LEAVES }])
       assert.deepEqual(await h.host.worktreeLines({ worktree: chain.path }), SETUP_LEAVES, 'what it holds now, read as its baseline was')
       const first = await start(h, 'first', { chain: chain.path })
       assert.equal(first.worktree, chain.path)
       await h.host.workerStop({ dispatch: first.dispatchId })
       await eventually('the first worker stopped', () => h.stopped(first))
-      const again = await h.host.chainWorktree({ runId: run, onBaseline })
+      const again = await h.host.chainWorktree({ runId: run })
       assert.deepEqual([again.path, again.made, again.baseline], [chain.path, false, null])
       const second = await start(h, 'second', { chain: chain.path })
       assert.equal(second.worktree, chain.path)
-      assert.equal(baselines.length, 1, 'no second baseline')
       assert.equal(await h.setups(chain.path), 1, 'its setup hook ran once')
       const own = await start(h, 'own', { child: child(`${run}-1`) })
       assert.equal(worktreeName(own.worktree), `${run}-1`)
@@ -465,10 +463,10 @@ export const SCENARIOS = [
       // Reclaimed, then asked for again, as a resume does: made again at the
       // same path, its hook run once more, and held as ever after.
       await h.host.worktreeRemove({ path: chain.path })
-      const remade = await h.host.chainWorktree({ runId: run, onBaseline })
+      const remade = await h.host.chainWorktree({ runId: run })
       assert.deepEqual([remade.path, remade.made, remade.baseline], [chain.path, true, SETUP_LEAVES])
       assert.equal(await h.setups(chain.path), 2, 'its setup hook ran once more, for the remake')
-      assert.equal((await h.host.chainWorktree({ runId: run, onBaseline })).made, false)
+      assert.equal((await h.host.chainWorktree({ runId: run })).made, false)
       const third = await start(h, 'third', { chain: chain.path })
       assert.equal(third.worktree, chain.path)
       assert.equal(await h.setups(chain.path), 2)
@@ -673,6 +671,14 @@ test('crew host: a chain worktree whose folder was deleted by hand, still listed
   assert.deepEqual([remade.path, remade.made], [chain.path, true])
   assert.ok(existsSync(chain.path))
   assert.equal(await h.setups(chain.path), 2)
+})
+
+test('crew host: a chain worktree whose baseline cannot be read once it is made is made all the same, with a warning and no baseline', async () => {
+  const h = crewKind.open({ env: { BREAK_STATUS: '1' } })
+  const run = await runOf(h)
+  const chain = await h.host.chainWorktree({ runId: run })
+  assert.deepEqual([worktreeName(chain.path), chain.made, chain.baseline], [`${run}-chain`, true, null])
+  assert.match(chain.warnings.join('\n'), /could not read its baseline/)
 })
 
 test('crew host: a setup hook that fails fails the start and leaves no worktree or branch behind', async () => {

@@ -61,3 +61,15 @@ export async function prepareChildWorktree({ project, worktree, bound, child, wa
   await child.onBaseline?.({ worktree, lines: baseline })
   return baseline
 }
+
+// The run's chain worktree, just made, readied as a child's is. Its baseline
+// unread is a warning, never a failure: the worktree is made all the same,
+// and the runner journals it with no baseline. Returns the baseline or null.
+export async function prepareChainWorktree({ project, worktree, bound, warnings, fs }) {
+  try {
+    return await prepareChildWorktree({ project, worktree, bound, child: {}, warnings, fs })
+  } catch (e) {
+    warnings.push(`could not read its baseline: ${e?.message ?? e}`)
+    return null
+  }
+}

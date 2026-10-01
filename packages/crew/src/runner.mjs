@@ -72,7 +72,7 @@ import { RUNNER_SETTINGS } from './settings.mjs'
 import { agentLifecycle, readResult, decisionsNeeded, setAside } from './lifecycle.mjs'
 import { hostOutage } from './outage.mjs'
 import { RESUME_REQUEST, runHalt } from './halt.mjs'
-import { JOURNAL_ENTRIES, readJournal, madeByRun, journalLines } from './journal.mjs'
+import { JOURNAL_ENTRIES, readJournal, madeByRun, journalLines, chainEntry } from './journal.mjs'
 import { runRegistry, REGISTRY_PATH } from './registry.mjs'
 import { sessionTranscripts } from './transcript.mjs'
 import { VIEW_EXIT } from './run-view/exit-codes.mjs'
@@ -295,7 +295,7 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
   // The run's chain worktree, and what earlier agents left in it, still told
   // to every chain agent the resume starts.
   const { chain } = earlier
-  if (chain) journal({ type: 'chain', runId: chain.runId, worktree: chain.worktree, lines: chain.baseline, ...(chain.leftovers.length && { leftovers: chain.leftovers }) })
+  if (chain) journal(chainEntry(chain))
   // Every Run mailbox message an earlier runner acted on, as it journaled it:
   // the host delivers a batch again until it is acknowledged, and it is never
   // acted on twice.

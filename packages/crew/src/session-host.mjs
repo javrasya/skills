@@ -18,11 +18,12 @@
 //            terminalScreen, terminalList, terminalClose, terminalSwitch,
 //            terminalRename; logTail, resumeRunner (a tab of the view's)
 //   worktree chainWorktree, worktreeLines, worktreeStatus, worktreeRemove
-//            (chainWorktree({ runId, onBaseline }) → { path, made, baseline,
+//            (chainWorktree({ runId }) → { path, made, baseline,
 //            warnings }: the run's one chain worktree, ADR-0020, `<runId>-chain`
 //            beside its `<runId>-<n>` ones, made the first time it is asked
 //            for, its setup hook run then and only then, and its baseline
-//            taken as a child's is and handed to onBaseline; asked again, the
+//            taken as a child's is, or null with a warning when it cannot be
+//            read or the create answered too late; asked again, the
 //            same one, `made` false and no baseline. workerStart({ chain })
 //            starts a worker in it, making nothing. A host that cannot make
 //            one refuses it `chain_unsupported`, final. worktreeLines({

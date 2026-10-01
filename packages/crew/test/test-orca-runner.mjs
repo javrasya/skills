@@ -353,7 +353,8 @@ async function runOne(worker, { script = ONE, orcaPatch = {}, permissionMode = n
   const clock = fakeClock()
   const lines = []
   const stateDir = tmp()
-  const orca = Object.assign(fakeOrca({ worker: (w) => worker({ ...w, clock }), clock, faults, setupLeaves, promptLoss }), orcaPatch)
+  const made = fakeOrca({ worker: (w) => worker({ ...w, clock }), clock, faults, setupLeaves, promptLoss })
+  const orca = Object.assign(made, typeof orcaPatch === 'function' ? orcaPatch(made) : orcaPatch)
   const result = await runScript(script, { host: orca, stateDir, out: (s) => lines.push(s), clock, permissionMode, settings, transcripts: fakeTranscripts(orca) })
   const of = (verb) => orca.calls.filter((c) => c.verb === verb)
   const log = readFileSync(join(stateDir, 'runner.log'), 'utf8').trimEnd().split('\n')
@@ -1063,24 +1064,19 @@ function chainCli(create = () => ({ worktree: { id: `repo::${CHAIN}`, path: CHAI
 
 test("orca-cli: the run's chain worktree is made once, as <runId>-chain from the run's worktree under the repo's setup policy, its baseline taken; asked again, the same one", async () => {
   const { argvs, orca } = chainCli()
-  const baselines = []
-  const onBaseline = (b) => baselines.push(b)
-  assert.deepEqual(await orca.chainWorktree({ runId: 'run_1', onBaseline }), { path: CHAIN, made: true, baseline: ['?? setup.out'], warnings: [] })
+  assert.deepEqual(await orca.chainWorktree({ runId: 'run_1' }), { path: CHAIN, made: true, baseline: ['?? setup.out'], warnings: [] })
   assert.deepEqual(verbsOf(argvs), ['worktree list', 'worktree create', 'terminal close'])
   const create = argvs[1]
   assert.deepEqual([flag(create, '--name'), flag(create, '--parent-worktree'), create.includes('--setup')], ['run_1-chain', 'current', false])
-  assert.deepEqual(baselines, [{ worktree: CHAIN, lines: ['?? setup.out'] }])
   argvs.length = 0
-  assert.deepEqual(await orca.chainWorktree({ runId: 'run_1', onBaseline }), { path: CHAIN, made: false, baseline: null, warnings: [] })
+  assert.deepEqual(await orca.chainWorktree({ runId: 'run_1' }), { path: CHAIN, made: false, baseline: null, warnings: [] })
   assert.deepEqual(verbsOf(argvs), ['worktree list'])
-  assert.equal(baselines.length, 1)
 })
 
 test("orca-cli: a chain create answered too late is taken up as made, with a warning and no baseline, its setup maybe still running", async () => {
   const { orca } = chainCli(() => { throw new OrcaError('call_timeout', 'killed after 120s', 'worktree create') })
-  const baselines = []
-  const r = await orca.chainWorktree({ runId: 'run_1', onBaseline: (b) => baselines.push(b) })
-  assert.deepEqual([r.path, r.made, r.baseline, r.warnings.length, baselines], [CHAIN, true, null, 1, []])
+  const r = await orca.chainWorktree({ runId: 'run_1' })
+  assert.deepEqual([r.path, r.made, r.baseline, r.warnings.length], [CHAIN, true, null, 1])
 })
 
 test("orca-cli: a worker started in the chain runs its terminal there, making and setting no worktree, and a failed start never names the chain as its own", async () => {
@@ -1986,6 +1982,35 @@ test('leftover check: a file still there after the one follow-up is logged, jour
   const told = r.orca.dispatches.get(second.dispatchId).prompt
   assert.match(told, /left by its setup: setup\.out\. These files were left uncommitted in your worktree by an agent before you: tmp\.log\. They are not your work, so never stage or commit them/)
   assert.deepEqual(foldJournal(r.journal).chain.leftovers, ['?? tmp.log'])
+})
+
+test('leftover check: a chain agent still busy with its follow-up past followUpMs is stopped before the next chain agent starts, and what it left is read then', async () => {
+  const r = await runOne(leaving(async (w) => {
+    w.lines.push('?? tmp.log')
+    w.state.onNudge = () => { w.state.idle = false }
+    await submitGood(w)
+  }), { script: TWO_CHAINED, setupLeaves: ['?? setup.out'] })
+  assert.deepEqual(r.result, GOOD)
+  const [first, second] = r.orca.calls.filter((c) => c.verb === 'workerStart')
+  const stop = r.orca.calls.findIndex((c) => c.verb === 'workerStop' && c.dispatchId === first.dispatchId)
+  assert.ok(stop >= 0 && stop < r.orca.calls.indexOf(second), 'the busy agent is stopped before the next one starts in its worktree')
+  assert.ok(r.log.some((l) => l.includes('[Implement] impl:#1: still busy with its follow-up after 10 minutes; stopping it')), r.log.join('\n'))
+  assert.deepEqual(ofType(r.journal, 'leftover').map((e) => e.lines), [['?? tmp.log']])
+})
+
+test('sequential run: a chain the host made with no baseline (its create answered too late) is journaled all the same, and no chain agent is told to remove what its setup left', async () => {
+  const r = await runOne(submitGood, {
+    script: TWO_CHAINED, setupLeaves: ['?? setup.out'],
+    orcaPatch: (orca) => {
+      const made = orca.chainWorktree
+      return { chainWorktree: async ({ runId }) => ({ ...(await made({ runId })), baseline: null, warnings: ['worktree create answered too late'] }) }
+    },
+  })
+  assert.deepEqual(r.result, GOOD)
+  assert.deepEqual(ofType(r.journal, 'chain').map((e) => [e.worktree, e.lines]), [['C:/fake/worktrees/run_fake1-chain', null]])
+  assert.deepEqual(foldJournal(r.journal).chain, { runId: 'run_fake1', worktree: 'C:/fake/worktrees/run_fake1-chain', baseline: null, leftovers: [] })
+  assert.deepEqual([followUps(r), ofType(r.journal, 'followUp'), ofType(r.journal, 'leftover')], [[], [], []])
+  assert.ok(r.log.some((l) => l.includes('no chain agent is checked for leftovers')), r.log.join('\n'))
 })
 
 test('leftover check: a chain agent that fails gets no follow-up, whatever it left, and its call ends as ever', async () => {

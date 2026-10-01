@@ -519,7 +519,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
 
     // The run's `<runId>-chain`, made as a child is, setup hook and all, the
     // first time it is asked for; the same one, as it is, every time after.
-    async chainWorktree({ runId, onBaseline = null }) {
+    async chainWorktree({ runId }) {
       const name = `${runId}-chain`
       const found = findWorktree(name)
       if (found) return { path: found[0], made: false, baseline: null, warnings: [] }
@@ -527,9 +527,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       const path = `C:/fake/worktrees/${name}`
       worktrees.set(path, { parent: runWorktree, name, displayName: name, removed: false, status: null, porcelain: [...setupLeaves], commits: 0, unpushed: 0, setup: null })
       record({ verb: 'worktreeCreate', name, worktree: path, setup: null })
-      const baseline = [...setupLeaves]
-      await onBaseline?.({ worktree: path, lines: baseline })
-      return { path, made: true, baseline, warnings: [] }
+      return { path, made: true, baseline: [...setupLeaves], warnings: [] }
     },
 
     async worktreeLines({ worktree }) {

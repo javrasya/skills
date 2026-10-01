@@ -17,6 +17,7 @@ import { validate } from './schema.mjs'
 import { slug } from './util.mjs'
 import { sessionTranscripts } from './transcript.mjs'
 import { extraLines } from './git.mjs'
+import { chainEntry } from './journal.mjs'
 import { DOCTOR_NUDGE, doctorContinuePrompt, notePrompt, runMailbox, doctorRounds } from './doctor.mjs'
 
 export { doctorPrompt, notePrompt } from './doctor.mjs'
@@ -208,8 +209,8 @@ export function readResult(resultPath, schema) {
 // Returns life(call), which resolves to the agent's value or null, and throws
 // only if journal or out does. life.chain(call) resolves to the run's chain
 // worktree, the host's chainWorktree answer, in the Run it ensures for call;
-// chainBefore is the chain an earlier runner of the run journaled, { baseline,
-// leftovers }, which a chain the host hands back as it is still holds, and lends its baseline to an unmade one at the same path. life.doctors() resolves once every doctor
+// chainBefore is the chain an earlier runner of the run journaled, as the
+// journal folds it, { runId, worktree, baseline, leftovers }, which a chain the host hands back as it is still holds, and lends its baseline to an unmade one at the same path. life.doctors() resolves once every doctor
 // still out has ended: a patient's agent() never waits on its doctor once its
 // own result is in, so the runner awaits them before it ends.
 export function agentLifecycle({ host, clock, limits, out, stateDir, objective, journal, retainWorktree, onRun = () => {}, takeOver = null, transcripts = sessionTranscripts(), nextN, doctorLaunch = () => ({ harness: 'claude' }), history = () => ({ entries: [], log: [] }), mailHandled = [], mailPending = [], outage = { lost: () => 0, sleep: (ms) => clock.sleep(ms) }, chainBefore = null }) {
@@ -627,7 +628,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
           const w = await host.workerStart({
             run: runId,
             asking: asking(call),
-            prompt: patient != null ? prompt : (baseline) => (sent = workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline: baseline ?? (chain ? chainBase : null), leftovers: chain ? chainLeft : [], note: again?.note ?? null })),
+            prompt: patient != null ? prompt : (baseline) => (sent = workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline: baseline ?? (chain ? chainState?.baseline ?? null : null), leftovers: chain ? chainState?.leftovers ?? [] : [], note: again?.note ?? null })),
             title,
             ...launch,
             sessionId,
@@ -890,8 +891,9 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
     const { adopt, held, isolated, chained = false, launch } = call
     if (!adopt) {
       const made = held.restart?.made ?? []
-      // A chained patient made none: it was to start in the run's chain.
-      const chainPath = chained ? (await life.chain(call).catch(() => null))?.path ?? null : null
+      // A chained patient made none: it was to start in the run's chain, as
+      // journaled; never asked of the host, which may make it again.
+      const chainPath = chained ? chainState?.worktree ?? null : null
       // Its worker may have run in that worktree before its start failed: a
       // retry judges it against its baseline.
       return {
@@ -965,24 +967,27 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
   }
 
   // The run's chain worktree (ADR-0020), asked of the host once per runner
-  // however many calls ask at once, its baseline journaled when the host
-  // makes it; one that failed is asked for again by the next call, and so is
-  // any with `recheck`, which a halted node carries on in. One the host
-  // hands back unmade has the baseline journaled when it was made.
+  // however many calls ask at once, and journaled whenever the host made it,
+  // with its baseline or none; one that failed is asked for again by the
+  // next call, and so is any with `recheck`, which a halted node carries on
+  // in. One the host hands back unmade has the baseline journaled when it was made.
   let chain = null
-  // What the chain holds that no agent starting in it owns: its baseline, and
-  // every file an agent before left there past its follow-up.
-  let chainBase = chainBefore?.baseline ?? null
-  let chainLeft = chainBefore?.leftovers ?? []
-  let chainAt = chainBefore?.worktree ?? null
+  // The chain as the journal folds it, { runId, worktree, baseline,
+  // leftovers }: what it holds that no agent starting in it owns, its
+  // baseline and every file an agent before left there past its follow-up.
+  let chainState = chainBefore
   life.chain = (call, { recheck = false } = {}) => {
     if (recheck) chain = null
     const making = (chain ??= ensureRun(call)
-      .then(({ runId }) => host.chainWorktree({ runId, onBaseline: ({ worktree, lines }) => journal({ type: 'chain', runId, worktree, lines }) }))
-      .then((c) => {
+      .then(async ({ runId }) => ({ runId, c: await host.chainWorktree({ runId }) }))
+      .then(({ runId, c }) => {
         for (const why of c.warnings ?? []) warn(call, why)
-        if (c.made) [chainBase, chainLeft, chainAt] = [c.baseline, [], c.path]
-        return c.made || c.baseline ? c : { ...c, baseline: chainAt === c.path ? chainBase : null }
+        if (c.made) {
+          chainState = { runId, worktree: c.path, baseline: c.baseline, leftovers: [] }
+          journal(chainEntry(chainState))
+          if (!c.baseline) warn(call, 'the chain worktree was made with no baseline, its setup maybe still running, so no chain agent is checked for leftovers')
+        }
+        return c.made || c.baseline ? c : { ...c, baseline: chainState?.worktree === c.path ? chainState.baseline : null }
       }))
     return making.catch((e) => {
       if (chain === making) chain = null
@@ -998,8 +1003,9 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
   async function leftoverCheck(call, w, sessionId, { stopped }) {
     const { key, n, title } = call
     const worktree = w.worktree
-    if (!worktree) return
-    const extra = async () => extraLines(await host.worktreeLines({ worktree }), [...(chainBase ?? []), ...chainLeft])
+    // With no baseline an agent's leftovers cannot be told from its setup's.
+    if (!worktree || !chainState?.baseline) return
+    const extra = async () => extraLines(await host.worktreeLines({ worktree }), [...chainState.baseline, ...chainState.leftovers])
     let left
     try {
       left = await extra()
@@ -1011,7 +1017,11 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
       journal({ type: 'followUp', key, n, title, worktree, lines: left })
       out(`>> ${title}: it left ${fileNames(left)} uncommitted in the chain worktree; asking it once to commit or remove them`)
       try {
-        if (!(await followUp(call, w, sessionId, leftoverPrompt(left)))) out(`!! ${title}: still busy with its follow-up after ${mins(limits.followUpMs)} minutes; its leftovers are read as they stand`)
+        // One still busy is stopped: the next chain agent starts in its worktree.
+        if (!(await followUp(call, w, sessionId, leftoverPrompt(left)))) {
+          out(`!! ${title}: still busy with its follow-up after ${mins(limits.followUpMs)} minutes; stopping it, and reading its leftovers as they stand`)
+          await host.workerStop({ dispatch: w.dispatchId })
+        }
         left = await extra()
       } catch (e) {
         out(`!! ${title}: its follow-up did not run: ${e?.message ?? e}`)
@@ -1020,7 +1030,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
     }
     journal({ type: 'leftover', key, n, title, worktree, lines: left })
     out(`!! ${title}: left ${fileNames(left)} uncommitted in the chain worktree${stopped ? '' : ' after its follow-up'}; every later chain agent is told never to commit them`)
-    chainLeft = [...new Set([...chainLeft, ...left])]
+    chainState = { ...chainState, leftovers: [...new Set([...chainState.leftovers, ...left])] }
   }
 
   // Types `text` into a returned worker's session and waits, up to

@@ -4,7 +4,7 @@
 // in this file. fake-orca.mjs implements the same interface, offline.
 import { execFile } from 'child_process'
 import { RUNNER_SETTINGS } from './settings.mjs'
-import { gitProbes, prepareChildWorktree, reuseWorktree, worktreeLines } from './worktree.mjs'
+import { gitProbes, prepareChainWorktree, prepareChildWorktree, reuseWorktree, worktreeLines } from './worktree.mjs'
 import { sessionTranscripts } from './transcript.mjs'
 import { bounded, execGit, gitIn, realTimer, worktreeName } from './git.mjs'
 import { launchCommand, resumeCommand, SHELL_WORD } from './harness.mjs'
@@ -322,13 +322,13 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
     // only then. Asked again, the one Orca holds under that name, as it is,
     // whoever worked in it last. A create answered too late has no baseline:
     // its setup may still be running.
-    async chainWorktree({ runId, onBaseline = null }) {
+    async chainWorktree({ runId }) {
       const name = `${runId}-chain`
       const found = await findWorktree(name)
       if (found) return { path: found.path, made: false, baseline: null, warnings: [] }
       const warnings = []
       const { path, answered } = await createWorktree(name, null, warnings)
-      const baseline = answered ? await prepareChildWorktree({ project, worktree: path, bound, child: { onBaseline }, warnings, fs }) : null
+      const baseline = answered ? await prepareChainWorktree({ project, worktree: path, bound, warnings, fs }) : null
       return { path, made: true, baseline, warnings }
     },
 

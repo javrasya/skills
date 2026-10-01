@@ -27,7 +27,7 @@ import { childCommand } from './command.mjs'
 import { samePath } from './paths.mjs'
 import { sleep } from './util.mjs'
 import { gitIn, repoOf } from './git.mjs'
-import { gitProbes, prepareChildWorktree, reuseWorktree, worktreeLines } from './worktree.mjs'
+import { gitProbes, prepareChainWorktree, prepareChildWorktree, reuseWorktree, worktreeLines } from './worktree.mjs'
 
 export const CREW_BIN = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url))
 
@@ -417,7 +417,7 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     // worked in it last, so it is never refused as a child's would be. One
     // reclaimed meanwhile is made again, setup hook and all, from the tip of
     // the `<runId>-chain` branch reclaim leaves behind.
-    async chainWorktree({ runId, onBaseline = null }) {
+    async chainWorktree({ runId }) {
       const repo = await repoOf(cwd, bound)
       const name = `${runId}-chain`
       const path = join(crewWorktrees(repo), name)
@@ -429,7 +429,7 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
       const tip = !!(await gitIn(repo, ['branch', '--list', name], bound)).trim()
       await addWorktree(repo, name, path, false, tip)
       const warnings = []
-      const baseline = await prepareChildWorktree({ project, worktree: path, bound, child: { onBaseline }, warnings })
+      const baseline = await prepareChainWorktree({ project, worktree: path, bound, warnings })
       return { path, made: true, baseline, warnings }
     },
 
