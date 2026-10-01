@@ -260,7 +260,7 @@ export function doctorRounds({ limits, journal, out, life, failAgent, nextN, doc
           handed(await remedy(call, failure, { round, doctor, message: m }))
         },
       }
-      const dCall = { schema: null, isolated: true, setup: 'skip', launch: doctorLaunch(), key: null, n: doctor, label: dLabel, title: dTitle, phaseName, patient: origin, patientTitle: title, round, box }
+      const dCall = { schema: null, isolation: 'worktree', setup: 'skip', launch: doctorLaunch(), key: null, n: doctor, label: dLabel, title: dTitle, phaseName, patient: origin, patientTitle: title, round, box }
       let doctoring
       if (!again || again.unlaunched) {
         const { entries, log } = history({ n, origin, title })

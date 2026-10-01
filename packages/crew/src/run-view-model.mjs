@@ -11,8 +11,8 @@ import { basename, dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { sessionTranscripts } from './transcript.mjs'
 import { pathKey, samePath } from './paths.mjs'
-import { agentName, agentsOf, ownWorktree, reclaimAgent, reclaimRun } from './reclaim.mjs'
-import { foldJournal, journalLines, timeOf } from './journal.mjs'
+import { agentName, agentsOf, chainAgent, reclaimAgent, reclaimChainAfter, reclaimRun, runWorktree } from './reclaim.mjs'
+import { foldJournal, journalLines, readJournal, timeOf } from './journal.mjs'
 import { REGISTRY_PATH, readRegistry, runRegistry } from './registry.mjs'
 import { worktreeUnpushed } from './git.mjs'
 import { hostUnreachable } from './session-host.mjs'
@@ -82,7 +82,7 @@ export function runnerPid(stateDir) {
 }
 
 // The one rule for whether a run's runner is alive, in both modes: the attached
-// header, and the standalone row, its r and its R, all read this. It is whether
+// header, and the standalone row, its Ctrl+R and its r, all read this. It is whether
 // the process <runDir>/runner.pid names is alive. The runner's tab outlives it
 // (no `; exit`), so an open tab says nothing. false with no runner.pid, or one
 // naming a gone process; null when it cannot be told (no run dir, a runner.pid
@@ -177,7 +177,7 @@ function latestEvent(path) {
 //           the line naming each one, its tab and what it waits on (a
 //           doctor's escalation, its reason), which the flash line keeps over
 //           `latest` until it is answered; else null
-//   dialog  null, or what `r` opened, which takes every key and click until it
+//   dialog  null, or what Ctrl+R opened, which takes every key and click until it
 //           closes (the tree keeps refreshing behind it):
 //           { kind: 'choose', title, options: [{ id, label, detail, disabled, reason }], highlight }
 //             the reclaim dialog, its options in RECLAIM_OPTIONS order and
@@ -189,8 +189,9 @@ function latestEvent(path) {
 // waiting, nextAt, workerLeft, patient, round, doctors, tabOpen, reclaimed, context, band, tokens,
 // elapsedMs, transcript }. state is one of STATES: reclaimed once the registry
 // records it so, whatever it was before. worktree
-// is only ever one named `<runId>-<n>`: any other, the run's own checkout
-// included, is the operator's and never shown. tabOpen
+// is only ever one named `<runId>-<n>`, or a sequential run's `<runId>-chain`
+// its agents share: any other, the run's own checkout included, is the
+// operator's and never shown. tabOpen
 // is whether Orca's terminal list shows its tab, never what its worker's
 // state says: Orca marks every tab the runner launched retained for good. It
 // is null when the agent has no tab or the list could not be read. context,
@@ -201,10 +202,10 @@ function latestEvent(path) {
 // transcripts (transcript.mjs); registry is the run registry's path, or null;
 // unpushed(path) counts a worktree's unpushed commits; alive(stateDir) says
 // whether the runner lives (runnerAlive), header.alive being null when it
-// cannot say. resumeHost(): attached, what R does during an outage: it asks
+// cannot say. resumeHost(): attached, what r does during an outage: it asks
 // the runner to probe Orca at once. While an outage is under way, Enter on an
-// agent, l and r say HOST_GONE and ask Orca nothing; an agent keeps its state.
-// resumeHalted(node): attached, what R does on a halted run with no outage:
+// agent, l and Ctrl+R say HOST_GONE and ask Orca nothing; an agent keeps its state.
+// resumeHalted(node): attached, what r does on a halted run with no outage:
 // it asks the runner to resume that node, or with null every held one.
 // Enter on an agent, or a click, brings its tab to the front (focus), except
 // on a host whose sessions are entered in place (host.inPlace, crew): there it
@@ -223,6 +224,9 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   let phases = []
   // The superseded attempts: no row, but Reclaim All's.
   let superseded = []
+  // A sequential run's chain worktree, as the journal names it: Reclaim All's
+  // alone (ADR-0020), and null once the registry records it reclaimed.
+  let chain = null
   let header = null
   let selectedKey = null
   let selected = 0
@@ -232,8 +236,8 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   let latest = null
   let alert = null
   let logTab = null
-  // null, { kind: 'choose', highlight }, or { kind: 'confirm', n, title,
-  // lines, confirm, queue }: queue holds the confirmations still to ask after
+  // null, { kind: 'choose', highlight }, or { kind: 'confirm', n, chain, title,
+  // lines, confirm, queue }, chain true when it confirms the chain worktree's: queue holds the confirmations still to ask after
   // this one, each a reclaim's answer.
   let dialog = null
   let halt = null
@@ -307,6 +311,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
         run = (runId && runs.find((r) => r.runId === runId)) || runs.filter((r) => samePath(r.runDir, stateDir)).at(-1) || null
       } catch {}
     }
+    chain = fold.chain && !run?.reclaimed && !run?.chainReclaimed ? fold.chain : null
     let open = null
     if (every.some((a) => a.terminal)) {
       try {
@@ -319,7 +324,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
       const reclaimed = !!a.runId && (run?.reclaimed === true || reclaimedNames.has(agentName(a)))
       Object.assign(a, {
         ...(reclaimed && { state: 'reclaimed' }),
-        worktree: ownWorktree(a),
+        worktree: runWorktree(a),
         tabOpen: a.terminal && open ? open.has(a.terminal) : null,
         reclaimed,
         context: usage?.context ?? null,
@@ -506,6 +511,22 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     return { ...say(`reclaimed ${what}${withDoctors(r ? doctors.reclaimed.length : 0)}${notes.length ? `; ${notes.join('; ')}` : ''}`), reclaim: r, agent: target, ...also }
   }
 
+  // Reclaim All's last step on a sequential run: its chain worktree, by the
+  // one rule for it (reclaimChainAfter), `kept` the agents this reclaim kept,
+  // as `reclaim` answers for an agent.
+  async function reclaimTheChain(kept, { force = false } = {}) {
+    const target = chainAgent(chain)
+    let r
+    try {
+      r = await reclaimChainAfter(kept, chain, { host, journaled: agentsOf(journalPath), unpushed, force, registry: registry && runRegistry(registry, clock) })
+    } catch (e) {
+      r = { reclaimed: false, reason: e?.message ?? String(e) }
+    }
+    if (!r.reclaimed) return { ...say(r.unreachable ? HOST_GONE : `kept ${target.title}: ${r.reason}`), reclaim: r, agent: target }
+    await refresh()
+    return { ...say(`reclaimed ${target.title}${r.notes.length ? `; ${r.notes.join('; ')}` : ''}`), reclaim: r, agent: target }
+  }
+
   // The confirmation a refused reclaim `res` asks for, as the dialog, or null:
   // `f` stops the worker of an agent kept running when it failed (stop), or
   // removes a worktree that holds unpushed commits (force). `confirmed` is
@@ -514,7 +535,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   function confirmationOf(res, confirmed = {}) {
     const r = res?.reclaim
     if (!res?.agent || !r || r.reclaimed) return null
-    const about = { kind: 'confirm', n: res.agent.n, title: `Reclaim ${res.agent.title}?` }
+    const about = { kind: 'confirm', n: res.agent.n, chain: res.agent.chain === true, title: `Reclaim ${res.agent.title}?` }
     if (r.stoppable && !confirmed.stop) return { ...about, confirm: { ...confirmed, stop: true }, lines: [r.reason, '', 'f = stop its worker, then reclaim it · any other key cancels'] }
     if (r.unpushed > 0 && !confirmed.force) return { ...about, confirm: { ...confirmed, force: true }, lines: [r.reason, '', 'f = force the reclaim, and those commits are lost · any other key cancels'] }
     return null
@@ -552,7 +573,8 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
       return { ...res, option: option.id }
     }
     const list = chosen(option.id, row)
-    if (!list.length) return { ...say(`${what}: no agent left to reclaim`), option: option.id, reclaimed: [], kept: [] }
+    const withChain = option.id === 'all' && !!chain
+    if (!list.length && !withChain) return { ...say(`${what}: no agent left to reclaim`), option: option.id, reclaimed: [], kept: [] }
     const total = list.reduce((n, a) => n + 1 + doctorsOf(a).length, 0)
     const reclaimed = []
     const kept = []
@@ -568,11 +590,22 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
       if (r) put({ n: a.n, title: a.title }, r)
       for (const { agent, reclaim: dr } of [...doctors.reclaimed, ...doctors.kept]) put(agent, dr)
     }
+    // The chain goes last.
+    let chainGone = null
+    if (withChain) {
+      const res = await reclaimTheChain(kept)
+      if (!res.reclaim.reclaimed) kept.push({ agent: res.agent, reclaim: res.reclaim })
+      else {
+        chainGone = res.agent
+        for (const note of res.reclaim.notes) notes.push(`${res.agent.title}: ${note}`)
+      }
+    }
     if (reclaimed.length) await refresh()
     dialog = nextConfirmation(kept)
     const asked = kept.filter((k) => confirmationOf(k)).length
     const text = kept.some((k) => k.reclaim.unreachable) ? `${HOST_GONE}; reclaimed ${reclaimed.length} of ${total} before it went` : [
       `reclaimed ${reclaimed.length} of ${total} agent${total === 1 ? '' : 's'} of ${what}`,
+      ...(chainGone ? [`removed ${chainGone.title}`] : []),
       ...kept.filter((k) => !confirmationOf(k)).map(({ agent, reclaim: r }) => `kept ${agent.title}: ${r.reason}`),
       ...(asked ? [`${asked} to confirm`] : []),
       ...notes,
@@ -583,13 +616,13 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   // A key while the dialog is open: the tree takes none.
   async function dialogKey(name) {
     if (dialog.kind === 'confirm') {
-      const { n, confirm, queue, title } = dialog
+      const { n, chain: ofChain, confirm, queue, title } = dialog
       dialog = null
       if (name !== 'f') {
         dialog = nextConfirmation(queue)
         return say(`${title.replace(/^Reclaim (.*)\?$/, '$1')}: reclaim cancelled`)
       }
-      const res = await reclaim({ n, ...confirm })
+      const res = ofChain ? await reclaimTheChain([], confirm) : await reclaim({ n, ...confirm })
       const again = confirmationOf(res, confirm)
       dialog = again ? { ...again, queue: [...(res.doctors?.kept ?? []), ...queue] } : nextConfirmation([...(res.doctors?.kept ?? []), ...queue])
       layout()
@@ -667,7 +700,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     }
   }
 
-  // R, attached: the runner probes Orca at once during an outage, and carries
+  // r, attached: the runner probes Orca at once during an outage, and carries
   // on if Orca answers (runner.mjs). Else, on a halted run (ADR-0016), it
   // resumes the selected node when that failed or needs you, or every held
   // node; both go over the one channel to the runner.
@@ -713,14 +746,14 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
         const row = current()
         return row?.kind === 'phase' && !row.phase.folded ? toggle(row.phase) : {}
       }
-      case 'r':
+      case 'CTRL_R':
         if (hostAway()) return say(HOST_GONE)
         dialog = { kind: 'choose', highlight: 0 }
         layout()
         return {}
       case 'l':
         return openLog()
-      case 'R':
+      case 'r':
         return resumeHost || resumeHalted ? askResume() : {}
       case 'q':
         return { quit: true }
@@ -759,13 +792,13 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
 // paused it (an Orca outage past its limit), else null. alive is runnerAlive's answer for its run dir, the rule attached
 // mode's header reads too: whether the process its runner.pid names is alive,
 // never whether its tab is open, since the tab outlives the runner. Just after
-// R, until the new runner has written its own runner.pid, the tab R opened
+// r, until the new runner has written its own runner.pid, the tab r opened
 // counts as the runner while Orca's terminal list shows it. null when it
 // cannot be told. kept counts the agents its journal names that are not reclaimed.
-// closable is whether r may record the whole run reclaimed: only once its
+// closable is whether Ctrl+R may record the whole run reclaimed: only once its
 // runner is known dead, ended or not, since nothing undoes that record and a
-// live runner may start more agents; a dead one starts none, and R refuses a
-// reclaimed run. R resumes a run only when it is resumable: alive being
+// live runner may start more agents; a dead one starts none, and r refuses a
+// reclaimed run. r resumes a run only when it is resumable: alive being
 // false, and the run not reclaimed.
 //
 // Only the registry's runs are listed, so a worktree no run made never is.
@@ -779,7 +812,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
 // renderer enters and closes on leaving it. The rest is as runView's.
 export function runsView({ host, hostOf = () => host, clock = { now: () => Date.now() }, registry = REGISTRY_PATH, transcripts = sessionTranscripts(), unpushed = worktreeUnpushed, alive = runnerAlive, runner = RUNNER_PATH, enter = false, orchestrator = null }) {
   const folds = new Map()
-  // runId -> { host, terminal, pid, starting }: the tab R opened, and the runner.pid
+  // runId -> { host, terminal, pid, starting }: the tab r opened, and the runner.pid
   // its run dir held then. While that file is unchanged the new runner has not
   // written its own, so the tab stands for it; once it has, the pid decides.
   const launched = new Map()
@@ -824,7 +857,7 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
     } catch (e) {
       message = `could not read the run registry ${registry}: ${e?.message ?? e}`
     }
-    // A host's terminal list is read only for a tab R opened on it whose
+    // A host's terminal list is read only for a tab r opened on it whose
     // runner has not written its runner.pid yet.
     const open = new Map()
     for (const name of new Set([...launched.values()].filter((l) => l.starting).map((l) => l.host))) {
@@ -877,7 +910,7 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
     if (!run) return say(`no run ${runId} in the run registry`)
     if (!run.runDir) return say(`${labelOf(run)} has no run directory recorded`)
     // The tree's header asks what the run's row asks, by the same rule.
-    // R reaches the run's runner as a request file it takes (runner.mjs), since
+    // r reaches the run's runner as a request file it takes (runner.mjs), since
     // this tree is no child of it.
     const request = (node) => writeJsonAtomic(join(run.runDir, RESUME_REQUEST), { node: node ?? null })
     opened = { runId, view: runView({ stateDir: run.runDir, host: hostOf(run.host), enter, clock, transcripts, registry, unpushed, resumeHost: () => request(null), resumeHalted: request, alive: () => (recorded.has(runId) ? liveOf(recorded.get(runId), lastOpen) : null), triage: orchestrator ? () => orchestrator.triage(run) : null }) }
@@ -900,7 +933,7 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
     return { folded: project.key }
   }
 
-  // Why the run stays open after a whole-run r, or null when it is closable.
+  // Why the run stays open after a whole-run Ctrl+R, or null when it is closable.
   const openBecause = (run) => (run.alive === true ? 'its runner is alive' : run.alive === null ? 'whether its runner is alive cannot be told' : null)
 
   // Every agent of the run the registry does not already record reclaimed,
@@ -921,11 +954,13 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
     let r
     let left
     try {
-      const done = new Set(readRegistry(registry).find((e) => e.runId === runId)?.reclaimedAgents.map((a) => a.agent) ?? [])
-      left = run.runDir ? agentsOf(join(run.runDir, 'journal.jsonl')).filter((a) => a.runId === runId && !done.has(a.name)) : []
-      const writer = runRegistry(registry, clock)
-      r = await reclaimRun(left, { host: hostOf(run.host), unpushed, registry: writer, closeRun: !stays, out: (s) => notes.push(s.replace(/^!! /, '')) })
-      if (!left.length && !stays) writer.reclaimed({ runId })
+      const entry = readRegistry(registry).find((e) => e.runId === runId)
+      const done = new Set(entry?.reclaimedAgents.map((a) => a.agent) ?? [])
+      const journaled = run.runDir ? agentsOf(join(run.runDir, 'journal.jsonl')).filter((a) => a.runId === runId) : []
+      left = journaled.filter((a) => !done.has(a.name))
+      const ran = run.runDir ? readJournal(join(run.runDir, 'journal.jsonl')).chain : null
+      const chain = ran?.runId === runId && !entry?.chainReclaimed ? ran : null
+      r = await reclaimRun(left, { host: hostOf(run.host), unpushed, registry: runRegistry(registry, clock), closeRun: !stays, runId, chain, journaled, out: (s) => notes.push(s.replace(/^!! /, '')) })
     } catch (e) {
       return say(`could not reclaim ${label}: ${e?.message ?? e}`)
     }
@@ -951,11 +986,11 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
     if (run.reclaimed) return say(`${label} is reclaimed: its agents are gone and the registry closed it, so there is nothing to resume`)
     if (run.alive === true && run.paused) {
       const host = run.paused.reason === 'crew outage' ? 'crew' : 'Orca'
-      return say(`${label}'s runner is alive and paused on ${host === 'crew' ? 'a' : 'an'} ${host} outage: it carries on by itself once ${host} is back, and R in its ${run.host === 'crew' ? 'tree' : where(run)} probes ${host} at once`)
+      return say(`${label}'s runner is alive and paused on ${host === 'crew' ? 'a' : 'an'} ${host} outage: it carries on by itself once ${host} is back, and r in its ${run.host === 'crew' ? 'tree' : where(run)} probes ${host} at once`)
     }
-    if (run.alive === true && run.outcome === 'halted') return say(run.host === 'crew' ? `${label}'s runner is alive and halted: open its tree and press R there to resume it` : `${label}'s runner is alive and halted, in ${where(run)}: R there resumes it`)
+    if (run.alive === true && run.outcome === 'halted') return say(run.host === 'crew' ? `${label}'s runner is alive and halted: open its tree and press r there to resume it` : `${label}'s runner is alive and halted, in ${where(run)}: r there resumes it`)
     if (run.alive === true) return say(run.host === 'crew' ? `${label}'s runner is alive: nothing to resume` : `${label}'s runner is alive, in ${where(run)}: nothing to resume`)
-    if (run.alive === null) return say(`could not tell whether ${label}'s runner is alive: its runner.pid, or Orca's list of the tab R opened, did not answer`)
+    if (run.alive === null) return say(`could not tell whether ${label}'s runner is alive: its runner.pid, or Orca's list of the tab r opened, did not answer`)
     if (!run.project || !run.runDir) return say(`${label} has no ${run.project ? 'run directory' : 'worktree'} recorded to resume in`)
     // A run armed before the registry named its script was launched by the
     // skill, whose state dir is orca-run/ beside the rendered workflow.js.
@@ -988,17 +1023,17 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
   }
 
   // Key names as terminal-kit gives them. With a run open its tree takes the
-  // keys, except R, and q or Escape, which go back to the list, unless its
+  // keys, except r, and q or Escape, which go back to the list, unless its
   // dialog is open, which takes every key; q on the list returns { quit }.
   async function key(name) {
     if (opened) {
       if (opened.view.model?.dialog) return opened.view.key(name)
       if (name === 'q' || name === 'ESCAPE' || name === 'LEFT') return close()
-      if (name === 'R') {
+      if (name === 'r') {
         // A live runner that is halted or paused is resumed from its tree,
         // through its request file; a dead one gets a new runner.
         const run = runOf(opened.runId)
-        return run?.alive === true && (run.paused || run.outcome === 'halted') ? opened.view.key('R') : resume()
+        return run?.alive === true && (run.paused || run.outcome === 'halted') ? opened.view.key('r') : resume()
       }
       if (name === '?') return consult()
       return opened.view.key(name)
@@ -1026,9 +1061,9 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
         const row = current()
         return row?.kind === 'project' && !row.project.folded ? toggle(row.project) : {}
       }
-      case 'r':
+      case 'CTRL_R':
         return reclaim()
-      case 'R':
+      case 'r':
         return resume()
       case 'q':
         return { quit: true }

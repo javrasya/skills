@@ -1,0 +1,2 @@
+# Dependencies, installed or linked in from another checkout: no trailing slash, so a symlink is ignored too.
+node_modules

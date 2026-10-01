@@ -114,7 +114,12 @@ test('daemon: with none running, a crew command starts one that outlives its ter
 test('daemon: run and view start it too, before their own work', async () => {
   const { paths, crew } = scratch()
   const view = crew('view')
-  assert.equal(view.status, 2, 'the view\'s own usage error')
+  assert.equal(view.status, 3, 'the view\'s own refusal: it needs a terminal')
+  // Bare `crew view` is the runs list now, so a second run named is the usage error.
+  const usage = crew('view', 'one', 'two')
+  assert.equal(usage.status, 2, 'the view\'s own usage error')
+  const attached = crew('view', '--attached')
+  assert.equal(attached.status, 2, 'the view\'s own usage error')
   assert.ok(await daemonHello(paths))
   assert.equal(crew('--help').status, 0)
 })
@@ -310,10 +315,10 @@ test('daemon: one that died with a run live is followed by one that starts its r
   }
 })
 
-// The run list asks nothing of crew until R: with the daemon down, its R is the
+// The run list asks nothing of crew until r: with the daemon down, its r is the
 // call that starts the daemon, whose recovery starts the run's runner. The run
-// still gets one runner, and R tells why it started none.
-test('daemon: R on a run whose runner died with the daemon, starting the daemon, leaves the run one runner, the recovered one', async () => {
+// still gets one runner, and r tells why it started none.
+test('daemon: r on a run whose runner died with the daemon, starting the daemon, leaves the run one runner, the recovered one', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
   const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
   homes.push(paths)
@@ -353,10 +358,10 @@ test('daemon: R on a run whose runner died with the daemon, starting the daemon,
     assert.equal(recovered.title, 'crew run workflow.js', "crew's own, recovering it")
     assert.match(refused.message, new RegExp(`could not resume the-spec .*: run_live: .* has its runner already, in crew session ${recovered.id}`))
     assert.equal(refused.resumed, undefined)
-    // The recovered runner has not written its runner.pid yet: R still starts none.
+    // The recovered runner has not written its runner.pid yet: r still starts none.
     assert.match((await runs.resume(run.id)).message, new RegExp(`run_live: .* has its runner already, in crew session ${recovered.id}`))
     assert.equal((await runners()).length, 1)
-    // Once it ends, R starts the run's runner, and the next R, from another list, none.
+    // Once it ends, r starts the run's runner, and the next r, from another list, none.
     await request(paths, { op: 'session.kill', id: recovered.id })
     const resumed = await runs.resume(run.id)
     assert.ok(resumed.resumed, resumed.message)

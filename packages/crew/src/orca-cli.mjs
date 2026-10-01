@@ -4,9 +4,9 @@
 // in this file. fake-orca.mjs implements the same interface, offline.
 import { execFile } from 'child_process'
 import { RUNNER_SETTINGS } from './settings.mjs'
-import { gitProbes, prepareChildWorktree, reuseWorktree } from './worktree.mjs'
+import { gitProbes, prepareChainWorktree, prepareWorktree, reuseWorktree, worktreeLines } from './worktree.mjs'
 import { sessionTranscripts } from './transcript.mjs'
-import { bounded, execGit, gitIn, realTimer, worktreeName } from './git.mjs'
+import { bounded, chainName, execGit, gitIn, realTimer, worktreeName } from './git.mjs'
 import { launchCommand, resumeCommand, SHELL_WORD } from './harness.mjs'
 import { runnerArgs } from './daemon/runs.mjs'
 
@@ -203,6 +203,34 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
     })
   }
 
+  // `worktree create` of `name` from the run's worktree: its path, and whether
+  // Orca answered in time. Without `setup` Orca follows the repo's setup
+  // policy; 'skip' skips the repo's setup hook (a doctor's worktree).
+  async function createWorktree(name, setup, warnings) {
+    let c
+    try {
+      c = await orca(['worktree', 'create', '--name', name, '--parent-worktree', 'current', ...(setup ? ['--setup', setup] : [])], Math.max(0, createMs - callMs))
+    } catch (e) {
+      // A create Orca finishes after its answer timed out still leaves the
+      // worktree, and a retry would find it; looked up now, it costs no attempt.
+      if (e?.code !== 'call_timeout') throw e
+      return { path: afterCreateTimeout(e, (await findWorktree(name).catch(() => null))?.path ?? null, warnings), answered: false }
+    }
+    const path = createdPath(c)
+    if (!path) throw new OrcaError('bad_output', `worktree create named no path for ${name}`, 'worktree create')
+    // Orca opens a plain shell in a new worktree; the agent gets its own.
+    if (c?.startupTerminal?.handle) await closeQuietly(c.startupTerminal.handle)
+    // A name Orca suffixed means a worktree of this name already exists
+    // that the lookup did not take up. Both are named on the error so
+    // both are retained. Final: a retry would look the name up and create
+    // again, and each create that misses makes one more <name>-3, -4…
+    if (worktreeName(path) !== name) {
+      const earlier = path.slice(0, path.length - worktreeName(path).length) + name
+      throw Object.assign(new OrcaError('worktree_name_taken', `asked for ${name}, Orca made ${worktreeName(path)}: a worktree named ${name} already exists`, 'worktree create'), { worktree: path, worktrees: [path, earlier], final: true })
+    }
+    return { path, answered: true }
+  }
+
   async function workerShow({ dispatch }) {
     return workerStatus(await orca(['orchestration', 'worker-show', '--dispatch', dispatch]))
   }
@@ -238,7 +266,9 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
     // or null. A child this attempt creates has its own taken before its
     // terminal opens, and handed to `child.onBaseline({ worktree, lines })`.
     // `prompt` may be a function of the child's baseline (null without one).
-    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null }) {
+    // `chain`, chainWorktree's path: the worker runs in the run's chain
+    // worktree, which is never this start's to make, set or name on its error.
+    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null, chain = null }) {
       if (!sessionId) throw new Error(`workerStart: ${title} has no session id; the runner assigns one to every worker`)
       const command = launchCommand({ harness, model, effort, permissionMode, sessionId })
       // Orca's documented route for custom argv under supervision: create the
@@ -247,39 +277,14 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       // names. With it, a process already running cannot be moved into a
       // worktree worker-start makes, so the child is made first, the terminal
       // opens in it, and worker-start is told that is where it runs.
-      let worktree = null
-      let place = ['--worktree', 'current']
-      let terminalIn = []
+      let worktree = chain
+      let place = chain ? ['--worktree', `path:${chain}`] : ['--worktree', 'current']
+      let terminalIn = chain ? place : []
       const warnings = []
-      let c = null
+      let answered = false
       if (child) {
         worktree = child.retry ? await earlierWorktree(child.name, child.dispatched, child.baseline ?? null) : null
-        if (!worktree) {
-          // A create Orca finishes after its answer timed out still leaves the
-          // worktree, and a retry would find it; looked up now, it costs no attempt.
-          // `setup: 'skip'` skips the repo's setup hook (a doctor's worktree);
-          // without it Orca follows the repo's setup policy.
-          try {
-            c = await orca(['worktree', 'create', '--name', child.name, '--parent-worktree', 'current', ...(child.setup ? ['--setup', child.setup] : [])], Math.max(0, createMs - callMs))
-          } catch (e) {
-            if (e?.code !== 'call_timeout') throw e
-            worktree = afterCreateTimeout(e, (await findWorktree(child.name).catch(() => null))?.path ?? null, warnings)
-          }
-        }
-        if (c) {
-          worktree = createdPath(c)
-          if (!worktree) throw new OrcaError('bad_output', `worktree create named no path for ${child.name}`, 'worktree create')
-          // Orca opens a plain shell in a new worktree; the agent gets its own.
-          if (c?.startupTerminal?.handle) await closeQuietly(c.startupTerminal.handle)
-          // A name Orca suffixed means a worktree of this name already exists
-          // that the lookup did not take up. Both are named on the error so
-          // both are retained. Final: a retry would look the name up and create
-          // again, and each create that misses makes one more <name>-3, -4…
-          if (worktreeName(worktree) !== child.name) {
-            const earlier = worktree.slice(0, worktree.length - worktreeName(worktree).length) + child.name
-            throw Object.assign(new OrcaError('worktree_name_taken', `asked for ${child.name}, Orca made ${worktreeName(worktree)}: a worktree named ${child.name} already exists`, 'worktree create'), { worktree, worktrees: [worktree, earlier], final: true })
-          }
-        }
+        if (!worktree) ({ path: worktree, answered } = await createWorktree(child.name, child.setup, warnings))
         place = terminalIn = ['--worktree', `path:${worktree}`]
         // worktree create has no --display-name. Cosmetic: the start goes on.
         try {
@@ -294,7 +299,7 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       try {
         // Only a create answered in time: one looked up after its timeout may
         // still be running its setup, so its lines are no baseline.
-        if (c) baseline = await prepareChildWorktree({ project, worktree, bound, child, warnings, fs })
+        if (answered) baseline = await prepareWorktree({ project, worktree, bound, onBaseline: child.onBaseline, warnings, fs })
         const t = await orca(['terminal', 'create', ...terminalIn, '--title', title, '--command', command])
         handle = t.terminal.handle
         await waitIdle(handle, command)
@@ -306,11 +311,31 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       } catch (e) {
         if (handle) await closeQuietly(handle)
         // The caller names a worktree made for a worker that never started.
-        if (worktree && e instanceof Object) e.worktree = worktree
+        if (child && worktree && e instanceof Object) e.worktree = worktree
         if (dispatching && e instanceof Object) e.dispatched = true
         throw e
       }
     },
+
+    // chainName(runId) beside the run's `<runId>-<n>` worktrees, made as they
+    // are, from the run's worktree (`--parent-worktree current`, its HEAD,
+    // session-host.mjs), with no --setup, so Orca applies the repo's setup
+    // policy then and only then. Asked again, the one Orca holds under that
+    // name, as it is, whoever worked in it last; one reclaimed meanwhile is
+    // made again the same way. A create answered too late has no baseline:
+    // its setup may still be running.
+    async chainWorktree({ runId }) {
+      const name = chainName(runId)
+      const found = await findWorktree(name)
+      if (found) return { path: found.path, made: false, baseline: null, warnings: [] }
+      const warnings = []
+      const { path, answered } = await createWorktree(name, null, warnings)
+      const baseline = answered ? await prepareChainWorktree({ project, worktree: path, bound, warnings, fs }) : null
+      return { path, made: true, baseline, warnings }
+    },
+
+    // Git's to say, as a child's baseline is: Orca's worktrees are on this machine.
+    worktreeLines: ({ worktree }) => worktreeLines(worktree, bound),
 
     // Board status of a worktree the runner created, by path: todo,
     // in-progress, in-review or completed.

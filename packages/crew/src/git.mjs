@@ -52,6 +52,19 @@ export const porcelainLines = (text) => String(text ?? '').split('\n').map((l) =
 // Whether a worktree's porcelain lines are its baseline's, in any order.
 export const sameLines = (lines, baseline) => lines.length === baseline.length && [...lines].sort().join('\n') === [...baseline].sort().join('\n')
 
+// A worktree's porcelain lines that none of `known` is: what it holds beyond them.
+export const extraLines = (lines, known) => {
+  const had = new Set(known)
+  return lines.filter((l) => !had.has(l))
+}
+
+// The paths a worktree's porcelain lines name: each line's two status columns
+// and the space after them dropped.
+export const porcelainPaths = (lines) => lines.map((l) => l.slice(3))
+
+// `known` with every line of `lines` it lacks added, each line once.
+export const unionLines = (known, lines) => [...new Set([...known, ...lines])]
+
 // Commits on a worktree's branch that no other branch and no remote holds:
 // work of its own, which a retry never takes a worktree over with.
 export async function worktreeOwnCommits(path, branch, bound) {
@@ -71,6 +84,13 @@ export async function worktreeUnpushed(path, bound) {
 // -2, -3… when that name was taken. Every reader of a worktree's name takes
 // it from here, so the `<runId>-` ownership rule reads one name.
 export const worktreeName = (path) => String(path).split(/[\\/]/).pop()
+
+// The names a run gives its worktrees, built here and nowhere else: an
+// agent's own `<runId>-<n>`, n the origin of the call that started it, which
+// is also the agent's identity in the run registry; and a sequential run's one
+// chain worktree (ADR-0020), which is the run's, never one agent's.
+export const agentId = (runId, origin) => `${runId}-${origin}`
+export const chainName = (runId) => `${runId}-chain`
 
 // A program's exit, never a rejection: { code, stdout, stderr }, code null
 // when it could not start at all (not installed). The probes `crew start`

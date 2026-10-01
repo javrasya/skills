@@ -1,7 +1,7 @@
 // A halted run (ADR-0016): a node that failed, or whose result needs decisions
 // only the operator can make, is held, never handed to the script as null or
 // as that result, and the run halts. While it is halted every new agent() call
-// but an in-flight one (opts.inFlight) is held too, not started. R resumes a
+// but an in-flight one (opts.inFlight) is held too, not started. r resumes a
 // held node, or every one; once no failed or needs-decision node is left, the
 // run leaves halted and releases every held call, in call order. The runner
 // (runner.mjs) decides what is held and how a node is resumed; this is only
@@ -17,12 +17,12 @@
 //   on()             whether the run is halted
 //   hold(node)       holds a node: { node, title, needsDecision, reason,
 //                    questions? };
-//                    resolves once R resumes it, which the caller then does
+//                    resolves once r resumes it, which the caller then does
 //   settle(node)     a held node succeeded: the run leaves halted once none
 //                    is left, and every held call goes on
 //   gate(call)       for a new call: null while the run is not halted, else a
 //                    promise that resolves once it is released
-//   resume(node)     R: resumes that held node, or with none every one not
+//   resume(node)     r: resumes that held node, or with none every one not
 //                    already being resumed; { resumed: [node…] }
 //   nodes()          every held node's name, in the order they were held
 // }
@@ -43,7 +43,7 @@ export function runHalt({ journal, out, record = () => {}, runId = () => null, o
         journal({ type: 'halted', node, reason })
         if (runId()) record('halted', { runId: runId(), node, reason })
       }
-      out(`!!!!!!!! HALTED: ${node} ${needsDecision ? 'needs decisions only you can make' : 'failed'}: ${reason}; R to resume`)
+      out(`!!!!!!!! HALTED: ${node} ${needsDecision ? 'needs decisions only you can make' : 'failed'}: ${reason}; r to resume`)
       onHalt({ node, nodes: [...held.keys()] })
       changed()
     })
@@ -69,15 +69,15 @@ export function runHalt({ journal, out, record = () => {}, runId = () => null, o
 
   function resume(node = null) {
     if (!on) {
-      out('>> R: the run is not halted: nothing to resume')
+      out('>> r: the run is not halted: nothing to resume')
       return { resumed: [] }
     }
     const targets = node ? [held.get(node)].filter(Boolean) : [...held.values()]
     const ready = targets.filter((t) => !t.resuming)
-    if (!ready.length) out(node && !held.has(node) ? `>> R: ${node} is not held: nothing to resume` : '>> R: every held node is already being resumed')
+    if (!ready.length) out(node && !held.has(node) ? `>> r: ${node} is not held: nothing to resume` : '>> r: every held node is already being resumed')
     for (const t of ready) {
       t.resuming = true
-      out(`>> R: resuming ${t.node}`)
+      out(`>> r: resuming ${t.node}`)
       t.go()
     }
     return { resumed: ready.map((t) => t.node) }
@@ -86,6 +86,6 @@ export function runHalt({ journal, out, record = () => {}, runId = () => null, o
   return { on: () => on, hold, settle, gate, resume, nodes: () => [...held.keys()] }
 }
 
-// The file the tree's R writes in a run's state dir for its runner to take
+// The file the tree's r writes in a run's state dir for its runner to take
 // (runner.mjs watchResumeRequests): { node }, null for every held node.
 export const RESUME_REQUEST = 'resume-request.json'

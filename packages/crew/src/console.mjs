@@ -106,7 +106,7 @@ export function keyNames(text) {
       i += csi[0].length
     } else {
       const ch = rest[0]
-      keys.push(ch === '\r' || ch === '\n' ? 'ENTER' : ch === '\x1b' ? 'ESCAPE' : ch === '\x03' ? 'CTRL_C' : ch === '\x7f' || ch === '\b' ? 'BACKSPACE' : ch === '\t' ? 'TAB' : ch)
+      keys.push(ch === '\r' || ch === '\n' ? 'ENTER' : ch === '\x1b' ? 'ESCAPE' : ch === '\x03' ? 'CTRL_C' : ch === '\x12' ? 'CTRL_R' : ch === '\x7f' || ch === '\b' ? 'BACKSPACE' : ch === '\t' ? 'TAB' : ch)
       i += 1
     }
   }

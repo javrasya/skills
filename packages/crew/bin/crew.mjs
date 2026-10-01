@@ -6,7 +6,7 @@
 //                     session of the daemon's, entered from the run console
 //                     (`crew view <run dir>`, the dir it prints);
 //                     on orca it is this process, in the operator's Orca tab
-//   crew start <spec#> [--harness h] [--model m] [--base b] [--stack-mode s] [--permission-mode p]
+//   crew start <spec#> [--harness h] [--model m] [--base b] [--stack-mode s] [--run-order o] [--permission-mode p]
 //                     arms a run of the implement-spec workflow from a form,
 //                     each row a flag (every one of them with no terminal),
 //                     and launches it as `crew run` does; a spec with no
@@ -69,7 +69,7 @@ import { sleep } from '../src/util.mjs'
 
 const USAGE = [
   'usage: crew run [--host <host>] <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]',
-  '       crew start <spec#> [--harness claude|pi] [--model <m>] [--base <branch>] [--stack-mode native|install|chain] [--permission-mode <mode>]',
+  '       crew start <spec#> [--harness claude|pi] [--model <m>] [--base <branch>] [--stack-mode native|install|chain] [--run-order parallel|sequential] [--permission-mode <mode>]',
   '       crew ls [--registry <run registry, for a fixture>]',
   '       crew [view [<run id or run dir>] [--registry <run registry, for a fixture>]]  (no run: the runs list)',
   '       crew view --attached <run-dir> | --standalone [--registry <run registry, for a fixture>]',
@@ -216,8 +216,9 @@ async function ls(args) {
 // which its runner records once it has started; 0 for a run already there.
 // With no run named, the console opens on the runs list rather than a tree.
 async function view(args, { waitMs = 0 } = {}) {
+  // Before any of its own checks, as `crew run` does: a view that bails still leaves the daemon up.
+  await daemonAnyway()
   if (['--attached', '--standalone'].includes(args[0])) {
-    await daemonAnyway()
     return launch(entry('../src/run-view/view.mjs'), args)
   }
   const { registry, rest } = registryOf(args, 'crew view')
@@ -244,7 +245,6 @@ async function view(args, { waitMs = 0 } = {}) {
     process.exit(3)
   }
   const { backKey } = readCrewConfig(paths)
-  await daemonAnyway()
   if (run) await runs.open(run.runId)
   else await runs.refresh()
   await runsConsole({ paths, stdin: process.stdin, stdout: process.stdout, runs, backKey }).done

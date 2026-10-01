@@ -161,8 +161,10 @@ export function promptDelivered(text, needle) {
 // tool's result waits on the model, or the model on a tool; null when no
 // entry tells. A subagent's and a meta line are not the session's turn.
 //   Claude: an assistant message's stop_reason (tool_use keeps the turn
-//           going), a turn_duration system line (ends it), a user line (a
-//           prompt or a tool result: one going, but for an interrupt's marker).
+//           going), a turn_duration system line (ends it, unless background
+//           agents are still out: their task-notification starts the next
+//           turn), a user line (a prompt or a tool result: one going, but for
+//           an interrupt's marker).
 //   pi:     an assistant message's stopReason (toolUse keeps it going), a user
 //           or toolResult message (one going).
 const INTERRUPTED = /^\[Request interrupted by user/
@@ -170,7 +172,7 @@ function turnOf(e) {
   if (!e || typeof e !== 'object' || e.isSidechain || e.isMeta) return null
   const m = e.message
   if (e.type === 'assistant') return m?.stop_reason ? m.stop_reason !== 'tool_use' : null
-  if (e.type === 'system') return e.subtype === 'turn_duration' ? true : null
+  if (e.type === 'system') return e.subtype === 'turn_duration' ? !(e.pendingBackgroundAgentCount > 0) : null
   if (e.type === 'user') {
     const c = m?.content
     const said = typeof c === 'string' ? c : Array.isArray(c) ? c.find((b) => b?.type === 'text')?.text : null
@@ -211,8 +213,32 @@ function tail(path, bytes = 256 * 1024) {
   return chunk.toString('utf8')
 }
 
+// Both harnesses write a subagent's transcript in a dir named for the
+// session's file, beside it, and nothing into the session's own while a
+// background one works: their bytes are the session's too, or a session
+// waiting on its background agents looks still.
+//   Claude: <id>/subagents/agent-*.jsonl
+//   pi:     <created-at>_<id>/<runId>/run-<n>/session.jsonl (pi-subagents)
+function subagentBytes(dir, depth = 4) {
+  let entries
+  try {
+    entries = readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return 0
+  }
+  let bytes = 0
+  for (const e of entries) {
+    const at = join(dir, e.name)
+    try {
+      if (e.isFile() && e.name.endsWith('.jsonl')) bytes += statSync(at).size
+      else if (e.isDirectory() && depth > 1) bytes += subagentBytes(at, depth - 1)
+    } catch {}
+  }
+  return bytes
+}
+
 // size({ harness, sessionId, worktree }) is the transcript's length in bytes,
-// or null while it has none; path(…) is where it is, or null; usage(…) is
+// its subagents' added, or null while it has none; path(…) is where it is, or null; usage(…) is
 // { path, context, tokens }, context and tokens null until an assistant turn
 // is written, or null with no transcript; delivered({ …, needle }) is
 // promptDelivered on it, false with no transcript; idle(…) is turnEnded on its
@@ -247,7 +273,7 @@ export function sessionTranscripts({ home = homedir(), env = process.env, scanEv
   return {
     size: quiet((q) => {
       const path = locate(q)
-      return path ? statSync(path).size : null
+      return path ? statSync(path).size + subagentBytes(path.replace(/\.jsonl$/, '')) : null
     }),
     path: quiet(locate),
     delivered: quiet((q) => {

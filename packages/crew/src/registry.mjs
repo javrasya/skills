@@ -20,17 +20,20 @@
 //              host gone past its limit (ADR-0015)
 //   unpaused   the runner carries it on again
 //   halted     node, reason: the run halted on a node that failed or needs a
-//              decision (ADR-0016); its runner stays, and R carries it on
+//              decision (ADR-0016); its runner stays, and r carries it on
 //   unhalted   no failed or needs-decision node is left: it runs again
-//   reclaimed  agent: the reclaimed agent's worktree name, `<runId>-<n>`, n
-//              being the call that started its worker (its origin: a resume
-//              numbers its calls on, never its agents); for an agent with no
-//              worktree of its own, the name it would have had. With no agent,
-//              the whole run was reclaimed
+//   reclaimed  agent: the reclaimed agent's journaled `<runId>-<n>`, n being
+//              the call that started its worker (its origin: a resume numbers
+//              its calls on, never its agents), never its worktree's name, which
+//              agents may share. Entries written before named the worktree, which
+//              Orca named the same. `<runId>-chain` is a sequential run's
+//              chain worktree, removed (reclaim.mjs's reclaimChainAfter). With
+//              no agent, the whole run was reclaimed
 import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync } from 'fs'
 import { dirname, join } from 'path'
 import { claudeDir } from './transcript.mjs'
 import { LEGACY_HOST } from './hosts.mjs'
+import { chainName } from './git.mjs'
 
 // In the user's Claude directory, resolved where transcripts resolve it.
 export const REGISTRY_PATH = join(claudeDir(), 'orca-runs.jsonl')
@@ -88,13 +91,16 @@ export function runRegistry(path = REGISTRY_PATH, clock = { now: () => Date.now(
 //                                         carried it on, ended it or been
 //                                         followed by another runner,
 //     reclaimed: boolean, reclaimedAt,  — the whole run
-//     reclaimedAgents: [{ agent, at }] }
+//     reclaimedAgents: [{ agent, at }], — its agents, never its chain
+//     chainReclaimed: boolean }         — its chain worktree removed since
+//                                         a runner last took it up
 // 'running' only means no `ended` was written since a runner last started on
 // it: a runner that was killed never writes one, so whether it is still alive
 // is its runner.pid's to say (run-view-model.mjs's runnerAlive). A resume's
 // `runner` entry reopens a run that ended, or was reclaimed as a whole: state
 // is running again and reclaimed false, while reclaimedAgents keeps the agents
-// already reclaimed, since their worktrees are gone. host is the one its
+// already reclaimed, since their worktrees are gone, and chainReclaimed is
+// false again, since a resume may make the chain anew. host is the one its
 // latest runner named, else its armed entry's, else orca: every run armed
 // before hosts had names ran on Orca. A line that does not parse (a torn last line) is skipped, and so is an entry
 // for a Run never armed here.
@@ -114,21 +120,22 @@ export function readRegistry(path = REGISTRY_PATH) {
         runs.set(e.runId, {
           runId: e.runId, host: e.host ?? LEGACY_HOST, project: e.project ?? null, runDir: e.runDir ?? null, spec: e.spec ?? null,
           script: e.script ?? null, permissionMode: e.permissionMode ?? null, armedAt: e.at ?? null,
-          state: 'running', endedAt: null, runner: null, paused: null, reclaimed: false, reclaimedAt: null, reclaimedAgents: [],
+          state: 'running', endedAt: null, runner: null, paused: null, reclaimed: false, reclaimedAt: null, reclaimedAgents: [], chainReclaimed: false,
         })
       }
       continue
     }
     const run = runs.get(e.runId)
     if (!run) continue
-    if (e.type === 'runner') Object.assign(run, { runner: { terminal: e.terminal ?? null, at: e.at ?? null }, state: 'running', endedAt: null, paused: null, reclaimed: false, reclaimedAt: null, ...(e.host && { host: e.host }) })
+    if (e.type === 'runner') Object.assign(run, { runner: { terminal: e.terminal ?? null, at: e.at ?? null }, state: 'running', endedAt: null, paused: null, reclaimed: false, reclaimedAt: null, chainReclaimed: false, ...(e.host && { host: e.host }) })
     else if (e.type === 'ended' && OUTCOMES.includes(e.outcome)) Object.assign(run, { state: e.outcome, endedAt: e.at ?? null, paused: null })
     else if (e.type === 'paused') run.paused = { reason: e.reason ?? null, at: e.at ?? null }
     else if (e.type === 'unpaused') run.paused = null
     else if (e.type === 'halted' && run.state === 'running') run.state = 'halted'
     else if (e.type === 'unhalted' && run.state === 'halted') run.state = 'running'
     else if (e.type === 'reclaimed') {
-      if (e.agent) run.reclaimedAgents.push({ agent: e.agent, at: e.at ?? null })
+      if (e.agent === chainName(e.runId)) run.chainReclaimed = true
+      else if (e.agent) run.reclaimedAgents.push({ agent: e.agent, at: e.at ?? null })
       else Object.assign(run, { reclaimed: true, reclaimedAt: e.at ?? null })
     }
   }

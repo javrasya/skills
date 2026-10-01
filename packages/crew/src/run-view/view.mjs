@@ -13,7 +13,7 @@
 // It reads runs from their run dirs, the registry and Orca (run-view-model.mjs),
 // never from a runner, so a crash here never touches a run; the runner restarts
 // an attached view. Over IPC an attached view only sends {type: 'detach'}
-// before the operator's quit, and {type: 'resume', node?} for R: during an
+// before the operator's quit, and {type: 'resume', node?} for r: during an
 // Orca outage the runner probes Orca at once (ADR-0015); on a halted run it
 // resumes that node, or every held one (ADR-0016). Exit codes: exit-codes.mjs. The reclaim dialog,
 // and each confirmation after it, is the model's (view.model.dialog): this
@@ -125,7 +125,7 @@ const unpushed = (path) => worktreeUnpushed(path, bound)
 // Standalone, `runs` takes every key and click, and hands them to the run it
 // opened; `tree()` is the run tree on screen, or null on the list.
 const runs = standalone ? runsView({ host, hostOf: (name) => hosts[name] ?? host, registry, unpushed }) : null
-// R's one message to the runner: during an outage it probes Orca; on a halted
+// r's one message to the runner: during an outage it probes Orca; on a halted
 // run it resumes `node`, or every held node without one (ADR-0016).
 const resumeHost = () => {
   if (process.connected) process.send({ type: 'resume' })

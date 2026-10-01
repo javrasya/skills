@@ -1,13 +1,13 @@
 export const meta = {
   name: 'implement-spec-__SPEC__',
-  description: 'Implement spec #__SPEC__ as a stack of PRs: discover the ticket graph, implement each ticket in its own worktree, gate it, publish it as one stacked PR, review the whole stack, register it',
+  description: 'Implement spec #__SPEC__ as a stack of PRs: discover the ticket graph, implement each ticket in its own worktree (in sequential order, the run\'s one chain worktree), gate it, publish it as one stacked PR, review the whole stack, register it',
   phases: [
     { title: 'Graph', detail: 'read the spec and its tickets, return the task graph' },
     { title: 'Explore', detail: 'research notes saved outside the repo' },
     { title: 'Setup', detail: 'layer-0 PR when prior work already sits on a branch' },
     { title: 'Implement', detail: 'a dispatcher sizes each ticket; fresh slice agents implement it, frontier-scheduled' },
     { title: 'Gate', detail: 'code-review each ticket branch before it is published' },
-    { title: 'Stack', detail: 'serial publish lane: rebase onto the tip, one draft PR per ticket, reclaim the ticket\'s worktrees' },
+    { title: 'Stack', detail: 'serial publish lane: rebase onto the tip (never in sequential order, whose tip never moves under a ticket), one draft PR per ticket, reclaim the ticket\'s worktrees' },
     { title: 'Review', detail: 'code-review the whole stack; fixes land as the top PR' },
     { title: 'Finalize', detail: 'reconcile the stack, ready the PRs, reclaim the worktrees the lane has not' },
   ],
@@ -58,6 +58,7 @@ const REPO_DIR = String.raw`__REPO_DIR__`          // main checkout
 const NOTES_DIR = String.raw`__NOTES_DIR__`        // research notes, outside the repo
 const BASE_REF = '__BASE_REF__'                    // branch the stack merges into
 const STACK_MODE = '__STACK_MODE__'                // 'native' (gh-stack + stacks API) or 'chain' (plain --base chain)
+const RUN_ORDER = '__RUN_ORDER__'                  // 'parallel' (the frontier at once) or 'sequential' (one ticket at a time, session runner only; ADR-0020)
 const RUNNER = '__RUNNER__'                        // 'session' on the session runner (crew, on Orca), and 'orca', its value before, still; anything else is the Workflow runner. The one line the two renderings differ in
 // The project's mechanical checks — format, lint, test — one command per line,
 // confirmed by the user before launch and saved in <notes-dir>/validation.md.
@@ -120,10 +121,20 @@ const mirror = (branches) => `\`git fetch origin\`, then mirror origin into the 
 // (ADR-0012). The reclaim steps below therefore hand a session run no path, and
 // the rendered script stays the same under both runners but for RUNNER.
 const ON_SESSION = RUNNER === 'session' || RUNNER === 'orca'
+// The skill refuses this before rendering (SKILL.md step 1); this is the
+// backstop for a script rendered by hand.
+if (RUN_ORDER !== 'parallel' && RUN_ORDER !== 'sequential') throw new Error(`RUN_ORDER is '${RUN_ORDER}': it must be 'parallel' or 'sequential'`)
+if (RUN_ORDER === 'sequential' && !ON_SESSION) throw new Error('sequential run order needs the session runner: a sequential run points its agents one after another at one folder, and the Workflow runner cannot point two agents at one folder; re-arm with run order parallel, or on the session runner')
 // The session runner starts each doctor itself, with no agent() call to spread a
 // row into, so it reads the recover row from meta (ADR-0014).
 if (ON_SESSION) meta.roles = ROLES
-const WORKTREE = ON_SESSION
+// A sequential run's code agents share the run's one chain worktree, one
+// after another, each picking up the build cache the one before it left
+// (ADR-0020); a parallel run's each get one of their own.
+const ISOLATION = RUN_ORDER === 'sequential' ? 'chain' : 'worktree'
+const WORKTREE = ISOLATION === 'chain'
+  ? `Your worktree is this run's one chain worktree, made by its session host and worked in by its code agents one after another: the dependencies and build cache the agent before you left are yours to use. Leave nothing of your own in it uncommitted. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. Never remove it: the operator decides at the end of the run whether it is reclaimed.`
+  : ON_SESSION
   ? `Your worktree is a child worktree of this run's worktree, per agent, made by this run's session host. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. Never remove it: the operator decides at the end of the run whether it is reclaimed.`
   : `Your worktree is throwaway and per agent. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. This run reclaims it — uncommitted leftovers included — once the work it holds is published.`
 
@@ -337,10 +348,12 @@ const GRAPH_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['number', 'title', 'blocked_by', 'needs_human', 'human_reason'],
+        // map_position orders a sequential run only (runInOrder), so only a sequential run asks for it.
+        required: ['number', 'title', ...(RUN_ORDER === 'sequential' ? ['map_position'] : []), 'blocked_by', 'needs_human', 'human_reason'],
         properties: {
           number: { type: 'integer' },
           title: { type: 'string' },
+          ...(RUN_ORDER === 'sequential' && { map_position: { type: 'integer', description: "1-based place in the spec's own map of its tickets; 0 when the spec does not place it" } }),
           blocked_by: { type: 'array', items: { type: 'integer' } },
           needs_human: { type: 'boolean' },
           human_reason: { type: 'string', description: 'empty when needs_human is false' },
@@ -571,7 +584,9 @@ ${POINTERS}
 Find the tickets: sub-issues of #${SPEC}, issues that reference #${SPEC}, and issues linked from the spec body. Search each way — GitHub's sub-issue API is often empty even when the tickets exist.
 
 Blocking relationships: query GitHub's native dependencies first, per ticket — \`gh api "repos/${REPO}/issues/<n>/dependencies/blocked_by" -q '[.[].number]'\`. Only when that returns an empty list or a 404 fall back to prose: read the ticket's "Blocked by" section (or equivalent) and resolve it to issue numbers. A dependency the ticket calls soft or tests-only is still a dependency — record it.
-
+${RUN_ORDER === 'sequential' ? `
+map_position: where the spec itself places the ticket in its map of tickets — the ordered list, table or diagram of its slices — counting from 1. A ticket the spec does not place gets 0. Read it off the spec as written; do not rank the tickets yourself.
+` : ''}
 Set needs_human on a ticket that cannot be completed by an agent alone: it needs hardware, a running game, a physical device, credentials only a person holds, or its label says so. Put the reason in human_reason.
 
 start_ref: if work for this spec already sits on a branch (the spec or a ticket names one, or a branch exists whose commits are for this spec), return that branch — it becomes the bottom layer of the stack rather than being orphaned. Otherwise return "${BASE_REF}".
@@ -662,7 +677,7 @@ Do not disturb the user's working copy: leave ${REPO_DIR}'s checked-out branch a
 ${WORKTREE}
 
 Return the PR url and number, what the mirror found, and your worktree.`,
-    { ...ROLES.layer0, effort: 'low', phase: 'Setup', schema: LAYER0_SCHEMA, isolation: 'worktree', label: `layer0:${graph.start_ref}`, node: 'layer0' },
+    { ...ROLES.layer0, effort: 'low', phase: 'Setup', schema: LAYER0_SCHEMA, isolation: ISOLATION, label: `layer0:${graph.start_ref}`, node: 'layer0' },
   )
   if (!layer0) throw new Error('layer-0 PR failed — prior work would be orphaned')
   noteWorktree('layer0', graph.start_ref, layer0)
@@ -779,7 +794,7 @@ Every command must pass on the commit you return. Commit, then move the ticket b
 ${WORKTREE}
 
 Return the branch, a one-line summary, one result per validation command with its seconds and runs, every other build or test command you ran in \`other_runs\`, the sha the list passed on in \`validated_sha\`, anything from the brief you did not reach in \`unmet\`, what you settled yourself in \`decided\`, any contradiction for the operator in \`decisions_needed\`, and your worktree.`,
-      { ...ROLES.impl, effort: s.effort, phase: 'Implement', schema: IMPL_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}`, node: `${node}/s${i + 1}`, ...go },
+      { ...ROLES.impl, effort: s.effort, phase: 'Implement', schema: IMPL_SCHEMA, isolation: ISOLATION, label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}`, node: `${node}/s${i + 1}`, ...go },
     )
     if (!r) throw new Error(`slice implementer for #${t.number} died (${s.title})`)
     noteWorktree(t.number, `ticket/${t.number}`, r)
@@ -838,6 +853,7 @@ function enqueuePublish(t, impl, cutFrom, single) {
     const go = goOn(single)
     if (!go) return { stopped: true }
     const base = tip
+    if (RUN_ORDER === 'sequential' && cutFrom !== base) throw new Error(`publish of #${t.number}: the tip moved from ${cutFrom} to ${base} under a sequential run, whose publishes never rebase`)
     // Layers as they will stand once this PR exists — k is the ACTUAL position
     // in the stack, not the ticket's index in the plan, so the map's fourth box
     // says "layer 4". A run that lost three tickets ends "4 of 7 planned",
@@ -905,7 +921,7 @@ You are the only agent publishing right now. After the PR exists, the branch is 
 ${WORKTREE}
 
 Return whether it published, the PR url and number, what you resolved, one result per validation command with its seconds and runs plus the sha they hold for, how the stack link went, any note, the reclaim count and kept list, and your worktree.`,
-      { ...ROLES.publish, effort: 'low', phase: 'Stack', schema: PUBLISH_SCHEMA, isolation: 'worktree', label: `publish:#${t.number}`, node: `ticket/${t.number}/publish`, ...go },
+      { ...ROLES.publish, effort: 'low', phase: 'Stack', schema: PUBLISH_SCHEMA, isolation: ISOLATION, label: `publish:#${t.number}`, node: `ticket/${t.number}/publish`, ...go },
     ).then((r) => {
       recordValidation('publish', t.number, r, cutFrom !== base ? null : impl.validated)
       if (!r || !r.published) {
@@ -1012,7 +1028,7 @@ Every command must pass on the commit you return — a fix that leaves one red i
 ${WORKTREE}
 
 Return one verdict per finding in your brief you fixed or rejected, the \`location\` of any you did not reach, one result per validation command with its seconds and runs, every other build or test command you ran in \`other_runs\`, the sha the list passed on in \`validated_sha\`, and your worktree.`,
-      { ...ROLES.fix, effort: s.effort, phase: ph, schema: FIX_SLICE_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}`, node: `${node}/s${i + 1}`, ...go },
+      { ...ROLES.fix, effort: s.effort, phase: ph, schema: FIX_SLICE_SCHEMA, isolation: ISOLATION, label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}`, node: `${node}/s${i + 1}`, ...go },
     )
     // A dead fixer is not fatal — it is the next reviewer's problem, and that
     // reviewer reads the branch rather than anyone's account of it. But the
@@ -1157,7 +1173,7 @@ ${rejected.map((v) => `- ${v.location} — ${v.issue}\n  judged wrong because: $
         : ''}
 
 ${WORKTREE}`,
-      { ...ROLES.gate, phase: 'Gate', schema: GATE_REVIEW_SCHEMA, isolation: 'worktree', label: `gate:#${t.number}:r${round}`, node, ...go },
+      { ...ROLES.gate, phase: 'Gate', schema: GATE_REVIEW_SCHEMA, isolation: ISOLATION, label: `gate:#${t.number}:r${round}`, node, ...go },
     )
     noteWorktree(t.number, impl.branch, r)
     recordValidation('gate', t.number, r, validated)
@@ -1217,8 +1233,10 @@ function ticketDone(n) {
   return memo.get(n)
 }
 
+const awaited = (t) => t.blocked_by.filter((d) => byNum.has(d) && !blocked.has(d))
+
 async function runTicket(t) {
-  const deps = await Promise.all(t.blocked_by.filter((d) => byNum.has(d) && !blocked.has(d)).map(ticketDone))
+  const deps = await Promise.all(awaited(t).map(ticketDone))
   const waits = deps.filter((d) => d.state !== 'published')
   if (waits.length) return { number: t.number, state: 'not started', detail: `waits on ${waits.map((d) => `#${d.number} (${d.state})`).join(', ')}` }
   if (halting) return { number: t.number, state: 'not started', detail: `the run halted before it started` }
@@ -1299,8 +1317,23 @@ async function implementTicket(t) {
   return { number: t.number, state: 'published', ...impl, unfixed: gate.unfixed || [] }
 }
 
+const mapOrder = (a, b) => (a.map_position || Infinity) - (b.map_position || Infinity) || a.number - b.number
+async function runInOrder() {
+  const queue = [...auto].sort(mapOrder)
+  const out = []
+  while (queue.length) {
+    const i = queue.findIndex((t) => awaited(t).every((d) => memo.has(d)))
+    if (i < 0) {
+      out.push(...queue.map((t) => ({ number: t.number, state: 'not started', detail: `blocked in a cycle among ${queue.map((x) => '#' + x.number).join(', ')}` })))
+      break
+    }
+    out.push(await ticketDone(queue.splice(i, 1)[0].number))
+  }
+  return out
+}
+
 phase('Implement')
-const outcomes = await Promise.all(auto.map((t) => ticketDone(t.number)))
+const outcomes = RUN_ORDER === 'sequential' ? await runInOrder() : await Promise.all(auto.map((t) => ticketDone(t.number)))
 const layer0Line = () => (hasLayer0 ? [`layer 0 (pre-existing): ${layer0.pr_url}`] : [])
 
 // --- a halted run: no review, no finalize, nothing more on GitHub ----------
@@ -1347,7 +1380,7 @@ Invoke the \`code-review\` skill with \`${ref(BASE_REF)}\` as the fixed point an
 Every ticket was already reviewed alone on its own branch, so look hardest at what that could not see: two implementations of one helper, abstractions that contradict each other, a contract one ticket relies on that another changed. Return every finding; change no code yourself.
 
 ${WORKTREE}`,
-  { ...ROLES.review, phase: 'Review', schema: REVIEW_SCHEMA, isolation: 'worktree', label: `review:spec-${SPEC}`, node: 'review' },
+  { ...ROLES.review, phase: 'Review', schema: REVIEW_SCHEMA, isolation: ISOLATION, label: `review:spec-${SPEC}`, node: 'review' },
 )
 noteWorktree('review', tip, review)
 // Fail closed: a review that never returned is not a review with zero findings.
@@ -1412,7 +1445,7 @@ ${reclaimStep(integrationReclaim)}
 ${WORKTREE}
 
 Return the PR url and number, the branch, the reclaim count and kept list, and your worktree.`,
-      { ...ROLES.publish, effort: 'low', phase: 'Review', schema: INTEGRATION_SCHEMA, isolation: 'worktree', label: 'publish:integration', node: 'review/publish' },
+      { ...ROLES.publish, effort: 'low', phase: 'Review', schema: INTEGRATION_SCHEMA, isolation: ISOLATION, label: 'publish:integration', node: 'review/publish' },
     )
     if (integration && integration.pr_number) {
       // The prompt reclaims only after the PR exists, so a returned-but-unopened

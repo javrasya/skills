@@ -50,13 +50,13 @@ import { DEFAULT_HOST } from '../hosts.mjs'
 import { isOrchestratorTitle } from '../orchestrator.mjs'
 
 // The runner every launch of one starts: `crew run`, `crew start`, crew's own
-// recovery and the run views' R.
+// recovery and the run views' r.
 export const RUNNER_PATH = fileURLToPath(new URL('../runner.mjs', import.meta.url))
 
 // The runner's words past its program, the one place its command line is
 // built: on `host`, none named when null (a runner that names none is on
 // LEGACY_HOST), always naming its state dir, and resuming from it by default,
-// as the run view's R and crew's own recovery do.
+// as the run view's r and crew's own recovery do.
 export const runnerArgs = ({ runner = RUNNER_PATH, script, host = DEFAULT_HOST, stateDir, resume = true, permissionMode = null }) =>
   [runner, script, ...(host ? ['--host', host] : []), '--state-dir', stateDir, ...(resume ? ['--resume'] : []), ...(permissionMode ? ['--permission-mode', permissionMode] : [])]
 

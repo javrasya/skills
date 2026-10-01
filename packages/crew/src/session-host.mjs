@@ -17,7 +17,21 @@
 //   terminal terminalIdle, terminalSend, terminalEnter, terminalClearInput,
 //            terminalScreen, terminalList, terminalClose, terminalSwitch,
 //            terminalRename; logTail, resumeRunner (a tab of the view's)
-//   worktree worktreeStatus, worktreeRemove
+//   worktree chainWorktree, worktreeLines, worktreeStatus, worktreeRemove
+//            (chainWorktree({ runId }) → { path, made, baseline,
+//            warnings }: the run's one chain worktree, ADR-0020, named
+//            chainName(runId) (git.mjs) beside its `<runId>-<n>` ones. Asked
+//            while the host holds it, the same one as it is, `made` false and
+//            no baseline. Asked when it holds none, the first time or after a
+//            reclaim removed it, it is made: always from the run's worktree's
+//            HEAD, the run's base, never from a ref a chain agent left it on
+//            (an agent carried on in a remade one is told to switch back to
+//            its own ref, lifecycle.mjs haltedPrompt), its setup hook run
+//            then, `made` true, and a new baseline taken as a child's is, or
+//            null with a warning when it cannot be read or the create
+//            answered too late. workerStart({ chain }) starts a worker in it,
+//            making nothing. worktreeLines({ worktree }) → the `git status
+//            --porcelain` lines it holds now)
 //   mailbox  mailCheck({ ack }): the run's messages, each a `type` of
 //            worker_done, handoff or escalation; workerDone, sent by submit
 //
@@ -43,7 +57,7 @@ export const SESSION_HOST = Object.freeze([
   'workerStart', 'workerShow', 'workerStop', 'workerContinue', 'workerRelease',
   'terminalIdle', 'terminalSend', 'terminalEnter', 'terminalClearInput', 'terminalScreen',
   'terminalList', 'terminalClose', 'terminalSwitch', 'terminalRename', 'logTail', 'resumeRunner',
-  'worktreeStatus', 'worktreeRemove',
+  'chainWorktree', 'worktreeLines', 'worktreeStatus', 'worktreeRemove',
   'mailCheck', 'workerDone',
 ])
 
@@ -57,7 +71,7 @@ export const SESSION_METHODS = Object.freeze([
   'terminalList', 'terminalClose', 'terminalRename',
 ])
 
-export const RUN_METHODS = Object.freeze(['runCreate', 'runUse', 'workerShow', 'workerRelease', 'workerDone', 'mailCheck', 'worktreeStatus', 'worktreeRemove'])
+export const RUN_METHODS = Object.freeze(['runCreate', 'runUse', 'workerShow', 'workerRelease', 'workerDone', 'mailCheck', 'chainWorktree', 'worktreeLines', 'worktreeStatus', 'worktreeRemove'])
 
 // The methods of the interface `host` lacks, [] for a whole one.
 export const missingMethods = (host) => SESSION_HOST.filter((m) => typeof host?.[m] !== 'function')

@@ -184,7 +184,7 @@ test('triage: a new halted.json at is asked exactly once, however often and by h
   assert.deepEqual(await triageHalt({ stateDir, orchestrate }), { asked: false, state: null }, 'asked about that at already')
   assert.equal(starts().length, 1)
   assert.deepEqual(starts()[0].dirs, [stateDir], 'it may read the run directory')
-  assert.match(starts()[0].prompt, /held until the operator resumes it with R: impl:a/)
+  assert.match(starts()[0].prompt, /held until the operator resumes it with r: impl:a/)
   assert.ok(starts()[0].prompt.includes(stateDir), 'the question names the run directory')
   const recorded = readTriage(stateDir, AT)
   assert.deepEqual(recorded, { at: AT, since: recorded.since, state: 'answered', answer: ANSWER })
@@ -193,7 +193,7 @@ test('triage: a new halted.json at is asked exactly once, however often and by h
   notice(stateDir, '2026-09-28T10:05:00.000Z', ['impl:a', 'impl:b'])
   assert.equal((await triageHalt({ stateDir, orchestrate })).asked, true)
   assert.equal(starts().length, 2)
-  assert.match(starts()[1].prompt, /2 nodes are held until the operator resumes them with R: impl:a, impl:b/)
+  assert.match(starts()[1].prompt, /2 nodes are held until the operator resumes them with r: impl:a, impl:b/)
   // No halted.json, no question.
   assert.deepEqual(await triageHalt({ stateDir: scratch('running'), orchestrate }), { asked: false, state: null })
 })
@@ -273,14 +273,14 @@ test('halt panel: any width, however narrow, draws every triage state in its hei
   assert.ok(draw(view.model, { width: 70, height: 30 }).lines.map(strip).some((l) => l.includes('⏸ halt triage')))
 })
 
-test('triage: a question that fails says so in the panel, and R resumes the run all the same, while it is asked and after it failed', async () => {
+test('triage: a question that fails says so in the panel, and r resumes the run all the same, while it is asked and after it failed', async () => {
   const stateDir = haltedRun()
   const held = heldAnswer()
   const resumed = []
   const view = treeOf(stateDir, { resumeHalted: (node) => resumed.push(node), triage: () => triageHalt({ stateDir, orchestrate: held.orchestrate }) })
   await view.refresh()
   assert.equal(view.model.halt.triage.state, 'asking')
-  assert.match((await view.key('R')).message, /asked the runner to resume/)
+  assert.match((await view.key('r')).message, /asked the runner to resume/)
   assert.equal(resumed.length, 1, 'R goes to the runner while the question is still asked')
 
   held.give.reject(new OrchestratorError('halt-triage', 'its session ended without submitting an answer'))
@@ -291,8 +291,8 @@ test('triage: a question that fails says so in the panel, and R resumes the run 
   const panel = panelOf(view).map((l) => l.trimEnd())
   assert.equal(panel[1], '│ the triage question failed:')
   assert.match(panel.slice(2).join(' '), /the orchestrator gave no valid answer/)
-  assert.ok(panel.includes('│ R resumes the run all the same'))
-  assert.match((await view.key('R')).message, /asked the runner to resume/)
+  assert.ok(panel.includes('│ r resumes the run all the same'))
+  assert.match((await view.key('r')).message, /asked the runner to resume/)
   assert.equal(resumed.length, 2)
 
   // An orchestrator that cannot even be made fails the question the same way.

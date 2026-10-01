@@ -34,27 +34,42 @@ export async function reuseWorktree(path, { dispatched, baseline }, { held, line
   return path
 }
 
+// What the worktree at `path` holds uncommitted, as `git status --porcelain` lines.
+export const worktreeLines = async (path, bound) => porcelainLines(await gitIn(path, ['status', '--porcelain'], bound))
+
 // The two probes reuseWorktree reads through git, the same on every host:
 // what the worktree at `path` holds uncommitted, and its commits on `branch`.
 export const gitProbes = (path, branch, bound) => ({
-  lines: async () => porcelainLines(await gitIn(path, ['status', '--porcelain'], bound)),
+  lines: () => worktreeLines(path, bound),
   commits: () => worktreeOwnCommits(path, branch, bound),
 })
 
-// A child worktree this attempt made, readied for its worker: the project's
-// MCP answers go in first, so what they change is part of the baseline, as a
-// setup hook's output is; then its baseline, the porcelain lines it holds,
-// is taken and handed to child.onBaseline. A failure to copy the answers is a
-// warning, and leaves the worker to the prompt-delivery check (lifecycle.mjs).
-// Returns the baseline.
-export async function prepareChildWorktree({ project, worktree, bound, child, warnings, fs }) {
+// A worktree a host just made for a worker, a child or the run's chain,
+// readied for it: the project's MCP answers go in first, so what they change
+// is part of the baseline, as a setup hook's output is; then its baseline, the
+// porcelain lines it holds, is taken and handed to onBaseline. A failure to
+// copy the answers is a warning, and leaves the worker to the prompt-delivery
+// check (lifecycle.mjs). Returns the baseline.
+export async function prepareWorktree({ project, worktree, bound, onBaseline, warnings, fs }) {
   try {
     const m = copyMcpAnswers({ project, worktree, ...(fs && { fs }) })
     if (m.added.length) warnings.push(`the project has no answer for MCP server(s) ${m.added.join(', ')} of .mcp.json, so its worktree disables them`)
   } catch (e) {
     warnings.push(`could not copy the project's MCP server answers into its worktree: ${e?.message ?? e}`)
   }
-  const baseline = porcelainLines(await gitIn(worktree, ['status', '--porcelain'], bound))
-  await child.onBaseline?.({ worktree, lines: baseline })
+  const baseline = await worktreeLines(worktree, bound)
+  await onBaseline?.({ worktree, lines: baseline })
   return baseline
+}
+
+// The run's chain worktree, just made, readied as a child's is. Its baseline
+// unread is a warning, never a failure: the worktree is made all the same,
+// and the runner journals it with no baseline. Returns the baseline or null.
+export async function prepareChainWorktree({ project, worktree, bound, warnings, fs }) {
+  try {
+    return await prepareWorktree({ project, worktree, bound, warnings, fs })
+  } catch (e) {
+    warnings.push(`could not read its baseline: ${e?.message ?? e}`)
+    return null
+  }
 }

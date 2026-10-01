@@ -8,7 +8,7 @@ const TPL = fileURLToPath(new URL('../skills/engineering/implement-spec-in-workf
 
 const SIM_CHECK = 'npm t'
 
-function render(runner) {
+function render(runner, runOrder = 'parallel') {
   let s = readFileSync(TPL, 'utf8')
   s = s
     .replace(/__SPEC__/g, '224')
@@ -17,6 +17,7 @@ function render(runner) {
     .replace(/__NOTES_DIR__/g, '/tmp/n')
     .replace(/__BASE_REF__/g, 'main')
     .replace(/__STACK_MODE__/g, 'native')
+    .replace(/__RUN_ORDER__/g, runOrder)
     .replace(/__RUNNER__/g, runner)
     .replace(/__VALIDATION__/g, SIM_CHECK)
   return s
@@ -57,7 +58,7 @@ function completeToSchema(result, opts, label) {
   return filled
 }
 
-async function run(overrides = {}, { runner = 'workflow' } = {}) {
+async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel' } = {}) {
   const calls = []
   const defaults = {
     graph: () => ({
@@ -111,10 +112,20 @@ async function run(overrides = {}, { runner = 'workflow' } = {}) {
     throw new Error('unrouted label: ' + label)
   }
 
+  // `alongside` counts the agents already in flight when a call starts.
+  const timeline = []
+  let inFlight = 0
   const agent = async (prompt, opts = {}) => {
     const label = opts.label || '?'
-    calls.push({ label, effort: opts.effort || '(inherit)', prompt, opts })
-    return completeToSchema(await h[route(label)](label, prompt, opts), opts, label)
+    calls.push({ label, effort: opts.effort || '(inherit)', prompt, opts, alongside: inFlight })
+    inFlight++
+    timeline.push('start ' + label)
+    try {
+      return completeToSchema(await h[route(label)](label, prompt, opts), opts, label)
+    } finally {
+      inFlight--
+      timeline.push('end ' + label)
+    }
   }
   const parallel = (fns) => Promise.all(fns.map((f) => f()))
   const logs = []
@@ -122,10 +133,10 @@ async function run(overrides = {}, { runner = 'workflow' } = {}) {
   const phase = () => {}
 
   // The session runner's own loader, so the script is loaded one way everywhere.
-  const result = await loadScript(render(runner))(agent, parallel, phase, log, {})
+  const result = await loadScript(render(runner, runOrder))(agent, parallel, phase, log, {})
   EVERY_CALL.push(...calls)
   EVERY_RUN.push(calls)
-  return { result, calls, logs }
+  return { result, calls, logs, timeline }
 }
 
 // Assertions that must hold of EVERY prompt the workflow can emit are checked
@@ -565,6 +576,78 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   // One template, one rendering: the runner value is the only difference.
   const diff = render('workflow').split('\n').filter((l, i) => l !== render('session').split('\n')[i])
   check('R: the rendered script differs between runners only in RUNNER', diff.length === 1 && /^const RUNNER = 'workflow'/.test(diff[0]), diff.join(' | '))
+}
+
+// --- scenario O: the run order is rendered, and the Workflow runner refuses sequential
+{
+  check('O: the run order reaches the script', /^const RUN_ORDER = 'sequential'/m.test(render('session', 'sequential')) && /^const RUN_ORDER = 'parallel'/m.test(render('workflow')), '')
+  const refused = await run({}, { runner: 'workflow', runOrder: 'sequential' }).then(() => null, (e) => e)
+  check('O: the Workflow runner refuses a sequential run, and says why', refused && /needs the session runner/.test(refused.message) && /cannot point two agents at one folder/.test(refused.message), refused?.message ?? 'it ran')
+  const seq = await run({}, { runner: 'session', runOrder: 'sequential' })
+  check('O: a sequential run on the session runner loads and completes', seq.result.state.startsWith('complete'), seq.result.state)
+}
+
+// --- scenario S: sequential order builds one ticket at a time --------------
+// The graph lists its tickets out of map order on purpose: the scheduler must
+// sort, not walk the list. #14 sits second in the map but waits on #13; #11
+// and #15 are unplaced (map_position 0), so they go last, lowest number first.
+{
+  const later = (ms, v) => new Promise((res) => setTimeout(() => res(v), ms))
+  const ticket = (number, map_position, blocked_by = []) => ({ number, title: 'T' + number, map_position, blocked_by, needs_human: false, human_reason: '' })
+  const graph = () => ({
+    tickets: [ticket(15, 0), ticket(11, 0), ticket(14, 2, [13]), ticket(13, 3), ticket(12, 1)],
+    start_ref: 'main',
+    explorations: [{ label: 'area-a', question: 'a?' }, { label: 'area-b', question: 'b?' }],
+  })
+  const overrides = {
+    graph,
+    explore: (label) => later(5, `/tmp/n/${label}.md`),
+    impl: (label) => later(5, { branch: 'ticket/' + label.match(/#(\d+)/)[1], summary: 's', unmet: [] }),
+    review: () => ({ findings: [{ severity: 'major', location: 'c.js:3', issue: 'two helpers', fix: 'merge them' }, { severity: 'major', location: 'd.js:4', issue: 'two contracts', fix: 'pick one' }] }),
+    fixdispatch: (label, prompt) => ({ slices: locationsIn(prompt).map((l) => ({ title: l, brief: `- ${l} — ${issueFor(l)}`, findings: [l], effort: 'medium' })) }),
+  }
+  const ticketsOf = (calls) => calls.filter((c) => c.label.startsWith('dispatch:#')).map((c) => Number(c.label.match(/#(\d+)/)[1]))
+  const { result, calls, timeline } = await run(overrides, { runner: 'session', runOrder: 'sequential' })
+  const seq = calls.map((c) => c.label)
+  const order = ticketsOf(calls)
+  const before = (a, b) => timeline.includes(a) && timeline.indexOf(a) < timeline.indexOf(b)
+  check("S: tickets are taken in the spec map's order, then the lowest number, blockers first", JSON.stringify(order) === '[12,13,14,11,15]', JSON.stringify(order))
+  check('S: the stack is built in that order', JSON.stringify(result.stack_bottom_to_top.map((l) => l.split(':')[0])) === JSON.stringify(['#12', '#13', '#14', '#11', '#15', 'integration']), JSON.stringify(result.stack_bottom_to_top))
+  const crowded = calls.filter((c) => !c.label.startsWith('explore') && c.alongside > 0).map((c) => c.label)
+  check('S: outside Explore no agent ever runs beside another', !crowded.length, crowded.join(' | '))
+  check('S: the explorers still run side by side', calls.filter((c) => c.label.startsWith('explore')).some((c) => c.alongside > 0), '')
+  check("S: each ticket's publish returns before the next ticket's dispatch starts", order.slice(1).every((n, i) => before(`end publish:#${order[i]}`, `start dispatch:#${n}`)), timeline.join(' | '))
+  const publishes = calls.filter((c) => c.label.startsWith('publish:'))
+  check('S: no publisher prompt carries a rebase step', publishes.length === 6 && !publishes.some((c) => /git rebase/.test(c.prompt)), publishes.filter((c) => /git rebase/.test(c.prompt)).map((c) => c.label).join(' | '))
+  check('S: the whole-stack review and its integration fixes run one agent at a time', before('end review:spec-224', 'start integration:dispatch') && before('end integration:dispatch', 'start integration:s1') && before('end integration:s1', 'start integration:s2') && before('end integration:s2', 'start publish:integration'), timeline.join(' | '))
+  check('S: the sequential run completes', result.state.startsWith('complete'), result.state)
+
+  // The same graph in parallel order: the frontier starts at once, map order unread.
+  const par = await run(overrides, { runner: 'session' })
+  const first = ticketsOf(par.calls).slice(0, 4).sort((a, b) => a - b)
+  check('S: parallel order still dispatches every takeable ticket at once', JSON.stringify(first) === '[11,12,13,15]' && par.calls.some((c) => c.label.startsWith('dispatch:#') && c.alongside > 0) && par.result.state.startsWith('complete'), JSON.stringify(ticketsOf(par.calls)))
+
+  const isolations = (calls) => [...new Set(calls.filter((c) => c.opts.isolation).map((c) => c.opts.isolation))]
+  check('S: every agent that would get a worktree of its own runs in the chain worktree instead', JSON.stringify(isolations(calls)) === '["chain"]' && calls.filter((c) => c.opts.isolation).every((c) => /this run's one chain worktree/.test(c.prompt)), JSON.stringify(isolations(calls)))
+  check('S: a parallel run still gives each its own', JSON.stringify(isolations(par.calls)) === '["worktree"]' && !par.calls.some((c) => /chain worktree/.test(c.prompt)), JSON.stringify(isolations(par.calls)))
+
+  // A chain of blockers leaves a parallel run one order too: both publish the
+  // same layers, each PR on the same base, linked by the same commands.
+  const line = { ...overrides, graph: () => ({ tickets: [ticket(12, 3, [11]), ticket(11, 2, [10]), ticket(10, 1)], start_ref: 'main', explorations: [] }) }
+  const published = ({ calls, result }) => ({
+    stack: result.stack_bottom_to_top,
+    layers: calls.filter((c) => c.label.startsWith('publish:')).map((c) => [c.label, c.prompt.match(/gh pr create[^\n]*/)?.[0] ?? null, c.prompt.match(/gh stack link [a-z][^\n`]*/)?.[0] ?? null]),
+  })
+  const seqLine = published(await run(line, { runner: 'session', runOrder: 'sequential' }))
+  const parLine = published(await run(line, { runner: 'session' }))
+  check('S: a sequential run publishes the same stack as a parallel one', seqLine.layers.length === 4 && JSON.stringify(seqLine) === JSON.stringify(parLine), JSON.stringify({ seqLine, parLine }))
+
+  const failed = await run({ ...overrides, impl: (label) => (label.includes('#12') ? null : overrides.impl(label)) }, { runner: 'session', runOrder: 'sequential' })
+  const st = Object.fromEntries(failed.result.tickets.map((x) => [x.ticket, x]))
+  check('S: a failed ticket halts a sequential run with nothing else started', failed.result.halted === true && st[12].state === 'failed' && [11, 13, 14, 15].every((n) => st[n].state === 'not started') && !failed.calls.some((c) => /#1[1345]\b/.test(c.label)), JSON.stringify(failed.result.tickets))
+
+  const cycle = await run({ graph: () => ({ tickets: [ticket(10, 1, [11]), ticket(11, 2, [10])], start_ref: 'main', explorations: [] }) }, { runner: 'session', runOrder: 'sequential' })
+  check('S: a blocking cycle halts a sequential run instead of hanging it', cycle.result.halted === true && cycle.result.tickets.every((x) => x.state === 'not started' && /cycle/.test(x.detail)), JSON.stringify(cycle.result.tickets))
 }
 
 // --- run-wide: every prompt of every scenario ------------------------------

@@ -6,6 +6,7 @@
 import { existsSync, readFileSync } from 'fs'
 import { agentDir } from './lifecycle.mjs'
 import { foldMail, heldRounds, mailSupersedes } from './doctor.mjs'
+import { unionLines } from './git.mjs'
 
 // Every journal entry type and the fields it always carries, beside `type`.
 // `at` is an ISO timestamp from the runner's clock; `run` is the Orca Run the
@@ -112,6 +113,16 @@ import { foldMail, heldRounds, mailSupersedes } from './doctor.mjs'
 // decisions, with its `reason`; unhalted: no failed or needs-decision node is
 // left, and every held call goes on. held: a new call made while the run was
 // halted, not started until it is released. halted and unhalted have no n.
+// chain (ADR-0020): the session host made the run's chain worktree,
+// `<runId>-chain`, which every code agent of a sequential run works in:
+// `lines`, its porcelain lines then, as a baseline line holds a child's, or
+// null when the host made it but could not take them. It has no n: the
+// worktree is the run's, no agent's. A resume carries it forward with
+// `leftovers`, the leftover lines so far. chainEntry writes it.
+// followUp (#127): a chain agent returned leaving `lines` in the chain
+// worktree beyond what it was told was there before it, and was sent back
+// once to commit or remove them; leftover: the `lines` still there after,
+// which every later chain agent is told never to commit.
 export const JOURNAL_ENTRIES = Object.freeze({
   queued: ['at', 'key', 'n', 'title'],
   starting: ['at', 'key', 'n', 'title', 'run'],
@@ -142,6 +153,9 @@ export const JOURNAL_ENTRIES = Object.freeze({
   halted: ['at', 'node', 'reason'],
   unhalted: ['at'],
   held: ['at', 'key', 'n', 'node', 'title'],
+  chain: ['at', 'runId', 'worktree', 'lines'],
+  followUp: ['at', 'key', 'n', 'title', 'worktree', 'lines'],
+  leftover: ['at', 'key', 'n', 'title', 'worktree', 'lines'],
 })
 
 // A needs-decision result's questions, for the run view.
@@ -175,7 +189,13 @@ export const madeByRun = (a) => !!a.runId && (a.launched || !!a.worktree)
 
 export const readJournal = (path) => foldJournal(journalLines(path))
 
-// The fold of a journal's entries: { calls, retained, run, lastN, phases, agents, mail, outage }.
+// The chain line for a chain as the fold reads it back, { runId, worktree,
+// baseline, leftovers }.
+export function chainEntry({ runId, worktree, baseline, leftovers = [] }) {
+  return { type: 'chain', runId, worktree, lines: baseline, ...(leftovers.length && { leftovers }) }
+}
+
+// The fold of a journal's entries: { calls, retained, run, lastN, phases, agents, mail, outage, chain }.
 //
 // calls, what a resume replays and takes up: key -> what each call made under
 // it, in call order — { result } for a call that returned a value (with
@@ -220,7 +240,8 @@ export const readJournal = (path) => foldJournal(journalLines(path))
 // latest line: { origin, n, title, state, reason, continuations, replayed,
 // launched, runId, dispatchId, harness, sessionId, worktree, terminal, from,
 // to, waiting, nextAt, workerLeft, baseline, patient, round, doctors, rounds, failures,
-// attempt }. patient: a
+// attempt }, and originGuessed: true when only a take-up written before
+// take-ups carried their origin names it, so origin is that call's n. patient: a
 // doctor's patient, by origin, or null; round: a patient's latest doctor
 // round, or 0; doctors: the origins of its doctors, in round order; rounds:
 // each of its rounds, { round, doctor (origin), reason (the failure it
@@ -253,6 +274,9 @@ export const readJournal = (path) => foldJournal(journalLines(path))
 // mail: every `mail` line, one per message id, the first kept, in order.
 // outage: the Orca outage under way at the journal's end, or null: { phase:
 // 'waiting' | 'paused', since }. No agent's state is changed by it.
+// chain: the run's chain worktree as last journaled, { runId, worktree,
+// baseline, leftovers }, or null: leftovers, every leftover line since, once.
+// A chain line naming no runId is no chain: its reclaim could not name it.
 //
 // nodes (ADR-0016): node -> its call's entry as `calls` holds it, the latest
 // call to name that node winning, with `key`, `node`, `n` and `title`; a failed
@@ -276,6 +300,7 @@ export function foldJournal(entries) {
   let phases = null
   let outage = null
   let halted = null
+  let chain = null
   // One per call, by its n: a call's lines share it, and no two calls do.
   const byCall = new Map()
   // The call id of each outstanding line, by its dispatch.
@@ -314,6 +339,9 @@ export function foldJournal(entries) {
   // Folds one line into its agent's record, and returns that agent's origin.
   function agent(e) {
     const worker = WORKER_LINES.includes(e.type) || e.type === 'earlier'
+    // A take-up written before take-ups carried their origin, of a worker no
+    // earlier line names: its origin is only this call's n.
+    const guessed = worker && e.type !== 'started' && !Number.isInteger(e.origin) && !(e.dispatchId && byDispatch.has(e.dispatchId))
     const id = Number.isInteger(e.origin) ? e.origin
       : worker && e.dispatchId && byDispatch.has(e.dispatchId) ? byDispatch.get(e.dispatchId)
       : worker ? e.n : agentOfCall.get(e.n) ?? e.n
@@ -326,6 +354,7 @@ export function foldJournal(entries) {
         runId: null, dispatchId: null, harness: null, sessionId: null, worktree: null, terminal: null, from: null, to: null,
         waiting: null, nextAt: null, workerLeft: false, baseline: null, patient: null, round: 0, doctors: [], rounds: [], failures: 0, attempt: 1, dialog: null, beforeDialog: null,
       }
+      if (guessed) a.originGuessed = true
       agents.set(id, a)
     }
     a.n = e.n
@@ -457,6 +486,8 @@ export function foldJournal(entries) {
     if (e.type === 'outage') outage = e.phase === 'end' ? null : { phase: e.phase === 'paused' ? 'paused' : 'waiting', since: e.since ?? e.at ?? null }
     if (e.type === 'halted') halted = { since: e.at ?? null, node: e.node ?? null, reason: e.reason ?? null }
     if (e.type === 'unhalted') halted = null
+    if (e.type === 'chain' && typeof e.worktree === 'string' && typeof e.runId === 'string') chain = { runId: e.runId, worktree: e.worktree, baseline: Array.isArray(e.lines) ? e.lines : null, leftovers: Array.isArray(e.leftovers) ? e.leftovers : [] }
+    if (e.type === 'leftover' && chain && Array.isArray(e.lines)) chain = { ...chain, leftovers: unionLines(chain.leftovers, e.lines) }
     // Read as the runner acted on it (doctor.mjs).
     if (e.type === 'mail' && typeof e.messageId === 'string' && mailSupersedes(e, mail.get(e.messageId))) {
       mail.set(e.messageId, e)
@@ -540,5 +571,5 @@ export function foldJournal(entries) {
   for (const a of agents.values()) if (a.node && a.patient == null && (latestOfNode.get(a.node)?.n ?? -Infinity) < a.n) latestOfNode.set(a.node, a)
   for (const a of agents.values()) if (a.node && a.patient == null && a.state === 'failed' && latestOfNode.get(a.node) !== a) a.superseded = true
   const outstandingNodes = [...nodes.values()].filter((x) => x.failed || x.needsDecision).map((x) => x.node)
-  return { calls, nodes, retained, run, lastN, phases, agents: [...agents.values()].sort((x, y) => x.n - y.n), mail: [...mail.values()], outage, halted: halted && { ...halted, nodes: outstandingNodes } }
+  return { calls, nodes, retained, run, lastN, phases, agents: [...agents.values()].sort((x, y) => x.n - y.n), mail: [...mail.values()], outage, chain, halted: halted && { ...halted, nodes: outstandingNodes } }
 }

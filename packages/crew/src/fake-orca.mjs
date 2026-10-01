@@ -32,7 +32,7 @@
 // 'hang-after' is a create Orca finishes but never answers: the worktree
 // exists, and the call times out at `createMs`. count is how many
 // times that step has run, and orca this fake, so a fault can also change
-// what Orca holds, a worktree's `porcelain` for one. Steps: runCreate, worktreeStatus, and a start's
+// what Orca holds, a worktree's `porcelain` for one. Steps: runCreate, worktreeStatus, worktreeLines, and a start's
 // worktreeCreate, worktreeSet, terminalCreate, waitIdle and workerStart, the
 // order the adapter runs them in, and runUse.
 //
@@ -71,8 +71,40 @@
 import { existsSync } from 'fs'
 import { OrcaError, orcaUnreachable, afterCreateTimeout, resumeRunnerCommand, tailCommand, workerStartArgs, withTimeout, workerStatus } from './orca-cli.mjs'
 import { reuseWorktree } from './worktree.mjs'
+import { chainName } from './git.mjs'
 import { launchCommand, resumeCommand } from './harness.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
+
+// The worktree table both offline Orcas keep, the in-memory one (fakeOrca)
+// and the CLI one (fakeOrcaCli), so the two cannot come to disagree on how
+// Orca makes and removes a worktree: by path, each made from the run's
+// worktree as `name` was asked, or suffixed -2, -3… when that path is taken,
+// as Orca does; the repo's setup policy leaving `setupLeaves` in it unless its
+// `setup` is 'skip', and `setups` counting how often the policy ran at its
+// path, a remake after a removal included. A removed one stays, marked so.
+// The rest of an entry, `status`, `displayName`, `commits` and `unpushed`, is
+// set by whichever Orca holds it, or by a test.
+function fakeWorktrees({ runWorktree, setupLeaves }) {
+  const table = new Map()
+  const live = (path) => !!table.get(path) && !table.get(path).removed
+  return {
+    table,
+    live,
+    find: (name) => [...table].find(([, w]) => w.name === name && !w.removed) ?? null,
+    create(asked, setup = null) {
+      let name = asked
+      for (let i = 2; live(`C:/fake/worktrees/${name}`); i++) name = `${asked}-${i}`
+      const path = `C:/fake/worktrees/${name}`
+      const skip = setup === 'skip'
+      const setups = (table.get(path)?.setups ?? 0) + (skip ? 0 : 1)
+      table.set(path, { parent: runWorktree, name, displayName: name, removed: false, status: null, porcelain: skip ? [] : [...setupLeaves], commits: 0, unpushed: 0, setup, setups })
+      return { path, name }
+    },
+    remove(path) {
+      table.get(path).removed = true
+    },
+  }
+}
 
 // The runner's transcript reader, over the fake's sessions: a session's size
 // is its latest dispatch's `transcript`, which a continuation carries over.
@@ -84,7 +116,9 @@ export const fakeTranscripts = (orca) => ({
 export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run', runPrefix = 'run_fake', coordinator = 'term_runner', tabs = [], faults = {}, callMs = RUNNER_SETTINGS.hostCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, setupLeaves = [], promptLoss = () => null } = {}) {
   const calls = []
   const dispatches = new Map()
-  const worktrees = new Map([[runWorktree, { parent: null, name: null, displayName: null, removed: false, status: null, porcelain: [], commits: 0, unpushed: 0 }]])
+  const table = fakeWorktrees({ runWorktree, setupLeaves })
+  const worktrees = table.table
+  worktrees.set(runWorktree, { parent: null, name: null, displayName: null, removed: false, status: null, porcelain: [], commits: 0, unpushed: 0 })
   // handle -> { path, title, open }: the tabs logTail opened.
   const logTabs = new Map()
   const counts = {}
@@ -159,7 +193,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
   // The worktree list, looked up by name as the adapter does.
   function findWorktree(name) {
     record({ verb: 'worktreeList', name })
-    return [...worktrees].find(([, w]) => w.name === name && !w.removed) ?? null
+    return table.find(name)
   }
 
   // The worktree a retry takes up, by name, decided by the rule every host shares
@@ -205,7 +239,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       observation: { status: d.exited ? 'exited' : 'live', agentWait: d.waiting ? JSON.parse(d.waiting) : null },
     })
   }
-  const live = (name) => worktrees.has(name) && !worktrees.get(name).removed
+  const live = table.live
 
   // Only the exact pane and IDs Orca issued a dispatch send as it.
   function sender({ from, capability, taskId, dispatchId }) {
@@ -267,7 +301,9 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     // Only the custom launch exists: the harness command, carrying the
     // runner's session id, in a terminal worker-start then adopts. `command`
     // and `argv` are what the real adapter would type and run.
-    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null }) {
+    // `chain`: a chain worktree this Orca made (chainWorktree), which the
+    // worker runs in, nothing made.
+    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null, chain = null }) {
       if (!sessionId) throw new Error(`fake orca: ${title} was started without a runner-assigned --session-id`)
       if (away()) await reach()
       const command = launchCommand({ harness, model, effort, permissionMode, sessionId })
@@ -277,6 +313,10 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       let worktree = runWorktree
       let made = null
       let created = false
+      if (chain) {
+        if (!live(chain)) throw new OrcaError('selector_not_found', `no worktree ${chain}`, 'terminal create')
+        worktree = chain
+      }
       if (child) {
         made = child.retry ? await earlierWorktree(child.name, child.dispatched, child.baseline ?? null) : null
         let timedOut = null
@@ -292,11 +332,9 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
         if (!made && !timedOut) {
           // Real Orca never refuses a taken name: it makes <name>-2, which
           // the adapter refuses for good, naming both.
-          let name = child.name
-          for (let i = 2; live(`C:/fake/worktrees/${name}`); i++) name = `${child.name}-${i}`
-          made = `C:/fake/worktrees/${name}`
           // A child made with setup skipped runs no setup hook, so it is born clean.
-          worktrees.set(made, { parent: runWorktree, name, displayName: name, removed: false, status: null, porcelain: child.setup === 'skip' ? [] : [...setupLeaves], commits: 0, unpushed: 0, setup: child.setup ?? null })
+          const { path, name } = table.create(child.name, child.setup ?? null)
+          made = path
           created = !late
           record({ verb: 'worktreeCreate', name: child.name, worktree: made, setup: child.setup ?? null })
           if (name !== child.name) {
@@ -337,14 +375,14 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
         throw e
       }
       const text = typeof prompt === 'function' ? prompt(baseline) : prompt
-      const argv = workerStartArgs({ run, prompt: text, title, place: ['--worktree', child ? `path:${worktree}` : 'current'], terminal: preamble.handle })
+      const argv = workerStartArgs({ run, prompt: text, title, place: ['--worktree', child || chain ? `path:${worktree}` : 'current'], terminal: preamble.handle })
       if (argv.includes('--agent')) throw new Error(`fake orca: worker-start for ${title} was called with --agent`)
       // Like Claude Code, the agent titles its own tab from its prompt.
       const d = {
         ...preamble, run, title, ...launch, sessionId, command, prompt: text, worktree, tabTitle: text.slice(0, 30), ...fresh(), transcript: null, onNudge: null, onContinue: null, terminalState: 'retained',
       }
       dispatches.set(d.dispatchId, d)
-      record({ verb: 'workerStart', dispatchId: d.dispatchId, title, ...launch, sessionId, command, argv, placement: child ? 'new-child' : 'current', worktree })
+      record({ verb: 'workerStart', dispatchId: d.dispatchId, title, ...launch, sessionId, command, argv, placement: child ? 'new-child' : chain ? 'chain' : 'current', worktree })
       // The worker plays only once its prompt reaches it (promptLoss).
       counts.promptLoss = (counts.promptLoss ?? 0) + 1
       d.delivery = promptLoss({ title, count: counts.promptLoss, sessionId }) ?? null
@@ -375,6 +413,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
         Object.assign(d, { gone: false, exited: false, idle: false, waiting: null })
       } else {
         fence(caller, run, 'orchestration worker-start')
+        if (worktree && worktrees.get(worktree)?.removed) throw new OrcaError('selector_not_found', `no worktree ${worktree}`, 'terminal create')
         const preamble = preambleOf(++seq)
         c = { ...d, ...preamble, run, title, command, worktree, ...fresh(), from: id }
         dispatches.set(c.dispatchId, c)
@@ -510,6 +549,26 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       return { deliveryId: b?.id ?? null, acknowledged, replayed, messages: b ? b.messages.map((m) => ({ ...m })) : [] }
     },
 
+    // The run's chainName(runId), made as a child is, setup hook and all,
+    // whenever none is held: the first time it is asked for, and again after
+    // a reclaim removed it; the same one, as it is, every time in between.
+    async chainWorktree({ runId }) {
+      const name = chainName(runId)
+      const found = findWorktree(name)
+      if (found) return { path: found[0], made: false, baseline: null, warnings: [] }
+      await step('worktreeCreate', { name }, createMs)
+      const { path } = table.create(name)
+      record({ verb: 'worktreeCreate', name, worktree: path, setup: null })
+      return { path, made: true, baseline: [...setupLeaves], warnings: [] }
+    },
+
+    async worktreeLines({ worktree }) {
+      await step('worktreeLines', { worktree })
+      if (!live(worktree)) throw new OrcaError('selector_not_found', `no worktree ${worktree}`, 'git status')
+      record({ verb: 'worktreeLines', worktree })
+      return [...worktrees.get(worktree).porcelain]
+    },
+
     async worktreeStatus({ worktree, status }) {
       await step('worktreeStatus', { worktree, status })
       const w = worktrees.get(worktree)
@@ -590,7 +649,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       const w = worktrees.get(path)
       if (!w || w.removed) throw new OrcaError('selector_not_found', `no worktree ${path}`, 'worktree rm')
       record({ verb: 'worktreeRemove', path })
-      w.removed = true
+      table.remove(path)
       for (const d of dispatches.values()) if (d.worktree === path) d.gone = true
     },
 
@@ -599,4 +658,105 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
   })
   const orca = as(coordinator)
   return orca
+}
+
+// Orca's CLI itself, offline, for the real adapter (orca-cli.mjs) to run
+// against: `call(args)` answers an argv as `orca <args> --json` would, with
+// its `result`, or fails as OrcaError, and `git(cwd, args)` answers the git
+// the adapter runs in a worktree. Only the verbs a worktree's life takes: a
+// Run; a worktree created from the run's (`--name` as asked, or suffixed -2,
+// -3… when taken, as Orca does; the repo's setup policy leaving `setupLeaves`
+// in it unless `--setup skip`), listed, set and removed with every terminal in
+// it; a terminal created, waited on, listed and closed; a worker started in
+// one and stopped. Any other verb fails, so no test passes on an answer real
+// Orca was never asked for. `worktrees` holds each by path, in the table
+// fakeOrca keeps too (fakeWorktrees), with `setups`, how often the setup
+// policy ran in it; `dispatches`, each worker by id. It stays a second fake
+// beside fakeOrca because it answers Orca's argv, so the real adapter's own
+// parsing runs, where fakeOrca stands in for that adapter.
+export function fakeOrcaCli({ setupLeaves = [], runWorktree = 'C:/fake/run', coordinator = 'term_runner' } = {}) {
+  const table = fakeWorktrees({ runWorktree, setupLeaves })
+  const worktrees = table.table
+  const terminals = new Map()
+  const dispatches = new Map()
+  let runs = 0
+  let seq = 0
+  const flag = (args, name) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined)
+  const live = table.live
+  const selected = (args, verb) => {
+    const at = flag(args, '--worktree')
+    const path = at === 'current' || at === undefined ? runWorktree : at.replace(/^path:/, '')
+    if (path !== runWorktree && !live(path)) throw new OrcaError('selector_not_found', `no worktree ${path}`, verb)
+    return path
+  }
+  const open = (worktree, extra = {}) => {
+    const handle = `term_cli${++seq}`
+    terminals.set(handle, { worktree, closed: false, agent: false, ...extra })
+    return handle
+  }
+  const VERBS = {
+    'orchestration run-create': () => ({ run: { id: `run_cli${++runs}`, coordinator_handle: coordinator } }),
+    'worktree list': () => ({ worktrees: [...worktrees].filter(([, w]) => !w.removed).map(([path, w]) => ({ path, branch: `refs/heads/${w.name}` })), truncated: false }),
+    'worktree create': (args) => {
+      // A path made again after its rm keeps its count: its hook ran there before.
+      const { path } = table.create(flag(args, '--name'), flag(args, '--setup') ?? null)
+      return { worktree: { id: `repo::${path}`, path }, startupTerminal: { handle: open(path) } }
+    },
+    'worktree set': (args) => {
+      const w = worktrees.get(selected(args, 'worktree set'))
+      if (args.includes('--display-name')) w.displayName = flag(args, '--display-name')
+      if (args.includes('--workspace-status')) w.status = flag(args, '--workspace-status')
+      return {}
+    },
+    'worktree rm': (args) => {
+      const path = selected(args, 'worktree rm')
+      table.remove(path)
+      for (const t of terminals.values()) if (t.worktree === path) t.closed = true
+      return {}
+    },
+    'terminal create': (args) => {
+      const path = selected(args, 'terminal create')
+      const handle = open(path, { title: flag(args, '--title'), command: flag(args, '--command') })
+      return { terminal: { handle, worktreeId: `repo::${path}` } }
+    },
+    'terminal wait': () => ({ wait: { satisfied: true } }),
+    'terminal close': (args) => {
+      const t = terminals.get(flag(args, '--terminal'))
+      if (!t || t.closed) throw new OrcaError('terminal_handle_stale', 'terminal_handle_stale', 'terminal close')
+      t.closed = true
+      return {}
+    },
+    'terminal list': (args) => {
+      const path = args.includes('--worktree') ? selected(args, 'terminal list') : null
+      return { terminals: [...terminals].filter(([, t]) => !t.closed && (!path || t.worktree === path)).map(([handle, t]) => ({ handle, orphaned: false, ...(t.agent && { agentIdentity: 'claude' }) })) }
+    },
+    'orchestration worker-start': (args) => {
+      const handle = flag(args, '--terminal')
+      const t = terminals.get(handle)
+      if (!t || t.closed) throw new OrcaError('terminal_handle_stale', 'terminal_handle_stale', 'orchestration worker-start')
+      t.agent = true
+      const dispatchId = `ctx_cli${++seq}`
+      dispatches.set(dispatchId, { terminal: handle, worktree: t.worktree, run: flag(args, '--run'), spec: flag(args, '--spec'), stopped: false })
+      return { dispatchId, taskId: `task_cli${seq}`, effects: [{ kind: 'terminal', role: 'agent', id: handle }] }
+    },
+    'orchestration worker-stop': (args) => {
+      const d = dispatches.get(flag(args, '--dispatch'))
+      if (!d) throw new OrcaError('dispatch_not_found', `no dispatch ${flag(args, '--dispatch')}`, 'orchestration worker-stop')
+      d.stopped = true
+      return {}
+    },
+  }
+  return {
+    worktrees,
+    dispatches,
+    async call(args) {
+      const verb = args.slice(0, 2).join(' ')
+      if (!VERBS[verb]) throw new OrcaError('unknown_command', `the offline Orca CLI plays no ${verb}`, verb)
+      return VERBS[verb](args)
+    },
+    async git(cwd, args) {
+      if (args[0] === 'status' && worktrees.has(cwd)) return worktrees.get(cwd).porcelain.map((l) => `${l}\n`).join('')
+      throw new Error(`git ${args[0]} in ${cwd}: the offline Orca CLI plays no such git`)
+    },
+  }
 }
