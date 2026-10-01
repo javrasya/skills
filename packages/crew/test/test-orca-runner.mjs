@@ -756,6 +756,49 @@ test('liveness: a blocked worker the operator answers in time is journaled unblo
   assert.ok(Date.parse(unblocked.at) >= 29 * MIN, unblocked.at)
 })
 
+// An attended agent (ADR-0021): a person joins its session, so it waits for
+// them as long as they take.
+const ATTENDED = `return await agent('Help the person clear these blockers.', { label: 'unblock', phase: 'Unblock', node: 'unblock', attended: 'blockers: no signing identity', schema: ${JSON.stringify(SCHEMA)} })`
+
+test('attended: an agent a person joins is never nudged, continued or failed for idling, and shows needs you until it submits five hours on', async () => {
+  const r = await runOne(async (w) => {
+    w.state.idle = true
+    w.clock.at(5 * 60 * MIN, () => submitGood(w))
+  }, { script: ATTENDED, settings: NO_DOCTOR })
+  assert.deepEqual(r.result, GOOD)
+  assert.equal(r.nudges.length, 0)
+  assert.equal(r.continues.length, 0)
+  assertEntries(r.journal)
+  const started = ofType(r.journal, 'started')[0]
+  assert.equal(started.attended, 'blockers: no signing identity')
+  const live = foldJournal(r.journal.filter((e) => e.type !== 'result')).agents[0]
+  assert.deepEqual([live.state, live.reason], ['needs you', 'blockers: no signing identity'])
+  assert.ok(r.lines.some((l) => l.includes('NEEDS YOU') && l.includes('[Unblock] unblock') && l.includes('blockers: no signing identity')), r.lines.join('\n'))
+  assert.equal(foldJournal(r.journal).agents[0].state, 'done')
+})
+
+test('attended: a blocked attended agent is never failed for waiting on its human', async () => {
+  const r = await runOne(async (w) => {
+    w.state.waiting = '{"evidence":"prompt-text","text":"Allow this command?"}'
+    w.clock.at(3 * 60 * MIN, () => { w.state.waiting = null })
+    w.clock.at(3 * 60 * MIN + 5 * MIN, () => submitGood(w))
+  }, { script: ATTENDED, settings: NO_DOCTOR })
+  assert.deepEqual(r.result, GOOD)
+  assert.equal(ofType(r.journal, 'failed').length, 0)
+})
+
+test('attended: an attended session that exits is continued, and still needs you', async () => {
+  const r = await runOne(async (w) => {
+    w.clock.at(10 * MIN, () => { w.state.exited = true })
+    submitsOnContinue(w.state)
+  }, { script: ATTENDED, settings: NO_DOCTOR })
+  assert.deepEqual(r.result, GOOD)
+  assert.equal(r.continues.length, 1)
+  assert.equal(r.nudges.length, 0)
+  const live = foldJournal(r.journal.filter((e) => e.type !== 'result')).agents[0]
+  assert.equal(live.state, 'needs you')
+})
+
 test('liveness: a worker Orca cannot start, or cannot be watched, is null', async () => {
   const start = await runOne(async () => {}, { settings: NO_DOCTOR, orcaPatch: { workerStart: async () => { throw new Error('orca orchestration worker-start: outcome_unknown') } } })
   assert.equal(start.result, null)
@@ -6359,6 +6402,13 @@ test('prompts: every worker may use subagents, and is told never to start a dyna
   assert.match(NO_WORKFLOW, /[Nn]ever start a dynamic workflow/)
 })
 
+test('prompts: an attended worker is told a person will join, and never that nobody answers', () => {
+  const p = workerPrompt('Help.', { schemaPath: 's.json', resultPath: 'r.json', payloadPath: 'p.json', attended: 'blockers: x' })
+  assert.ok(!p.includes(NO_ASK))
+  assert.match(p, /A person will join this session/)
+  assert.match(p, /node ".*submit\.mjs"/)
+})
+
 test('prompts: every worker, and every doctor, is told never to run orchestration ask', () => {
   const p = workerPrompt('Do a thing.', { schemaPath: 's.json', resultPath: 'r.json', payloadPath: 'p.json' })
   assert.ok(p.includes(NO_ASK))
@@ -6773,6 +6823,23 @@ test('halt: a node whose result needs decisions is held as needs you with its qu
   const [c] = rig.orca.calls.filter((x) => x.verb === 'workerContinue')
   assert.match(c.text, /operator has answered them\. Re-read the ticket, its body and its comments/)
   assert.equal(c.reopened, true, 'its dispatch settled, so it continues under a new one')
+})
+
+test('halt: an attended node that could not clear its blockers is held; r continues its session with the person, still needs you', async () => {
+  const rig = nodeRig({ 'Do a.': async (w) => { w.state.onContinue = submitsValue(ANSWERED); return submitsValue(ASKS)(w) } })
+  const run = rig.go(`return await ${nodeCall('a', ", attended: 'blockers: no signing identity'")}`)
+  await until(() => rig.halts.length, 'the halt')
+  assert.equal(foldJournal(rig.journal()).agents[0].state, 'needs you')
+  await run.control.resume({})
+  assert.deepEqual(await run.p, ANSWERED)
+  const [c] = rig.orca.calls.filter((x) => x.verb === 'workerContinue')
+  assert.match(c.text, /The person is back/)
+  assert.doesNotMatch(c.text, /Re-read the ticket/)
+  // Its continued line says it is attended, so a resume whose journal starts
+  // afresh still shows it needing you.
+  const continued = ofType(rig.journal(), 'continued').at(-1)
+  assert.equal(continued.attended, 'blockers: no signing identity')
+  assert.equal(foldJournal([continued]).agents[0].state, 'needs you')
 })
 
 test('run view: on a halted run the header says so; r on a failed or needs-you node resumes that node, r elsewhere every held one; the view\'s r reaches the runner with its node', async () => {

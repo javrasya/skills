@@ -102,6 +102,9 @@ import { unionLines } from './git.mjs'
 // it), paused (still going at the outage limit: the run is paused, and fails
 // no agent) and end (Orca answered again; with `ms`, its length); `since` is
 // when it began. It has no n, and a resume carries none forward.
+// attended (ADR-0021): an attended call's started, reattached and resumed
+// continued lines carry `attended`, why it needs you: its agent shows needs
+// you, with that reason, whenever it is at work.
 // node (ADR-0016): a call's lines carry its `node`, the stable name the script
 // gives it (opts.node), when it names one: starting, started, reattached,
 // outstanding, continued, result, failed and held. A node's result that needs
@@ -475,6 +478,9 @@ export function foldJournal(entries) {
         })
         break
     }
+    // An attended agent (ADR-0021) needs you for as long as it is at work.
+    if (typeof e.attended === 'string') a.attended = e.attended
+    if (a.attended && ['running', 'continued', 'stuck'].includes(a.state)) Object.assign(a, { state: 'needs you', reason: a.attended })
     return id
   }
 

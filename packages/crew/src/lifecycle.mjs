@@ -69,6 +69,10 @@ ${note}`)
 // ask`, which blocks until the coordinator replies, and this runner never does.
 export const NO_ASK = "Never run any `orchestration ask` command, whatever your session host's preamble offers, and never wait on a reply from anyone: nobody will answer. Put a question only a human can answer in your result (in `decisions_needed`, where your schema has it), finish everything it does not block, then submit."
 
+// An attended worker (ADR-0021) is the one a person joins: it asks them, and
+// waits on them as long as they take.
+export const ATTENDED = 'A person will join this session: ask them directly in it, and wait for their answer for as long as they take — nobody hurries you, and nothing fails you for waiting. Submit only once your task says you are done.'
+
 // A worker's own subagents are its work, and the runner sees them in its
 // transcript (transcript.mjs). A dynamic workflow inside a workflow run is
 // another orchestrator the runner cannot see or supervise.
@@ -77,7 +81,8 @@ export const NO_WORKFLOW = 'You may use subagents, in the foreground or the back
 // `baseline`: the porcelain lines of the worktree it starts in, or null.
 // `leftovers`: those an agent before it left in its chain worktree.
 // `note`: a doctor's note for a start retried after its retries were spent.
-export function workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline = null, leftovers = [], note = null }) {
+// `attended`: a person joins it, so it is told to ask them, not that nobody answers.
+export function workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline = null, leftovers = [], note = null, attended = null }) {
   const what = schemaPath
     ? `Write your result to ${payloadPath} as one JSON object that matches the JSON Schema in ${schemaPath}.`
     : `Write your answer to ${payloadPath} as plain text.`
@@ -92,7 +97,7 @@ How this run receives your result: your final message is not read. Your result r
    ${command}
 3. If submit exits non-zero it prints every error: fix the payload and run it again until it exits 0. Then stop and idle.
 
-${NO_ASK}
+${attended ? ATTENDED : NO_ASK}
 
 ${NO_WORKFLOW}${noteSection(note)}`
 }
@@ -167,7 +172,10 @@ const continuePrompt = (why) => `You were interrupted: the workflow runner stopp
 // on, told why. One that needed decisions is told the operator has answered,
 // on the ticket. `remade`: the baseline of the run's chain worktree, made
 // again because it was reclaimed while the run was halted (ADR-0020).
-export const haltedPrompt = (needsDecision, remade = null) => `${needsDecision
+// `attended`: a person joins it (ADR-0021), so its answers come from them.
+export const haltedPrompt = (needsDecision, remade = null, attended = false) => `${attended
+  ? 'The workflow run was halted here and has been resumed. The person is back in this session: pick up with them where you stopped, and finish the task'
+  : needsDecision
   ? 'The workflow run was halted here: your result named decisions only the operator can make, and the operator has answered them. Re-read the ticket, its body and its comments, for the answers, then finish the task'
   : 'The workflow run was halted here, and the operator has resumed it. Carry on from where you are and finish the task'}, then run the submit command from your instructions until it exits 0. If a session host's preamble came with this message, take the four IDs for submit from it, not from an earlier one.${remade
   ? ` Your worktree was reclaimed while the run was halted and has been made again, its setup hook run again: anything you left uncommitted in it is gone, and it is no longer on the ref you were on, so switch back to your work's ref first.${baselineSection(remade)}`
@@ -373,12 +381,14 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
   // beginning and ending, so the run view shows it while it lasts. mail(), a
   // doctor's, reads the Run mailbox at every look, and ends the watch with
   // what it returns: the doctor's worker_done, read before the host shows it.
-  // held(), a doctor's, is whether it needs you: while it does, it waits on
-  // a human for as long as it takes, so no idle, stillness or blocked limit
-  // counts against it; each counts afresh from its next message. nudgeText:
+  // held(), a doctor's or an attended agent's, is whether it needs you: while
+  // it does, it waits on a human for as long as it takes, so no idle,
+  // stillness or blocked limit counts against it; each counts afresh from its
+  // next message. attended: an attended agent's session that exits is dead,
+  // to be continued, since a held one is otherwise never read as dead. nudgeText:
   // what a nudge types, a doctor's its own, and owes what an idle death
   // says it went without, a doctor's its report.
-  async function watch(w, { title, harness, sessionId, nudged, moving = () => {}, blocked = () => {}, unblocked = () => {}, mail = null, held = () => false, nudgeText = NUDGE, owes = 'submitting' }) {
+  async function watch(w, { title, harness, sessionId, nudged, moving = () => {}, blocked = () => {}, unblocked = () => {}, mail = null, held = () => false, attended = false, nudgeText = NUDGE, owes = 'submitting' }) {
     const start = clock.now()
     let errors = 0
     let nudges = 0
@@ -489,6 +499,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
         blockedAt = null
         stillFrom = graceFrom = now
       }
+      if (hold && attended && s.exited) return { dead: 'its session exited' }
       if (hold) {
         stillFrom = graceFrom = now
         stuckNudged = false
@@ -637,7 +648,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
           const w = await host.workerStart({
             run: runId,
             asking: asking(call),
-            prompt: patient != null ? prompt : (baseline) => (sent = workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline: baseline ?? (chain ? chainState?.baseline ?? null : null), leftovers: chain ? chainState?.leftovers ?? [] : [], note: again?.note ?? null })),
+            prompt: patient != null ? prompt : (baseline) => (sent = workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline: baseline ?? (chain ? chainState?.baseline ?? null : null), leftovers: chain ? chainState?.leftovers ?? [] : [], note: again?.note ?? null, attended: call.attended ?? null })),
             title,
             ...launch,
             sessionId,
@@ -665,10 +676,11 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
       }
       return failAgent(call, { ...failure, ...retainMade() })
     }
-    journal({ type: 'started', key, n, ...nodeOf(call), title, run: runId, dispatchId: w.dispatchId, harness: launch.harness, sessionId, worktree: w.worktree ?? null, terminal: w.terminal, dir, ...(call.origin != null && { origin: call.origin }) })
+    journal({ type: 'started', key, n, ...nodeOf(call), title, run: runId, dispatchId: w.dispatchId, harness: launch.harness, sessionId, worktree: w.worktree ?? null, terminal: w.terminal, dir, ...(call.origin != null && { origin: call.origin }), ...(call.attended && { attended: call.attended }) })
     if (isolation === 'worktree' && w.worktree) await setStatus(call, w.worktree, phaseName === 'Gate' ? 'in-review' : 'in-progress')
     const on = [launch.harness, launch.model, launch.effort && `${launch.effort} effort`, launch.permissionMode && `${launch.permissionMode} mode`].filter(Boolean).join(', ')
     out(`>> ${title}: started on ${on} as dispatch ${w.dispatchId}, session ${sessionId}, in terminal ${w.terminal}${w.worktree ? ` in ${w.worktree}` : ''}`)
+    if (call.attended) out(`!!!!!!!! ${title} NEEDS YOU in terminal ${w.terminal}: ${call.attended}`)
     // The agent titles its own tab and drops --task-title (ADR-0011), so the
     // tab is renamed to the title the operator finds it by.
     try {
@@ -721,7 +733,8 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
           blocked: (waiting) => journal({ type: 'blocked', key, n, title, dispatchId: w.dispatchId, terminal: w.terminal, waiting: String(waiting) }),
           unblocked: () => journal({ type: 'unblocked', key, n, title, dispatchId: w.dispatchId }),
           mail,
-          held: () => box?.needsYou != null,
+          held: () => !!call.attended || box?.needsYou != null,
+          attended: !!call.attended,
           nudgeText: patient != null ? DOCTOR_NUDGE : NUDGE, owes: patient != null ? 'reporting' : 'submitting',
         })
         // A dead session is continued in its own session (ADR-0013), unless
@@ -824,7 +837,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
       journal({
         type: 'reattached', key, n, ...nodeOf(call), title, run: adopt.run ?? takeOver, dispatchId: adopt.dispatchId, harness: adopt.harness ?? call.launch?.harness ?? null,
         sessionId: adopt.sessionId, terminal: adopt.terminal, worktree: adopt.worktree, dir: rel, origin: adopt.origin ?? n, ...(adopt.continuations && { continuations: adopt.continuations }),
-        ...(call.patient != null && { patient: call.patient, round: call.round }), ...(call.box?.needsYou != null && { needsYou: call.box.needsYou }),
+        ...(call.patient != null && { patient: call.patient, round: call.round }), ...(call.box?.needsYou != null && { needsYou: call.box.needsYou }), ...(call.attended && { attended: call.attended }),
       })
     }
     mkdirSync(dir, { recursive: true })
@@ -949,11 +962,11 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
     out(`>> ${title}: resuming node ${call.node}: continuing session ${adopt.sessionId} ${gone ? `in a new terminal in ${w.worktree ?? 'its worktree'}` : `in terminal ${w.terminal}`}`)
     let next
     try {
-      next = await host.workerContinue({ run: runId, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: haltedPrompt(!!halted.needsDecision, chain?.made ? chain.baseline ?? [] : null), ...launch, sessionId: adopt.sessionId, reopen: gone || !!chain?.made, asking: asking(call) })
+      next = await host.workerContinue({ run: runId, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: haltedPrompt(!!halted.needsDecision, chain?.made ? chain.baseline ?? [] : null, !!call.attended), ...launch, sessionId: adopt.sessionId, reopen: gone || !!chain?.made, asking: asking(call) })
     } catch (e) {
       return failAgent(call, { reason: `resuming its session failed: ${e?.message ?? e}`, attempts: 0, run: runId, retained: keep(call, w) })
     }
-    journal({ type: 'continued', key, n, ...nodeOf(call), title, dispatchId: next.dispatchId, sessionId: adopt.sessionId, terminal: next.terminal, reason: 'the run was resumed', attempt: 0, reopened: next.dispatchId !== w.dispatchId })
+    journal({ type: 'continued', key, n, ...nodeOf(call), title, dispatchId: next.dispatchId, sessionId: adopt.sessionId, terminal: next.terminal, reason: 'the run was resumed', attempt: 0, reopened: next.dispatchId !== w.dispatchId, ...(call.attended && { attended: call.attended }) })
     return { w: await moveTo(title, w, next), sessionId: adopt.sessionId, attempts: 0, continued: 0 }
   }
 

@@ -4,6 +4,7 @@ export const meta = {
   phases: [
     { title: 'Graph', detail: 'read the spec and its tickets, return the task graph' },
     { title: 'Explore', detail: 'research notes saved outside the repo' },
+    { title: 'Unblock', detail: 'when discovery found blockers: an attended session where the operator clears them, before anything is built' },
     { title: 'Setup', detail: 'layer-0 PR when prior work already sits on a branch' },
     { title: 'Implement', detail: 'a dispatcher sizes each ticket; fresh slice agents implement it, frontier-scheduled' },
     { title: 'Gate', detail: 'code-review each ticket branch before it is published' },
@@ -32,6 +33,7 @@ const RUN_DEFAULT = { harness: 'claude', model: 'opus' }
 const ROLES = {
   graph: RUN_DEFAULT,         // Graph: read the spec, return the ticket graph
   explore: RUN_DEFAULT,       // Explore: one research note
+  unblock: RUN_DEFAULT,       // Unblock: guide the operator through the blockers (session runner only)
   layer0: RUN_DEFAULT,        // Setup: the layer-0 PR
   dispatch: RUN_DEFAULT,      // Implement: size a ticket into slices
   impl: RUN_DEFAULT,          // Implement: one slice
@@ -338,10 +340,32 @@ const RETRO_SCHEMA = {
   },
 }
 
+// What discovery finds missing from the environment (ADR-0021): something a
+// person supplies once — a credential, a signing identity, a device or service
+// set up — so agents can do the rest. Never a ticket: those stay automated.
+const BLOCKERS_FIELD = {
+  blockers: {
+    type: 'array',
+    description: 'what the environment is missing that a person must supply once; empty when nothing is',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['subject', 'tickets', 'why', 'evidence', 'check'],
+      properties: {
+        subject: { type: 'string', description: 'what is missing, named plainly' },
+        tickets: { type: 'array', items: { type: 'integer' }, description: 'the tickets that need it' },
+        why: { type: 'string', description: 'what those tickets cannot do without it' },
+        evidence: { type: 'string', description: 'what you ran or read that shows it missing' },
+        check: { type: 'string', description: 'one command that succeeds once it is there' },
+      },
+    },
+  },
+}
+
 const GRAPH_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['tickets', 'start_ref', 'explorations'],
+  required: ['tickets', 'start_ref', 'explorations', 'blockers'],
   properties: {
     tickets: {
       type: 'array',
@@ -361,6 +385,7 @@ const GRAPH_SCHEMA = {
       },
     },
     start_ref: { type: 'string', description: 'branch already carrying work for this spec — it becomes the bottom layer of the stack; else the base ref' },
+    ...BLOCKERS_FIELD,
     explorations: {
       type: 'array',
       maxItems: 4,
@@ -564,6 +589,37 @@ const INTEGRATION_SCHEMA = {
   },
 }
 
+const EXPLORE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['path', 'blockers'],
+  properties: {
+    path: { type: 'string', description: 'the absolute path of the note you wrote' },
+    ...BLOCKERS_FIELD,
+  },
+}
+
+// The unblock agent's result: every blocker it saw verified clear, and, as a
+// node's decisions_needed, each it could not — which holds the node and halts
+// the run until a resume carries the same session on (ADR-0016, ADR-0021).
+const UNBLOCK_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['resolved', 'decisions_needed'],
+  properties: {
+    resolved: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['subject', 'verified_by'],
+        properties: { subject: { type: 'string' }, verified_by: { type: 'string', description: 'the check you ran and what it showed' } },
+      },
+    },
+    decisions_needed: { type: 'array', items: { type: 'string' }, description: 'each blocker still not clear, and why; empty once every one is' },
+  },
+}
+
 const FINALIZE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -587,7 +643,9 @@ Blocking relationships: query GitHub's native dependencies first, per ticket —
 ${RUN_ORDER === 'sequential' ? `
 map_position: where the spec itself places the ticket in its map of tickets — the ordered list, table or diagram of its slices — counting from 1. A ticket the spec does not place gets 0. Read it off the spec as written; do not rank the tickets yourself.
 ` : ''}
-Set needs_human on a ticket that cannot be completed by an agent alone: it needs hardware, a running game, a physical device, credentials only a person holds, or its label says so. Put the reason in human_reason.
+Set needs_human on a ticket whose work itself cannot be done by an agent alone — a person must do it with their own hands throughout — or whose label says so. Put the reason in human_reason.
+
+blockers: what this machine is missing that a person can supply once so agents can do the rest — a credential, a signing identity or profile, an account or permission, a device or service set up and running. Check, do not guess: look for it (the keychain, the config file, the running process, the env var) and record what you ran as evidence. Something missing that a person supplies once is a blocker, not needs_human: the tickets that need it stay automated, and the run clears its blockers with the operator before it builds anything. Give each a \`check\` command that succeeds once it is there. Nothing missing: an empty list.
 
 start_ref: if work for this spec already sits on a branch (the spec or a ticket names one, or a branch exists whose commits are for this spec), return that branch — it becomes the bottom layer of the stack rather than being orphaned. Otherwise return "${BASE_REF}".
 
@@ -635,12 +693,64 @@ Keep the note under 300 lines. Every reader ingests it whole at full price, so c
 
 ${ECONOMY}
 
-Return the absolute path you wrote.`,
-      { ...ROLES.explore, effort: 'low', phase: 'Explore', label: `explore:${e.label}`, node: exploreNodes[i] },
+If your research shows this machine missing something a person must supply once — a credential, a signing identity or profile, an account, a device or service set up and running — return it in \`blockers\`, with the evidence you saw and a \`check\` command that succeeds once it is there. Check, do not guess; nothing missing is an empty list.
+
+Return the absolute path you wrote, and your blockers.`,
+      { ...ROLES.explore, effort: 'low', phase: 'Explore', schema: EXPLORE_SCHEMA, label: `explore:${e.label}`, node: exploreNodes[i] },
     ),
   ),
 )).filter(Boolean)
 log(`${notes.length} research notes in ${NOTES_DIR}`)
+
+// --- step 2b: clear the blockers with the operator (ADR-0021) -------------
+// Everything discovery found missing is cleared before anything is built, so
+// every automated ticket runs undisturbed. The session runner opens one
+// attended session the operator joins; no clock hurries it. A blocker it
+// cannot clear comes back as the node's decisions_needed, which holds the
+// node and halts the run until a resume carries that same session on. The
+// Workflow runner has nobody in its sessions, so it halts here instead.
+const blockers = [...(graph.blockers || []), ...notes.flatMap((n) => n.blockers || [])]
+const neededBy = (b) => (b.tickets.length ? b.tickets.map((t) => '#' + t).join(', ') : 'the run')
+const blockerList = blockers.map((b) => `${b.subject} (${neededBy(b)})`).join('; ')
+const haltOnBlockers = (why) => {
+  log(`HALTED at Unblock — ${why}: ${blockerList}`)
+  return {
+    spec: SPEC,
+    halted: true,
+    reason: `${why}: ${blockerList}. Nothing was built. Clear them, then resume the run.`,
+    blockers,
+    published: [],
+    notes: NOTES_DIR,
+  }
+}
+if (blockers.length) {
+  log(`${blockers.length} blocker(s) to clear before anything is built: ${blockerList}`)
+  if (!ON_SESSION) return haltOnBlockers('this machine is missing what the tickets need, and the Workflow runner has nobody to clear it with')
+  phase('Unblock')
+  const cleared = await agent(
+    `Help the person at this machine clear what it is missing before the run for spec #${SPEC} builds anything.
+
+${POINTERS}
+
+Discovery found these blockers. Each names what is missing, the tickets that need it, what was seen, and a command that succeeds once it is there:
+
+${blockers.map((b, i) => `${i + 1}. ${b.subject} — needed by ${neededBy(b)}: ${b.why}
+   evidence: ${b.evidence}
+   check: \`${b.check}\``).join('\n')}
+
+Some may repeat one another — treat them as one. Before you start, run every check: one that already passes is resolved, and you tell the person so.
+
+You guide; the person acts. Never install, sign, configure, create or fetch anything yourself, and never handle a secret: a credential, a certificate, an account or a permission is the person's decision and the person's action. Explain what each blocker is and why the tickets need it, ask what you need to know (which account, which machine, what they already have), tell them step by step what to do, and wait for them for as long as they take. Once they say a step is done, run its check. A check that still fails: say what it shows and work out the next step together.
+
+End when every blocker's check passes: each in \`resolved\`, with the check you ran and what it showed. If the person tells you to stop with some still failing, put each of those in \`decisions_needed\` with why it is not clear — the run then halts, and resuming it brings you back here.`,
+    { ...ROLES.unblock, phase: 'Unblock', schema: UNBLOCK_SCHEMA, attended: `blockers: ${blockers.map((b) => b.subject).join(' · ')}`, label: 'unblock', node: 'unblock' },
+  )
+  // The session runner holds an unresolved node until a resume clears it, so
+  // this is any runner that hands one back.
+  if (!cleared) return haltOnBlockers('the unblock session ended without a result')
+  if (cleared.decisions_needed.length) return haltOnBlockers(`the unblock session left some uncleared (${cleared.decisions_needed.join('; ')})`)
+  log(`Unblocked: ${cleared.resolved.map((r) => r.subject).join('; ') || 'nothing left to clear'}`)
+}
 
 // --- step 3: layer 0 — prior work becomes the bottom of the stack --------
 // The stack's whole-stack merge lands on BASE_REF, and a `Closes #N` only fires
@@ -750,7 +860,7 @@ The ticket was cut from the spec by a human and is trusted as written. Do not lo
 
 Default to ONE slice. Slice only when one agent plausibly cannot finish in roughly 70 tool calls; when unsure, do not slice. Slices run sequentially on one branch, so each must leave the branch consistent — building, tests green.
 
-Each brief is under 3,000 characters and has four sections, nothing else: (1) the acceptance criteria this slice owns, copied verbatim from the ticket; (2) the files you expect it to touch; (3) which of these research notes to read — ${notes.length ? notes.join(', ') : 'none exist'} — by filename, the ones whose subject bears on its criteria; (4) what is out of scope because another slice owns it. Every criterion of the ticket is owned by exactly one slice, including any test the ticket demands. Set each slice's effort: 'high' for the gnarly ones, 'medium' otherwise.
+Each brief is under 3,000 characters and has four sections, nothing else: (1) the acceptance criteria this slice owns, copied verbatim from the ticket; (2) the files you expect it to touch; (3) which of these research notes to read — ${notes.length ? notes.map((n) => n.path).join(', ') : 'none exist'} — by filename, the ones whose subject bears on its criteria; (4) what is out of scope because another slice owns it. Every criterion of the ticket is owned by exactly one slice, including any test the ticket demands. Set each slice's effort: 'high' for the gnarly ones, 'medium' otherwise.
 
 Also return ticket_brief: one short paragraph on the whole ticket, for later fix agents.`,
     { ...ROLES.dispatch, effort: 'high', phase: 'Implement', schema: DISPATCH_SCHEMA, label: `dispatch:#${t.number}${remainder ? ':re' : ''}`, node },

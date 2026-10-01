@@ -69,7 +69,8 @@ async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel' 
       start_ref: 'main',
       explorations: [{ label: 'area-a', question: 'q?' }],
     }),
-    explore: () => '/tmp/n/01-area-a.md',
+    explore: () => ({ path: '/tmp/n/01-area-a.md', blockers: [] }),
+    unblock: () => ({ resolved: [], decisions_needed: [] }),
     layer0: () => ({ pr_url: 'https://pr/layer0', pr_number: 90, note: 'in sync', worktree: '/wt/layer0' }),
     dispatch: () => ({ ticket_brief: 'the ticket in brief', slices: [{ title: 'all of it', brief: 'do it', effort: 'medium' }] }),
     impl: (label) => ({ branch: 'ticket/' + label.match(/#(\d+)/)[1], summary: 's', tests_run: 'npm t', tests_green: true, unmet: [] }),
@@ -97,6 +98,7 @@ async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel' 
   function route(label) {
     if (label.startsWith('graph')) return 'graph'
     if (label.startsWith('explore')) return 'explore'
+    if (label.startsWith('unblock')) return 'unblock'
     if (label.startsWith('layer0')) return 'layer0'
     if (label.startsWith('dispatch')) return 'dispatch'
     if (label.startsWith('impl')) return 'impl'
@@ -168,6 +170,58 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('A: explore effort low / dispatch high / publish low', calls.find((c) => c.label.startsWith('explore')).effort === 'low' && calls.find((c) => c.label === 'dispatch:#10').effort === 'high' && calls.find((c) => c.label === 'publish:#10').effort === 'low', '')
   check('A: slice effort taken from dispatcher verdict', calls.find((c) => c.label === 'impl:#10').effort === 'medium', '')
   check('A: an untouched harness table runs every agent on Claude opus', calls.every((c) => c.opts.harness === 'claude' && c.opts.model === 'opus'), JSON.stringify(calls.filter((c) => c.opts.harness !== 'claude' || c.opts.model !== 'opus').map((c) => c.label)))
+}
+
+// --- scenario U: blockers found at discovery are cleared first (ADR-0021) ---
+const SIGNING = { subject: 'Developer ID signing identity', tickets: [10], why: 'the app must be signed with it', evidence: 'security find-identity shows none', check: 'security find-identity -v -p codesigning | grep "Developer ID Application"' }
+const withBlockers = (blockers) => () => ({
+  tickets: [
+    { number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' },
+    { number: 11, title: 'T11', blocked_by: [10], needs_human: false, human_reason: '' },
+  ],
+  start_ref: 'main',
+  explorations: [{ label: 'area-a', question: 'q?' }],
+  blockers,
+})
+{
+  const { result, calls } = await run({
+    graph: withBlockers([SIGNING]),
+    explore: () => ({ path: '/tmp/n/01-area-a.md', blockers: [{ subject: 'notary credentials', tickets: [11], why: 'notarization', evidence: 'no keychain profile', check: 'xcrun notarytool history --keychain-profile notary' }] }),
+    unblock: () => ({ resolved: [{ subject: 'Developer ID signing identity', verified_by: 'find-identity lists it' }, { subject: 'notary credentials', verified_by: 'history ran' }], decisions_needed: [] }),
+  }, { runner: 'session' })
+  const seq = calls.map((c) => c.label)
+  const u = calls.find((c) => c.label === 'unblock')
+  check('U1: blockers open one unblock session', seq.filter((l) => l === 'unblock').length === 1, seq.join(' | '))
+  check('U1: unblock runs after explore and before anything is implemented', seq.indexOf('unblock') > seq.findIndex((l) => l.startsWith('explore')) && seq.indexOf('unblock') < seq.findIndex((l) => l.startsWith('dispatch')), seq.join(' | '))
+  check('U1: unblock is attended, a node, in the project, with the blockers as its reason', u && typeof u.opts.attended === 'string' && /Developer ID signing identity/.test(u.opts.attended) && u.opts.node === 'unblock' && !u.opts.isolation && u.opts.phase === 'Unblock', JSON.stringify(u && u.opts))
+  check('U1: the unblock prompt hands over every blocker with its check, graph and explorers alike', u && u.prompt.includes(SIGNING.check) && u.prompt.includes(SIGNING.evidence) && u.prompt.includes('notarytool history'), '')
+  check('U1: the unblock agent guides and never fixes', u && /[Nn]ever install, sign, configure/.test(u.prompt) && /`decisions_needed`/.test(u.prompt), '')
+  check('U1: a cleared run implements every ticket', result.halted === false && result.state.startsWith('complete') && seq.includes('publish:#11'), result.state)
+}
+{
+  const { result, calls } = await run({ graph: withBlockers([SIGNING]), unblock: () => ({ resolved: [], decisions_needed: ['Developer ID signing identity: no Account Holder access today'] }) }, { runner: 'session' })
+  check('U5: an unresolved blocker halts the run before anything is built', result.halted === true && /Developer ID signing identity/.test(result.reason) && !calls.some((c) => c.label.startsWith('dispatch') || c.label.startsWith('layer0')), JSON.stringify(result))
+}
+{
+  const before = (await run({}, { runner: 'session' })).calls.map((c) => c.label)
+  const { calls } = await run({ graph: withBlockers([]) }, { runner: 'session' })
+  check('U2: an empty blocker list leaves the call sequence as it was', JSON.stringify(calls.map((c) => c.label)) === JSON.stringify(before), calls.map((c) => c.label).join(' | '))
+}
+{
+  const { calls } = await run({}, { runner: 'session' })
+  check('U2: no blockers, no unblock session', !calls.some((c) => c.label === 'unblock'), calls.map((c) => c.label).join(' | '))
+  check('U2: the graph prompt asks for blockers, apart from needs_human', /blockers:/.test(calls[0].prompt) && /is a blocker, not needs_human/.test(calls[0].prompt), '')
+}
+{
+  const { result, calls } = await run({ graph: withBlockers([SIGNING]) })
+  const seq = calls.map((c) => c.label)
+  check('U3: the Workflow runner halts at blockers instead of opening a session', !seq.includes('unblock') && result.halted === true && /Developer ID signing identity/.test(result.reason) && result.blockers.length === 1, JSON.stringify(result))
+  check('U3: nothing is implemented past a blocker', !seq.some((l) => l.startsWith('dispatch') || l.startsWith('layer0') || l.startsWith('publish')), seq.join(' | '))
+}
+{
+  const { result, calls } = await run({ graph: withBlockers([SIGNING]), unblock: () => null }, { runner: 'session' })
+  const seq = calls.map((c) => c.label)
+  check('U4: an unblock session that died halts the run with its blockers', result.halted === true && /Developer ID signing identity/.test(result.reason) && !seq.some((l) => l.startsWith('dispatch')), JSON.stringify(result))
 }
 
 // --- scenario B: slice bails, re-dispatch finishes --------------------------
@@ -656,6 +710,8 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   const noForce = /--force(?!` or `--force-with-lease` to any push)/
   check('ALL: no prompt tells an agent to force-push', !EVERY_CALL.some((c) => noForce.test(c.prompt.replace(/^- Never pass.*$/gm, '').replace(/git worktree remove --force|orca worktree rm --worktree path:<path> --force/g, ''))), offenders(/--force-with-lease origin|--force origin/))
   check('ALL: no prompt tells an agent to check a branch out', !EVERY_CALL.some((c) => /git checkout -B|git checkout ticket\//.test(c.prompt)), offenders(/git checkout -B/))
+  check('ALL: no prompt interpolates an object instead of a value', !EVERY_CALL.some((c) => c.prompt.includes('[object Object]')), offenders(/\[object Object\]/))
+  check('A: the dispatcher names the research notes by path', EVERY_RUN[0].find((c) => c.label === 'dispatch:#10').prompt.includes('/tmp/n/01-area-a.md'), '')
   check('ALL: no prompt interpolates a helper instead of a value', !EVERY_CALL.some((c) => /runRefs\.has|\(r\) =>|=> \(\{/.test(c.prompt)), offenders(/runRefs\.has|\(r\) =>/))
   // `--open` readies the PRs, and the drafts are half the "still adding
   // layers" signal. Every `gh stack link` in the run must omit it.

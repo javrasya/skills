@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-08-28
+Accepted — 2026-08-28. Amended by ADR-0021: what discovery finds missing from the environment is a blocker, cleared with the operator before anything is built, not a ticket needing a human.
 
 ## Context
 
