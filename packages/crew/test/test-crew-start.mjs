@@ -485,7 +485,7 @@ test('crew start arms with a [1m] model, and a worker starts on it: the crew hos
   const started = await host.workerStart({ run: runId, prompt: 'hello', title: 'impl', ...impl, permissionMode: 'auto', sessionId })
   const { sessions } = await request(w.paths, { op: 'session.list' })
   const worker = sessions.find((s) => s.id === started.terminal)
-  assert.deepEqual(worker.command.slice(2), ['--session-id', sessionId, '--permission-mode', 'auto', '--model', 'sonnet[1m]'])
+  assert.deepEqual(worker.command.slice(2, -2), ['--session-id', sessionId, '--permission-mode', 'auto', '--model', 'sonnet[1m]'])
   assert.equal(launchCommand({ ...impl, sessionId }), `claude --session-id ${sessionId} --model 'sonnet[1m]'`, 'a host that types it into a shell quotes it')
 })
 

@@ -28,7 +28,7 @@ import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { fakeOrca, fakeOrcaCli } from '../src/fake-orca.mjs'
 import { orcaCli } from '../src/orca-cli.mjs'
-import { crewHost, crewWorktrees } from '../src/crew-host.mjs'
+import { PI_EXTENSION, claudeSettings, crewHost, crewWorktrees } from '../src/crew-host.mjs'
 import { repoConfig } from '../src/crew-config.mjs'
 import { CREW_ONLY, RUN_METHODS, SESSION_METHODS, hostUnreachable } from '../src/session-host.mjs'
 import { reclaimAgent } from '../src/reclaim.mjs'
@@ -504,13 +504,13 @@ test('crew host: has crew\'s own methods beyond the interface, sessionStart and 
   assert.deepEqual(CREW_ONLY.filter((m) => typeof host[m] !== 'function'), [])
 })
 
-test('crew host: the harness starts from the runner\'s launch line word for word, only its program swapped', async () => {
+test('crew host: the harness starts from the runner\'s launch line word for word, only its program swapped, and crew\'s hooks for that session after it', async () => {
   const h = crewKind.open()
   const launch = { harness: 'claude', model: 'opus', effort: 'high', permissionMode: 'acceptEdits' }
   const w = await start(h, 'launch line', launch)
   const [, ...words] = launchCommand({ ...launch, sessionId: w.sessionId }).split(' ')
   const s = await h.info(w)
-  assert.deepEqual(s.command, [process.execPath, FAKE_HARNESS, ...words])
+  assert.deepEqual(s.command, [process.execPath, FAKE_HARNESS, ...words, '--settings', claudeSettings()])
   assert.equal(s.cwd, crewScratch().cwd)
   assert.equal(w.worktree, crewScratch().cwd)
   assert.equal(s.title, 'launch line')
@@ -539,7 +539,7 @@ test('crew host: pi\'s transcript is written in pi\'s format, where the runner f
   const h = crewKind.open()
   const w = await start(h, 'pi', { harness: 'pi', model: 'sonnet', effort: 'low' })
   const s = await h.info(w)
-  assert.deepEqual(s.command.slice(2), ['--approve', '--session-id', w.sessionId, '--model', 'sonnet', '--thinking', 'low'])
+  assert.deepEqual(s.command.slice(2), ['--approve', '--session-id', w.sessionId, '--model', 'sonnet', '--thinking', 'low', '-e', PI_EXTENSION])
   const transcripts = sessionTranscripts({ env: crewScratch().env })
   const usage = await eventually('pi\'s transcript', () => transcripts.usage({ harness: 'pi', sessionId: w.sessionId, worktree: w.worktree }))
   assert.match(usage.path, new RegExp(`_${w.sessionId}\\.jsonl$`))
@@ -603,12 +603,42 @@ test('crew host: a dialog nobody can answer fails the start at once, and one ans
   assert.deepEqual(await h.host.terminalList(), before)
 })
 
-test('crew host: a continued session runs the runner\'s resume line word for word, in the dead one\'s worktree, and the dead one is closed', async () => {
+test("crew host: pi's dialog before the first prompt is heard of from pi's own event, not its screen: nothing is typed into it, and the prompt goes in once it is answered", async () => {
+  const h = crewKind.open({ env: { CREW_FAKE_DIALOG: 'pi-mcp' } })
+  const heard = []
+  const starting = start(h, 'pi mcp', { harness: 'pi', asking: (seen) => heard.push(seen) })
+  const shown = await eventually('the dialog heard of', () => heard[0])
+  assert.deepEqual([shown.dialog, shown.ask], ['a dialog', 'pi asks: Allow project MCP server “fakesrv”?: enter the session and answer it'])
+  await sleep(PAST_QUIET)
+  assert.equal(heard.length, 1, 'a dialog that stays is heard of once')
+  const screen = await h.host.terminalScreen({ terminal: shown.terminal, lines: 30 })
+  assert.ok(screen.some((l) => l.includes('Allow project MCP server')), 'nothing was typed into it')
+  // The person answers it in the session.
+  await request(h.paths, { op: 'session.write', id: shown.terminal, data: '\r' })
+  const w = await starting
+  assert.deepEqual(heard.slice(1), [null], 'its going is heard of')
+  const transcripts = sessionTranscripts({ env: crewScratch().env })
+  const path = await eventually("pi's transcript", () => transcripts.usage({ harness: 'pi', sessionId: w.sessionId, worktree: w.worktree })?.path)
+  assert.ok(readFileSync(path, 'utf8').includes(w.prompt), 'the start prompt went in')
+})
+
+for (const [harness, asks] of [['claude', 'Claude asks permission to use Bash: touch asked.txt'], ['pi', 'pi asks: Allow Bash?']]) {
+  test(`crew host: a ${harness} worker that asks the person mid-turn is waiting on them, from its own events, until they answer`, async () => {
+    const h = crewKind.open()
+    const w = await start(h, `asks on ${harness}`, { harness, prompt: `Contract prompt for asks on ${harness}. [ask Bash]` })
+    const waiting = async () => (await h.host.workerShow({ dispatch: w.dispatchId })).waiting
+    assert.equal(await eventually('it waiting on the person', waiting), asks)
+    await request(h.paths, { op: 'session.write', id: w.terminal, data: '\r' })
+    await eventually('it no longer waiting', async () => (await waiting()) === null)
+  })
+}
+
+test('crew host: a continued session runs the runner\'s resume line word for word, crew\'s hooks after it, in the dead one\'s worktree, and the dead one is closed', async () => {
   const h = crewKind.open()
   const { w, next } = await died(h, 'resume line')
   const [, ...words] = resumeCommand({ harness: 'claude', sessionId: w.sessionId }).split(' ')
   const s = await h.info(next)
-  assert.deepEqual(s.command, [process.execPath, FAKE_HARNESS, ...words])
+  assert.deepEqual(s.command, [process.execPath, FAKE_HARNESS, ...words, '--settings', claudeSettings()])
   assert.equal(s.cwd, crewScratch().cwd)
   assert.equal(next.worktree, crewScratch().cwd)
   assert.equal(s.title, 'resume line')

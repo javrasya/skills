@@ -15,6 +15,10 @@
 //   session.screen { id }                  → { screen: { lines, cursor, alternate } }
 //   session.write { id, data, paste }      → { session }: data typed as keys,
 //     or with paste as pasted text
+//   session.waiting { id, waiting, keep } → { session }: what its harness
+//     waits on the person for, or null, as the harness's own events tell it
+//     (hooks/); with keep, set only while it waits on nothing. Its info, and
+//     its worker's worker.show, carry it
 //   session.rename { id, title }           → { session }
 //   session.kill { id }                    → { session }: its program ends,
 //     the session and its last screen stay until closed
@@ -131,12 +135,28 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
     if (pid && alive(pid)) throw new Error(`run_live: ${runDir} has its runner already, pid ${pid}`)
   }
 
+  // What the session's harness waits on the person for, as its own events
+  // told (session.waiting), in its info; null once its program has ended.
+  function waitsOn(session) {
+    const { info } = session
+    let waiting = null
+    return Object.assign(session, {
+      info: () => {
+        const i = info()
+        return { ...i, waiting: i.alive ? waiting : null }
+      },
+      wait(what, keep = false) {
+        if (!(keep && waiting)) waiting = what
+      },
+    })
+  }
+
   function spawnOne({ command, cwd, env, cols, rows, title, runDir = null }) {
     const id = book.sessionId()
     // Always the directory it was asked for, never the daemon's own: that is
     // wherever the crew command that started the daemon happened to run.
     if (typeof cwd !== 'string' || !cwd) throw new Error(`session.spawn needs the directory to start ${command[0]} in`)
-    const session = open({ id, command, cwd, env: { ...(env ?? process.env), CREW_SESSION: id }, cols, rows, title })
+    const session = waitsOn(open({ id, command, cwd, env: { ...(env ?? process.env), CREW_SESSION: id }, cols, rows, title }))
     sessions.set(id, session)
     if (runDir !== null) runnerDirs.set(id, runKey(runDir))
     book.started(id)
@@ -213,6 +233,11 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
       if (!session.info().alive) throw new Error(`session ${id} has exited`)
       if (paste) await session.paste(text(data, 'data'))
       else session.write(text(data, 'data'))
+      return { session: session.info() }
+    },
+    'session.waiting': ({ id, waiting = null, keep = false }) => {
+      const session = sessionOf(id)
+      session.wait(waiting === null ? null : text(waiting, 'waiting'), keep === true)
       return { session: session.info() }
     },
     'session.rename': ({ id, title }) => {

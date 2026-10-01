@@ -21,7 +21,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test-force-exit test/test-shared.mjs && node --test-force-exit test/test-screens.mjs && node --test-force-exit test/test-orca-runner.mjs && node --test-force-exit test/test-crew-bin.mjs && node --test-force-exit test/test-daemon.mjs && node --test-force-exit test/test-console.mjs && node --test-force-exit test/test-host-contract.mjs && node --test-force-exit test/test-crew-run.mjs && node --test-force-exit test/test-start-form.mjs && node --test-force-exit test/test-crew-start.mjs && node --test-force-exit test/test-orchestrator.mjs",
+    "test": "node --test-force-exit test/test-shared.mjs && node --test-force-exit test/test-screens.mjs && node --test-force-exit test/test-waiting.mjs && node --test-force-exit test/test-orca-runner.mjs && node --test-force-exit test/test-crew-bin.mjs && node --test-force-exit test/test-daemon.mjs && node --test-force-exit test/test-console.mjs && node --test-force-exit test/test-host-contract.mjs && node --test-force-exit test/test-crew-run.mjs && node --test-force-exit test/test-start-form.mjs && node --test-force-exit test/test-crew-start.mjs && node --test-force-exit test/test-orchestrator.mjs",
     "prepack": "node scripts/pack-template.mjs",
     "postpack": "node scripts/pack-template.mjs --clean"
   },

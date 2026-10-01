@@ -1,0 +1,7 @@
+{"session_id": "00000000-0000-4000-8000-000000000001", "hook_event_name": "SessionStart", "source": "startup"}
+{"session_id": "00000000-0000-4000-8000-000000000001", "permission_mode": "default", "hook_event_name": "UserPromptSubmit"}
+{"session_id": "00000000-0000-4000-8000-000000000001", "permission_mode": "default", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "touch hello-crew.txt", "description": "Create empty file hello-crew.txt"}, "tool_use_id": "toolu_01Bs9cEoVu75Uy1jcRF6ztDX"}
+{"session_id": "00000000-0000-4000-8000-000000000001", "permission_mode": "default", "hook_event_name": "PermissionRequest", "tool_name": "Bash", "tool_input": {"command": "touch hello-crew.txt", "description": "Create empty file hello-crew.txt"}}
+{"session_id": "00000000-0000-4000-8000-000000000001", "hook_event_name": "Notification", "message": "Claude needs your permission", "notification_type": "permission_prompt"}
+{"session_id": "00000000-0000-4000-8000-000000000001", "permission_mode": "default", "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": "touch hello-crew.txt", "description": "Create empty file hello-crew.txt"}, "tool_use_id": "toolu_01Bs9cEoVu75Uy1jcRF6ztDX", "duration_ms": 2072}
+{"session_id": "00000000-0000-4000-8000-000000000001", "permission_mode": "default", "hook_event_name": "Stop", "stop_hook_active": false, "background_tasks": [], "session_crons": []}
