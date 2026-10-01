@@ -627,6 +627,21 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   const first = ticketsOf(par.calls).slice(0, 4).sort((a, b) => a - b)
   check('S: parallel order still dispatches every takeable ticket at once', JSON.stringify(first) === '[11,12,13,15]' && par.calls.some((c) => c.label.startsWith('dispatch:#') && c.alongside > 0) && par.result.state.startsWith('complete'), JSON.stringify(ticketsOf(par.calls)))
 
+  const isolations = (calls) => [...new Set(calls.filter((c) => c.opts.isolation).map((c) => c.opts.isolation))]
+  check('S: every agent that would get a worktree of its own runs in the chain worktree instead', JSON.stringify(isolations(calls)) === '["chain"]' && calls.filter((c) => c.opts.isolation).every((c) => /this run's one chain worktree/.test(c.prompt)), JSON.stringify(isolations(calls)))
+  check('S: a parallel run still gives each its own', JSON.stringify(isolations(par.calls)) === '["worktree"]' && !par.calls.some((c) => /chain worktree/.test(c.prompt)), JSON.stringify(isolations(par.calls)))
+
+  // A chain of blockers leaves a parallel run one order too: both publish the
+  // same layers, each PR on the same base, linked by the same commands.
+  const line = { ...overrides, graph: () => ({ tickets: [ticket(12, 3, [11]), ticket(11, 2, [10]), ticket(10, 1)], start_ref: 'main', explorations: [] }) }
+  const published = ({ calls, result }) => ({
+    stack: result.stack_bottom_to_top,
+    layers: calls.filter((c) => c.label.startsWith('publish:')).map((c) => [c.label, c.prompt.match(/gh pr create[^\n]*/)?.[0] ?? null, c.prompt.match(/gh stack link [a-z][^\n`]*/)?.[0] ?? null]),
+  })
+  const seqLine = published(await run(line, { runner: 'session', runOrder: 'sequential' }))
+  const parLine = published(await run(line, { runner: 'session' }))
+  check('S: a sequential run publishes the same stack as a parallel one', seqLine.layers.length === 4 && JSON.stringify(seqLine) === JSON.stringify(parLine), JSON.stringify({ seqLine, parLine }))
+
   const failed = await run({ ...overrides, impl: (label) => (label.includes('#12') ? null : overrides.impl(label)) }, { runner: 'session', runOrder: 'sequential' })
   const st = Object.fromEntries(failed.result.tickets.map((x) => [x.ticket, x]))
   check('S: a failed ticket halts a sequential run with nothing else started', failed.result.halted === true && st[12].state === 'failed' && [11, 13, 14, 15].every((n) => st[n].state === 'not started') && !failed.calls.some((c) => /#1[1345]\b/.test(c.label)), JSON.stringify(failed.result.tickets))

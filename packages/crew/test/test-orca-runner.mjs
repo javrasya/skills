@@ -1875,6 +1875,40 @@ return await agent('Patient.', { label: 'impl:#7', phase: 'Implement', schema: S
   })
 }
 
+test('sequential run: every chain agent starts in the one <runId>-chain, made once with its setup, and told its setup leftovers; a worktree agent still gets its own <runId>-<n>', async () => {
+  const script = `const S = ${JSON.stringify(SCHEMA)}
+await agent('Build a.', { label: 'impl:#1', phase: 'Implement', schema: S, isolation: 'chain' })
+await agent('Publish a.', { label: 'publish:#1', phase: 'Stack', schema: S, isolation: 'chain' })
+await agent('Own a.', { label: 'own', phase: 'Implement', schema: S, isolation: 'worktree' })
+return await agent('Build b.', { label: 'impl:#2', phase: 'Implement', schema: S, isolation: 'chain' })`
+  const r = await runOne(submitGood, { script, setupLeaves: ['?? setup.out'] })
+  assert.deepEqual(r.result, GOOD)
+  const starts = r.orca.calls.filter((c) => c.verb === 'workerStart')
+  assert.deepEqual(starts.map((c) => [c.title, c.placement, c.worktree]), [
+    ['[Implement] impl:#1', 'chain', 'C:/fake/worktrees/run_fake1-chain'],
+    ['[Stack] publish:#1', 'chain', 'C:/fake/worktrees/run_fake1-chain'],
+    ['[Implement] own', 'new-child', 'C:/fake/worktrees/run_fake1-3'],
+    ['[Implement] impl:#2', 'chain', 'C:/fake/worktrees/run_fake1-chain'],
+  ])
+  assert.deepEqual(r.orca.calls.filter((c) => c.verb === 'worktreeCreate').map((c) => c.name), ['run_fake1-chain', 'run_fake1-3'])
+  assert.deepEqual(ofType(r.journal, 'chain').map((e) => e.worktree), ['C:/fake/worktrees/run_fake1-chain'])
+  for (const s of starts) assert.match(r.orca.dispatches.get(s.dispatchId).prompt, /left by its setup: setup\.out/, s.title)
+  assert.deepEqual(ofType(r.journal, 'started').map((e) => e.worktree), starts.map((s) => s.worktree))
+})
+
+test('sequential run: a chain agent that dies gets a doctor in a <runId>-<n> worktree of its own, setup skipped, never the chain', async () => {
+  const script = `const S = ${JSON.stringify(SCHEMA)}
+await agent('Build a.', { label: 'impl:#1', phase: 'Implement', schema: S, isolation: 'chain' })
+return await agent('Patient.', { label: 'impl:#2', phase: 'Implement', schema: S, isolation: 'chain' })`
+  const r = await runOne(withDoctor((w) => (w.prompt.startsWith('Patient.') ? diesPastCap(w) : submitGood(w))), { script })
+  assert.equal(r.result, null)
+  const creates = r.orca.calls.filter((c) => c.verb === 'worktreeCreate')
+  assert.deepEqual(creates.map((c) => [c.name, c.setup]), [['run_fake1-chain', null], ['run_fake1-3', 'skip'], ['run_fake1-4', 'skip'], ['run_fake1-5', 'skip']])
+  const doctors = r.orca.calls.filter((c) => c.verb === 'workerStart' && c.title === '[Implement] recover -> impl:#2')
+  assert.deepEqual(doctors.map((d) => [d.placement, d.worktree]), [3, 4, 5].map((n) => ['new-child', `C:/fake/worktrees/run_fake1-${n}`]))
+  assert.match(r.orca.dispatches.get(doctors[0].dispatchId).prompt, /run_fake1-chain/, "the doctor is shown the patient's worktree, the chain")
+})
+
 test("doctor: its prompt carries the patient's title, prompt, failure reason, journal entries, log lines, transcript and worktree, and the round of three", async () => {
   const PROMPT = 'Patient: build the frobnicator.'
   for (const isolation of ['worktree', null]) {

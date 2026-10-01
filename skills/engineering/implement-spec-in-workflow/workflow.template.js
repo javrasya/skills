@@ -128,7 +128,13 @@ if (RUN_ORDER === 'sequential' && !ON_SESSION) throw new Error('sequential run o
 // The session runner starts each doctor itself, with no agent() call to spread a
 // row into, so it reads the recover row from meta (ADR-0014).
 if (ON_SESSION) meta.roles = ROLES
-const WORKTREE = ON_SESSION
+// A sequential run's code agents share the run's one chain worktree, one
+// after another, each picking up the build cache the one before it left
+// (ADR-0020); a parallel run's each get one of their own.
+const ISOLATION = RUN_ORDER === 'sequential' ? 'chain' : 'worktree'
+const WORKTREE = ISOLATION === 'chain'
+  ? `Your worktree is this run's one chain worktree, made by its session host and worked in by its code agents one after another: the dependencies and build cache the agent before you left are yours to use. Leave nothing of your own in it uncommitted. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. Never remove it: the operator decides at the end of the run whether it is reclaimed.`
+  : ON_SESSION
   ? `Your worktree is a child worktree of this run's worktree, per agent, made by this run's session host. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. Never remove it: the operator decides at the end of the run whether it is reclaimed.`
   : `Your worktree is throwaway and per agent. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. This run reclaims it — uncommitted leftovers included — once the work it holds is published.`
 
@@ -670,7 +676,7 @@ Do not disturb the user's working copy: leave ${REPO_DIR}'s checked-out branch a
 ${WORKTREE}
 
 Return the PR url and number, what the mirror found, and your worktree.`,
-    { ...ROLES.layer0, effort: 'low', phase: 'Setup', schema: LAYER0_SCHEMA, isolation: 'worktree', label: `layer0:${graph.start_ref}`, node: 'layer0' },
+    { ...ROLES.layer0, effort: 'low', phase: 'Setup', schema: LAYER0_SCHEMA, isolation: ISOLATION, label: `layer0:${graph.start_ref}`, node: 'layer0' },
   )
   if (!layer0) throw new Error('layer-0 PR failed — prior work would be orphaned')
   noteWorktree('layer0', graph.start_ref, layer0)
@@ -787,7 +793,7 @@ Every command must pass on the commit you return. Commit, then move the ticket b
 ${WORKTREE}
 
 Return the branch, a one-line summary, one result per validation command with its seconds and runs, every other build or test command you ran in \`other_runs\`, the sha the list passed on in \`validated_sha\`, anything from the brief you did not reach in \`unmet\`, what you settled yourself in \`decided\`, any contradiction for the operator in \`decisions_needed\`, and your worktree.`,
-      { ...ROLES.impl, effort: s.effort, phase: 'Implement', schema: IMPL_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}`, node: `${node}/s${i + 1}`, ...go },
+      { ...ROLES.impl, effort: s.effort, phase: 'Implement', schema: IMPL_SCHEMA, isolation: ISOLATION, label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}`, node: `${node}/s${i + 1}`, ...go },
     )
     if (!r) throw new Error(`slice implementer for #${t.number} died (${s.title})`)
     noteWorktree(t.number, `ticket/${t.number}`, r)
@@ -914,7 +920,7 @@ You are the only agent publishing right now. After the PR exists, the branch is 
 ${WORKTREE}
 
 Return whether it published, the PR url and number, what you resolved, one result per validation command with its seconds and runs plus the sha they hold for, how the stack link went, any note, the reclaim count and kept list, and your worktree.`,
-      { ...ROLES.publish, effort: 'low', phase: 'Stack', schema: PUBLISH_SCHEMA, isolation: 'worktree', label: `publish:#${t.number}`, node: `ticket/${t.number}/publish`, ...go },
+      { ...ROLES.publish, effort: 'low', phase: 'Stack', schema: PUBLISH_SCHEMA, isolation: ISOLATION, label: `publish:#${t.number}`, node: `ticket/${t.number}/publish`, ...go },
     ).then((r) => {
       recordValidation('publish', t.number, r, cutFrom !== base ? null : impl.validated)
       if (!r || !r.published) {
@@ -1021,7 +1027,7 @@ Every command must pass on the commit you return — a fix that leaves one red i
 ${WORKTREE}
 
 Return one verdict per finding in your brief you fixed or rejected, the \`location\` of any you did not reach, one result per validation command with its seconds and runs, every other build or test command you ran in \`other_runs\`, the sha the list passed on in \`validated_sha\`, and your worktree.`,
-      { ...ROLES.fix, effort: s.effort, phase: ph, schema: FIX_SLICE_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}`, node: `${node}/s${i + 1}`, ...go },
+      { ...ROLES.fix, effort: s.effort, phase: ph, schema: FIX_SLICE_SCHEMA, isolation: ISOLATION, label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}`, node: `${node}/s${i + 1}`, ...go },
     )
     // A dead fixer is not fatal — it is the next reviewer's problem, and that
     // reviewer reads the branch rather than anyone's account of it. But the
@@ -1166,7 +1172,7 @@ ${rejected.map((v) => `- ${v.location} — ${v.issue}\n  judged wrong because: $
         : ''}
 
 ${WORKTREE}`,
-      { ...ROLES.gate, phase: 'Gate', schema: GATE_REVIEW_SCHEMA, isolation: 'worktree', label: `gate:#${t.number}:r${round}`, node, ...go },
+      { ...ROLES.gate, phase: 'Gate', schema: GATE_REVIEW_SCHEMA, isolation: ISOLATION, label: `gate:#${t.number}:r${round}`, node, ...go },
     )
     noteWorktree(t.number, impl.branch, r)
     recordValidation('gate', t.number, r, validated)
@@ -1373,7 +1379,7 @@ Invoke the \`code-review\` skill with \`${ref(BASE_REF)}\` as the fixed point an
 Every ticket was already reviewed alone on its own branch, so look hardest at what that could not see: two implementations of one helper, abstractions that contradict each other, a contract one ticket relies on that another changed. Return every finding; change no code yourself.
 
 ${WORKTREE}`,
-  { ...ROLES.review, phase: 'Review', schema: REVIEW_SCHEMA, isolation: 'worktree', label: `review:spec-${SPEC}`, node: 'review' },
+  { ...ROLES.review, phase: 'Review', schema: REVIEW_SCHEMA, isolation: ISOLATION, label: `review:spec-${SPEC}`, node: 'review' },
 )
 noteWorktree('review', tip, review)
 // Fail closed: a review that never returned is not a review with zero findings.
@@ -1438,7 +1444,7 @@ ${reclaimStep(integrationReclaim)}
 ${WORKTREE}
 
 Return the PR url and number, the branch, the reclaim count and kept list, and your worktree.`,
-      { ...ROLES.publish, effort: 'low', phase: 'Review', schema: INTEGRATION_SCHEMA, isolation: 'worktree', label: 'publish:integration', node: 'review/publish' },
+      { ...ROLES.publish, effort: 'low', phase: 'Review', schema: INTEGRATION_SCHEMA, isolation: ISOLATION, label: 'publish:integration', node: 'review/publish' },
     )
     if (integration && integration.pr_number) {
       // The prompt reclaims only after the PR exists, so a returned-but-unopened

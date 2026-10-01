@@ -403,7 +403,7 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
     }
     if (entry?.unsettled && !entry.held) out(`>> ${title}: its worker never started in the last run; it starts now`)
 
-    const call = { prompt, schema: opts.schema, isolated: opts.isolation === 'worktree', launch, key, n, label, title, phaseName, ...(node && { node }) }
+    const call = { prompt, schema: opts.schema, isolated: opts.isolation === 'worktree', chained: opts.isolation === 'chain', launch, key, n, label, title, phaseName, ...(node && { node }) }
     // A patient's doctor rounds so far, and, while its agent() waited on
     // them, the round the resume goes on with: it is not started again.
     const treated = entry?.rounds ? { rounds: entry.rounds, ...(entry.held && { held: entry.held, origin: entry.held.origin }) } : {}

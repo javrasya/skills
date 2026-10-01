@@ -6,7 +6,7 @@
 //   node packages/crew/test/test-crew-run.mjs
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawnSync } from 'child_process'
@@ -31,8 +31,8 @@ const paths = crewPaths(env)
 after(() => stopDaemon(paths, { force: true }).catch(() => {}))
 
 // The run's worktree: a git repo, since a doctor runs in a worktree of its own.
-function repo() {
-  const cwd = join(root, 'repo')
+function repo(name = 'repo') {
+  const cwd = join(root, name)
   mkdirSync(cwd)
   const git = (...args) => assert.equal(spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).status, 0, `git ${args.join(' ')}`)
   git('init', '-q')
@@ -73,6 +73,31 @@ test('a doctor round on the crew host: the patient dies, its doctor hands off a 
   assert.ok(doctorStart?.worktree?.startsWith(crewWorktrees(cwd)), JSON.stringify(started))
   const fold = readJournal(join(stateDir, 'journal.jsonl'))
   assert.equal(fold.agents.find((a) => a.n === doctor.n)?.state, 'done', JSON.stringify(fold.agents))
+})
+
+test('a sequential run on the crew host: its code agents one after another in <runId>-chain, its setup hook run once, and a doctor in a <runId>-<n> of its own, setup skipped', async () => {
+  const cwd = repo('chain-repo')
+  const hook = join(root, 'chain-setup.mjs')
+  const setupLog = join(root, 'chain-setup.log')
+  writeFileSync(hook, `import { appendFileSync } from 'fs'\nappendFileSync(${JSON.stringify(setupLog)}, process.env.CREW_WORKTREE + '\\n')\n`)
+  mkdirSync(env.CREW_HOME, { recursive: true })
+  writeFileSync(paths.config, JSON.stringify({ repos: { [cwd]: { setup: hook } } }))
+  const host = sessionHost(crewHost({ paths, env, cwd, harnesses: { claude: [process.execPath, FAKE_HARNESS] }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
+  const stateDir = join(root, 'chain-state')
+  const said = []
+  const result = await runScript(fixture('chain.workflow.js'), { host, stateDir, out: (s) => said.push(s), settings: FAST, transcripts: sessionTranscripts({ env }), project: cwd })
+  const log = said.join('\n')
+  assert.deepEqual(result, { first: 'hello', patient: 'the note carried it on' }, log)
+  const fold = readJournal(join(stateDir, 'journal.jsonl'))
+  const chain = join(crewWorktrees(cwd), `${fold.run.runId}-chain`)
+  assert.equal(fold.chain?.worktree, chain, log)
+  const entries = readFileSync(join(stateDir, 'journal.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+  const [doctor] = entries.filter((e) => e.type === 'doctor')
+  const started = entries.filter((e) => e.type === 'started')
+  assert.deepEqual(started.filter((e) => e.n !== doctor.doctor).map((e) => e.worktree), [chain, chain], JSON.stringify(started))
+  assert.equal(started.find((e) => e.n === doctor.doctor)?.worktree, join(crewWorktrees(cwd), `${fold.run.runId}-${doctor.doctor}`))
+  assert.deepEqual(readFileSync(setupLog, 'utf8').trim().split('\n').map((p) => realpathSync(p)), [realpathSync(chain)], 'the setup hook ran once, in the chain worktree, never in the doctor\'s')
+  assert.ok(existsSync(chain))
 })
 
 test('a harness dialog before the prompt: the agent needs you in the session showing it, nothing is typed into it, and once answered its prompt goes in and it finishes', async () => {

@@ -565,7 +565,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
   // start retried with its `note`, carrying on from the `made`, `dispatched`
   // and `baseline` the spent start left, so its first attempt is a retry.
   async function start(runId, call, again = null) {
-    const { prompt, isolated, launch, key, n, title, phaseName, dir, schemaPath, resultPath, payloadPath, patient = null, setup = null } = call
+    const { prompt, isolated, chained = false, launch, key, n, title, phaseName, dir, schemaPath, resultPath, payloadPath, patient = null, setup = null } = call
     // The child worktrees failed attempts left. Every attempt of a call asks
     // for the same `<runId>-<n>` name, so a retry takes that one up again;
     // one the host made under a suffixed name leaves both it and that one.
@@ -594,13 +594,19 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
         // looks for in the session.
         let sent = prompt
         try {
+          // A chained call (ADR-0020) makes no worktree: it starts in the
+          // run's chain worktree, whose setup leftovers its agent is told of
+          // as a child's. A doctor's call is never chained: it keeps a
+          // `<runId>-<n>` of its own.
+          const chain = chained ? await life.chain(call) : null
           const w = await host.workerStart({
             run: runId,
             asking: asking(call),
-            prompt: patient != null ? prompt : (baseline) => (sent = workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline, note: again?.note ?? null })),
+            prompt: patient != null ? prompt : (baseline) => (sent = workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline: baseline ?? chain?.baseline ?? null, note: again?.note ?? null })),
             title,
             ...launch,
             sessionId,
+            ...(chain && { chain: chain.path }),
             child: isolated ? { name: `${runId}-${call.origin ?? n}`, displayName: title, retry: attempt > 1 || !!again, dispatched, baseline, onBaseline, ...(setup && { setup }) } : null,
           })
           // Logged at once: a start that then fails its delivery check made them too.
@@ -753,7 +759,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
     }
   }
 
-  // call: { prompt, schema, isolated, launch, key, n, label, title, phaseName },
+  // call: { prompt, schema, isolated, chained, launch, key, n, label, title, phaseName },
   // and on a resume `adopt`, the worker the last run left out for it, as the
   // journal's fold names it: { dir, run, dispatchId, harness, sessionId,
   // terminal, worktree, continuations, origin }. A doctor's call also has
