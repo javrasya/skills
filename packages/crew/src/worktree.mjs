@@ -44,13 +44,13 @@ export const gitProbes = (path, branch, bound) => ({
   commits: () => worktreeOwnCommits(path, branch, bound),
 })
 
-// A child worktree this attempt made, readied for its worker: the project's
-// MCP answers go in first, so what they change is part of the baseline, as a
-// setup hook's output is; then its baseline, the porcelain lines it holds,
-// is taken and handed to child.onBaseline. A failure to copy the answers is a
-// warning, and leaves the worker to the prompt-delivery check (lifecycle.mjs).
-// Returns the baseline.
-export async function prepareChildWorktree({ project, worktree, bound, child, warnings, fs }) {
+// A worktree a host just made for a worker, a child or the run's chain,
+// readied for it: the project's MCP answers go in first, so what they change
+// is part of the baseline, as a setup hook's output is; then its baseline, the
+// porcelain lines it holds, is taken and handed to onBaseline. A failure to
+// copy the answers is a warning, and leaves the worker to the prompt-delivery
+// check (lifecycle.mjs). Returns the baseline.
+export async function prepareWorktree({ project, worktree, bound, onBaseline, warnings, fs }) {
   try {
     const m = copyMcpAnswers({ project, worktree, ...(fs && { fs }) })
     if (m.added.length) warnings.push(`the project has no answer for MCP server(s) ${m.added.join(', ')} of .mcp.json, so its worktree disables them`)
@@ -58,7 +58,7 @@ export async function prepareChildWorktree({ project, worktree, bound, child, wa
     warnings.push(`could not copy the project's MCP server answers into its worktree: ${e?.message ?? e}`)
   }
   const baseline = await worktreeLines(worktree, bound)
-  await child.onBaseline?.({ worktree, lines: baseline })
+  await onBaseline?.({ worktree, lines: baseline })
   return baseline
 }
 
@@ -67,7 +67,7 @@ export async function prepareChildWorktree({ project, worktree, bound, child, wa
 // and the runner journals it with no baseline. Returns the baseline or null.
 export async function prepareChainWorktree({ project, worktree, bound, warnings, fs }) {
   try {
-    return await prepareChildWorktree({ project, worktree, bound, child: {}, warnings, fs })
+    return await prepareWorktree({ project, worktree, bound, warnings, fs })
   } catch (e) {
     warnings.push(`could not read its baseline: ${e?.message ?? e}`)
     return null

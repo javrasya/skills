@@ -19,15 +19,19 @@
 //            terminalRename; logTail, resumeRunner (a tab of the view's)
 //   worktree chainWorktree, worktreeLines, worktreeStatus, worktreeRemove
 //            (chainWorktree({ runId }) → { path, made, baseline,
-//            warnings }: the run's one chain worktree, ADR-0020, `<runId>-chain`
-//            beside its `<runId>-<n>` ones, made the first time it is asked
-//            for, its setup hook run then and only then, and its baseline
-//            taken as a child's is, or null with a warning when it cannot be
-//            read or the create answered too late; asked again, the
-//            same one, `made` false and no baseline. workerStart({ chain })
-//            starts a worker in it, making nothing. A host that cannot make
-//            one refuses it `chain_unsupported`, final. worktreeLines({
-//            worktree }) → the `git status --porcelain` lines it holds now)
+//            warnings }: the run's one chain worktree, ADR-0020, named
+//            chainName(runId) (git.mjs) beside its `<runId>-<n>` ones. Asked
+//            while the host holds it, the same one as it is, `made` false and
+//            no baseline. Asked when it holds none, the first time or after a
+//            reclaim removed it, it is made: always from the run's worktree's
+//            HEAD, the run's base, never from a ref a chain agent left it on
+//            (an agent carried on in a remade one is told to switch back to
+//            its own ref, lifecycle.mjs haltedPrompt), its setup hook run
+//            then, `made` true, and a new baseline taken as a child's is, or
+//            null with a warning when it cannot be read or the create
+//            answered too late. workerStart({ chain }) starts a worker in it,
+//            making nothing. worktreeLines({ worktree }) → the `git status
+//            --porcelain` lines it holds now)
 //   mailbox  mailCheck({ ack }): the run's messages, each a `type` of
 //            worker_done, handoff or escalation; workerDone, sent by submit
 //

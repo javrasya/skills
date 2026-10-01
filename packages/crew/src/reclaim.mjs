@@ -14,7 +14,7 @@
 //   - reclaiming releases the worker, closes its tab if Orca's terminal list
 //     still shows it, and removes its worktree.
 import { madeByRun, readJournal } from './journal.mjs'
-import { worktreeName, worktreeUnpushed } from './git.mjs'
+import { agentId, chainName, worktreeName, worktreeUnpushed } from './git.mjs'
 import { hostUnreachable } from './session-host.mjs'
 
 // `unpushed(path)` below defaults to git.mjs's worktreeUnpushed: commits
@@ -51,7 +51,7 @@ export const runWorktree = (a) => (a.worktree && worktreeName(a.worktree).starts
 
 // The worktree an agent's reclaim may remove: one the run created for that
 // agent alone, never the chain its sequential run shares.
-export const ownWorktree = (a) => (runWorktree(a) && worktreeName(a.worktree) !== `${a.runId}-chain` ? a.worktree : null)
+export const ownWorktree = (a) => (runWorktree(a) && worktreeName(a.worktree) !== chainName(a.runId) ? a.worktree : null)
 
 // A refusal while `worktree` holds commits no remote has, unless `force`.
 async function heldBack(worktree, { unpushed, force }) {
@@ -68,7 +68,7 @@ async function heldBack(worktree, { unpushed, force }) {
 // The name the run registry records an agent's reclaim under. Only a journal
 // whose take-up never carried its origin leaves the worktree's name as the one
 // record of the call that started it.
-export const agentName = (a) => (a.originGuessed && ownWorktree(a) ? worktreeName(ownWorktree(a)) : `${a.runId}-${a.origin ?? a.n}`)
+export const agentName = (a) => (a.originGuessed && ownWorktree(a) ? worktreeName(ownWorktree(a)) : agentId(a.runId, a.origin ?? a.n))
 
 // Whether an agent failed and was kept with its worker's process left
 // running: Orca still shows that worker live, so only `stop` reclaims it.

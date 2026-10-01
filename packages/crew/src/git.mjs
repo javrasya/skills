@@ -85,6 +85,13 @@ export async function worktreeUnpushed(path, bound) {
 // it from here, so the `<runId>-` ownership rule reads one name.
 export const worktreeName = (path) => String(path).split(/[\\/]/).pop()
 
+// The names a run gives its worktrees, built here and nowhere else: an
+// agent's own `<runId>-<n>`, n the origin of the call that started it, which
+// is also the agent's identity in the run registry; and a sequential run's one
+// chain worktree (ADR-0020), which is the run's, never one agent's.
+export const agentId = (runId, origin) => `${runId}-${origin}`
+export const chainName = (runId) => `${runId}-chain`
+
 // A program's exit, never a rejection: { code, stdout, stderr }, code null
 // when it could not start at all (not installed). The probes `crew start`
 // makes take one of these, so a test hands them its own.

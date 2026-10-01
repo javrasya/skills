@@ -673,6 +673,22 @@ test('crew host: a chain worktree whose folder was deleted by hand, still listed
   assert.equal(await h.setups(chain.path), 2)
 })
 
+test("crew host: a chain worktree reclaimed and made again starts from the run's HEAD, as the first did, never from where its branch was left", async () => {
+  const h = crewKind.open()
+  const run = await runOf(h)
+  const chain = await h.host.chainWorktree({ runId: run })
+  const git = (dir, ...args) => spawnSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { encoding: 'utf8' }).stdout.trim()
+  const base = git(crewScratch().cwd, 'rev-parse', 'HEAD')
+  assert.equal(git(chain.path, 'rev-parse', 'HEAD'), base)
+  git(chain.path, 'commit', '--allow-empty', '-m', 'left on the chain branch')
+  const left = git(chain.path, 'rev-parse', 'HEAD')
+  await h.host.worktreeRemove({ path: chain.path })
+  const remade = await h.host.chainWorktree({ runId: run })
+  assert.deepEqual([remade.path, remade.made, git(remade.path, 'rev-parse', 'HEAD')], [chain.path, true, base])
+  assert.equal(git(crewScratch().cwd, 'rev-parse', `refs/heads/${run}-chain`), left, 'the branch reclaim left keeps what it holds')
+  await h.host.worktreeRemove({ path: chain.path })
+})
+
 test('crew host: a chain worktree whose baseline cannot be read once it is made is made all the same, with a warning and no baseline', async () => {
   const h = crewKind.open({ env: { BREAK_STATUS: '1' } })
   const run = await runOf(h)

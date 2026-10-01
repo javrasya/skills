@@ -19,7 +19,7 @@ import { fakeOrca, fakeTranscripts } from '../src/fake-orca.mjs'
 import { RUNNER_SETTINGS } from '../src/settings.mjs'
 import { orcaCli, OrcaError, tailCommand, resumeRunnerCommand, orcaUnreachable } from '../src/orca-cli.mjs'
 import { worktreeUnpushed } from '../src/git.mjs'
-import { reuseWorktree, prepareChildWorktree, WorktreeError } from '../src/worktree.mjs'
+import { reuseWorktree, prepareWorktree, WorktreeError } from '../src/worktree.mjs'
 import { hostOutage, probesBy } from '../src/outage.mjs'
 import { sessionHost, missingMethods } from '../src/session-host.mjs'
 import { runRegistry, readRegistry, OUTCOMES } from '../src/registry.mjs'
@@ -1561,14 +1561,14 @@ test('worktree: a refused take-up is a host-neutral WorktreeError, never an Orca
   assert.ok(!/from '\.\/orca-cli\.mjs'/.test(crewHost), 'the crew host imports nothing of the Orca adapter')
 })
 
-test('worktree: prepareChildWorktree copies the MCP answers, warns on a failure, and takes and hands over the baseline', async () => {
+test('worktree: prepareWorktree copies the MCP answers, warns on a failure, and takes and hands over the baseline', async () => {
   const project = tmp()
   const worktree = tmp()
   const seen = []
   const warnings = []
   const bound = { git: async (cwd, args) => (assert.deepEqual([cwd, args], [worktree, ['status', '--porcelain']]), ' M a\r\n?? b\n') }
   const broken = { existsSync: () => { throw new Error('disk gone') } }
-  const lines = await prepareChildWorktree({ project, worktree, bound, child: { onBaseline: (b) => seen.push(b) }, warnings, fs: broken })
+  const lines = await prepareWorktree({ project, worktree, bound, onBaseline: (b) => seen.push(b), warnings, fs: broken })
   assert.deepEqual(lines, [' M a', '?? b'])
   assert.deepEqual(seen, [{ worktree, lines }])
   assert.deepEqual(warnings, ["could not copy the project's MCP server answers into its worktree: disk gone"])

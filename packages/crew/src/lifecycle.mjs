@@ -16,7 +16,7 @@ import { randomUUID } from 'crypto'
 import { validate } from './schema.mjs'
 import { slug } from './util.mjs'
 import { sessionTranscripts } from './transcript.mjs'
-import { extraLines, porcelainPaths, unionLines } from './git.mjs'
+import { agentId, extraLines, porcelainPaths, unionLines } from './git.mjs'
 import { chainEntry } from './journal.mjs'
 import { DOCTOR_NUDGE, doctorContinuePrompt, notePrompt, runMailbox, doctorRounds } from './doctor.mjs'
 
@@ -635,7 +635,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
             ...launch,
             sessionId,
             ...(chain && { chain: chain.path }),
-            child: isolation === 'worktree' ? { name: `${runId}-${call.origin ?? n}`, displayName: title, retry: attempt > 1 || !!again, dispatched, baseline, onBaseline, ...(setup && { setup }) } : null,
+            child: isolation === 'worktree' ? { name: agentId(runId, call.origin ?? n), displayName: title, retry: attempt > 1 || !!again, dispatched, baseline, onBaseline, ...(setup && { setup }) } : null,
           })
           // Logged at once: a start that then fails its delivery check made them too.
           for (const why of w.warnings ?? []) warn(call, why)

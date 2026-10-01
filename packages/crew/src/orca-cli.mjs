@@ -4,9 +4,9 @@
 // in this file. fake-orca.mjs implements the same interface, offline.
 import { execFile } from 'child_process'
 import { RUNNER_SETTINGS } from './settings.mjs'
-import { gitProbes, prepareChainWorktree, prepareChildWorktree, reuseWorktree, worktreeLines } from './worktree.mjs'
+import { gitProbes, prepareChainWorktree, prepareWorktree, reuseWorktree, worktreeLines } from './worktree.mjs'
 import { sessionTranscripts } from './transcript.mjs'
-import { bounded, execGit, gitIn, realTimer, worktreeName } from './git.mjs'
+import { bounded, chainName, execGit, gitIn, realTimer, worktreeName } from './git.mjs'
 import { launchCommand, resumeCommand, SHELL_WORD } from './harness.mjs'
 import { runnerArgs } from './daemon/runs.mjs'
 
@@ -281,10 +281,10 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       let place = chain ? ['--worktree', `path:${chain}`] : ['--worktree', 'current']
       let terminalIn = chain ? place : []
       const warnings = []
-      let made = false
+      let answered = false
       if (child) {
         worktree = child.retry ? await earlierWorktree(child.name, child.dispatched, child.baseline ?? null) : null
-        if (!worktree) ({ path: worktree, answered: made } = await createWorktree(child.name, child.setup, warnings))
+        if (!worktree) ({ path: worktree, answered } = await createWorktree(child.name, child.setup, warnings))
         place = terminalIn = ['--worktree', `path:${worktree}`]
         // worktree create has no --display-name. Cosmetic: the start goes on.
         try {
@@ -299,7 +299,7 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       try {
         // Only a create answered in time: one looked up after its timeout may
         // still be running its setup, so its lines are no baseline.
-        if (made) baseline = await prepareChildWorktree({ project, worktree, bound, child, warnings, fs })
+        if (answered) baseline = await prepareWorktree({ project, worktree, bound, onBaseline: child.onBaseline, warnings, fs })
         const t = await orca(['terminal', 'create', ...terminalIn, '--title', title, '--command', command])
         handle = t.terminal.handle
         await waitIdle(handle, command)
@@ -317,13 +317,15 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
       }
     },
 
-    // `<runId>-chain` beside the run's `<runId>-<n>` worktrees, made as they
-    // are with no --setup, so Orca applies the repo's setup policy then and
-    // only then. Asked again, the one Orca holds under that name, as it is,
-    // whoever worked in it last. A create answered too late has no baseline:
+    // chainName(runId) beside the run's `<runId>-<n>` worktrees, made as they
+    // are, from the run's worktree (`--parent-worktree current`, its HEAD,
+    // session-host.mjs), with no --setup, so Orca applies the repo's setup
+    // policy then and only then. Asked again, the one Orca holds under that
+    // name, as it is, whoever worked in it last; one reclaimed meanwhile is
+    // made again the same way. A create answered too late has no baseline:
     // its setup may still be running.
     async chainWorktree({ runId }) {
-      const name = `${runId}-chain`
+      const name = chainName(runId)
       const found = await findWorktree(name)
       if (found) return { path: found.path, made: false, baseline: null, warnings: [] }
       const warnings = []
