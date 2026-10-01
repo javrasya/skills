@@ -174,19 +174,20 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
 
 // --- scenario U: blockers found at discovery are cleared first (ADR-0021) ---
 const SIGNING = { subject: 'Developer ID signing identity', tickets: [10], why: 'the app must be signed with it', evidence: 'security find-identity shows none', check: 'security find-identity -v -p codesigning | grep "Developer ID Application"' }
-const withBlockers = (blockers) => () => ({
+const NOTARY = { subject: 'notary credentials', tickets: [11], why: 'notarization', evidence: 'no keychain profile', check: 'xcrun notarytool history --keychain-profile notary' }
+const withBlockers = (blockers, start_ref = 'main') => () => ({
   tickets: [
     { number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' },
     { number: 11, title: 'T11', blocked_by: [10], needs_human: false, human_reason: '' },
   ],
-  start_ref: 'main',
+  start_ref,
   explorations: [{ label: 'area-a', question: 'q?' }],
   blockers,
 })
 {
   const { result, calls } = await run({
     graph: withBlockers([SIGNING]),
-    explore: () => ({ path: '/tmp/n/01-area-a.md', blockers: [{ subject: 'notary credentials', tickets: [11], why: 'notarization', evidence: 'no keychain profile', check: 'xcrun notarytool history --keychain-profile notary' }] }),
+    explore: () => ({ path: '/tmp/n/01-area-a.md', blockers: [NOTARY] }),
     unblock: () => ({ resolved: [{ subject: 'Developer ID signing identity', verified_by: 'find-identity lists it' }, { subject: 'notary credentials', verified_by: 'history ran' }], decisions_needed: [] }),
   }, { runner: 'session' })
   const seq = calls.map((c) => c.label)
@@ -197,6 +198,13 @@ const withBlockers = (blockers) => () => ({
   check('U1: the unblock prompt hands over every blocker with its check, graph and explorers alike', u && u.prompt.includes(SIGNING.check) && u.prompt.includes(SIGNING.evidence) && u.prompt.includes('notarytool history'), '')
   check('U1: the unblock agent guides and never fixes', u && /[Nn]ever install, sign, configure/.test(u.prompt) && /`decisions_needed`/.test(u.prompt), '')
   check('U1: a cleared run implements every ticket', result.halted === false && result.state.startsWith('complete') && seq.includes('publish:#11'), result.state)
+  check('U1: the unblock agent takes its role row from the role table', u && u.opts.harness === 'claude' && u.opts.model === 'opus', JSON.stringify(u && u.opts))
+  check('U1: explorers that return blockers still hand the dispatcher their notes by path', calls.find((c) => c.label === 'dispatch:#10').prompt.includes('/tmp/n/01-area-a.md'), '')
+}
+{
+  const { calls } = await run({ graph: withBlockers([SIGNING], 'feat/prior') }, { runner: 'session' })
+  const seq = calls.map((c) => c.label)
+  check('U6: unblock runs before Setup builds layer 0', seq.includes('unblock') && seq.findIndex((l) => l.startsWith('layer0')) > seq.indexOf('unblock'), seq.join(' | '))
 }
 {
   const { result, calls } = await run({ graph: withBlockers([SIGNING]), unblock: () => ({ resolved: [], decisions_needed: ['Developer ID signing identity: no Account Holder access today'] }) }, { runner: 'session' })
@@ -213,9 +221,10 @@ const withBlockers = (blockers) => () => ({
   check('U2: the graph prompt asks for blockers, apart from needs_human', /blockers:/.test(calls[0].prompt) && /is a blocker, not needs_human/.test(calls[0].prompt), '')
 }
 {
-  const { result, calls } = await run({ graph: withBlockers([SIGNING]) })
+  const { result, calls } = await run({ graph: withBlockers([SIGNING]), explore: () => ({ path: '/tmp/n/01-area-a.md', blockers: [NOTARY] }) })
   const seq = calls.map((c) => c.label)
-  check('U3: the Workflow runner halts at blockers instead of opening a session', !seq.includes('unblock') && result.halted === true && /Developer ID signing identity/.test(result.reason) && result.blockers.length === 1, JSON.stringify(result))
+  check('U3: the Workflow runner halts at blockers instead of opening a session', !seq.includes('unblock') && result.halted === true && result.blockers.length === 2, JSON.stringify(result))
+  check('U3: the halt lists every blocker, graph and explorers alike, with the tickets that need it', /Developer ID signing identity \(#10\)/.test(result.reason) && /notary credentials \(#11\)/.test(result.reason), result.reason)
   check('U3: nothing is implemented past a blocker', !seq.some((l) => l.startsWith('dispatch') || l.startsWith('layer0') || l.startsWith('publish')), seq.join(' | '))
 }
 {

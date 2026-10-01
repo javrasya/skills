@@ -6,7 +6,7 @@
 // The model is read from the run's journal, its agents' session transcripts,
 // Orca's terminal list and the run registry; the actions go to Orca, and a
 // reclaim goes through reclaim.mjs, so the view keeps its rules.
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, rmSync } from 'fs'
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from 'fs'
 import { basename, dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { sessionTranscripts } from './transcript.mjs'
@@ -19,8 +19,8 @@ import { hostUnreachable } from './session-host.mjs'
 import { isOrchestratorTitle } from './orchestrator.mjs'
 import { haltNoticeOf, readTriage } from './triage.mjs'
 import { RESUME_REQUEST } from './halt.mjs'
-import { PAUSE_FILE, pausedAt } from './pause.mjs'
-import { removeRun } from './remove.mjs'
+import { alreadyPaused, pauseRun, pausedAt, unpauseRun } from './pause.mjs'
+import { leftOnDisk, removeRun } from './remove.mjs'
 import { writeJsonAtomic } from './fsutil.mjs'
 import { probesBy } from './outage.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
@@ -551,16 +551,16 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   // unpushed commits offered for a force-delete, one at a time; then the run
   // forgotten, naming whatever was left on disk.
   const removeHere = () => removeRun({ stateDir, runId: header?.runId ?? null, host, registry: registry && runRegistry(registry, clock), unpushed })
-  function forceNext(handle, queue, others) {
+  function forceNext(handle, queue) {
     const [k, ...rest] = queue
     if (k) {
-      dialog = { kind: 'confirm', act: 'force', handle, k, queue: rest, others, title: `Force-delete ${k.agent.worktree}?`, lines: [k.reason, '', 'f = force-delete it, and those commits are lost · any other key keeps it'] }
+      dialog = { kind: 'confirm', act: 'force', handle, k, queue: rest, title: `Force-delete ${k.worktree ?? k.agent.title}?`, lines: [k.reason, '', 'f = force-delete it, and those commits are lost · any other key keeps it'] }
       layout()
       return say(`${k.agent.title}: its worktree holds unpushed commits`)
     }
     const { left } = handle.finish()
     layout()
-    return { ...say(`removed the run${left.length ? `; left on disk: ${left.join(', ')}` : ''}${others.length ? `; kept ${others.map((o) => `${o.agent.title}: ${o.reason}`).join('; ')}` : ''}`), removed: true }
+    return { ...say(`removed the run${leftOnDisk(left)}`), removed: true }
   }
 
   // The first of `queue` that asks for a confirmation, holding the rest.
@@ -642,16 +642,13 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
       dialog = null
       if (name !== 'y') return say('nothing removed')
       const handle = await (remove ?? removeHere)()
-      return forceNext(handle, handle.kept.filter((k) => k.unpushed > 0), handle.kept.filter((k) => !(k.unpushed > 0)))
+      return forceNext(handle, handle.kept.filter((k) => k.unpushed > 0))
     }
     if (dialog.act === 'force') {
-      const { handle, k, queue, others } = dialog
+      const { handle, k, queue } = dialog
       dialog = null
-      if (name === 'f') {
-        const r = await handle.force(k)
-        if (!r.reclaimed) others.push({ ...k, reason: r.reason })
-      }
-      return forceNext(handle, queue, others)
+      if (name === 'f') await handle.force(k)
+      return forceNext(handle, queue)
     }
     if (dialog.kind === 'confirm') {
       const { n, chain: ofChain, confirm, queue, title } = dialog
@@ -792,15 +789,13 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
       case 'l':
         return openLog()
       case 'p': {
-        if (pausedAt(stateDir)) return say('already paused: r resumes it')
-        writeJsonAtomic(join(stateDir, PAUSE_FILE), { at: new Date(clock.now()).toISOString() })
+        if (!pauseRun(stateDir, new Date(clock.now()))) return say(alreadyPaused('r'))
         const n = atWork(agentsNow()).length
         await refresh()
         return say(`paused: no new agent starts; ${n} agent${n === 1 ? ' is' : 's are'} finishing`)
       }
       case 'r':
-        if (pausedAt(stateDir)) {
-          rmSync(join(stateDir, PAUSE_FILE), { force: true })
+        if (unpauseRun(stateDir)) {
           if (header?.halted && resumeHalted) askResume()
           await refresh()
           return say('resumed: the agents held by the pause start')
@@ -933,7 +928,7 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
       const run = {
         runId: r.runId, host: r.host, name: r.spec, spec: number ? `#${number}` : null, project: r.project, runDir: r.runDir,
         script: r.script, permissionMode: r.permissionMode, terminal: launched.get(r.runId)?.terminal ?? r.runner?.terminal ?? null,
-        outcome: r.state === 'running' ? null : r.state, paused: r.state === 'running' ? r.paused ?? null : null, onPause: !!r.runDir && pausedAt(r.runDir), alive: live, reclaimed: r.reclaimed,
+        outcome: r.state === 'running' ? null : r.state, outagePaused: r.state === 'running' ? r.paused ?? null : null, operatorPaused: !!r.runDir && pausedAt(r.runDir), alive: live, reclaimed: r.reclaimed,
         kept: r.reclaimed ? 0 : agents.filter((a) => !done.has(a.name)).length,
         closable: !r.reclaimed && live === false,
         armedAt: Number.isFinite(armedAt) ? armedAt : null, ageMs: Number.isFinite(armedAt) ? Math.max(0, now - armedAt) : null, resumable: live === false && !r.reclaimed,
@@ -1039,8 +1034,8 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
     if (!run) return say('select a run to resume')
     const label = labelOf(run)
     if (run.reclaimed) return say(`${label} is reclaimed: its agents are gone and the registry closed it, so there is nothing to resume`)
-    if (run.alive === true && run.paused) {
-      const host = run.paused.reason === 'crew outage' ? 'crew' : 'Orca'
+    if (run.alive === true && run.outagePaused) {
+      const host = run.outagePaused.reason === 'crew outage' ? 'crew' : 'Orca'
       return say(`${label}'s runner is alive and paused on ${host === 'crew' ? 'a' : 'an'} ${host} outage: it carries on by itself once ${host} is back, and r in its ${run.host === 'crew' ? 'tree' : where(run)} probes ${host} at once`)
     }
     if (run.alive === true && run.outcome === 'halted') return say(run.host === 'crew' ? `${label}'s runner is alive and halted: open its tree and press r there to resume it` : `${label}'s runner is alive and halted, in ${where(run)}: r there resumes it`)
@@ -1095,7 +1090,7 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
         // A paused run, or a live runner that is halted or paused on an
         // outage, is resumed from its tree; a dead one gets a new runner.
         const run = runOf(opened.runId)
-        return run && (pausedAt(run.runDir) || (run.alive === true && (run.paused || run.outcome === 'halted'))) ? opened.view.key('r') : resume()
+        return run && (pausedAt(run.runDir) || (run.alive === true && (run.outagePaused || run.outcome === 'halted'))) ? opened.view.key('r') : resume()
       }
       if (name === '?') return consult()
       return opened.view.key(name)

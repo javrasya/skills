@@ -8,11 +8,11 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, existsSync, readFileSync, mkdirSync, appendFileSync, copyFileSync, rmSync, readdirSync } from 'fs'
 import { tmpdir } from 'os'
 import { join, dirname } from 'path'
-import { spawnSync } from 'child_process'
+import { spawn, spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { submit } from '../src/submit.mjs'
 import { runScript, journalKey, failureSummary, finish, SUBMIT, SETTINGS, realClock, JOURNAL_ENTRIES, readJournal, attachView, runnerLog, watchResumeRequests } from '../src/runner.mjs'
-import { agentLifecycle, notePrompt, workerPrompt, doctorPrompt, NO_ASK, NO_WORKFLOW } from '../src/lifecycle.mjs'
+import { agentLifecycle, notePrompt, workerPrompt, doctorPrompt, NO_ASK, NO_WORKFLOW, ATTENDED as ATTENDED_TEXT } from '../src/lifecycle.mjs'
 import { mergeMcpAnswers, copyMcpAnswers } from '../src/mcp-answers.mjs'
 import { foldJournal } from '../src/journal.mjs'
 import { fakeOrca, fakeTranscripts } from '../src/fake-orca.mjs'
@@ -25,8 +25,11 @@ import { sessionHost, missingMethods } from '../src/session-host.mjs'
 import { runRegistry, readRegistry, OUTCOMES } from '../src/registry.mjs'
 import { transcriptPath, sessionTranscripts, claudeSlug, piDir, promptDelivered, turnEnded } from '../src/transcript.mjs'
 import { agentsOf, reclaimAgent, reclaimRun } from '../src/reclaim.mjs'
-import { removeRun } from '../src/remove.mjs'
+import { removeRun, stopRunnerOf } from '../src/remove.mjs'
 import { findRun, pauseCommand, resumeCommand, removeCommand } from '../src/run-commands.mjs'
+import { holdQueue } from '../src/hold.mjs'
+import { runHalt } from '../src/halt.mjs'
+import { runPause, pauseRun as pauseRunIn, unpauseRun } from '../src/pause.mjs'
 import { runView, runsView, bandOf, STATES, RUNNER_PATH, runnerAlive, runEnded } from '../src/run-view-model.mjs'
 import { consoleRunsHelp, consoleTreeHelp, draw, drawRuns, listRuns, strip, TREE_HELP, marqueeOffset, NAME_W } from '../src/run-view/draw.mjs'
 import { EventEmitter } from 'events'
@@ -799,6 +802,36 @@ test('attended: an attended session that exits is continued, and still needs you
   assert.equal(r.nudges.length, 0)
   const live = foldJournal(r.journal.filter((e) => e.type !== 'result')).agents[0]
   assert.equal(live.state, 'needs you')
+})
+
+test('attended: true is a person needed with the default reason; its session silent for hours is never nudged, and NEEDS YOU names its terminal', async () => {
+  const r = await runOne(async (w) => {
+    w.clock.at(4 * 60 * MIN, () => submitGood(w))
+  }, { script: `return await agent('Help.', { label: 'unblock', phase: 'Unblock', attended: true, schema: ${JSON.stringify(SCHEMA)} })`, settings: NO_DOCTOR })
+  assert.deepEqual(r.result, GOOD)
+  assert.equal(r.nudges.length, 0)
+  assert.equal(r.continues.length, 0)
+  assert.equal(ofType(r.journal, 'failed').length, 0)
+  const started = ofType(r.journal, 'started')[0]
+  assert.equal(started.attended, 'a person is needed in this session')
+  assert.ok(r.lines.some((l) => l.includes(`[Unblock] unblock NEEDS YOU in terminal ${started.terminal}: a person is needed in this session`)), r.lines.join('\n'))
+})
+
+test('attended: it is part of the call, so its journal key differs from the same call unattended', () => {
+  const opts = { label: 'unblock', phase: 'Unblock', schema: SCHEMA }
+  assert.notEqual(journalKey('p', opts), journalKey('p', { ...opts, attended: 'blockers: x' }))
+  assert.notEqual(journalKey('p', { ...opts, attended: 'blockers: x' }), journalKey('p', { ...opts, attended: 'blockers: y' }))
+})
+
+test('attended: an unattended agent that idles is still nudged and never needs you', async () => {
+  const r = await runOne(async (w) => {
+    w.state.idle = true
+    w.clock.at(10 * MIN, () => submitGood(w))
+  }, { settings: NO_DOCTOR })
+  assert.deepEqual(r.result, GOOD)
+  assert.ok(r.nudges.length > 0)
+  assert.equal(ofType(r.journal, 'started')[0].attended, undefined)
+  assert.ok(!r.lines.some((l) => l.includes('NEEDS YOU')), r.lines.join('\n'))
 })
 
 test('liveness: a worker Orca cannot start, or cannot be watched, is null', async () => {
@@ -3552,7 +3585,9 @@ test('remove: a worktree not forced is left on disk and named; the run is still 
   run.orca.worktrees.get(A_WT).unpushed = 1
   const runId = readRegistry(run.registry)[0].runId
   const r = await removeRun({ stateDir: run.stateDir, runId, host: run.orca, unpushed: run.orca.unpushedOf, registry: runRegistry(run.registry, run.clock), stopRunner: () => {} })
-  assert.deepEqual(r.finish(), { left: [A_WT] })
+  const { left } = r.finish()
+  assert.deepEqual(left.map((l) => [l.worktree, l.title]), [[A_WT, '[P] a']])
+  assert.match(left[0].reason, /1 unpushed commit/)
   assert.equal(run.orca.worktrees.get(A_WT).removed, false)
   assert.deepEqual(readRegistry(run.registry), [])
 })
@@ -3564,6 +3599,32 @@ test('remove: an agent whose worker is still running is stopped first, then recl
   assert.ok(run.orca.calls.slice(run.during).some((c) => c.verb === 'workerStop'), 'its worker was stopped')
   assert.deepEqual(r.kept, [])
   assert.equal(run.orca.worktrees.get(A_WT).removed, true)
+})
+
+test('remove: a sequential run\'s agent still at work is stopped, and its chain worktree, holding unpushed commits, is offered by its own path', async () => {
+  const run = await reclaimableChainRun(null)
+  run.chain.unpushed = 2
+  const r = await removeRun({ stateDir: run.rest.stateDir, runId: 'run_fake1', host: run.orca, unpushed: run.orca.unpushedOf, registry: runRegistry(run.registry, run.clock), stopRunner: () => {} })
+  assert.ok(run.after().some((c) => c.verb === 'workerStop' && c.dispatchId === 'ctx_fake3'), 'its agent at work was stopped')
+  assert.deepEqual(r.kept.map((k) => [k.agent.chain, k.worktree, k.unpushed]), [[true, RUN_CHAIN, 2]])
+  assert.equal(run.chain.removed, false)
+  assert.equal((await r.force(r.kept[0])).reclaimed, true)
+  assert.equal(run.chain.removed, true)
+  assert.deepEqual(r.finish(), { left: [] })
+  assert.deepEqual(readRegistry(run.registry), [])
+  assert.ok(!existsSync(run.rest.stateDir))
+})
+
+test('remove: the runner its state dir\'s runner.pid names is ended, and waited for; no runner.pid, nothing is signalled', async () => {
+  const stateDir = tmp()
+  await stopRunnerOf(stateDir, { waitMs: 0 })
+  const runner = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+  const ended = new Promise((r) => runner.once('exit', (code, signal) => r(signal)))
+  writeFileSync(join(stateDir, 'runner.pid'), String(runner.pid))
+  assert.equal(runnerAlive(stateDir), true)
+  await stopRunnerOf(stateDir)
+  assert.equal(await ended, 'SIGTERM')
+  assert.equal(runnerAlive(stateDir), false)
 })
 
 test('crew pause, resume, rm: a run is named by its run id, its run folder or its state dir', async () => {
@@ -3581,6 +3642,21 @@ test('crew pause, resume, rm: a run is named by its run id, its run folder or it
   assert.throws(() => pauseCommand({ registry: run.registry, target: 'nope' }), /no run nope in the run registry/)
 })
 
+test('crew pause, resume: a crew start run is named by its run folder or the folder\'s name too; an unknown run is an error naming crew ls', () => {
+  const folder = join(tmp(), 'runs', '9-20261001-120000-ab12')
+  const stateDir = join(folder, 'orca-run')
+  mkdirSync(stateDir, { recursive: true })
+  const registry = registryIn()
+  runRegistry(registry).armed({ runId: 'run_9', project: 'C:/repos/app', runDir: stateDir, spec: 'implement-spec-9', host: 'crew' })
+  for (const target of ['run_9', folder, '9-20261001-120000-ab12', stateDir]) {
+    assert.match(pauseCommand({ registry, target }), /^paused run_9: /, target)
+    assert.ok(existsSync(join(stateDir, 'paused.json')))
+    assert.match(resumeCommand({ registry, target }), /^resumed run_9: /, target)
+    assert.ok(!existsSync(join(stateDir, 'paused.json')))
+  }
+  for (const command of [pauseCommand, resumeCommand]) assert.throws(() => command({ registry, target: 'nope' }), /no run nope in the run registry: `crew ls` lists them/)
+})
+
 test('crew rm: asks first, unless --yes; asks f for each worktree with unpushed commits, one at a time', async () => {
   const run = await endedRun()
   run.orca.worktrees.get(A_WT).unpushed = 3
@@ -3588,11 +3664,11 @@ test('crew rm: asks first, unless --yes; asks f for each worktree with unpushed 
   const asked = []
   const answers = ['n']
   const ask = async (q) => (asked.push(q), answers.shift())
-  const no = await removeCommand({ registry: run.registry, target: r.runId, host: run.orca, unpushed: run.orca.unpushedOf, ask, stopRunner: () => {} })
+  const no = await removeCommand({ registry: run.registry, target: r.runId, openHost: async () => run.orca, unpushed: run.orca.unpushedOf, ask, stopRunner: () => {} })
   assert.match(no, /nothing removed/)
   assert.match(asked[0], /^Remove run .*\? .* \[y\/N\] $/s)
   answers.push('y', 'f')
-  const yes = await removeCommand({ registry: run.registry, target: r.runId, host: run.orca, unpushed: run.orca.unpushedOf, ask, stopRunner: () => {} })
+  const yes = await removeCommand({ registry: run.registry, target: r.runId, openHost: async () => run.orca, unpushed: run.orca.unpushedOf, ask, stopRunner: () => {} })
   assert.match(asked[2], /Force-delete C:\/fake\/worktrees\/run_fake1-1\? .*3 unpushed commits.* \[f = force-delete, anything else keeps it\] $/s)
   assert.equal(run.orca.worktrees.get(A_WT).removed, true)
   assert.match(yes, /^removed /)
@@ -3604,9 +3680,10 @@ test('crew rm --yes asks nothing about the run, and still asks about an unpushed
   run.orca.worktrees.get(A_WT).unpushed = 1
   const [r] = readRegistry(run.registry)
   const asked = []
-  const out = await removeCommand({ registry: run.registry, target: r.runId, host: run.orca, unpushed: run.orca.unpushedOf, yes: true, ask: async (q) => (asked.push(q), 'k'), stopRunner: () => {} })
+  const out = await removeCommand({ registry: run.registry, target: r.runId, openHost: async () => run.orca, unpushed: run.orca.unpushedOf, yes: true, ask: async (q) => (asked.push(q), 'k'), stopRunner: () => {} })
   assert.equal(asked.length, 1)
-  assert.match(out, /left on disk: C:\/fake\/worktrees\/run_fake1-1/)
+  assert.match(out, /; left on disk: C:\/fake\/worktrees\/run_fake1-1 \(.*1 unpushed commit.*\)$/)
+  assert.ok(!/; kept /.test(out), 'every worktree left is named once, in one list')
 })
 
 test('reclaim: a live agent is refused and left untouched; once settled it is reclaimed, its open tab closed', async () => {
@@ -5022,7 +5099,7 @@ test('run console: the frames — no runner row, the key line naming the back ke
   const discover = lines.findIndex((l) => /▸ Discover/.test(l))
   assert.equal(screen.rowAt(discover + 1), 0, 'the first row is the first phase (rowAt takes a 1-based y)')
   assert.ok(!lines.some((l) => /runner {3}crew session|the runner {2}crew session/.test(l)), 'no runner row or pane')
-  assert.match(lines.at(-1), /⏎\/→\/click enter · F12 out of a session · ← runs · Ctrl\+R reclaim · l log · r resume · \? orchestrator/)
+  assert.match(lines.at(-1), /⏎\/→\/click enter · F12 out of a session · ← runs · Ctrl\+R reclaim · l log · p pause · r resume · x remove · \? orchestrator/)
   assert.equal(consoleTreeHelp('orca', 'f12'), `${TREE_HELP} · ? orchestrator`, 'an Orca run\'s agent is its tab; ? is crew\'s orchestrator whatever the host')
   const runs = listOf.get(view)
   await runs.key('q')
@@ -6491,6 +6568,11 @@ test('prompts: an attended worker is told a person will join, and never that nob
   assert.ok(!p.includes(NO_ASK))
   assert.match(p, /A person will join this session/)
   assert.match(p, /node ".*submit\.mjs"/)
+  // The swap is all that differs: how it submits, and every other worker's
+  // prompt, are as they were.
+  const paths = { schemaPath: 's.json', resultPath: 'r.json', payloadPath: 'p.json' }
+  assert.equal(p.replace(ATTENDED_TEXT, NO_ASK), workerPrompt('Help.', paths))
+  assert.equal(workerPrompt('Help.', { ...paths, attended: null }), workerPrompt('Help.', paths))
 })
 
 test('prompts: every worker, and every doctor, is told never to run orchestration ask', () => {
@@ -6770,6 +6852,65 @@ test('pause: a runner that starts on a paused run stays paused, and removing pau
   assert.deepEqual(await run.p, GOOD)
 })
 
+test('pause: every new call is held, an in-flight one too, each journaled held; PAUSED is logged once; r starts them in call order', async () => {
+  let rig
+  rig = nodeRig({ 'Do a.': async (w) => { pauseRun(rig.stateDir); return submitGood(w) } })
+  const run = rig.go(`const a = await ${nodeCall('a')}\nreturn [a, ...(await parallel([() => ${nodeCall('b')}, () => ${nodeCall('c', ', inFlight: true')}, () => ${nodeCall('d')}]))]`)
+  await until(() => rig.lines.filter((l) => l.endsWith(': held, the run is paused')).length === 3, 'b, c and d held')
+  assert.deepEqual(rig.started(run), ['[P] a'])
+  assert.deepEqual(ofType(rig.journal(), 'held').map((e) => [e.node, e.paused]), [['n/b', true], ['n/c', true], ['n/d', true]])
+  assert.equal(rig.lines.filter((l) => /PAUSED/.test(l)).length, 1, rig.lines.join('\n'))
+  assert.deepEqual(foldJournal(rig.journal()).agents.filter((x) => x.node !== 'n/a').map((x) => [x.state, x.reason]), Array(3).fill(['queued', 'held: the run is paused']))
+  assert.deepEqual(await run.control.resume({}), { resumed: [], unpaused: true })
+  assert.deepEqual(await run.p, [GOOD, GOOD, GOOD, GOOD])
+  assert.deepEqual(rig.started(run), ['[P] a', '[P] b', '[P] c', '[P] d'])
+  assert.deepEqual(rig.journal().filter((e) => ['pause', 'unpause'].includes(e.type)).map((e) => e.type), ['pause', 'unpause'])
+})
+
+test('pause: on a run both halted and paused, the runner\'s resume lifts the pause, journaled even if no call saw it, and resumes the halt', async () => {
+  const rig = nodeRig({ 'Do a.': diesThenSubmitsOnContinue })
+  const run = rig.go(`return await parallel([() => ${nodeCall('a')}, () => ${nodeCall('b')}])`)
+  await until(() => rig.halts.length && ofType(rig.journal(), 'result').some((e) => e.node === 'n/b'), 'the halt, and b done')
+  pauseRun(rig.stateDir)
+  assert.deepEqual(await run.control.resume({}), { resumed: ['n/a'], unpaused: true })
+  assert.ok(!existsSync(join(rig.stateDir, 'paused.json')))
+  assert.deepEqual(await run.p, [GOOD, GOOD])
+  assert.deepEqual(rig.journal().filter((e) => ['pause', 'unpause'].includes(e.type)).map((e) => e.type), ['pause', 'unpause'])
+})
+
+test('hold queue: a call the halt held, then the pause, keeps its place ahead of a later in-flight call the pause alone held; once both clear they start in call order', async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'crew-hold-'))
+  const entries = []
+  const lines = []
+  const queue = holdQueue()
+  const halt = runHalt({ journal: (e) => entries.push(e), out: (s) => lines.push(s), queue })
+  const pause = runPause({ stateDir, journal: (e) => entries.push(e), out: (s) => lines.push(s), sleep: () => new Promise(() => {}), pollMs: 1, queue })
+  const started = []
+  const call = (title, inFlight = false) => {
+    const held = queue.gate({ key: title, n: 0, node: `n/${title}`, title }, { inFlight })
+    assert.ok(held, `${title} is held`)
+    return held.then(() => started.push(title))
+  }
+  const resumed = halt.hold({ node: 'n/x', title: 'x', reason: 'it failed' })
+  const a = call('a')
+  assert.equal(pauseRunIn(stateDir, new Date()), true)
+  assert.equal(pauseRunIn(stateDir, new Date()), false, 'already paused')
+  const b = call('b', true)
+  halt.resume()
+  await resumed
+  halt.settle('n/x')
+  const c = call('c')
+  await new Promise((r) => setImmediate(r))
+  assert.deepEqual(started, [], 'the pause holds every one')
+  assert.equal(pause.lift(), true)
+  await Promise.all([a, b, c])
+  assert.deepEqual(started, ['a', 'b', 'c'])
+  assert.deepEqual(entries.filter((e) => e.type === 'held').map((e) => [e.node, !!e.paused]), [['n/a', false], ['n/b', true], ['n/a', true], ['n/c', true]])
+  assert.ok(lines.includes('>> no failed or needs-decision node is left: the run is no longer halted, and the 1 call held meanwhile go on'), lines.join('\n'))
+  assert.equal(pause.lift(), false)
+  assert.equal(unpauseRun(stateDir), false, 'not paused')
+})
+
 // A sequential run (ADR-0020) halted on its first chained node.
 const CHAIN_PATH = 'C:/fake/worktrees/run_fake1-chain'
 const chainedRun = `const a = await ${nodeCall('a', ", isolation: 'chain'")}
@@ -6877,7 +7018,7 @@ test('halt: a failed node is held and halts the run: a new call is held unstarte
   assert.deepEqual(fold.halted.nodes, ['n/a'])
   assert.deepEqual(fold.agents.find((a) => a.node === 'n/c').state, 'queued')
 
-  assert.deepEqual(await run.control.resume({}), { resumed: ['n/a'] })
+  assert.deepEqual(await run.control.resume({}), { resumed: ['n/a'], unpaused: false })
   assert.deepEqual(await run.p, [GOOD, [GOOD, GOOD, GOOD]])
   j = rig.journal()
   assertEntries(j)
@@ -6967,6 +7108,21 @@ const viewOn = (entries, over = {}) => {
   return { stateDir, view }
 }
 
+test('run view: an attended agent shows needs you with its reason while at work, and the alert names its tab', async () => {
+  const { view } = viewOn([
+    { ...startedJ(1, '[Unblock] unblock', 0, 'claude', 'sid-1'), attended: 'blockers: no signing identity' },
+    startedJ(2, '[Implement] impl:a', 0, 'claude', 'sid-2'),
+  ])
+  await view.refresh()
+  const row = (n) => view.model.rows.find((r) => r.key === `agent:${n}`).agent
+  assert.deepEqual([row(1).state, row(1).reason], ['needs you', 'blockers: no signing identity'])
+  assert.equal(row(2).state, 'running')
+  assert.equal(view.model.alert, 'NEEDS YOU: [Unblock] unblock in tab term_fake1: blockers: no signing identity')
+  const lines = draw(view.model, { width: 200, height: 30, flash: null, alert: view.model.alert }).lines.map(strip)
+  assert.ok(lines.some((l) => /unblock +\? needs you/.test(l)), lines.join('\n'))
+  assert.ok(lines.at(-2).includes('NEEDS YOU: [Unblock] unblock in tab term_fake1: blockers: no signing identity'), lines.at(-2))
+})
+
 test('run view: p pauses the run, the header says how many agents are finishing; r resumes it', async () => {
   const { stateDir, view } = viewOn([startedJ(1, '[Implement] impl:a', 0, 'claude', 'sid-1')])
   await view.refresh()
@@ -6982,14 +7138,30 @@ test('run view: p pauses the run, the header says how many agents are finishing;
   assert.equal(view.model.header.paused, null)
 })
 
+test('run view: r on a run both paused and halted lifts the pause and asks the runner to resume the halt', async () => {
+  const asked = []
+  const { stateDir, view } = viewOn([
+    startedJ(1, '[Implement] impl:a', 0, 'claude', 'sid-1'),
+    J('failed', 1, '[Implement] impl:a', 1, { node: 'n/a', reason: 'it died', attempts: 1 }),
+    { type: 'halted', at: at(1), node: 'n/a', reason: 'it died' },
+  ], { resumeHalted: (node) => asked.push(node) })
+  pauseRun(stateDir)
+  await view.refresh()
+  assert.deepEqual(view.model.header.paused, { finishing: 0 })
+  assert.match(draw(view.model, { width: 160, height: 30 }).lines.map(strip)[1], /^ ⏸ paused · r to resume/)
+  assert.match((await view.key('r')).message, /resumed: the agents held by the pause start/)
+  assert.ok(!existsSync(join(stateDir, 'paused.json')))
+  assert.equal(asked.length, 1)
+})
+
 test('run view: x asks before removing; y removes, asking f for each worktree with unpushed commits, one at a time', async () => {
   const forced = []
   const kept = [
-    { agent: { title: '[P] a', worktree: '/wt/a' }, reason: '/wt/a holds 2 unpushed commits; only a forced reclaim removes it', unpushed: 2 },
-    { agent: { title: '[P] b', worktree: '/wt/b' }, reason: '/wt/b holds 1 unpushed commit; only a forced reclaim removes it', unpushed: 1 },
+    { agent: { title: '[P] a', worktree: '/wt/a' }, reason: '/wt/a holds 2 unpushed commits; only a forced reclaim removes it', unpushed: 2, worktree: '/wt/a' },
+    { agent: { title: '[P] b', worktree: '/wt/b' }, reason: '/wt/b holds 1 unpushed commit; only a forced reclaim removes it', unpushed: 1, worktree: '/wt/b' },
   ]
   let removed = 0
-  const remove = async () => (removed++, { kept, force: async (k) => (forced.push(k.agent.worktree), { reclaimed: true, notes: [] }), finish: () => ({ left: ['/wt/b'] }) })
+  const remove = async () => (removed++, { kept, force: async (k) => (forced.push(k.agent.worktree), { reclaimed: true, notes: [] }), finish: () => ({ left: [{ worktree: '/wt/b', title: '[P] b', reason: kept[1].reason }, { worktree: null, title: '[P] c', reason: 'it is still live' }] }) })
   const { view } = viewOn([startedJ(1, '[Implement] impl:a', 0, 'claude', 'sid-1')], { remove })
   await view.refresh()
   await view.key('x')
@@ -7008,7 +7180,7 @@ test('run view: x asks before removing; y removes, asking f for each worktree wi
   const done = await view.key('k')
   assert.deepEqual(forced, ['/wt/a'])
   assert.equal(done.removed, true)
-  assert.match(done.message, /removed the run; left on disk: \/wt\/b/)
+  assert.equal(done.message, `removed the run; left on disk: /wt/b (${kept[1].reason}); [P] c (it is still live)`)
   assert.equal(view.model.dialog, null)
 })
 
@@ -7023,12 +7195,34 @@ test('runs list: p pauses the run under the cursor and shows it paused; r resume
   assert.match((await runs.key('p')).message, /^paused/)
   assert.ok(existsSync(join(stateDir, 'paused.json')))
   await runs.refresh()
-  assert.equal(runs.model.rows.find((r) => r.kind === 'run').run.onPause, true)
+  assert.equal(runs.model.rows.find((r) => r.kind === 'run').run.operatorPaused, true)
+  assert.match(listRuns(runs.model).find((l) => l.includes('run_1')), /run_1 +crew +#103 +paused /)
+  assert.match((await runs.key('p')).message, /already paused/)
   assert.match((await runs.key('r')).message, /^resumed/)
   assert.ok(!existsSync(join(stateDir, 'paused.json')))
   await runs.key('x')
   assert.match(runs.opened().model.dialog.title, /^Remove run run_1\?/)
   assert.match((await runs.key('n')).message, /nothing removed/)
+})
+
+test('runs list: x, then y, removes the run under the cursor: back on the list, the run gone from it and from the registry, its run folder deleted', async () => {
+  const folder = join(tmp(), 'runs', '103-20261001-120000-ab12')
+  const stateDir = join(folder, 'orca-run')
+  mkdirSync(stateDir, { recursive: true })
+  writeFileSync(join(stateDir, 'journal.jsonl'), '')
+  const registry = registryIn()
+  runRegistry(registry).armed({ runId: 'run_1', project: 'C:/repos/app', runDir: stateDir, spec: 'implement-spec-103', host: 'crew' })
+  const runs = runsView({ host: { terminalList: async () => [] }, registry, transcripts: { usage: () => null }, alive: () => false })
+  await runs.refresh()
+  while (runs.model.rows[runs.model.selected]?.kind !== 'run') await runs.key('DOWN')
+  await runs.key('x')
+  const done = await runs.key('y')
+  assert.equal(done.removed, true)
+  assert.match(done.message, /^removed the run/)
+  assert.equal(runs.opened(), null, 'back on the list')
+  assert.ok(!runs.model.rows.some((r) => r.kind === 'run'))
+  assert.deepEqual(readRegistry(registry), [])
+  assert.ok(!existsSync(folder))
 })
 
 test('run view: on a halted run the header says so; r on a failed or needs-you node resumes that node, r elsewhere every held one; the view\'s r reaches the runner with its node', async () => {
@@ -7161,7 +7355,7 @@ test('halt: while an Orca outage is on, r probes Orca and resumes no held node; 
   assert.deepEqual(await run.control.resume({}), { back: true, outage: true }, 'this R ends the outage, and still resumes nothing')
   assert.equal(continued(), 0)
   release()
-  assert.deepEqual(await run.control.resume({}), { resumed: ['n/a'] })
+  assert.deepEqual(await run.control.resume({}), { resumed: ['n/a'], unpaused: false })
   assert.deepEqual(await run.p, [GOOD, GOOD])
   assert.equal(continued(), 1)
   assert.deepEqual(phasesOf(rig.journal()), ['start', 'end'])

@@ -198,7 +198,7 @@ A run with blockers clears them before it implements anything, in the **unblock 
 
 A **paused run** is one its operator stopped from launching anything new — `p` in the [[run console]], or `crew pause` — while every agent already at work finishes. Unlike a [[halted run]], nothing went wrong: it is the operator's choice, and it holds in-flight calls too. The pause is a file in the run's state dir, `paused.json`, so it outlives the runner and crew: a runner that comes back on a paused run stays paused. `r`, or `crew resume`, lifts it, and the held agents start in call order. Not an **outage pause**, which the runner makes itself when its session host is gone.
 
-**Removing a run** — `x`, confirmed, or `crew rm` — stops its runner and every agent, reclaims the whole run, forgets it (a `removed` line in the run registry, so no list shows it) and deletes its folder; its PRs on GitHub stay. A worktree holding commits no remote has is never removed unasked: the operator is asked about each, one at a time, and `f` force-deletes it; one kept is named and left on disk.
+**Removing a run** — `x`, confirmed, or `crew rm` — stops its runner and every agent, reclaims the whole run, forgets it (a `removed` line in the run registry, so no list shows it) and deletes its folder; its PRs on GitHub stay. A worktree holding commits no remote has is never removed unasked: the operator is asked about each, one at a time, and `f` force-deletes it; one kept is named and left on disk. Removing from the runs list returns to the list.
 
 ### Halted run
 

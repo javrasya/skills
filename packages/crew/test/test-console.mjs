@@ -147,6 +147,17 @@ test('mode replay: a terminal in any state is put into the session\'s screen and
 
 // A terminal made of fake streams: stdin is written to as if keys were pressed,
 // and what the console writes to stdout lands in a headless terminal too.
+// A console a failed assertion left open is quit at the test's end, so its
+// refresh timer never keeps the test process alive: out of a session with
+// `back`, then Ctrl+C on the page.
+function quitAfter(t, term, crew, back = BACK) {
+  t.after(() => {
+    if (crew.mode() === 'quit') return
+    if (crew.mode() === 'entered') term.press(back)
+    term.press('\x03')
+  })
+}
+
 function fakeTerminal(cols, rows) {
   const stdin = new PassThrough()
   stdin.isTTY = true
@@ -211,6 +222,7 @@ test('console: enter, the mode replay, keys, resize and the back key, against a 
   const { paths, id, screen, info, typed } = await scriptedSession(t)
   const term = fakeTerminal(80, 24)
   const crew = runConsole({ paths, stdin: term.stdin, stdout: term.stdout, refreshMs: 100 })
+  quitAfter(t, term, crew)
   assert.equal(term.stdin.raw, true)
   await until('the list', () => term.text().includes(`> ${id}  running`))
   assert.equal(crew.mode(), 'list')
@@ -274,6 +286,7 @@ test('console: the back key named in crew config leaves, and F12 then reaches th
   writeFileSync(paths.config, JSON.stringify({ backKey: 'f5' }))
   const term = fakeTerminal(80, 24)
   const crew = runConsole({ paths, stdin: term.stdin, stdout: term.stdout, backKey: readCrewConfig(paths).backKey, refreshMs: 100 })
+  quitAfter(t, term, crew, '\x1b[15~')
   await until('the list', () => term.text().includes(`> ${id}  running`))
   assert.match(term.text(), /F5 comes back/)
   term.press('\r')
@@ -292,6 +305,7 @@ test('console: keys typed while the enter is in flight reach the session in orde
   const { paths, id, typed } = await scriptedSession(t)
   const term = fakeTerminal(80, 24)
   const crew = runConsole({ paths, stdin: term.stdin, stdout: term.stdout, refreshMs: 100 })
+  quitAfter(t, term, crew)
   await until('the list', () => term.text().includes(`> ${id}  running`))
   // The console's mode as each chunk reached it; this listener runs after the console's own.
   const arrivedIn = []
@@ -361,6 +375,7 @@ test('crew view: the tree is phases and agents, no runner row; Enter on an agent
   const row = () => tree().rows[tree().selected].key
   const term = fakeTerminal(120, 30)
   const crew = runsConsole({ paths, stdin: term.stdin, stdout: term.stdout, runs, refreshMs: 100 })
+  quitAfter(t, term, crew)
   await until('the tree', async () => (await term.screen()).lines.some((l) => l.includes('AGENT')))
   assert.deepEqual(tree().rows.map((r) => r.key), ['phase:Work', 'agent:1'])
   assert.ok(!(await term.screen()).lines.some((l) => l.includes('runner   crew session')), 'no runner row on screen')
@@ -402,6 +417,7 @@ test('crew view: Ctrl+C and Ctrl+D typed in an agent\'s session never reach it; 
   const tree = () => runs.opened().model
   const term = fakeTerminal(120, 30)
   const crew = runsConsole({ paths, stdin: term.stdin, stdout: term.stdout, runs, refreshMs: 100 })
+  quitAfter(t, term, crew)
   await until('the tree', async () => (await term.screen()).lines.some((l) => l.includes('AGENT')))
   term.press('\x1b[B')
   await until('the agent selected', () => tree().rows[tree().selected].key === 'agent:1')
@@ -445,8 +461,10 @@ test('crew view: ? on an opened run enters a fresh orchestrator session seeded w
   const tree = () => runs.opened().model
   const keys = () => tree().rows.map((r) => r.key)
   const before = keys()
-  const term = fakeTerminal(120, 30)
+  // Wide enough for the whole key line, ? orchestrator at its end.
+  const term = fakeTerminal(160, 30)
   const crew = runsConsole({ paths, stdin: term.stdin, stdout: term.stdout, runs, refreshMs: 100 })
+  quitAfter(t, term, crew)
   await until('the tree', async () => (await term.screen()).lines.some((l) => l.includes('AGENT')))
   assert.match((await term.screen()).lines.at(-1), /\? orchestrator/)
 

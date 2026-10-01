@@ -4,17 +4,19 @@
 // its folder deleted. Its PRs on GitHub stay. A worktree holding commits no
 // remote has is never removed unasked: removeRun returns each as `kept`, the
 // caller asks the operator about each, one at a time, and `force` removes
-// the ones they say to; finish() forgets the run whatever was left, naming it.
+// the ones they say to; finish() forgets the run whatever was left, naming
+// each once, with why it was left. Each kept one carries `worktree`, its path:
+// the chain's is its run's, not its agent's, which chainAgent leaves unset.
 import { rmSync } from 'fs'
-import { basename, dirname, join } from 'path'
+import { join } from 'path'
 import { readJournal } from './journal.mjs'
 import { agentsOf, reclaimAgent, reclaimChainAfter, reclaimRun } from './reclaim.mjs'
 import { runnerAlive, runnerPid } from './run-view-model.mjs'
 import { worktreeUnpushed } from './git.mjs'
+import { runFolderOfStateDir } from './run-layout.mjs'
 
-// The folder a run lives in: crew start's own run folder (runs/<id>/), or
-// for any other run its state dir alone.
-export const runFolderOf = (stateDir) => (basename(stateDir) === 'orca-run' && basename(dirname(dirname(stateDir))) === 'runs' ? dirname(stateDir) : stateDir)
+// finish()'s `left`, as the words that end a removal's message.
+export const leftOnDisk = (left) => (left.length ? `; left on disk: ${left.map((l) => `${l.worktree ?? l.title} (${l.reason})`).join('; ')}` : '')
 
 // Ends the runner whose runner.pid the state dir names, and waits, up to
 // `waitMs`, for it to be gone.
@@ -43,9 +45,9 @@ export async function removeRun({ stateDir, runId, host, registry = null, unpush
       out(`!! ${a.title}: its worker could not be stopped: ${e?.message ?? e}`)
     }
   }
-  const { kept } = await reclaimRun(agents, { host, unpushed, registry, runId, chain, journaled: agents, out })
-  const left = new Set(kept)
-  const pathOf = (k) => (k.agent.chain ? chain.worktree : k.agent.worktree)
+  const kept = (await reclaimRun(agents, { host, unpushed, registry, runId, chain, journaled: agents, out })).kept.map((k) => ({ ...k, worktree: k.agent.chain ? chain.worktree : k.agent.worktree }))
+  // Each kept one still on disk, and why: its reclaim's reason, or a failed force's.
+  const left = new Map(kept.map((k) => [k, k.reason]))
   return {
     kept,
     async force(k) {
@@ -53,12 +55,13 @@ export async function removeRun({ stateDir, runId, host, registry = null, unpush
         ? await reclaimChainAfter([], chain, { host, journaled: agents, unpushed, force: true, registry })
         : await reclaimAgent(k.agent, { host, unpushed, force: true })
       if (r.reclaimed) left.delete(k)
+      else left.set(k, r.reason)
       return r
     },
     finish() {
       registry?.removed({ runId })
-      rmSync(runFolderOf(stateDir), { recursive: true, force: true })
-      return { left: [...left].map(pathOf).filter(Boolean) }
+      rmSync(runFolderOfStateDir(stateDir), { recursive: true, force: true })
+      return { left: [...left].map(([k, reason]) => ({ worktree: k.worktree ?? null, title: k.agent.title, reason })) }
     },
   }
 }

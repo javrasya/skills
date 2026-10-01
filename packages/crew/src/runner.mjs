@@ -73,6 +73,7 @@ import { agentLifecycle, readResult, decisionsNeeded, setAside } from './lifecyc
 import { hostOutage } from './outage.mjs'
 import { RESUME_REQUEST, runHalt } from './halt.mjs'
 import { runPause } from './pause.mjs'
+import { holdQueue } from './hold.mjs'
 import { JOURNAL_ENTRIES, readJournal, madeByRun, journalLines, chainEntry } from './journal.mjs'
 import { runRegistry, REGISTRY_PATH } from './registry.mjs'
 import { sessionTranscripts } from './transcript.mjs'
@@ -259,14 +260,18 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
   }
   // The run's halt (ADR-0016). r in the attached view reaches resume(): an
   // outage's r takes precedence while one is on.
-  const halt = runHalt({ journal, out, record, runId: runIdNow, onHalt, onChange: haltNotice })
+  // A new call is held while either holds it, the halt asked first, in the
+  // one hold queue (hold.mjs): held calls start in call order across both.
+  const holds = holdQueue()
+  const halt = runHalt({ journal, out, record, runId: runIdNow, onHalt, onChange: haltNotice, queue: holds })
   // The operator's pause (pause.mjs): r lifts it as it resumes a halt.
-  const pause = runPause({ stateDir, journal, out, sleep: (ms) => clock.sleep(ms), pollMs: limits.pollMs })
+  const pause = runPause({ stateDir, journal, out, sleep: (ms) => clock.sleep(ms), pollMs: limits.pollMs, queue: holds })
   pause.on()
+  // { resumed: [node…], unpaused }: unpaused whether r lifted a pause.
   control.resume = async ({ node = null } = {}) => {
     if (outage.state()) return control.resumeHost()
-    const lifted = pause.lift()
-    return lifted && !halt.on() ? { resumed: [], unpaused: true } : halt.resume(node)
+    const unpaused = pause.lift()
+    return { ...(unpaused && !halt.on() ? { resumed: [] } : halt.resume(node)), unpaused }
   }
   // How many calls with each key this run has made.
   const seen = new Map()
@@ -426,9 +431,9 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
       aside.delete(entry.worker.worktree)
       return settle(call, await life({ ...call, ...treated, adopt: entry.worker }))
     }
-    // While the run is halted, a new call waits, unless it is in flight.
-    if (!opts.inFlight) await halt.gate(call)
-    await pause.gate(call)
+    // While the run is halted (unless it is in flight) or paused, a new call
+    // waits in the hold queue.
+    await holds.gate(call, { inFlight: !!opts.inFlight })
     return settle(call, await (carried ? resumeNode(call, carried) : life({ ...call, ...treated })))
   }
 
