@@ -3611,6 +3611,21 @@ test('crew pause, resume, rm: a run is named by its run id, its run folder or it
   assert.throws(() => pauseCommand({ registry: run.registry, target: 'nope' }), /no run nope in the run registry/)
 })
 
+test('crew pause, resume: a crew start run is named by its run folder or the folder\'s name too; an unknown run is an error naming crew ls', () => {
+  const folder = join(tmp(), 'runs', 'implement-spec-9-20261001-120000-ab12')
+  const stateDir = join(folder, 'orca-run')
+  mkdirSync(stateDir, { recursive: true })
+  const registry = registryIn()
+  runRegistry(registry).armed({ runId: 'run_9', project: 'C:/repos/app', runDir: stateDir, spec: 'implement-spec-9', host: 'crew' })
+  for (const target of ['run_9', folder, 'implement-spec-9-20261001-120000-ab12', stateDir]) {
+    assert.match(pauseCommand({ registry, target }), /^paused run_9: /, target)
+    assert.ok(existsSync(join(stateDir, 'paused.json')))
+    assert.match(resumeCommand({ registry, target }), /^resumed run_9: /, target)
+    assert.ok(!existsSync(join(stateDir, 'paused.json')))
+  }
+  for (const command of [pauseCommand, resumeCommand]) assert.throws(() => command({ registry, target: 'nope' }), /no run nope in the run registry: `crew ls` lists them/)
+})
+
 test('crew rm: asks first, unless --yes; asks f for each worktree with unpushed commits, one at a time', async () => {
   const run = await endedRun()
   run.orca.worktrees.get(A_WT).unpushed = 3
@@ -6805,6 +6820,32 @@ test('pause: a runner that starts on a paused run stays paused, and removing pau
   assert.deepEqual(await run.p, GOOD)
 })
 
+test('pause: every new call is held, an in-flight one too, each journaled held; PAUSED is logged once; r starts them in call order', async () => {
+  let rig
+  rig = nodeRig({ 'Do a.': async (w) => { pauseRun(rig.stateDir); return submitGood(w) } })
+  const run = rig.go(`const a = await ${nodeCall('a')}\nreturn [a, ...(await parallel([() => ${nodeCall('b')}, () => ${nodeCall('c', ', inFlight: true')}, () => ${nodeCall('d')}]))]`)
+  await until(() => rig.lines.filter((l) => l.endsWith(': held, the run is paused')).length === 3, 'b, c and d held')
+  assert.deepEqual(rig.started(run), ['[P] a'])
+  assert.deepEqual(ofType(rig.journal(), 'held').map((e) => [e.node, e.paused]), [['n/b', true], ['n/c', true], ['n/d', true]])
+  assert.equal(rig.lines.filter((l) => /PAUSED/.test(l)).length, 1, rig.lines.join('\n'))
+  assert.deepEqual(foldJournal(rig.journal()).agents.filter((x) => x.node !== 'n/a').map((x) => [x.state, x.reason]), Array(3).fill(['queued', 'held: the run is paused']))
+  assert.deepEqual(await run.control.resume({}), { resumed: [], unpaused: true })
+  assert.deepEqual(await run.p, [GOOD, GOOD, GOOD, GOOD])
+  assert.deepEqual(rig.started(run), ['[P] a', '[P] b', '[P] c', '[P] d'])
+  assert.deepEqual(rig.journal().filter((e) => ['pause', 'unpause'].includes(e.type)).map((e) => e.type), ['pause', 'unpause'])
+})
+
+test('pause: on a run both halted and paused, the runner\'s resume lifts the pause, journaled even if no call saw it, and resumes the halt', async () => {
+  const rig = nodeRig({ 'Do a.': diesThenSubmitsOnContinue })
+  const run = rig.go(`return await parallel([() => ${nodeCall('a')}, () => ${nodeCall('b')}])`)
+  await until(() => rig.halts.length && ofType(rig.journal(), 'result').some((e) => e.node === 'n/b'), 'the halt, and b done')
+  pauseRun(rig.stateDir)
+  assert.deepEqual(await run.control.resume({}), { resumed: ['n/a'] })
+  assert.ok(!existsSync(join(rig.stateDir, 'paused.json')))
+  assert.deepEqual(await run.p, [GOOD, GOOD])
+  assert.deepEqual(rig.journal().filter((e) => ['pause', 'unpause'].includes(e.type)).map((e) => e.type), ['pause', 'unpause'])
+})
+
 // A sequential run (ADR-0020) halted on its first chained node.
 const CHAIN_PATH = 'C:/fake/worktrees/run_fake1-chain'
 const chainedRun = `const a = await ${nodeCall('a', ", isolation: 'chain'")}
@@ -7032,6 +7073,22 @@ test('run view: p pauses the run, the header says how many agents are finishing;
   assert.equal(view.model.header.paused, null)
 })
 
+test('run view: r on a run both paused and halted lifts the pause and asks the runner to resume the halt', async () => {
+  const asked = []
+  const { stateDir, view } = viewOn([
+    startedJ(1, '[Implement] impl:a', 0, 'claude', 'sid-1'),
+    J('failed', 1, '[Implement] impl:a', 1, { node: 'n/a', reason: 'it died', attempts: 1 }),
+    { type: 'halted', at: at(1), node: 'n/a', reason: 'it died' },
+  ], { resumeHalted: (node) => asked.push(node) })
+  pauseRun(stateDir)
+  await view.refresh()
+  assert.deepEqual(view.model.header.paused, { finishing: 0 })
+  assert.match(draw(view.model, { width: 160, height: 30 }).lines.map(strip)[1], /^ ⏸ paused · r to resume/)
+  assert.match((await view.key('r')).message, /resumed: the agents held by the pause start/)
+  assert.ok(!existsSync(join(stateDir, 'paused.json')))
+  assert.equal(asked.length, 1)
+})
+
 test('run view: x asks before removing; y removes, asking f for each worktree with unpushed commits, one at a time', async () => {
   const forced = []
   const kept = [
@@ -7074,6 +7131,8 @@ test('runs list: p pauses the run under the cursor and shows it paused; r resume
   assert.ok(existsSync(join(stateDir, 'paused.json')))
   await runs.refresh()
   assert.equal(runs.model.rows.find((r) => r.kind === 'run').run.onPause, true)
+  assert.match(listRuns(runs.model).find((l) => l.includes('run_1')), /run_1 +crew +#103 +paused /)
+  assert.match((await runs.key('p')).message, /already paused/)
   assert.match((await runs.key('r')).message, /^resumed/)
   assert.ok(!existsSync(join(stateDir, 'paused.json')))
   await runs.key('x')

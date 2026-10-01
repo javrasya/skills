@@ -187,6 +187,33 @@ test('crew ls: every run of the registry, crew\'s and Orca\'s, by project; crew 
   }
 })
 
+test('crew pause | resume <run>: by run id, run folder, its name or state dir; an unknown run is an error naming crew ls', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-bin-pause-'))
+  const registry = join(dir, 'runs.jsonl')
+  const folder = join(dir, 'runs', 'implement-spec-13-20261001-120000-ab12')
+  const stateDir = join(folder, 'orca-run')
+  mkdirSync(stateDir, { recursive: true })
+  runRegistry(registry).armed({ runId: 'run_c1', project: join(dir, 'proj'), runDir: stateDir, spec: 'implement-spec-13', host: 'crew' })
+  for (const target of ['run_c1', folder, 'implement-spec-13-20261001-120000-ab12', stateDir]) {
+    const p = crew('pause', target, '--registry', registry)
+    assert.equal(p.status, 0, p.stderr)
+    assert.match(p.stdout, /^paused run_c1: /)
+    assert.ok(existsSync(join(stateDir, 'paused.json')))
+    assert.match(crew('pause', target, '--registry', registry).stdout, /already paused/)
+    assert.match(crew('ls', '--registry', registry).stdout, /^ {2}run_c1 +crew +#13 +paused /m)
+    const r = crew('resume', target, '--registry', registry)
+    assert.equal(r.status, 0, r.stderr)
+    assert.match(r.stdout, /^resumed run_c1: /)
+    assert.ok(!existsSync(join(stateDir, 'paused.json')))
+  }
+  for (const verb of ['pause', 'resume']) {
+    const none = crew(verb, 'run_nope', '--registry', registry)
+    assert.equal(none.status, 1)
+    assert.match(none.stderr, /no run run_nope in the run registry: `crew ls` lists them/)
+  }
+  assert.equal(crew('pause', '--registry', registry).status, 2)
+})
+
 test('crew view: with no run, the runs list; --attached and --standalone are the run view\'s own argv', () => {
   const list = crew('view', '--registry', join(mkdtempSync(join(tmpdir(), 'crew-bin-')), 'runs.jsonl'))
   assert.equal(list.status, 3, 'no run named: the runs list, which needs a terminal')

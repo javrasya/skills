@@ -426,8 +426,9 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
       aside.delete(entry.worker.worktree)
       return settle(call, await life({ ...call, ...treated, adopt: entry.worker }))
     }
-    // While the run is halted, a new call waits, unless it is in flight.
-    if (!opts.inFlight) await halt.gate(call)
+    // While the run is halted, a new call waits, unless it is in flight. An
+    // in-flight call awaits too, so calls reach the pause in call order.
+    await (opts.inFlight ? null : halt.gate(call))
     await pause.gate(call)
     return settle(call, await (carried ? resumeNode(call, carried) : life({ ...call, ...treated })))
   }

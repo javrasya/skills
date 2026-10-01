@@ -23,6 +23,10 @@ export const pausedAt = (stateDir) => existsSync(join(stateDir, PAUSE_FILE))
 export function runPause({ stateDir, journal, out, sleep, pollMs }) {
   const file = join(stateDir, PAUSE_FILE)
   let paused = false
+  // The calls held, each its release, in call order. One poll releases them
+  // all, so they go on in call order, not each at its own poll's next tick.
+  const waiting = []
+  let polling = false
   function on() {
     const now = existsSync(file)
     if (now === paused) return paused
@@ -31,16 +35,30 @@ export function runPause({ stateDir, journal, out, sleep, pollMs }) {
     out(paused ? '!!!!!!!! PAUSED: no new agent starts, and every agent at work finishes; r to resume' : '>> the run is resumed: held agents start')
     return paused
   }
-  async function gate({ key, n, node = null, title }) {
-    if (!on()) return
+  const release = () => {
+    for (const go of waiting.splice(0)) go()
+  }
+  async function poll() {
+    polling = true
+    while (on()) await sleep(pollMs)
+    polling = false
+    release()
+  }
+  function gate({ key, n, node = null, title }) {
+    if (!on()) return null
     journal({ type: 'held', key, n, ...(node && { node }), title, paused: true })
     out(`.. ${title}: held, the run is paused`)
-    while (on()) await sleep(pollMs)
+    const held = new Promise((go) => waiting.push(go))
+    if (!polling) poll()
+    return held
   }
+  // on() first: a pause written since the runner last looked is journaled
+  // before its unpause.
   function lift() {
-    if (!existsSync(file)) return false
+    if (!on()) return false
     rmSync(file, { force: true })
     on()
+    release()
     return true
   }
   return { on, gate, lift }
