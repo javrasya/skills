@@ -669,7 +669,9 @@ export function fakeOrcaCli({ setupLeaves = [], runWorktree = 'C:/fake/run', coo
       for (let i = 2; live(`C:/fake/worktrees/${name}`); i++) name = `${asked}-${i}`
       const path = `C:/fake/worktrees/${name}`
       const skip = flag(args, '--setup') === 'skip'
-      worktrees.set(path, { name, removed: false, status: null, displayName: null, porcelain: skip ? [] : [...setupLeaves], setups: skip ? 0 : 1 })
+      // A path made again after its rm keeps its count: its hook ran there before.
+      const before = worktrees.get(path)?.setups ?? 0
+      worktrees.set(path, { name, removed: false, status: null, displayName: null, porcelain: skip ? [] : [...setupLeaves], setups: before + (skip ? 0 : 1) })
       return { worktree: { id: `repo::${path}`, path }, startupTerminal: { handle: open(path) } }
     },
     'worktree set': (args) => {

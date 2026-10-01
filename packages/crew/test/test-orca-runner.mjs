@@ -6437,7 +6437,7 @@ test('resume of a sequential run: the halted node carries on in the chain worktr
   assert.match(rig.orca.dispatches.get(starts[0].dispatchId).prompt, /left by its setup: setup\.out/, 'the baseline journaled when it was made, by the earlier runner')
   assert.deepEqual(second.calls().filter((x) => x.verb === 'worktreeCreate'), [])
   assertEntries(rig.journal())
-  assert.deepEqual(foldJournal(rig.journal()).chain, { runId: 'run_fake1', worktree: CHAIN_PATH, baseline: ['?? setup.out'] }, 'still journaled for the next resume')
+  assert.deepEqual(foldJournal(rig.journal()).chain, { runId: 'run_fake1', worktree: CHAIN_PATH, baseline: ['?? setup.out'], leftovers: [] }, 'still journaled for the next resume')
 })
 
 test('resume of a sequential run: a chain worktree reclaimed while halted is made again once, setup and all, and the halted node and the next agent carry on in it', async () => {
