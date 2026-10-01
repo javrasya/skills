@@ -711,6 +711,7 @@ const withBlockers = (blockers) => () => ({
   check('ALL: no prompt tells an agent to force-push', !EVERY_CALL.some((c) => noForce.test(c.prompt.replace(/^- Never pass.*$/gm, '').replace(/git worktree remove --force|orca worktree rm --worktree path:<path> --force/g, ''))), offenders(/--force-with-lease origin|--force origin/))
   check('ALL: no prompt tells an agent to check a branch out', !EVERY_CALL.some((c) => /git checkout -B|git checkout ticket\//.test(c.prompt)), offenders(/git checkout -B/))
   check('ALL: no prompt interpolates an object instead of a value', !EVERY_CALL.some((c) => c.prompt.includes('[object Object]')), offenders(/\[object Object\]/))
+  check('A: a publisher that cannot publish hands the operator a decision, so a resume carries its session on', /`decisions_needed`/.test(EVERY_RUN[0].find((c) => c.label === 'publish:#10').prompt) && EVERY_RUN[0].find((c) => c.label === 'publish:#10').opts.schema.required.includes('decisions_needed'), '')
   check('A: the dispatcher names the research notes by path', EVERY_RUN[0].find((c) => c.label === 'dispatch:#10').prompt.includes('/tmp/n/01-area-a.md'), '')
   check('ALL: no prompt interpolates a helper instead of a value', !EVERY_CALL.some((c) => /runRefs\.has|\(r\) =>|=> \(\{/.test(c.prompt)), offenders(/runRefs\.has|\(r\) =>/))
   // `--open` readies the PRs, and the drafts are half the "still adding

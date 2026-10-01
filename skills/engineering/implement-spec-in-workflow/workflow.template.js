@@ -468,9 +468,13 @@ const DISPATCH_SCHEMA = {
 const PUBLISH_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['published', 'pr_url', 'pr_number', 'conflicts_resolved', 'checks', 'validated_sha', 'stack_link', 'note', 'worktree', 'worktrees_removed', 'worktrees_kept'],
+  required: ['published', 'pr_url', 'pr_number', 'conflicts_resolved', 'checks', 'validated_sha', 'stack_link', 'note', 'worktree', 'worktrees_removed', 'worktrees_kept', 'decisions_needed'],
   properties: {
     published: { type: 'boolean' },
+    // A publisher that cannot publish says why here: the runner holds its node
+    // and halts the run, and a resume carries the same session on once the
+    // operator acted, rather than replaying a publish that never happened.
+    decisions_needed: { type: 'array', items: { type: 'string' }, description: 'empty when published; else what stopped you and what the operator must do' },
     pr_url: { type: 'string' },
     pr_number: { type: 'integer' },
     conflicts_resolved: { type: 'array', items: { type: 'string' } },
@@ -1027,6 +1031,8 @@ ${canLink
           : `9. Do not register a stack yet: \`gh stack link\` needs two layers and yours is the only one. Report \`stack_link: "skipped"\`. The next PR registers both.`}
 
 You are the only agent publishing right now. After the PR exists, the branch is published: nothing may ever push to it again.
+
+If you cannot publish — the base branch is not on origin, a push or the PR is refused, anything you must not work around — stop, return \`published: false\`, and put what stopped you and what the operator must do in \`decisions_needed\`. The run then waits for the operator, and once they have acted your session is carried on: check again and publish.
 
 ${WORKTREE}
 
