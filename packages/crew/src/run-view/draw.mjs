@@ -72,12 +72,19 @@ function contextCell(a) {
 }
 const mixOf = (mix) => STATES.filter((s) => mix[s]).map((s) => c(COLOUR[s], `${GLYPH[s]}${mix[s]}`)).join(' ')
 
+// An ended run reads as how it ended, not as its runner gone (#157).
+const OUTCOME_GLYPH = { complete: ['32', '✓ complete'], halted: ['1;33', '⏸ halted'], failed: ['31', '✗ failed'] }
+const outcomeLine = (o) => {
+  const [colour, label] = OUTCOME_GLYPH[o.kind]
+  return c(colour, `${label}${o.detail ? ` — ${o.detail}` : ''}${o.kind === 'halted' ? ' · r to resume' : ''}`)
+}
+
 function headerLines(h, W) {
   if (!h) return [fit('', W), fit('', W)]
   const dot = grey(' · ')
   const run = [
     h.name && bold(h.name), h.project, h.runId && grey(h.runId), h.spec && `spec ${h.spec}`,
-    `runner ${h.alive === true ? c('32', '● alive') : h.alive === false ? c('31', '○ gone') : grey('? unknown')}`, duration(h.elapsedMs),
+    h.outcome ? outcomeLine(h.outcome) : `runner ${h.alive === true ? c('32', '● alive') : h.alive === false ? c('31', '○ gone') : grey('? unknown')}`, duration(h.elapsedMs),
   ].filter(Boolean).join(dot)
   const counts = COUNTED.filter((s) => h.counts?.[s]).map((s) => c(COLOUR[s], `${GLYPH[s]} ${h.counts[s]} ${s}`)).join('  ')
   const halted = h.halted ? c('1;33', `⏸ halted — ${h.halted.nodes.length} node${h.halted.nodes.length === 1 ? '' : 's'} need${h.halted.nodes.length === 1 ? 's' : ''} you · r to resume`) : null
