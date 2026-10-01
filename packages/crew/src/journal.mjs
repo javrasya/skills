@@ -276,6 +276,7 @@ export function chainEntry({ runId, worktree, baseline, leftovers = [] }) {
 // 'waiting' | 'paused', since }. No agent's state is changed by it.
 // chain: the run's chain worktree as last journaled, { runId, worktree,
 // baseline, leftovers }, or null: leftovers, every leftover line since, once.
+// A chain line naming no runId is no chain: its reclaim could not name it.
 //
 // nodes (ADR-0016): node -> its call's entry as `calls` holds it, the latest
 // call to name that node winning, with `key`, `node`, `n` and `title`; a failed
@@ -485,7 +486,7 @@ export function foldJournal(entries) {
     if (e.type === 'outage') outage = e.phase === 'end' ? null : { phase: e.phase === 'paused' ? 'paused' : 'waiting', since: e.since ?? e.at ?? null }
     if (e.type === 'halted') halted = { since: e.at ?? null, node: e.node ?? null, reason: e.reason ?? null }
     if (e.type === 'unhalted') halted = null
-    if (e.type === 'chain' && typeof e.worktree === 'string') chain = { runId: e.runId ?? null, worktree: e.worktree, baseline: Array.isArray(e.lines) ? e.lines : null, leftovers: Array.isArray(e.leftovers) ? e.leftovers : [] }
+    if (e.type === 'chain' && typeof e.worktree === 'string' && typeof e.runId === 'string') chain = { runId: e.runId, worktree: e.worktree, baseline: Array.isArray(e.lines) ? e.lines : null, leftovers: Array.isArray(e.leftovers) ? e.leftovers : [] }
     if (e.type === 'leftover' && chain && Array.isArray(e.lines)) chain = { ...chain, leftovers: unionLines(chain.leftovers, e.lines) }
     // Read as the runner acted on it (doctor.mjs).
     if (e.type === 'mail' && typeof e.messageId === 'string' && mailSupersedes(e, mail.get(e.messageId))) {

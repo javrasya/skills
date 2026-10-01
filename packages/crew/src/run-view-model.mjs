@@ -11,10 +11,10 @@ import { basename, dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { sessionTranscripts } from './transcript.mjs'
 import { pathKey, samePath } from './paths.mjs'
-import { agentName, agentsOf, reclaimAgent, reclaimChain, reclaimRun, runWorktree } from './reclaim.mjs'
+import { agentName, agentsOf, chainAgent, reclaimAgent, reclaimChainAfter, reclaimRun, runWorktree } from './reclaim.mjs'
 import { foldJournal, journalLines, readJournal, timeOf } from './journal.mjs'
 import { REGISTRY_PATH, readRegistry, runRegistry } from './registry.mjs'
-import { worktreeName, worktreeUnpushed } from './git.mjs'
+import { worktreeUnpushed } from './git.mjs'
 import { hostUnreachable } from './session-host.mjs'
 import { isOrchestratorTitle } from './orchestrator.mjs'
 import { haltNoticeOf, readTriage } from './triage.mjs'
@@ -225,7 +225,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   // The superseded attempts: no row, but Reclaim All's.
   let superseded = []
   // A sequential run's chain worktree, as the journal names it: Reclaim All's
-  // alone (ADR-0020).
+  // alone (ADR-0020), and null once the registry records it reclaimed.
   let chain = null
   let header = null
   let selectedKey = null
@@ -299,7 +299,6 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     const entries = journalLines(journalPath)
     latest = latestEvent(join(stateDir, 'runner.log'))
     const fold = foldJournal(entries)
-    chain = fold.chain
     const every = agentsIn(fold)
     const agents = every.filter((a) => !a.superseded)
     const now = clock.now()
@@ -312,6 +311,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
         run = (runId && runs.find((r) => r.runId === runId)) || runs.filter((r) => samePath(r.runDir, stateDir)).at(-1) || null
       } catch {}
     }
+    chain = fold.chain && !run?.reclaimed && !run?.chainReclaimed ? fold.chain : null
     let open = null
     if (every.some((a) => a.terminal)) {
       try {
@@ -511,18 +511,20 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     return { ...say(`reclaimed ${what}${withDoctors(r ? doctors.reclaimed.length : 0)}${notes.length ? `; ${notes.join('; ')}` : ''}`), reclaim: r, agent: target, ...also }
   }
 
-  // Reclaim All's last step on a sequential run, every agent of it reclaimed:
-  // its chain worktree, as `reclaim` answers for an agent.
-  async function reclaimTheChain({ force = false } = {}) {
-    const target = { n: null, title: worktreeName(chain.worktree), chain: true }
+  // Reclaim All's last step on a sequential run: its chain worktree, by the
+  // one rule for it (reclaimChainAfter), `kept` the agents this reclaim kept,
+  // as `reclaim` answers for an agent.
+  async function reclaimTheChain(kept, { force = false } = {}) {
+    const target = chainAgent(chain)
     let r
     try {
-      r = await reclaimChain({ ...chain, runId: chain.runId ?? header?.runId }, { host, unpushed, force })
+      r = await reclaimChainAfter(kept, chain, { host, journaled: agentsOf(journalPath), unpushed, force, registry: registry && runRegistry(registry, clock) })
     } catch (e) {
       r = { reclaimed: false, reason: e?.message ?? String(e) }
     }
     if (!r.reclaimed) return { ...say(r.unreachable ? HOST_GONE : `kept ${target.title}: ${r.reason}`), reclaim: r, agent: target }
-    return { ...say(`reclaimed ${target.title}`), reclaim: r, agent: target }
+    await refresh()
+    return { ...say(`reclaimed ${target.title}${r.notes.length ? `; ${r.notes.join('; ')}` : ''}`), reclaim: r, agent: target }
   }
 
   // The confirmation a refused reclaim `res` asks for, as the dialog, or null:
@@ -588,19 +590,22 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
       if (r) put({ n: a.n, title: a.title }, r)
       for (const { agent, reclaim: dr } of [...doctors.reclaimed, ...doctors.kept]) put(agent, dr)
     }
-    // The chain goes last, and only with no agent kept: one kept may still be at work in it.
-    let chainGone = false
+    // The chain goes last.
+    let chainGone = null
     if (withChain) {
-      const res = kept.length ? null : await reclaimTheChain()
-      if (res?.reclaim.reclaimed) chainGone = true
-      else kept.push({ agent: { n: null, title: worktreeName(chain.worktree), chain: true }, reclaim: res?.reclaim ?? { reclaimed: false, reason: 'an agent of the run was kept' } })
+      const res = await reclaimTheChain(kept)
+      if (!res.reclaim.reclaimed) kept.push({ agent: res.agent, reclaim: res.reclaim })
+      else {
+        chainGone = res.agent
+        for (const note of res.reclaim.notes) notes.push(`${res.agent.title}: ${note}`)
+      }
     }
-    if (reclaimed.length || chainGone) await refresh()
+    if (reclaimed.length) await refresh()
     dialog = nextConfirmation(kept)
     const asked = kept.filter((k) => confirmationOf(k)).length
     const text = kept.some((k) => k.reclaim.unreachable) ? `${HOST_GONE}; reclaimed ${reclaimed.length} of ${total} before it went` : [
       `reclaimed ${reclaimed.length} of ${total} agent${total === 1 ? '' : 's'} of ${what}`,
-      ...(chainGone ? [`removed ${worktreeName(chain.worktree)}`] : []),
+      ...(chainGone ? [`removed ${chainGone.title}`] : []),
       ...kept.filter((k) => !confirmationOf(k)).map(({ agent, reclaim: r }) => `kept ${agent.title}: ${r.reason}`),
       ...(asked ? [`${asked} to confirm`] : []),
       ...notes,
@@ -617,7 +622,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
         dialog = nextConfirmation(queue)
         return say(`${title.replace(/^Reclaim (.*)\?$/, '$1')}: reclaim cancelled`)
       }
-      const res = ofChain ? await reclaimTheChain(confirm) : await reclaim({ n, ...confirm })
+      const res = ofChain ? await reclaimTheChain([], confirm) : await reclaim({ n, ...confirm })
       const again = confirmationOf(res, confirm)
       dialog = again ? { ...again, queue: [...(res.doctors?.kept ?? []), ...queue] } : nextConfirmation([...(res.doctors?.kept ?? []), ...queue])
       layout()
@@ -949,13 +954,13 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
     let r
     let left
     try {
-      const done = new Set(readRegistry(registry).find((e) => e.runId === runId)?.reclaimedAgents.map((a) => a.agent) ?? [])
-      left = run.runDir ? agentsOf(join(run.runDir, 'journal.jsonl')).filter((a) => a.runId === runId && !done.has(a.name)) : []
+      const entry = readRegistry(registry).find((e) => e.runId === runId)
+      const done = new Set(entry?.reclaimedAgents.map((a) => a.agent) ?? [])
+      const journaled = run.runDir ? agentsOf(join(run.runDir, 'journal.jsonl')).filter((a) => a.runId === runId) : []
+      left = journaled.filter((a) => !done.has(a.name))
       const ran = run.runDir ? readJournal(join(run.runDir, 'journal.jsonl')).chain : null
-      const chained = ran && { ...ran, runId: ran.runId ?? runId }
-      const writer = runRegistry(registry, clock)
-      r = await reclaimRun(left, { host: hostOf(run.host), unpushed, registry: writer, closeRun: !stays, chain: chained?.runId === runId ? chained : null, out: (s) => notes.push(s.replace(/^!! /, '')) })
-      if (!left.length && !stays && !r.kept.length && !(chained?.runId === runId)) writer.reclaimed({ runId })
+      const chain = ran?.runId === runId && !entry?.chainReclaimed ? ran : null
+      r = await reclaimRun(left, { host: hostOf(run.host), unpushed, registry: runRegistry(registry, clock), closeRun: !stays, runId, chain, journaled, out: (s) => notes.push(s.replace(/^!! /, '')) })
     } catch (e) {
       return say(`could not reclaim ${label}: ${e?.message ?? e}`)
     }

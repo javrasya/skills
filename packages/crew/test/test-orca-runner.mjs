@@ -3242,6 +3242,8 @@ test('registry: the fold gives each run its state, where its runner was last see
   w.ended({ runId: 'run_a', outcome: 'failed' })
   const reclaim = (e) => writeFileSync(path, readFileSync(path, 'utf8') + JSON.stringify({ type: 'reclaimed', ...e }) + '\n')
   reclaim({ runId: 'run_a', agent: 'run_a-3', at: isoAt(3 * MIN) })
+  // Its chain worktree: recorded apart from its agents.
+  reclaim({ runId: 'run_a', agent: 'run_a-chain', at: isoAt(3 * MIN) })
   reclaim({ runId: 'run_a', at: isoAt(4 * MIN) })
   reclaim({ runId: 'run_b', agent: 'run_b-1', at: isoAt(5 * MIN) })
   // Never armed here: a run from before the registry.
@@ -3253,12 +3255,12 @@ test('registry: the fold gives each run its state, where its runner was last see
   assert.deepEqual(runs[0], {
     runId: 'run_a', host: 'orca', project: 'C:/repo', runDir: 'C:/a', spec: 's1', script: 'C:/notes/workflow.js', permissionMode: 'auto', armedAt: isoAt(0),
     state: 'failed', endedAt: isoAt(2 * MIN), runner: { terminal: 'term_2', at: isoAt(MIN) }, paused: null,
-    reclaimed: true, reclaimedAt: isoAt(4 * MIN), reclaimedAgents: [{ agent: 'run_a-3', at: isoAt(3 * MIN) }],
+    reclaimed: true, reclaimedAt: isoAt(4 * MIN), reclaimedAgents: [{ agent: 'run_a-3', at: isoAt(3 * MIN) }], chainReclaimed: true,
   })
   assert.deepEqual(runs[1], {
     runId: 'run_b', host: 'orca', project: 'C:/other', runDir: 'C:/b', spec: 's2', script: null, permissionMode: null, armedAt: isoAt(0),
     state: 'running', endedAt: null, runner: null, paused: null,
-    reclaimed: false, reclaimedAt: null, reclaimedAgents: [{ agent: 'run_b-1', at: isoAt(5 * MIN) }],
+    reclaimed: false, reclaimedAt: null, reclaimedAgents: [{ agent: 'run_b-1', at: isoAt(5 * MIN) }], chainReclaimed: false,
   })
   assert.deepEqual(readRegistry(join(tmp(), 'none.jsonl')), [], 'no registry yet is no runs')
 })
@@ -4646,10 +4648,14 @@ viewTest('sequential run: Reclaim All once the run has ended removes the chain w
   assert.match(run.view.model.dialog.lines[0], /run_fake1-chain holds 2 unpushed commits; only a forced reclaim removes it/)
   assert.equal(run.chain.removed, false)
   const forced = await pressOn(run.view)('f')
-  assert.deepEqual([forced.agent, forced.reclaim.reclaimed, run.view.model.message], [{ n: null, title: 'run_fake1-chain', chain: true }, true, 'reclaimed run_fake1-chain'])
+  assert.deepEqual([forced.agent, forced.reclaim.reclaimed, run.view.model.message], [{ runId: 'run_fake1', n: null, title: 'run_fake1-chain', chain: true }, true, 'reclaimed run_fake1-chain'])
   assert.deepEqual(touched(run.after()).slice(-3), [['workerRelease', 'ctx_fake3'], ['terminalClose', 'term_fake3'], ['worktreeRemove', RUN_CHAIN]])
   assert.equal(run.chain.removed, true)
-  assert.deepEqual(reclaimedIn(run.registry), ['run_fake1-1', 'run_fake1-2', 'run_fake1-3'])
+  assert.deepEqual(reclaimedIn(run.registry), ['run_fake1-1', 'run_fake1-2', 'run_fake1-3', 'run_fake1-chain'])
+  // The chain's reclaim is recorded: Reclaim All has nothing left, and removes it no more.
+  const again = await chooseOption(run.view, 'all')
+  assert.deepEqual([again.reclaimed, again.kept, run.view.model.message], [[], [], 'the run: no agent left to reclaim'])
+  assert.equal(touched(run.after()).filter(([verb]) => verb === 'worktreeRemove').length, 1)
 })
 
 test('sequential run: Ctrl+R on the runs list closes a run whose runner is dead with its chain worktree, which unpushed commits keep, and the run with it', async () => {
@@ -4664,7 +4670,34 @@ test('sequential run: Ctrl+R on the runs list closes a run whose runner is dead 
   held.chain.unpushed = 0
   r = await runs.reclaim('run_fake1')
   assert.deepEqual([r.reclaimed, r.kept], [[], []])
-  assert.deepEqual([held.chain.removed, reclaimedIn(held.registry)], [true, ['run_fake1-1', 'run_fake1-2', 'run_fake1-3', null]])
+  assert.deepEqual([held.chain.removed, reclaimedIn(held.registry)], [true, ['run_fake1-1', 'run_fake1-2', 'run_fake1-3', 'run_fake1-chain', null]])
+})
+
+test('sequential run: a resume that remakes a reclaimed chain and carries its node on under the same <runId>-<n> keeps the chain from Ctrl+R while that agent is live in it', async () => {
+  const run = await reclaimableChainRun(null, { alive: () => false })
+  run.orca.dispatches.get('ctx_fake3').settled = true
+  const runs = runsView({ host: run.orca, ...run.rest })
+  await runs.refresh()
+  await runs.reclaim('run_fake1')
+  assert.deepEqual([run.chain.removed, reclaimedIn(run.registry)], [true, ['run_fake1-1', 'run_fake1-2', 'run_fake1-3', 'run_fake1-chain', null]])
+  // r: a runner takes the run up again, remakes the chain and carries node 3 on in it, as run_fake1-3; then it dies too.
+  runRegistry(run.registry, { now: () => 0 }).runner({ runId: 'run_fake1', terminal: 'term_runner2' })
+  const remade = await run.orca.chainWorktree({ runId: 'run_fake1' })
+  const w = await run.orca.workerStart({ run: 'run_fake1', prompt: 'p', title: 't3', sessionId: SID, chain: remade.path })
+  appendFileSync(join(run.rest.stateDir, 'journal.jsonl'), [
+    { type: 'chain', at: at(25), runId: 'run_fake1', worktree: remade.path, lines: [] },
+    J('started', 3, '[Implement] impl:#3', 26, { run: 'run_fake1', dispatchId: w.dispatchId, harness: 'claude', sessionId: 'sid-3b', worktree: remade.path, terminal: w.terminal }),
+  ].map((e) => JSON.stringify(e)).join('\n') + '\n')
+  const chain = run.orca.worktrees.get(remade.path)
+  assert.equal(chain.removed, false, 'the chain is made again')
+  await runs.refresh()
+  let r = await runs.reclaim('run_fake1')
+  assert.deepEqual([r.reclaimed, r.kept.map((k) => [k.agent.title, k.reason])], [[], [['run_fake1-chain', '[Implement] impl:#3 is still live in it']]])
+  assert.equal(chain.removed, false)
+  run.orca.dispatches.get(w.dispatchId).settled = true
+  r = await runs.reclaim('run_fake1')
+  assert.deepEqual([r.reclaimed, r.kept, chain.removed], [[], [], true])
+  assert.deepEqual(reclaimedIn(run.registry).slice(-2), ['run_fake1-chain', null])
 })
 
 // --- the run console: `crew view`, a crew run's sessions entered in place -----
