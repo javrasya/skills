@@ -129,7 +129,7 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
 
   const show = (d) => {
     const s = sessions.get(d.id)?.info() ?? null
-    return { settled: d.settled, outcome: d.outcome, gone: !s, exited: !!s && !s.alive, waiting: null, terminal: d.id, ...(!s && !d.settled && died.has(d.id) && { hostDied: true }) }
+    return { settled: d.settled, outcome: d.outcome, gone: !s, exited: !!s && !s.alive, waiting: s?.waiting ?? null, terminal: d.id, ...(!s && !d.settled && died.has(d.id) && { hostDied: true }) }
   }
 
   const ops = {

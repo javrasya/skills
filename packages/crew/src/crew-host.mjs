@@ -21,6 +21,7 @@ import { runnerCommand } from './daemon/runs.mjs'
 import { HOSTED_ENV, launchedSession, launchWords, nativeEnv, resumeWords } from './harness.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { SCREENS, readScreen, readsReady } from './screens.mjs'
+import { CLAUDE_HOOK_EVENTS } from './waiting.mjs'
 import { sessionTranscripts } from './transcript.mjs'
 import { readCrewConfig, repoConfig } from './crew-config.mjs'
 import { childCommand } from './command.mjs'
@@ -30,6 +31,18 @@ import { chainName, gitIn, repoOf } from './git.mjs'
 import { gitProbes, prepareChainWorktree, prepareWorktree, reuseWorktree, worktreeLines } from './worktree.mjs'
 
 export const CREW_BIN = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url))
+
+// What crew adds to the harness line of a session it starts, and to no other
+// (ADR-0022): a way for the harness to tell the daemon, from its own events,
+// when it waits on the person (waiting.mjs). pi loads crew's extension; Claude
+// takes crew's hooks as settings of that session alone, beside the person's
+// own. Neither changes what the harness does or shows.
+export const PI_EXTENSION = fileURLToPath(new URL('./hooks/crew-pi.mjs', import.meta.url))
+export const CLAUDE_HOOK = fileURLToPath(new URL('./hooks/claude-hook.mjs', import.meta.url))
+export const claudeSettings = (node = process.execPath) => JSON.stringify({
+  hooks: Object.fromEntries(CLAUDE_HOOK_EVENTS.map((event) => [event, [{ hooks: [{ type: 'command', command: `"${node}" "${CLAUDE_HOOK}"`, timeout: 10 }] }]])),
+})
+export const waitWords = (harness) => (harness === 'pi' ? ['-e', PI_EXTENSION] : harness === 'claude' ? ['--settings', claudeSettings()] : [])
 
 // The rows of a session's screen read for what it shows.
 const SCREEN_ROWS = 500
@@ -157,7 +170,9 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     for (;;) {
       const s = await sessionOf(id)
       if (!s?.alive) throw new Error(`\`${command.join(' ')}\` in crew session ${id} ended before its first prompt${s?.exit ? ` (exit ${s.exit.code})` : ''}${shown ? `, while ${shown.dialog === UNRECOGNISED ? 'its screen was not one crew recognises' : `it asked: ${shown.dialog}`}` : ''}; its screen:\n${(await screen(id, 15).catch(() => [])).join('\n')}`)
-      const seen = readScreen(harness, await screen(id, SCREEN_ROWS), screens)
+      // A harness that told the daemon it waits on the person (pi's dialogs,
+      // its extension's events) shows a dialog, whatever its screen.
+      const seen = s.waiting ? { state: 'dialog', dialog: 'a dialog', ask: `${s.waiting}: enter the session and answer it`, detail: null } : readScreen(harness, await screen(id, SCREEN_ROWS), screens)
       if (seen?.state === 'dialog') {
         steadySince = null
         if (!asking) throw Object.assign(new Error(`\`${command.join(' ')}\` in crew session ${id} stopped at a dialog before its first prompt (${seen.dialog}): ${seen.ask.replace(/: enter the session.*$/, '')}; answer it in a \`${harness}\` session of your own in ${s.cwd}, then try again`), { dialog: seen.dialog })
@@ -197,7 +212,7 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
   // `asking` is ready's: who hears of a dialog the person must answer first.
   async function launch(line, { harness, dir, title, prompt, run, typing = () => {}, asking = null }) {
     const [program, ...args] = line
-    const command = [...(harnesses[harness] ?? [program]), ...args]
+    const command = [...(harnesses[harness] ?? [program]), ...args, ...waitWords(harness)]
     const { session } = await call({ op: 'session.spawn', command, cwd: dir, env: sessionEnv, title })
     try {
       const { worker } = run ? await call({ op: 'run.worker', run, session: session.id, coordinator }) : { worker: null }
@@ -353,7 +368,8 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
 
     // From crew's own records: settled once its worker_done came (or it was
     // stopped), gone once its session is closed, exited once its program
-    // ended. Crew cannot see a harness waiting on a human, so never waiting.
+    // ended, and waiting on what its harness's own events say it waits on the
+    // person for (waitWords).
     async workerShow({ dispatch }) {
       return (await call({ op: 'worker.show', id: dispatch })).worker
     },

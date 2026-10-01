@@ -52,8 +52,10 @@ export const SCREENS = Object.freeze({
       { name: 'a dialog', match: (text, lines) => CLAUDE_CONFIRM.test(text) && !claudeInputBox(lines), ask: 'Claude shows a dialog: enter the session and answer it' },
     ]),
   }),
-  // pi is launched with --approve, so its trust prompt never shows. Its ready
-  // screen is not one crew reads yet: pi is ready once quiet.
+  // pi is launched with --approve, so its trust prompt never shows, and its
+  // extensions' dialogs are told by pi's own events (waiting.mjs), not read
+  // off its screen. Its ready screen is not one crew reads yet: pi is ready
+  // once quiet and waiting on nothing.
   pi: Object.freeze({ ready: null, dialogs: Object.freeze([]) }),
 })
 

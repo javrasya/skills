@@ -17,6 +17,10 @@
 //   [unrecorded]  the turn leaves no trace in the transcript
 //   [die]         the harness dies mid-turn: its prompt is in the transcript,
 //                 no reply ever is, and it exits 1
+//   [ask <tool>]  mid-turn it waits on the person, as for permission to use
+//                 <tool>, until Enter: Claude runs the hooks its --settings
+//                 name for it, as Claude does; pi emits ui_prompt_start and
+//                 ui_prompt_end to the extensions its -e names
 //
 // It plays a worker's part in a run too, from what the session was told, the
 // prompts of the transcript it resumed included. Given the runner's submit
@@ -29,6 +33,7 @@
 // orchestrator to draft a validation list, it answers FIXED_DRAFT, reading
 // nothing.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { pathToFileURL } from 'url'
 import { spawnSync } from 'child_process'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
@@ -74,10 +79,28 @@ if (argv.includes('-p')) {
     process.exit(error ? 1 : 0)
   })
 } else {
-  tui()
+  await tui()
 }
 
-function tui() {
+async function tui() {
+// pi's extensions, as -e names them, given a pi that only emits events; and
+// the hooks Claude's --settings names, run as Claude runs a command hook.
+const handlers = new Map()
+for (let i = argv.indexOf('-e'); i !== -1; i = argv.indexOf('-e', i + 1)) {
+  const ext = await import(pathToFileURL(argv[i + 1]).href)
+  ext.default({ on: (type, fn) => handlers.set(type, [...(handlers.get(type) ?? []), fn]) })
+}
+const emit = (event) => {
+  for (const fn of handlers.get(event.type) ?? []) fn(event, {})
+}
+const settings = after('--settings')
+const hooks = settings ? JSON.parse(settings.trim().startsWith('{') ? settings : readFileSync(settings, 'utf8')).hooks ?? {} : {}
+const hook = (payload) => {
+  for (const matcher of hooks[payload.hook_event_name] ?? []) {
+    for (const h of matcher.hooks) spawnSync(h.command, { shell: true, input: JSON.stringify({ session_id: sessionId, cwd, ...payload }), env: process.env })
+  }
+}
+
 let parent = null
 const write = (entry) => {
   mkdirSync(dirname(transcript), { recursive: true })
@@ -169,11 +192,21 @@ const said = []
 // folder. Down then Enter trusts it, and the input box shows; Enter alone
 // picks "No, exit" and it exits 1.
 let dialog = process.env.CREW_FAKE_DIALOG === 'trust'
+// CREW_FAKE_DIALOG=pi-mcp: as pi-mcp-adapter does, it draws its input first,
+// then asks whether to allow a project MCP server; Enter answers it.
+const PI_MCP = 'Allow project MCP server “fakesrv”?'
+let piDialog = false
+// Mid-turn, while it waits on the person ([ask]): what Enter answers.
+let answering = null
 let choice = 0
 let input = ''
 let status = ''
 function draw() {
   const [cols, rows] = process.stdout.getWindowSize?.() ?? [120, 30]
+  if (piDialog) {
+    process.stdout.write(`\x1b[2J\x1b[H${'─'.repeat(cols - 1)}\r\n ${PI_MCP}\r\n\r\n → Yes\r\n   No\r\n\r\n ↑↓ navigate  enter select  escape/ctrl+c cancel\r\n${'─'.repeat(cols - 1)}`)
+    return
+  }
   if (dialog) {
     process.stdout.write(`\x1b[2J\x1b[H${'─'.repeat(cols - 1)}\r\nAccessing workspace:\r\n\r\n${cwd}\r\n\r\nQuick safety check: Is this a project you created or one you trust?\r\n\r\n❯ No, exit\r\n  Yes, I trust this folder\r\n\r\nEnter to confirm · Esc to cancel`)
     return
@@ -220,8 +253,26 @@ async function turn(prompt) {
     clearInterval(spinner)
     status = ''
   } else if (how === 'turn') await sleep(Number(ms))
+  const ask = /\[ask ([^\]]+)\]/.exec(prompt)?.[1]
+  if (ask) await waitOn(ask)
   submit()
   reply(prompt, recorded)
+}
+
+async function waitOn(tool) {
+  const call = { tool_name: tool, tool_input: { command: 'touch asked.txt' } }
+  if (harness === 'pi') emit({ type: 'ui_prompt_start', reason: 'ui_prompt', kind: 'confirm', title: `Allow ${tool}?` })
+  else {
+    hook({ hook_event_name: 'PreToolUse', ...call })
+    hook({ hook_event_name: 'PermissionRequest', ...call })
+    hook({ hook_event_name: 'Notification', notification_type: 'permission_prompt', message: 'Claude needs your permission' })
+  }
+  status = `asks: may it use ${tool}? Enter to allow`
+  draw()
+  await new Promise((done) => (answering = done))
+  status = ''
+  if (harness === 'pi') emit({ type: 'ui_prompt_end', reason: 'ui_prompt', kind: 'confirm', title: `Allow ${tool}?` })
+  else hook({ hook_event_name: 'PostToolUse', ...call })
 }
 
 function reply(prompt, recorded) {
@@ -234,6 +285,13 @@ function reply(prompt, recorded) {
 process.stdout.write(`fake ${harness} starting\r\n`)
 process.stdout.write('\x1b[?1049h\x1b[?2004h\x1b[?25l')
 draw()
+if (process.env.CREW_FAKE_DIALOG === 'pi-mcp' && harness === 'pi') {
+  setTimeout(() => {
+    piDialog = true
+    emit({ type: 'ui_prompt_start', reason: 'ui_prompt', kind: 'confirm', title: PI_MCP })
+    draw()
+  }, 300)
+}
 if (process.stdin.isTTY) process.stdin.setRawMode(true)
 process.stdin.setEncoding('utf8')
 
@@ -251,6 +309,18 @@ process.stdin.on('data', (chunk) => {
     } else if (pending.startsWith('\x1b') && pending.length < 6 && '\x1b[20'.startsWith(pending.slice(0, 4))) {
       // A paste bracket split across reads.
       break
+    } else if (piDialog || answering) {
+      const key = pending[0]
+      pending = pending.slice(1)
+      if (key !== '\r') continue
+      if (answering) {
+        const done = answering
+        answering = null
+        done()
+      } else {
+        piDialog = false
+        emit({ type: 'ui_prompt_end', reason: 'ui_prompt', kind: 'confirm', title: PI_MCP })
+      }
     } else if (dialog) {
       if (pending.startsWith('\x1b[B')) {
         choice = 1
