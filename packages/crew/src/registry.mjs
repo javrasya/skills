@@ -29,6 +29,8 @@
 //              Orca named the same. `<runId>-chain` is a sequential run's
 //              chain worktree, removed (reclaim.mjs's reclaimChainAfter). With
 //              no agent, the whole run was reclaimed
+//   removed    the operator removed the run (remove.mjs): it is forgotten,
+//              dropped from every read of the registry, and its folder deleted
 import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync } from 'fs'
 import { dirname, join } from 'path'
 import { claudeDir } from './transcript.mjs'
@@ -78,6 +80,7 @@ export function runRegistry(path = REGISTRY_PATH, clock = { now: () => Date.now(
     unpaused: ({ runId }) => append({ type: 'unpaused', runId }),
     halted: ({ runId, node, reason }) => append({ type: 'halted', runId, node, reason }),
     unhalted: ({ runId }) => append({ type: 'unhalted', runId }),
+    removed: ({ runId }) => append({ type: 'removed', runId }),
   }
 }
 
@@ -103,7 +106,8 @@ export function runRegistry(path = REGISTRY_PATH, clock = { now: () => Date.now(
 // false again, since a resume may make the chain anew. host is the one its
 // latest runner named, else its armed entry's, else orca: every run armed
 // before hosts had names ran on Orca. A line that does not parse (a torn last line) is skipped, and so is an entry
-// for a Run never armed here.
+// for a Run never armed here. A run `removed` is in no read: its entries
+// before the removal and any after it are dropped with it.
 export function readRegistry(path = REGISTRY_PATH) {
   const runs = new Map()
   if (!existsSync(path)) return []
@@ -131,6 +135,7 @@ export function readRegistry(path = REGISTRY_PATH) {
     else if (e.type === 'ended' && OUTCOMES.includes(e.outcome)) Object.assign(run, { state: e.outcome, endedAt: e.at ?? null, paused: null })
     else if (e.type === 'paused') run.paused = { reason: e.reason ?? null, at: e.at ?? null }
     else if (e.type === 'unpaused') run.paused = null
+    else if (e.type === 'removed') runs.delete(e.runId)
     else if (e.type === 'halted' && run.state === 'running') run.state = 'halted'
     else if (e.type === 'unhalted' && run.state === 'halted') run.state = 'running'
     else if (e.type === 'reclaimed') {

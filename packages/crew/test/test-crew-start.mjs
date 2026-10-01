@@ -1,5 +1,5 @@
 // Offline tests for `crew start`: the form at a terminal, flag-only use,
-// arming (resolve, render, clear the end signals, launch), and the
+// arming (resolve, render into a run folder of its own, launch), and the
 // orchestrator's draft of a missing validation list, played by the fake
 // harness on the crew host.
 //   node packages/crew/test/test-crew-start.mjs
@@ -18,7 +18,7 @@ import { OrchestratorError, orchestrator } from '../src/orchestrator.mjs'
 import { execProgram } from '../src/git.mjs'
 import { STACKS_DOCS, rememberAnswers, rememberedAnswers, startForm } from '../src/start-form.mjs'
 import { preflight } from '../src/headless.mjs'
-import { END_SIGNALS, PLACEHOLDERS, launchRunner, notesDirOf, renderRoles, renderTemplate, startCommand, templatePath } from '../src/arm.mjs'
+import { PLACEHOLDERS, launchRunner, newRunId, notesDirOf, renderRoles, renderTemplate, startCommand, templatePath } from '../src/arm.mjs'
 import { launchCommand } from '../src/harness.mjs'
 import { DEFAULTS } from '../src/crew-config.mjs'
 import { loadScript } from '../src/runner.mjs'
@@ -200,10 +200,12 @@ function world({ validation = 'npm test\n', stackInstalled = true } = {}) {
   }
   const launches = []
   const launch = async (o) => {
-    launches.push({ ...o, signals: END_SIGNALS.filter((f) => existsSync(join(notesDir, 'orca-run', f))) })
+    launches.push(o)
     return { id: 's7' }
   }
-  const start = (argv, over = {}) => startCommand({ argv, paths, cwd: repoDir, tty: false, run, home, env: {}, launch, orchestrate: fakeOrchestrator(home), check: fakeCheck, ...over })
+  // Each start's own run id, in order: r1, r2, …
+  let armed = 0
+  const start = (argv, over = {}) => startCommand({ argv, paths, cwd: repoDir, tty: false, run, home, env: {}, launch, orchestrate: fakeOrchestrator(home), check: fakeCheck, newRunId: (spec) => `${spec}-r${++armed}`, ...over })
   return { home, repoDir, paths, notesDir, calls, launches, start, ready: (async () => {
     await git('init', '-q', '-b', 'develop')
     await git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init')
@@ -220,7 +222,7 @@ test('crew start with no terminal: every missing flag is an error naming it, and
   await assert.rejects(w.start(['--harness', 'pi']), (e) => e.code === 2 && /spec issue number is required/.test(e.message))
   await assert.rejects(w.start(['94', '--base']), (e) => e.code === 2 && /--base needs a value/.test(e.message))
   assert.equal(w.launches.length, 0)
-  assert.ok(!existsSync(join(w.notesDir, 'workflow.js')))
+  assert.ok(!existsSync(join(w.notesDir, 'runs')))
 })
 
 const FLAGS = ['--harness', 'claude', '--model', 'opus', '--base', 'main', '--stack-mode', 'chain', '--run-order', 'parallel', '--permission-mode', 'auto']
@@ -239,7 +241,7 @@ test('crew start: the harness is checked on the answered model, in the checkout,
   assert.deepEqual([checked[0].repoDir, checked[0].harness, typeof checked[0].model], [w.repoDir, 'claude', 'string'])
   assert.equal(asked, 0, 'the orchestrator is never asked')
   assert.equal(w.launches.length, 0)
-  assert.ok(!existsSync(join(w.notesDir, 'workflow.js')))
+  assert.ok(!existsSync(join(w.notesDir, 'runs')))
 })
 
 test('crew start with no terminal: a spec with no validation.md is an error, never a draft nobody confirmed', async () => {
@@ -278,7 +280,7 @@ test('crew start at a terminal: cancelling the draft writes nothing and arms not
   await assert.rejects(w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r']), stdout: fakeStdout(), orchestrate: failing }), (e) => e.code === 1 && /the orchestrator gave no valid answer to validation-list: its session settled failed; no validation list written, nothing armed/.test(e.message))
   assert.equal(w.launches.length, 0)
   assert.ok(!existsSync(join(w.notesDir, 'validation.md')))
-  assert.ok(!existsSync(join(w.notesDir, 'workflow.js')))
+  assert.ok(!existsSync(join(w.notesDir, 'runs')))
 })
 
 test('crew start at a terminal: Ctrl+C while the orchestrator drafts closes its question before crew start ends; nothing written, nothing armed', async () => {
@@ -332,7 +334,7 @@ test('crew start: a hand-written validation.md the workflow cannot hold is refus
   await w.ready
   await assert.rejects(w.start(['94', ...FLAGS]), (e) => e.code === 1 && e.message.includes(join(w.notesDir, 'validation.md')) && /line 2 holds \$\{/.test(e.message) && /nothing armed/.test(e.message))
   assert.equal(w.launches.length, 0)
-  assert.ok(!existsSync(join(w.notesDir, 'workflow.js')))
+  assert.ok(!existsSync(join(w.notesDir, 'runs')))
 })
 
 test('crew start at a terminal: a repo with no discoverable checks gets an empty draft, and the step says so', async () => {
@@ -346,22 +348,21 @@ test('crew start at a terminal: a repo with no discoverable checks gets an empty
   assert.equal(armed.target.validation, '')
 })
 
-test('crew start at a terminal: Enter through the form renders workflow.js, clears the last run\'s end signals, launches, remembers', async () => {
+test('crew start at a terminal: Enter through the form renders workflow.js into a run folder of its own, launches, remembers', async () => {
   const w = world({ validation: 'npm t\n' })
   await w.ready
-  const stateDir = join(w.notesDir, 'orca-run')
-  mkdirSync(stateDir, { recursive: true })
-  for (const f of END_SIGNALS) writeFileSync(join(stateDir, f), '{}')
-  writeFileSync(join(stateDir, 'journal.jsonl'), '')
   const out = fakeStdout()
   const armed = await w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r']), stdout: out })
   assert.match(lastScreen(out), /crew start: acme\/app #94: Crew, the session runner/)
-  const script = join(w.notesDir, 'workflow.js')
+  const runDir = join(w.notesDir, 'runs', '94-r1')
+  const script = join(runDir, 'workflow.js')
+  const stateDir = join(runDir, 'orca-run')
   assert.equal(armed.script, script)
-  assert.deepEqual(w.launches, [{ script, stateDir, permissionMode: 'auto', cwd: w.repoDir, title: 'implement-spec #94: Crew, the session runner', signals: [] }])
-  assert.ok(existsSync(join(stateDir, 'journal.jsonl')), 'only the end signals are cleared: the journal is what --resume replays')
+  assert.deepEqual(w.launches, [{ script, stateDir, permissionMode: 'auto', cwd: w.repoDir, title: 'implement-spec #94: Crew, the session runner' }])
+  assert.ok(!existsSync(join(runDir, 'validation.md')), 'the validation list is read from the spec\'s notes dir, never copied into the run')
   const template = readFileSync(templatePath(), 'utf8')
-  assert.equal(readFileSync(script, 'utf8'), skillRender(template, { SPEC: 94, REPO: 'acme/app', REPO_DIR: w.repoDir, NOTES_DIR: w.notesDir, BASE_REF: 'develop', STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session', VALIDATION: 'npm t\n' }))
+  // Its research notes are its own too; the validation list stays the spec's.
+  assert.equal(readFileSync(script, 'utf8'), skillRender(template, { SPEC: 94, REPO: 'acme/app', REPO_DIR: w.repoDir, NOTES_DIR: runDir, BASE_REF: 'develop', STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session', VALIDATION: 'npm t\n' }))
   assert.deepEqual(rememberedAnswers(w.paths, w.repoDir), { harness: 'claude', base: 'develop', stackMode: 'native', runOrder: 'parallel', permissionMode: 'auto', models: { claude: 'opus' } })
   assert.ok(!w.calls.some((c) => c.startsWith('gh extension install')), 'the extension is installed only when chosen')
 })
@@ -372,8 +373,8 @@ test('crew start by flags alone: pi takes no permission mode, Install and Use in
   await w.start(['94', '--harness', 'pi', '--model', 'lmstudio/qwen3', '--base', 'main', '--stack-mode', 'install', '--run-order', 'sequential'])
   assert.ok(w.calls.includes('gh extension install github/gh-stack'))
   const [launch] = w.launches
-  assert.deepEqual([launch.script, launch.permissionMode], [join(w.notesDir, 'workflow.js'), null])
-  const script = readFileSync(join(w.notesDir, 'workflow.js'), 'utf8')
+  assert.deepEqual([launch.script, launch.permissionMode], [join(w.notesDir, 'runs', '94-r1', 'workflow.js'), null])
+  const script = readFileSync(launch.script, 'utf8')
   assert.match(script, /^const STACK_MODE = 'native'/m)
   assert.match(script, /^const BASE_REF = 'main'/m)
   assert.match(script, /^const RUN_ORDER = 'sequential'/m)
@@ -387,7 +388,7 @@ test('crew start by flags alone without --run-order: the run is parallel, as bef
   rememberAnswers(w.paths, w.repoDir, { harness: 'claude', model: 'opus', base: 'main', stackMode: 'chain', runOrder: 'sequential', permissionMode: 'auto' })
   await w.start(['94', '--harness', 'claude', '--model', 'opus', '--base', 'main', '--stack-mode', 'chain', '--permission-mode', 'auto'])
   assert.equal(w.launches.length, 1)
-  assert.match(readFileSync(join(w.notesDir, 'workflow.js'), 'utf8'), /^const RUN_ORDER = 'parallel'/m)
+  assert.match(readFileSync(w.launches[0].script, 'utf8'), /^const RUN_ORDER = 'parallel'/m)
   assert.equal(rememberedAnswers(w.paths, w.repoDir).runOrder, 'parallel')
 })
 
@@ -408,7 +409,7 @@ const armedWith = async (argv, { roles } = {}) => {
   await w.ready
   if (roles) configRoles(w, roles)
   await w.start(['94', '--base', 'main', '--stack-mode', 'chain', '--run-order', 'parallel', ...argv])
-  return { w, script: readFileSync(join(w.notesDir, 'workflow.js'), 'utf8') }
+  return { w, script: readFileSync(w.launches[0].script, 'utf8') }
 }
 
 test('run default, Claude: every role row carries harness claude and the chosen model', async () => {
@@ -443,7 +444,7 @@ test('a per-role override naming no role of the template\'s is refused, and noth
   configRoles(w, { implement: { harness: 'pi', model: 'x/y' } })
   await assert.rejects(w.start(['94', '--harness', 'pi', '--model', 'x/y', '--base', 'main', '--stack-mode', 'chain', '--run-order', 'parallel']), /roles: implement is no role of the workflow template's; its roles are graph, /)
   assert.equal(w.launches.length, 0)
-  assert.ok(!existsSync(join(w.notesDir, 'workflow.js')))
+  assert.ok(!existsSync(join(w.notesDir, 'runs')))
   configRoles(w, { impl: { harness: 'codex', model: 'x' } })
   await assert.rejects(w.start(['94']), /roles\.impl: not \{ "harness": "claude" or "pi"/, 'a malformed override is refused before any form')
 })
@@ -495,16 +496,48 @@ const liveRunner = (stateDir) => {
   writeFileSync(join(stateDir, 'halted.json'), '{}')
 }
 
-test('crew start over a halted run whose runner is alive is refused before the form, and leaves its runner.pid and halted.json', async () => {
+test('crew start never shares a run: each start arms a new run in its own folder, and leaves an earlier one, live or not, exactly as it was', async () => {
   const w = world()
   await w.ready
-  const stateDir = join(w.notesDir, 'orca-run')
-  liveRunner(stateDir)
-  await assert.rejects(w.start(['94', ...FLAGS]), (e) => e.code === 1 && e.message.includes(stateDir) && /has its runner already/.test(e.message) && /nothing armed$/.test(e.message))
-  assert.equal(w.launches.length, 0)
-  assert.ok(!existsSync(join(w.notesDir, 'workflow.js')))
-  assert.equal(readFileSync(join(stateDir, 'runner.pid'), 'utf8'), String(process.pid))
-  assert.ok(existsSync(join(stateDir, 'halted.json')))
+  const first = await w.start(['94', ...FLAGS])
+  const firstState = join(w.notesDir, 'runs', '94-r1', 'orca-run')
+  liveRunner(firstState)
+  const written = readFileSync(first.script, 'utf8')
+  const second = await w.start(['94', ...FLAGS])
+  assert.equal(second.script, join(w.notesDir, 'runs', '94-r2', 'workflow.js'))
+  assert.deepEqual(w.launches.map((l) => l.stateDir), [firstState, join(w.notesDir, 'runs', '94-r2', 'orca-run')])
+  assert.equal(readFileSync(first.script, 'utf8'), written)
+  assert.equal(readFileSync(join(firstState, 'runner.pid'), 'utf8'), String(process.pid))
+  assert.ok(existsSync(join(firstState, 'halted.json')))
+})
+
+test('a run id is its spec number and a part of its own, so two runs of one spec are told apart', () => {
+  const at = new Date('2026-10-01T17:20:31Z')
+  assert.match(newRunId(827, at), /^827-20261001-172031-[0-9a-f]{4}$/)
+})
+
+test('crew start whose drawn id names a run folder that exists already draws another, and arms a folder of its own', async () => {
+  const w = world()
+  await w.ready
+  const first = await w.start(['94', ...FLAGS], { newRunId: () => '94-same' })
+  const written = readFileSync(first.script, 'utf8')
+  const ids = ['94-same', '94-other']
+  const second = await w.start(['94', ...FLAGS], { newRunId: () => ids.shift() })
+  assert.equal(second.script, join(w.notesDir, 'runs', '94-other', 'workflow.js'))
+  assert.equal(readFileSync(first.script, 'utf8'), written)
+  assert.equal(w.launches.length, 2)
+})
+
+test('crew start whose run folder exists already refuses, and leaves that run exactly as it was', async () => {
+  const w = world()
+  await w.ready
+  const first = await w.start(['94', ...FLAGS], { newRunId: () => '94-same' })
+  liveRunner(join(w.notesDir, 'runs', '94-same', 'orca-run'))
+  const written = readFileSync(first.script, 'utf8')
+  await assert.rejects(w.start(['94', ...FLAGS, '--run-order', 'sequential'], { newRunId: () => '94-same' }), /run folder .*94-same exists already: another run's, left as it is; nothing armed/)
+  assert.equal(w.launches.length, 1)
+  assert.equal(readFileSync(first.script, 'utf8'), written)
+  assert.equal(readFileSync(join(w.notesDir, 'runs', '94-same', 'orca-run', 'runner.pid'), 'utf8'), String(process.pid))
 })
 
 test('crew run --resume on a state dir whose runner is alive: the daemon refuses a second runner, run_live, and leaves the state dir as it was', async () => {

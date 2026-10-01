@@ -102,6 +102,9 @@ import { unionLines } from './git.mjs'
 // it), paused (still going at the outage limit: the run is paused, and fails
 // no agent) and end (Orca answered again; with `ms`, its length); `since` is
 // when it began. It has no n, and a resume carries none forward.
+// attended (ADR-0021): an attended call's started, reattached and resumed
+// continued lines carry `attended`, why it needs you: its agent shows needs
+// you, with that reason, whenever it is at work.
 // node (ADR-0016): a call's lines carry its `node`, the stable name the script
 // gives it (opts.node), when it names one: starting, started, reattached,
 // outstanding, continued, result, failed and held. A node's result that needs
@@ -152,6 +155,8 @@ export const JOURNAL_ENTRIES = Object.freeze({
   outage: ['at', 'phase', 'since'],
   halted: ['at', 'node', 'reason'],
   unhalted: ['at'],
+  pause: ['at'],
+  unpause: ['at'],
   held: ['at', 'key', 'n', 'node', 'title'],
   chain: ['at', 'runId', 'worktree', 'lines'],
   followUp: ['at', 'key', 'n', 'title', 'worktree', 'lines'],
@@ -366,7 +371,7 @@ export function foldJournal(entries) {
     if (a.dialog && !DIALOG_KEEPS.includes(e.type)) Object.assign(a, { dialog: null, beforeDialog: null })
     switch (e.type) {
       case 'held':
-        Object.assign(a, { state: 'queued', reason: 'held: the run is halted' })
+        Object.assign(a, { state: 'queued', reason: e.paused ? 'held: the run is paused' : 'held: the run is halted' })
         break
       case 'starting':
         a.from ??= at
@@ -475,6 +480,9 @@ export function foldJournal(entries) {
         })
         break
     }
+    // An attended agent (ADR-0021) needs you for as long as it is at work.
+    if (typeof e.attended === 'string') a.attended = e.attended
+    if (a.attended && ['running', 'continued', 'stuck'].includes(a.state)) Object.assign(a, { state: 'needs you', reason: a.attended })
     return id
   }
 
