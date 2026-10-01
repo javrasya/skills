@@ -203,6 +203,8 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
     })
   }
 
+  const chainRefused = () => Object.assign(new Error('orca: chain_unsupported: the Orca host makes no chain worktree, so it runs no sequential run'), { code: 'chain_unsupported', final: true })
+
   async function workerShow({ dispatch }) {
     return workerStatus(await orca(['orchestration', 'worker-show', '--dispatch', dispatch]))
   }
@@ -238,8 +240,9 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
     // or null. A child this attempt creates has its own taken before its
     // terminal opens, and handed to `child.onBaseline({ worktree, lines })`.
     // `prompt` may be a function of the child's baseline (null without one).
-    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null }) {
+    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null, chain = null }) {
       if (!sessionId) throw new Error(`workerStart: ${title} has no session id; the runner assigns one to every worker`)
+      if (chain) throw chainRefused()
       const command = launchCommand({ harness, model, effort, permissionMode, sessionId })
       // Orca's documented route for custom argv under supervision: create the
       // agent's terminal, then worker-start takes ownership of it. Without
@@ -314,6 +317,11 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
 
     // Board status of a worktree the runner created, by path: todo,
     // in-progress, in-review or completed.
+    // Not yet on Orca: refused, never a worker started in the run's own worktree instead.
+    async chainWorktree() {
+      throw chainRefused()
+    },
+
     async worktreeStatus({ worktree, status }) {
       await orca(['worktree', 'set', '--worktree', `path:${worktree}`, '--workspace-status', status])
     },

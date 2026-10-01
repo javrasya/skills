@@ -187,7 +187,8 @@ export function readResult(resultPath, schema) {
 // waits on: its lost() is taken off the watch's clocks, and a retry's backoff
 // is waited as its sleep(), so no clock the runner keeps runs while the host is gone.
 // Returns life(call), which resolves to the agent's value or null, and throws
-// only if journal or out does. life.doctors() resolves once every doctor
+// only if journal or out does. life.chain(call) resolves to the run's chain
+// worktree, the host's chainWorktree answer, in the Run it ensures for call. life.doctors() resolves once every doctor
 // still out has ended: a patient's agent() never waits on its doctor once its
 // own result is in, so the runner awaits them before it ends.
 export function agentLifecycle({ host, clock, limits, out, stateDir, objective, journal, retainWorktree, onRun = () => {}, takeOver = null, transcripts = sessionTranscripts(), nextN, doctorLaunch = () => ({ harness: 'claude' }), history = () => ({ entries: [], log: [] }), mailHandled = [], mailPending = [], outage = { lost: () => 0, sleep: (ms) => clock.sleep(ms) } }) {
@@ -915,6 +916,23 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
     }
     journal({ type: 'remedy', key, n, title, origin, round, doctor, how: 'continue', messageId, dispatchId: next.dispatchId, terminal: next.terminal, reopened: next.dispatchId !== w.dispatchId })
     return { w: await moveTo(title, w, next), sessionId, attempts: failure.attempts, continued: 0 }
+  }
+
+  // The run's chain worktree (ADR-0020), asked of the host once per runner
+  // however many calls ask at once, its baseline journaled when the host
+  // makes it; one that failed is asked for again by the next call.
+  let chain = null
+  life.chain = (call) => {
+    const making = (chain ??= ensureRun(call)
+      .then(({ runId }) => host.chainWorktree({ runId, onBaseline: ({ worktree, lines }) => journal({ type: 'chain', runId, worktree, lines }) }))
+      .then((c) => {
+        for (const why of c.warnings ?? []) warn(call, why)
+        return c
+      }))
+    return making.catch((e) => {
+      if (chain === making) chain = null
+      throw e
+    })
   }
 
   life.doctors = doctors.settled

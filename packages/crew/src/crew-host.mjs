@@ -221,11 +221,31 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     return ended ?? (s.quietMs !== null && s.quietMs >= quietMs)
   }
 
+  // A new worktree `name` at `path`, on a branch of its name from the run's
+  // HEAD, its setup hook run unless `skip`. One whose hook failed is removed
+  // again: nothing in it is anyone's work.
+  async function addWorktree(repo, name, path, skip) {
+    await gitIn(cwd, ['worktree', 'add', '-b', name, path, 'HEAD'], { ms: createMs })
+    const setup = skip ? null : repoConfig(paths, repo).setup ?? null
+    if (!setup) return
+    try {
+      await runHook(setup, { repo, worktree: path, env, ms: createMs })
+    } catch (e) {
+      try {
+        await gitIn(repo, ['worktree', 'remove', '--force', path], bound)
+        await gitIn(repo, ['branch', '-D', name], bound)
+      } catch (removing) {
+        e.message += `; removing ${path} again failed too: ${removing.message}`
+        e.worktree = path
+      }
+      throw e
+    }
+  }
+
   // The `<runId>-<n>` worktree a child start runs in: the one an earlier
   // attempt made, taken up by the rule every host shares (reuseWorktree), or
-  // a new one on a branch of its name from the run's HEAD, its setup hook run
-  // unless `setup` is 'skip'. A worktree whose hook failed is removed again:
-  // nothing in it is anyone's work. `made` is whether this start made it.
+  // a new one (addWorktree), its setup hook run unless `setup` is 'skip'.
+  // `made` is whether this start made it.
   async function childWorktree(child) {
     const repo = await repoOf(cwd, bound)
     const path = join(crewWorktrees(repo), child.name)
@@ -238,22 +258,7 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
       return { path, made: false }
     }
     if (known || existsSync(path)) throw fail('worktree_name_taken', `${path} already exists: crew makes each <runId>-<n> worktree once`, { worktree: path, final: true })
-    await gitIn(cwd, ['worktree', 'add', '-b', child.name, path, 'HEAD'], { ms: createMs })
-    const setup = child.setup === 'skip' ? null : repoConfig(paths, repo).setup ?? null
-    if (setup) {
-      try {
-        await runHook(setup, { repo, worktree: path, env, ms: createMs })
-      } catch (e) {
-        try {
-          await gitIn(repo, ['worktree', 'remove', '--force', path], bound)
-          await gitIn(repo, ['branch', '-D', child.name], bound)
-        } catch (removing) {
-          e.message += `; removing ${path} again failed too: ${removing.message}`
-          e.worktree = path
-        }
-        throw e
-      }
-    }
+    await addWorktree(repo, child.name, path, child.setup === 'skip')
     return { path, made: true }
   }
 
@@ -288,10 +293,12 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     // answers, and handed to onBaseline and to `prompt` when a function.
     // `asking` hears of a dialog its harness shows before the prompt goes in
     // (ready above), as workerContinue's does; the start waits it out.
-    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null, asking = null }) {
+    // With `chain`, chainWorktree's path, the worker runs in the run's chain
+    // worktree, which is never this start's to make or name on its error.
+    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null, chain = null, asking = null }) {
       if (!sessionId) throw new Error(`workerStart: ${title} has no session id; the runner assigns one to every worker`)
       const warnings = []
-      let worktree = cwd
+      let worktree = chain ?? cwd
       let baseline = child?.baseline ?? null
       let dispatched = false
       try {
@@ -402,6 +409,21 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
       // Refused run_live while the run has a runner, crew's own resuming it included.
       const { session } = await call({ op: 'session.spawn', command, cwd: worktree, env: sessionEnv, title, runDir: stateDir })
       return { terminal: session.id, command: command.join(' ') }
+    },
+
+    // `<runId>-chain` beside the run's `<runId>-<n>` worktrees, made as they
+    // are; asked again, the one git holds is the run's as it is, whoever
+    // worked in it last, so it is never refused as a child's would be.
+    async chainWorktree({ runId, onBaseline = null }) {
+      const repo = await repoOf(cwd, bound)
+      const name = `${runId}-chain`
+      const path = join(crewWorktrees(repo), name)
+      if ((await worktreesOf(repo, bound)).some((w) => samePath(w.path, path))) return { path, made: false, baseline: null, warnings: [] }
+      if (existsSync(path)) throw fail('worktree_name_taken', `${path} already exists and is no worktree git holds`, { worktree: path, final: true })
+      await addWorktree(repo, name, path, false)
+      const warnings = []
+      const baseline = await prepareChildWorktree({ project, worktree: path, bound, child: { onBaseline }, warnings })
+      return { path, made: true, baseline, warnings }
     },
 
     // Crew has no board: the status is kept by the daemon, for a worktree git has.

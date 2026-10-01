@@ -267,7 +267,9 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     // Only the custom launch exists: the harness command, carrying the
     // runner's session id, in a terminal worker-start then adopts. `command`
     // and `argv` are what the real adapter would type and run.
-    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null }) {
+    // `chain`: a chain worktree this Orca made (chainWorktree), which the
+    // worker runs in, nothing made.
+    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null, chain = null }) {
       if (!sessionId) throw new Error(`fake orca: ${title} was started without a runner-assigned --session-id`)
       if (away()) await reach()
       const command = launchCommand({ harness, model, effort, permissionMode, sessionId })
@@ -277,6 +279,10 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       let worktree = runWorktree
       let made = null
       let created = false
+      if (chain) {
+        if (!live(chain)) throw new OrcaError('selector_not_found', `no worktree ${chain}`, 'terminal create')
+        worktree = chain
+      }
       if (child) {
         made = child.retry ? await earlierWorktree(child.name, child.dispatched, child.baseline ?? null) : null
         let timedOut = null
@@ -337,14 +343,14 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
         throw e
       }
       const text = typeof prompt === 'function' ? prompt(baseline) : prompt
-      const argv = workerStartArgs({ run, prompt: text, title, place: ['--worktree', child ? `path:${worktree}` : 'current'], terminal: preamble.handle })
+      const argv = workerStartArgs({ run, prompt: text, title, place: ['--worktree', child || chain ? `path:${worktree}` : 'current'], terminal: preamble.handle })
       if (argv.includes('--agent')) throw new Error(`fake orca: worker-start for ${title} was called with --agent`)
       // Like Claude Code, the agent titles its own tab from its prompt.
       const d = {
         ...preamble, run, title, ...launch, sessionId, command, prompt: text, worktree, tabTitle: text.slice(0, 30), ...fresh(), transcript: null, onNudge: null, onContinue: null, terminalState: 'retained',
       }
       dispatches.set(d.dispatchId, d)
-      record({ verb: 'workerStart', dispatchId: d.dispatchId, title, ...launch, sessionId, command, argv, placement: child ? 'new-child' : 'current', worktree })
+      record({ verb: 'workerStart', dispatchId: d.dispatchId, title, ...launch, sessionId, command, argv, placement: child ? 'new-child' : chain ? 'chain' : 'current', worktree })
       // The worker plays only once its prompt reaches it (promptLoss).
       counts.promptLoss = (counts.promptLoss ?? 0) + 1
       d.delivery = promptLoss({ title, count: counts.promptLoss, sessionId }) ?? null
@@ -508,6 +514,21 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       const b = box?.batch ?? null
       record({ verb: 'mailCheck', ack, deliveryId: b?.id ?? null, ids: b ? b.messages.map((m) => m.id) : [], replayed })
       return { deliveryId: b?.id ?? null, acknowledged, replayed, messages: b ? b.messages.map((m) => ({ ...m })) : [] }
+    },
+
+    // The run's `<runId>-chain`, made as a child is, setup hook and all, the
+    // first time it is asked for; the same one, as it is, every time after.
+    async chainWorktree({ runId, onBaseline = null }) {
+      const name = `${runId}-chain`
+      const found = findWorktree(name)
+      if (found) return { path: found[0], made: false, baseline: null, warnings: [] }
+      await step('worktreeCreate', { name }, createMs)
+      const path = `C:/fake/worktrees/${name}`
+      worktrees.set(path, { parent: runWorktree, name, displayName: name, removed: false, status: null, porcelain: [...setupLeaves], commits: 0, unpushed: 0, setup: null })
+      record({ verb: 'worktreeCreate', name, worktree: path, setup: null })
+      const baseline = [...setupLeaves]
+      await onBaseline?.({ worktree: path, lines: baseline })
+      return { path, made: true, baseline, warnings: [] }
     },
 
     async worktreeStatus({ worktree, status }) {

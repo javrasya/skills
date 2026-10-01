@@ -464,6 +464,12 @@ test('session host: the Orca adapter and the fake Orca both implement every meth
   assert.throws(() => sessionHost({ ...fakeOrca(), workerShow: undefined }), /not a session host: workerShow missing/)
 })
 
+test('session host: the Orca adapter refuses a chain worktree for good, and a worker started in one, rather than run it anywhere else', async () => {
+  const refused = (e) => e.code === 'chain_unsupported' && e.final === true
+  await assert.rejects(orcaCli().chainWorktree({ runId: 'run_1' }), refused)
+  await assert.rejects(orcaCli().workerStart({ run: 'run_1', prompt: 'p', title: 't', sessionId: 's', chain: 'C:/repo.crew/run_1-chain' }), refused)
+})
+
 test('session host: no runner module names Orca in its code; only the Orca adapter, the fake Orca and the host list do', () => {
   const SRC = new URL('../src/', import.meta.url)
   const ADAPTERS = new Set(['orca-cli.mjs', 'fake-orca.mjs', 'hosts.mjs'])
@@ -1585,6 +1591,18 @@ test('lifecycle: a call journals started then its result, and returns the value 
   assert.equal(verbs.includes('workerRelease'), false)
   assert.deepEqual([journal[0].run, journal[1].run], ['run_fake1', 'run_fake1'])
   assert.equal(orca.calls[0].objective, 'the objective')
+})
+
+test('lifecycle: the run\'s chain worktree is made once for every call that asks, in its Run, and its baseline journaled once', async () => {
+  const orca = fakeOrca({ worker: submitting(), setupLeaves: ['?? setup.out'] })
+  const { life, call, journal } = lifecycleOn(orca)
+  const [a, b] = await Promise.all([life.chain(call('a')), life.chain(call('b'))])
+  assert.equal(a, b)
+  assert.equal(a.path, 'C:/fake/worktrees/run_fake1-chain')
+  assert.deepEqual(orca.calls.filter((c) => ['runCreate', 'worktreeCreate'].includes(c.verb)).map((c) => c.verb), ['runCreate', 'worktreeCreate'])
+  assert.deepEqual(journal, [{ type: 'chain', runId: 'run_fake1', worktree: a.path, lines: ['?? setup.out'] }])
+  assert.deepEqual(foldJournal(journal).chain, { runId: 'run_fake1', worktree: a.path, baseline: ['?? setup.out'] })
+  assert.equal(foldJournal([]).chain, null)
 })
 
 test('lifecycle: a Run Orca cannot create journals its retries and failed with no started line, and the next call asks again', async () => {

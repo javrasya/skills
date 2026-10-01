@@ -9,7 +9,8 @@
 // IDs a worker's preamble gave it; send(ids, message) and submit(ids, files),
 // a worker's own `orchestration send` and submit (on crew the real agent-side
 // commands, run with no Orca there); other(), the same host as another
-// coordinator; status(path) and removed(path), what it holds of a worktree.
+// coordinator; status(path) and removed(path), what it holds of a worktree,
+// and setups(path), how often a setup hook ran in it.
 // Every worker starts into a run the host made (runOf). Words in a
 // prompt script the worker's turn, as fake-harness.mjs reads them ([turn
 // <ms>], [spin <ms>], [draw], [unrecorded], [die]); the fake host's workers
@@ -58,7 +59,8 @@ async function eventually(what, check, ms = 15_000) {
 
 // One scratch crew home and daemon for every crew scenario. The run's
 // worktree is a git repo whose per-repo config in that home names a setup
-// hook, which writes setup.out, or fails when its environment says so.
+// hook, which writes setup.out and logs the worktree it ran in to
+// setup-runs.log, or fails when its environment says so.
 const homes = []
 after(async () => {
   for (const paths of homes) await stopDaemon(paths, { force: true }).catch(() => {})
@@ -78,12 +80,13 @@ function crewScratch() {
   git('add', 'README.md')
   git('-c', 'user.name=contract', '-c', 'user.email=contract@example.com', 'commit', '-q', '-m', 'init')
   const hook = join(root, 'setup-hook.mjs')
-  writeFileSync(hook, "import { writeFileSync } from 'fs'\nif (process.env.FAIL_SETUP) { console.error('setup refused'); process.exit(4) }\nwriteFileSync('setup.out', `${process.env.CREW_REPO}\\n${process.env.CREW_WORKTREE}\\n`)\n")
+  const setupLog = join(root, 'setup-runs.log')
+  writeFileSync(hook, `import { appendFileSync, writeFileSync } from 'fs'\nif (process.env.FAIL_SETUP) { console.error('setup refused'); process.exit(4) }\nwriteFileSync('setup.out', \`\${process.env.CREW_REPO}\\n\${process.env.CREW_WORKTREE}\\n\`)\nappendFileSync(${JSON.stringify(setupLog)}, \`\${process.env.CREW_WORKTREE}\\n\`)\n`)
   mkdirSync(paths.home, { recursive: true })
   writeFileSync(paths.config, JSON.stringify({ repos: { [cwd]: { setup: hook } } }))
   // The agent-side commands' environment: crew's, with any Orca out of reach.
   const agentEnv = { ...env, CREW_HOST: 'crew', CREW_HOME: paths.home, ORCA_BIN: join(root, 'no-such-orca') }
-  crew = { root, env, paths, cwd, agentEnv }
+  crew = { root, env, paths, cwd, agentEnv, setupLog }
   return crew
 }
 const scratchDir = () => mkdtempSync(join(crewScratch().root, 'files-'))
@@ -133,13 +136,14 @@ const HOSTS = [
         other: () => orca.as('term_other'),
         status: async (path) => orca.worktrees.get(path)?.status ?? null,
         removed: async (path) => orca.worktrees.get(path)?.removed === true,
+        setups: async (path) => orca.calls.filter((c) => c.verb === 'worktreeCreate' && c.worktree === path && c.setup !== 'skip').length,
       }
     },
   },
   {
     name: 'crew',
     open({ harness = [process.execPath, FAKE_HARNESS], env: extra = {} } = {}) {
-      const { env, paths, cwd, agentEnv } = crewScratch()
+      const { env, paths, cwd, agentEnv, setupLog } = crewScratch()
       const make = () => crewHost({ paths, env: { ...env, ...extra }, cwd, harnesses: harnessAs(harness), quietMs: 300, readyMs: 20_000 })
       const info = async (w) => (await request(paths, { op: 'session.list' })).sessions.find((s) => s.id === w.terminal)
       const ended = async (w) => (await info(w))?.alive === false
@@ -164,6 +168,7 @@ const HOSTS = [
         other: make,
         status: async (path) => (await request(paths, { op: 'worktree.statuses' })).statuses[resolve(path)] ?? null,
         removed: async (path) => !existsSync(path),
+        setups: async (path) => (existsSync(setupLog) ? readFileSync(setupLog, 'utf8').split('\n').filter((l) => l && resolve(l) === resolve(path)).length : 0),
       }
     },
   },
@@ -408,6 +413,34 @@ export const SCENARIOS = [
       assert.equal(await h.removed(w.worktree), true)
       assert.ok(!(await h.host.terminalList()).includes(w.terminal), 'its terminal went with it')
       await assert.rejects(h.host.worktreeRemove({ path: w.worktree }), /selector_not_found/)
+    },
+  },
+  {
+    name: 'chain worktree: made once as <runId>-chain, its setup hook run once and its output its baseline; workers start in it one after another, and a child beside it is made as ever',
+    async run(h) {
+      const run = await runOf(h)
+      const baselines = []
+      const onBaseline = (b) => baselines.push(b)
+      const chain = await h.host.chainWorktree({ runId: run, onBaseline })
+      assert.equal(worktreeName(chain.path), `${run}-chain`)
+      assert.deepEqual([chain.made, chain.baseline], [true, SETUP_LEAVES])
+      assert.deepEqual(baselines, [{ worktree: chain.path, lines: SETUP_LEAVES }])
+      const first = await start(h, 'first', { chain: chain.path })
+      assert.equal(first.worktree, chain.path)
+      await h.host.workerStop({ dispatch: first.dispatchId })
+      await eventually('the first worker stopped', () => h.stopped(first))
+      const again = await h.host.chainWorktree({ runId: run, onBaseline })
+      assert.deepEqual([again.path, again.made, again.baseline], [chain.path, false, null])
+      const second = await start(h, 'second', { chain: chain.path })
+      assert.equal(second.worktree, chain.path)
+      assert.equal(baselines.length, 1, 'no second baseline')
+      assert.equal(await h.setups(chain.path), 1, 'its setup hook ran once')
+      const own = await start(h, 'own', { child: child(`${run}-1`) })
+      assert.equal(worktreeName(own.worktree), `${run}-1`)
+      assert.equal(await h.setups(own.worktree), 1)
+      await assert.rejects(start(h, 'taken', { child: child(`${run}-1`) }), (e) => e.code === 'worktree_name_taken' && e.final === true)
+      await h.host.worktreeRemove({ path: chain.path })
+      await h.host.worktreeRemove({ path: own.worktree })
     },
   },
   {
