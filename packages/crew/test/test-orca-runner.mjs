@@ -4552,16 +4552,16 @@ viewTest('reclaim dialog: Enter reclaims per the option, by the reclaim rules: S
 // A sequential run (ADR-0020) as its journal tells it: three chain agents in
 // the one run_fake1-chain, 1 and 2 done, 3 still live, over a fake Orca that
 // made the chain and holds each agent's tab.
-const CHAIN = 'C:/fake/worktrees/run_fake1-chain'
-async function chainedRun(mode = 'attached', { alive } = {}) {
+const RUN_CHAIN = 'C:/fake/worktrees/run_fake1-chain'
+async function reclaimableChainRun(mode = 'attached', { alive } = {}) {
   const clock = fakeClock()
   const orca = fakeOrca({ worker: () => new Promise(() => {}), clock })
   await orca.chainWorktree({ runId: 'run_fake1' })
-  for (let n = 1; n <= 3; n++) await orca.workerStart({ run: 'run_fake1', prompt: 'p', title: `t${n}`, sessionId: SID, chain: CHAIN })
+  for (let n = 1; n <= 3; n++) await orca.workerStart({ run: 'run_fake1', prompt: 'p', title: `t${n}`, sessionId: SID, chain: RUN_CHAIN })
   const stateDir = tmp()
-  const started = (n, label, min) => J('started', n, `[Implement] ${label}`, min, { run: 'run_fake1', dispatchId: `ctx_fake${n}`, harness: 'claude', sessionId: `sid-${n}`, worktree: CHAIN, terminal: `term_fake${n}` })
+  const started = (n, label, min) => J('started', n, `[Implement] ${label}`, min, { run: 'run_fake1', dispatchId: `ctx_fake${n}`, harness: 'claude', sessionId: `sid-${n}`, worktree: RUN_CHAIN, terminal: `term_fake${n}` })
   const journal = [
-    { type: 'chain', at: at(0), runId: 'run_fake1', worktree: CHAIN, lines: [] },
+    { type: 'chain', at: at(0), runId: 'run_fake1', worktree: RUN_CHAIN, lines: [] },
     started(1, 'impl:#1', 0), J('result', 1, '[Implement] impl:#1', 5, { result: GOOD }),
     started(2, 'impl:#2', 6), J('result', 2, '[Implement] impl:#2', 10, { result: GOOD }),
     started(3, 'impl:#3', 11),
@@ -4575,7 +4575,7 @@ async function chainedRun(mode = 'attached', { alive } = {}) {
   const rest = { stateDir, clock, transcripts: { usage: () => null }, registry, unpushed: orca.unpushedOf, ...(alive && { alive }) }
   const view = mode ? await treeIn(mode, { orca, ...rest }) : null
   const since = orca.calls.length
-  return { orca, clock, registry, view, rest, chain: orca.worktrees.get(CHAIN), after: () => orca.calls.slice(since) }
+  return { orca, clock, registry, view, rest, chain: orca.worktrees.get(RUN_CHAIN), after: () => orca.calls.slice(since) }
 }
 const selectKey = async (view, key) => {
   while (view.model.rows[view.model.selected].key !== key) await pressOn(view)('DOWN')
@@ -4588,8 +4588,8 @@ const chooseOption = async (view, id) => {
 }
 
 viewTest('sequential run: Reclaim Selected and Reclaim Successful Ones close chain agents\' tabs and never remove the chain worktree they share', async (mode) => {
-  const run = await chainedRun(mode)
-  assert.deepEqual(run.view.model.phases.flatMap((p) => p.agents).map((a) => a.worktree), [CHAIN, CHAIN, CHAIN], 'each row still shows the chain')
+  const run = await reclaimableChainRun(mode)
+  assert.deepEqual(run.view.model.phases.flatMap((p) => p.agents).map((a) => a.worktree), [RUN_CHAIN, RUN_CHAIN, RUN_CHAIN], 'each row still shows the chain')
   await selectKey(run.view, 'agent:1')
   const one = await chooseOption(run.view, 'selected')
   assert.deepEqual([one.option, one.reclaim], ['selected', { reclaimed: true, notes: [] }])
@@ -4603,7 +4603,7 @@ viewTest('sequential run: Reclaim Selected and Reclaim Successful Ones close cha
 })
 
 viewTest('sequential run: Reclaim All once the run has ended removes the chain worktree after every agent\'s tab, never while an agent is kept live, and its unpushed commits only once f forces it', async (mode) => {
-  const run = await chainedRun(mode)
+  const run = await reclaimableChainRun(mode)
   runRegistry(run.registry, { now: () => 0 }).ended({ runId: 'run_fake1', outcome: 'ok' })
   await run.view.refresh()
   const live = await chooseOption(run.view, 'all')
@@ -4622,13 +4622,13 @@ viewTest('sequential run: Reclaim All once the run has ended removes the chain w
   assert.equal(run.chain.removed, false)
   const forced = await pressOn(run.view)('f')
   assert.deepEqual([forced.agent, forced.reclaim.reclaimed, run.view.model.message], [{ n: null, title: 'run_fake1-chain', chain: true }, true, 'reclaimed run_fake1-chain'])
-  assert.deepEqual(touched(run.after()).slice(-3), [['workerRelease', 'ctx_fake3'], ['terminalClose', 'term_fake3'], ['worktreeRemove', CHAIN]])
+  assert.deepEqual(touched(run.after()).slice(-3), [['workerRelease', 'ctx_fake3'], ['terminalClose', 'term_fake3'], ['worktreeRemove', RUN_CHAIN]])
   assert.equal(run.chain.removed, true)
   assert.deepEqual(reclaimedIn(run.registry), ['run_fake1-1', 'run_fake1-2', 'run_fake1-3'])
 })
 
 test('sequential run: Ctrl+R on the runs list closes a run whose runner is dead with its chain worktree, which unpushed commits keep, and the run with it', async () => {
-  const held = await chainedRun(null, { alive: () => false })
+  const held = await reclaimableChainRun(null, { alive: () => false })
   held.orca.dispatches.get('ctx_fake3').settled = true
   held.chain.unpushed = 1
   let runs = runsView({ host: held.orca, ...held.rest })
