@@ -6,6 +6,7 @@
 import { existsSync, readFileSync } from 'fs'
 import { agentDir } from './lifecycle.mjs'
 import { foldMail, heldRounds, mailSupersedes } from './doctor.mjs'
+import { unionLines } from './git.mjs'
 
 // Every journal entry type and the fields it always carries, beside `type`.
 // `at` is an ISO timestamp from the runner's clock; `run` is the Orca Run the
@@ -485,7 +486,7 @@ export function foldJournal(entries) {
     if (e.type === 'halted') halted = { since: e.at ?? null, node: e.node ?? null, reason: e.reason ?? null }
     if (e.type === 'unhalted') halted = null
     if (e.type === 'chain' && typeof e.worktree === 'string') chain = { runId: e.runId ?? null, worktree: e.worktree, baseline: Array.isArray(e.lines) ? e.lines : null, leftovers: Array.isArray(e.leftovers) ? e.leftovers : [] }
-    if (e.type === 'leftover' && chain && Array.isArray(e.lines)) chain = { ...chain, leftovers: [...new Set([...chain.leftovers, ...e.lines])] }
+    if (e.type === 'leftover' && chain && Array.isArray(e.lines)) chain = { ...chain, leftovers: unionLines(chain.leftovers, e.lines) }
     // Read as the runner acted on it (doctor.mjs).
     if (e.type === 'mail' && typeof e.messageId === 'string' && mailSupersedes(e, mail.get(e.messageId))) {
       mail.set(e.messageId, e)

@@ -1610,7 +1610,7 @@ function lifecycleOn(orca, settings = FAST) {
   let n = 0
   const call = (label, more = {}) => {
     const i = ++n
-    return { prompt: 'Name a thing.', schema: SCHEMA, isolated: false, launch: { harness: 'claude', permissionMode: 'auto' }, key: `k${i}`, n: i, label, title: `[P] ${label}`, phaseName: 'P', ...more }
+    return { prompt: 'Name a thing.', schema: SCHEMA, isolation: 'none', launch: { harness: 'claude', permissionMode: 'auto' }, key: `k${i}`, n: i, label, title: `[P] ${label}`, phaseName: 'P', ...more }
   }
   return { life, call, journal, kept, lines }
 }
@@ -1678,7 +1678,7 @@ test('lifecycle: an isolated worker that never started leaves its worktree retai
   const orca = fakeOrca()
   orca.workerStart = async () => { throw Object.assign(new Error('agent_not_ready'), { worktree: 'C:/fake/worktrees/orphan' }) }
   const { life, call, journal, kept } = lifecycleOn(orca, { ...FAST, ...NO_DOCTOR })
-  assert.equal(await life(call('impl', { isolated: true })), null)
+  assert.equal(await life(call('impl', { isolation: 'worktree' })), null)
   assert.deepEqual(kept.map((k) => k.path), ['C:/fake/worktrees/orphan'])
   assert.deepEqual(journal.map((e) => e.type), ['starting', 'retry', 'retry', 'retry', 'failed'], 'a worker that never started has no started line')
   assert.equal(journal[4].retained, kept[0])
@@ -1692,7 +1692,7 @@ test('lifecycle: a retry whose worktree list is truncated journals retry, then f
   const orca = fakeOrca()
   orca.workerStart = cliStart({ 'terminal wait': { wait: { satisfied: false } }, 'worktree list': { worktrees: [], truncated: true } })
   const { life, call, journal, kept } = lifecycleOn(orca, { ...FAST, ...NO_DOCTOR })
-  assert.equal(await life(call('impl', { isolated: true })), null)
+  assert.equal(await life(call('impl', { isolation: 'worktree' })), null)
   assert.deepEqual(journal.map((e) => e.type), ['starting', 'baseline', 'retry', 'retry', 'retry', 'failed'])
   assert.match(journal[3].reason, /worktree_list_truncated/)
   assert.match(journal[4].reason, /worktree_list_truncated/)
@@ -1704,7 +1704,7 @@ test('lifecycle: a create Orca answers under a suffixed name fails at once, reta
   const orca = fakeOrca()
   orca.workerStart = cliStart({ 'worktree create': (args) => ({ worktree: { path: `C:/wt/${flag(args, '--name')}-2` } }) })
   const { life, call, journal, kept } = lifecycleOn(orca, { ...FAST, ...NO_DOCTOR })
-  assert.equal(await life(call('impl', { isolated: true })), null)
+  assert.equal(await life(call('impl', { isolation: 'worktree' })), null)
   assert.deepEqual(journal.map((e) => e.type), ['starting', 'failed', 'retained'], 'final: never retried into a -3')
   assert.match(journal[1].reason, /worktree_name_taken/)
   const name = journal[1].reason.match(/asked for (\S+),/)[1]
@@ -3054,7 +3054,7 @@ test("baseline: a worktree born with setup output has that output journaled as i
   let atTerminal = null
   const orca = fakeOrca({ worker: submitting(), setupLeaves: BORN, faults: { terminalCreate: () => { atTerminal = journal.map((e) => e.type) } } })
   const { life, call, journal } = lifecycleOn(orca)
-  assert.deepEqual(await life(call('impl', { isolated: true })), GOOD)
+  assert.deepEqual(await life(call('impl', { isolation: 'worktree' })), GOOD)
   assert.deepEqual(atTerminal, ['starting', 'baseline'])
   const [b] = journal.filter((e) => e.type === 'baseline')
   assertEntries([{ ...b, at: new Date(0).toISOString() }])
@@ -6567,7 +6567,7 @@ test('resume of a sequential run: a chain worktree reclaimed while halted is mad
   const [c] = second.calls().filter((x) => x.verb === 'workerContinue')
   assert.deepEqual([c.worktree, c.reopened], [CHAIN_PATH, true])
   assert.match(c.text, /reclaimed while the run was halted and has been made again/)
-  assert.match(c.text, /never commit them\.\n\?\? setup\.out/)
+  assert.match(c.text, /left by its setup: setup\.out\. They are not your work/)
   const starts = second.calls().filter((x) => x.verb === 'workerStart')
   assert.deepEqual(starts.map((s) => [s.title, s.placement, s.worktree]), [['[P] b', 'chain', CHAIN_PATH]])
   assert.equal(rig.orca.worktrees.get(CHAIN_PATH).removed, false)

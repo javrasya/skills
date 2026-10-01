@@ -58,6 +58,13 @@ export const extraLines = (lines, known) => {
   return lines.filter((l) => !had.has(l))
 }
 
+// The paths a worktree's porcelain lines name: each line's two status columns
+// and the space after them dropped.
+export const porcelainPaths = (lines) => lines.map((l) => l.slice(3))
+
+// `known` with every line of `lines` it lacks added, each line once.
+export const unionLines = (known, lines) => [...new Set([...known, ...lines])]
+
 // Commits on a worktree's branch that no other branch and no remote holds:
 // work of its own, which a retry never takes a worktree over with.
 export async function worktreeOwnCommits(path, branch, bound) {

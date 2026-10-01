@@ -16,7 +16,7 @@ import { randomUUID } from 'crypto'
 import { validate } from './schema.mjs'
 import { slug } from './util.mjs'
 import { sessionTranscripts } from './transcript.mjs'
-import { extraLines } from './git.mjs'
+import { extraLines, porcelainPaths, unionLines } from './git.mjs'
 import { chainEntry } from './journal.mjs'
 import { DOCTOR_NUDGE, doctorContinuePrompt, notePrompt, runMailbox, doctorRounds } from './doctor.mjs'
 
@@ -24,7 +24,16 @@ export { doctorPrompt, notePrompt } from './doctor.mjs'
 
 export const SUBMIT = fileURLToPath(new URL('./submit.mjs', import.meta.url))
 
-const fileNames = (lines) => lines.map((l) => l.slice(3)).join(', ')
+const fileNames = (lines) => porcelainPaths(lines).join(', ')
+
+// The worktree a failure names as its agent's: the one it ran in (`w`), or,
+// for one that never started, the first child its start made or the run's
+// chain it was to start in; never the run's own worktree, which no agent owns.
+const failureWorktree = ({ isolation }, w, made = [], chainPath = null) => {
+  if (isolation === 'none') return null
+  if (w) return w.worktree ?? null
+  return isolation === 'worktree' ? made[0] ?? null : chainPath
+}
 
 // The files a worktree held before its agent, from its baseline's porcelain
 // lines, and in a chain worktree those an agent before it left there
@@ -154,7 +163,7 @@ const continuePrompt = (why) => `You were interrupted: the workflow runner stopp
 export const haltedPrompt = (needsDecision, remade = null) => `${needsDecision
   ? 'The workflow run was halted here: your result named decisions only the operator can make, and the operator has answered them. Re-read the ticket, its body and its comments, for the answers, then finish the task'
   : 'The workflow run was halted here, and the operator has resumed it. Carry on from where you are and finish the task'}, then run the submit command from your instructions until it exits 0. If a session host's preamble came with this message, take the four IDs for submit from it, not from an earlier one.${remade
-  ? ` Your worktree was reclaimed while the run was halted and has been made again, its setup hook run again: anything you left uncommitted in it is gone, and it is no longer on the ref you were on, so switch back to your work's ref first.${remade.length ? ` Its setup left these files, which are not yours: never commit them.\n${remade.join('\n')}` : ''}`
+  ? ` Your worktree was reclaimed while the run was halted and has been made again, its setup hook run again: anything you left uncommitted in it is gone, and it is no longer on the ref you were on, so switch back to your work's ref first.${baselineSection(remade)}`
   : ''}`
 
 // The convention a result needs the operator by (ADR-0016): a non-empty
@@ -265,14 +274,14 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
   // The worktree a dead agent leaves, retained, or null. A doctor's never is:
   // it changes nothing, so its worktree holds no work, and it stays
   // reclaimable through the journal and the run view.
-  const keep = ({ isolated, title, patient = null }, w) => (isolated && w?.worktree && patient == null
+  const keep = ({ isolation, title, patient = null }, w) => (isolation === 'worktree' && w?.worktree && patient == null
     ? retainWorktree({ path: w.worktree, reason: `retained because its agent (${title}) died before reporting its path: it may hold the only copy of that agent's work` })
     : null)
 
   // The worktrees a start that never started a worker made, retained: the
   // failed line carries the first; a `retained` line names each other one.
-  const keepMade = ({ isolated, title, patient = null }, made) => {
-    const [kept, ...more] = isolated && patient == null ? made.map((path) => retainWorktree({ path, reason: `retained because it was created for ${title}, whose worker never started, so no agent ever reported it` })) : []
+  const keepMade = ({ isolation, title, patient = null }, made) => {
+    const [kept, ...more] = isolation === 'worktree' && patient == null ? made.map((path) => retainWorktree({ path, reason: `retained because it was created for ${title}, whose worker never started, so no agent ever reported it` })) : []
     return { retained: kept ?? null, alsoRetained: more }
   }
 
@@ -540,18 +549,11 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
   // start. pi is not checked: it writes its transcript only at its first
   // assistant message, so a prompt it took would not show within the wait, and
   // an adapter with no promptDelivered checks nothing.
-  async function deliver({ title, isolated, launch }, w, sessionId, sent) {
+  async function deliver({ title, isolation, launch }, w, sessionId, sent) {
     if (launch.harness !== 'claude' || !host.promptDelivered || !sent) return
     const ms = limits.promptDeliveryMs
     const step = Math.max(1, Math.round(ms / 10))
-    const q = { harness: launch.harness, sessionId, worktree: w.worktree ?? null, needle: needleOf(sent) }
-    const arrives = async () => {
-      for (let waited = 0; ; waited += step) {
-        if (await host.promptDelivered(q)) return true
-        if (waited >= ms) return false
-        await outage.sleep(step)
-      }
-    }
+    const arrives = () => awaitDelivered({ harness: launch.harness, sessionId, worktree: w.worktree ?? null, needle: needleOf(sent) }, clock.now() + ms, step)
     try {
       if (await arrives()) return
       out(`!! ${title}: its prompt is not in its session ${wait(ms)} after worker-start; pressing Enter in its terminal ${w.terminal}`)
@@ -567,7 +569,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
     } catch (e) {
       await quietly(title, 'stop the worker its prompt never reached', () => host.workerStop({ dispatch: w.dispatchId }))
       await quietly(title, 'close its tab', () => host.terminalClose({ terminal: w.terminal }))
-      throw Object.assign(e instanceof Object ? e : new Error(String(e)), { dispatched: true, ...(isolated && w.worktree && { worktree: w.worktree }) })
+      throw Object.assign(e instanceof Object ? e : new Error(String(e)), { dispatched: true, ...(isolation === 'worktree' && w.worktree && { worktree: w.worktree }) })
     }
   }
 
@@ -587,7 +589,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
   // start retried with its `note`, carrying on from the `made`, `dispatched`
   // and `baseline` the spent start left, so its first attempt is a retry.
   async function start(runId, call, again = null) {
-    const { prompt, isolated, chained = false, launch, key, n, title, phaseName, dir, schemaPath, resultPath, payloadPath, patient = null, setup = null } = call
+    const { prompt, isolation, launch, key, n, title, phaseName, dir, schemaPath, resultPath, payloadPath, patient = null, setup = null } = call
     // The child worktrees failed attempts left. Every attempt of a call asks
     // for the same `<runId>-<n>` name, so a retry takes that one up again;
     // one the host made under a suffixed name leaves both it and that one.
@@ -623,7 +625,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
           // run's chain worktree, whose setup leftovers its agent is told of
           // as a child's. A doctor's call is never chained: it keeps a
           // `<runId>-<n>` of its own.
-          const chain = chained ? await life.chain(call) : null
+          const chain = isolation === 'chain' ? await life.chain(call) : null
           chainPath = chain?.path ?? null
           const w = await host.workerStart({
             run: runId,
@@ -633,7 +635,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
             ...launch,
             sessionId,
             ...(chain && { chain: chain.path }),
-            child: isolated ? { name: `${runId}-${call.origin ?? n}`, displayName: title, retry: attempt > 1 || !!again, dispatched, baseline, onBaseline, ...(setup && { setup }) } : null,
+            child: isolation === 'worktree' ? { name: `${runId}-${call.origin ?? n}`, displayName: title, retry: attempt > 1 || !!again, dispatched, baseline, onBaseline, ...(setup && { setup }) } : null,
           })
           // Logged at once: a start that then fails its delivery check made them too.
           for (const why of w.warnings ?? []) warn(call, why)
@@ -652,12 +654,12 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
       const retainMade = () => keepMade(call, [...made])
       const failure = { reason: e.reason, attempts: e.attempts, run: runId }
       if (patient == null) {
-        return { [SICK]: { ...failure, harness: launch.harness, sessionId: null, worktree: isolated ? [...made][0] ?? null : chainPath, keep: retainMade, restart: { made: [...made], dispatched, baseline } } }
+        return { [SICK]: { ...failure, harness: launch.harness, sessionId: null, worktree: failureWorktree(call, null, [...made], chainPath), keep: retainMade, restart: { made: [...made], dispatched, baseline } } }
       }
       return failAgent(call, { ...failure, ...retainMade() })
     }
     journal({ type: 'started', key, n, ...nodeOf(call), title, run: runId, dispatchId: w.dispatchId, harness: launch.harness, sessionId, worktree: w.worktree ?? null, terminal: w.terminal, dir, ...(call.origin != null && { origin: call.origin }) })
-    if (isolated && w.worktree) await setStatus(call, w.worktree, phaseName === 'Gate' ? 'in-review' : 'in-progress')
+    if (isolation === 'worktree' && w.worktree) await setStatus(call, w.worktree, phaseName === 'Gate' ? 'in-review' : 'in-progress')
     const on = [launch.harness, launch.model, launch.effort && `${launch.effort} effort`, launch.permissionMode && `${launch.permissionMode} mode`].filter(Boolean).join(', ')
     out(`>> ${title}: started on ${on} as dispatch ${w.dispatchId}, session ${sessionId}, in terminal ${w.terminal}${w.worktree ? ` in ${w.worktree}` : ''}`)
     // The agent titles its own tab and drops --task-title (ADR-0011), so the
@@ -680,7 +682,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
   // start's `again`, so it takes up the `<runId>-<n>` worktree an earlier
   // attempt of its start made rather than orphan it.
   async function supervise(runId, call) {
-    const { schema, isolated, chained = false, launch, key, n, title, resultPath, patient = null, box = null } = call
+    const { schema, isolation, launch, key, n, title, resultPath, patient = null, box = null } = call
     if (launch.harness === 'claude' && !launch.permissionMode && !toldNoMode) {
       toldNoMode = true
       out("!! no --permission-mode given: Claude workers start in Claude's own default permission mode, not in the orchestrator's.")
@@ -768,7 +770,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
         // A doctor is never itself doctored: its failure spends its round.
         if (kept && patient == null) {
           sick = true
-          return { [SICK]: { ...failure, harness: launch.harness, sessionId, worktree: isolated || chained ? w.worktree ?? null : null, w, gone: !!end.gone, keep: () => ({ retained: keep(call, w) }) } }
+          return { [SICK]: { ...failure, harness: launch.harness, sessionId, worktree: failureWorktree(call, w), w, gone: !!end.gone, keep: () => ({ retained: keep(call, w) }) } }
         }
         return failAgent(call, { ...failure, retained: retain() })
       }
@@ -778,16 +780,16 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
       journal({ type: 'result', key, n, ...nodeOf(call), title, result: result.value, ...(questions && { needsDecision: true }) })
       out(questions ? `?? ${title}: result received; it needs decisions only the operator can make: ${questions.join(' · ')}` : `<< ${title}: result received`)
       delivered = true
-      if (isolated && w.worktree && published(result.value)) await setStatus(call, w.worktree, 'completed')
+      if (isolation === 'worktree' && w.worktree && published(result.value)) await setStatus(call, w.worktree, 'completed')
       // Before agent() returns, so before the script can start the next agent.
-      if (chained && patient == null) await leftoverCheck(call, w, sessionId, { stopped: !!end.dead })
+      if (isolation === 'chain' && patient == null) await leftoverCheck(call, w, sessionId, { stopped: !!end.dead })
       return result.value
     } finally {
       if (!delivered && !sick) retain()
     }
   }
 
-  // call: { prompt, schema, isolated, chained, launch, key, n, label, title, phaseName },
+  // call: { prompt, schema, isolation ('none' | 'worktree' | 'chain'), launch, key, n, label, title, phaseName },
   // and on a resume `adopt`, the worker the last run left out for it, as the
   // journal's fold names it: { dir, run, dispatchId, harness, sessionId,
   // terminal, worktree, continuations, origin }. A doctor's call also has
@@ -836,7 +838,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
       if (adopt) {
         // Its worker is still out: the call stays unsettled for the next
         // resume, which takes that worker up, and its worktree is named.
-        const kept = call.isolated && adopt.worktree && call.patient == null ? retainWorktree({ path: adopt.worktree, reason: `retained because its agent (${title}) was still at work when this runner could not take its Run over, so it never reported — the next resume takes that agent up again` }) : null
+        const kept = call.isolation === 'worktree' && adopt.worktree && call.patient == null ? retainWorktree({ path: adopt.worktree, reason: `retained because its agent (${title}) was still at work when this runner could not take its Run over, so it never reported — the next resume takes that agent up again` }) : null
         return failAgent(call, { reason: e.reason, retained: kept, attempts: e.attempts, continuations: adopt.continuations, run: adopt.run ?? takeOver, workerOut: true }, { mark: '!!!!!!!!', said: `, its worker ${adopt.dispatchId} is left out for the next resume to take up, and the next agent() asks again` })
       }
       return failAgent(call, { reason: e.reason, attempts: e.attempts }, { mark: '!!!!!!!!', said: ', and the next agent() asks again' })
@@ -888,16 +890,16 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
   // doctors, rebuilt from what the journal kept: its worker, still out and
   // kept, or, for one whose worker never started, the worktree its start left.
   async function heldFailure(call, runId) {
-    const { adopt, held, isolated, chained = false, launch } = call
+    const { adopt, held, isolation, launch } = call
     if (!adopt) {
       const made = held.restart?.made ?? []
       // A chained patient made none: it was to start in the run's chain, as
       // journaled; never asked of the host, which may make it again.
-      const chainPath = chained ? chainState?.worktree ?? null : null
+      const chainPath = isolation === 'chain' ? chainState?.worktree ?? null : null
       // Its worker may have run in that worktree before its start failed: a
       // retry judges it against its baseline.
       return {
-        reason: held.reason, attempts: 0, run: runId, harness: launch.harness, sessionId: null, worktree: isolated ? made[0] ?? null : chainPath,
+        reason: held.reason, attempts: 0, run: runId, harness: launch.harness, sessionId: null, worktree: failureWorktree(call, null, made, chainPath),
         keep: () => keepMade(call, made), restart: { made, dispatched: true, baseline: held.restart?.baseline ?? null },
       }
     }
@@ -905,7 +907,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
     const end = await lookBack(w)
     return {
       reason: held.reason, attempts: 0, continuations: adopt.continuations, run: adopt.run ?? runId, workerLeft: true, harness: adopt.harness ?? launch.harness,
-      sessionId: adopt.sessionId, worktree: isolated || chained ? w.worktree ?? null : null, w, gone: !!end?.gone, keep: () => ({ retained: keep(call, w) }),
+      sessionId: adopt.sessionId, worktree: failureWorktree(call, w), w, gone: !!end?.gone, keep: () => ({ retained: keep(call, w) }),
     }
   }
 
@@ -914,12 +916,12 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
   // haltedPrompt, then watched as any worker, its continuations counted
   // afresh. call.adopt is the worker it last ran; call.halted { needsDecision }.
   async function carryHalted(runId, call) {
-    const { key, n, title, launch, adopt, halted, chained = false } = call
+    const { key, n, title, launch, adopt, halted, isolation } = call
     // A chained node (ADR-0020) carries on in the run's chain worktree, asked
     // of the host afresh: the operator may have reclaimed it while the run
     // was halted, and then the host makes it again.
     let chain = null
-    if (chained) {
+    if (isolation === 'chain') {
       try {
         chain = await life.chain(call, { recheck: true })
       } catch (e) {
@@ -1030,7 +1032,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
     }
     journal({ type: 'leftover', key, n, title, worktree, lines: left })
     out(`!! ${title}: left ${fileNames(left)} uncommitted in the chain worktree${stopped ? '' : ' after its follow-up'}; every later chain agent is told never to commit them`)
-    chainState = { ...chainState, leftovers: [...new Set([...chainState.leftovers, ...left])] }
+    chainState = { ...chainState, leftovers: unionLines(chainState.leftovers, left) }
   }
 
   // Types `text` into a returned worker's session and waits, up to
@@ -1041,18 +1043,31 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
     const until = clock.now() + limits.followUpMs
     // An idle look before the text has turned the session busy is the turn before.
     if (launch.harness === 'claude' && host.promptDelivered) {
-      const q = { harness: launch.harness, sessionId, worktree: w.worktree ?? null, needle: needleOf(text) }
-      while (!(await host.promptDelivered(q))) {
-        if (clock.now() >= until) return false
-        await outage.sleep(limits.pollMs)
-      }
+      if (!(await awaitDelivered({ harness: launch.harness, sessionId, worktree: w.worktree ?? null, needle: needleOf(text) }, until, limits.pollMs))) return false
     } else await outage.sleep(limits.nudgeEchoMs)
-    let size = measure(w, launch.harness, sessionId)
+    return awaitQuietTurn(w, launch.harness, sessionId, until)
+  }
+
+  // Polls the session every `step` for the prompt `q` names: true once it
+  // shows as a user message there, false once the clock passes `until`.
+  async function awaitDelivered(q, until, step) {
+    for (;;) {
+      if (await host.promptDelivered(q)) return true
+      if (clock.now() >= until) return false
+      await outage.sleep(step)
+    }
+  }
+
+  // Waits for a returned worker's turn to end: true once its terminal is
+  // idle and its transcript did not grow since the last look, or its worker
+  // is gone; false once the clock passes `until`.
+  async function awaitQuietTurn(w, harness, sessionId, until) {
+    let size = measure(w, harness, sessionId)
     for (;;) {
       const s = await host.workerShow({ dispatch: w.dispatchId })
       if (s.gone || s.exited) return true
       const idle = await host.terminalIdle({ terminal: w.terminal, timeoutMs: limits.idleProbeMs })
-      const now = measure(w, launch.harness, sessionId)
+      const now = measure(w, harness, sessionId)
       if (idle && now === size) return true
       size = now
       if (clock.now() >= until) return false
