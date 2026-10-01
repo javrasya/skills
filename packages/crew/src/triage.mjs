@@ -3,7 +3,7 @@
 // panel. The question's record is triage/<at>.json in the run's state dir,
 // created exclusively before it is asked: an `at` is asked once, however many
 // consoles show the run and across their restarts, and a notice rewritten with
-// a new `at` is a new question. A question never holds anything up: R resumes
+// a new `at` is a new question. A question never holds anything up: r resumes
 // the run whatever became of it, and one that fails is recorded failed. One
 // given up on because its console quit (the orchestrator closed) is no
 // answer and no failure: its claim is dropped, and the next console to show

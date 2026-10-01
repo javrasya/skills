@@ -323,7 +323,7 @@ test('console: keys typed while the enter is in flight reach the session in orde
 })
 
 test('run console keys: raw input as the run view\'s key names, and a left click as its row', () => {
-  assert.deepEqual(keyNames('\x1b[A\x1bOB\x1b[C\x1b[D\r\x1br R\x03q'), ['UP', 'DOWN', 'RIGHT', 'LEFT', 'ENTER', 'ESCAPE', 'r', ' ', 'R', 'CTRL_C', 'q'])
+  assert.deepEqual(keyNames('\x1b[A\x1bOB\x1b[C\x1b[D\r\x1br R\x12\x03q'), ['UP', 'DOWN', 'RIGHT', 'LEFT', 'ENTER', 'ESCAPE', 'r', ' ', 'R', 'CTRL_R', 'CTRL_C', 'q'])
   assert.deepEqual(keyNames('\x1b[<0;12;7M\x1b[<0;12;7m\x1b[<2;3;4M\x1b[<35;1;1M'), [{ click: { x: 12, y: 7 } }], 'a press of the left button, and nothing else')
   assert.deepEqual(keyNames('\x1b[24~\x1b[1;5D'), ['LEFT'], 'a key the tree takes no name for is dropped, and a modified arrow is the arrow')
   assert.deepEqual(keyNames('\x1bOd\x1bOc\x1b[1;5C'), ['LEFT', 'RIGHT', 'RIGHT'], "rxvt's Ctrl+Left and Ctrl+Right, and xterm's Ctrl+Right")

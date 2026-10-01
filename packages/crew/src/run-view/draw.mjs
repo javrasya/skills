@@ -80,7 +80,7 @@ function headerLines(h, W) {
     `runner ${h.alive === true ? c('32', '● alive') : h.alive === false ? c('31', '○ gone') : grey('? unknown')}`, duration(h.elapsedMs),
   ].filter(Boolean).join(dot)
   const counts = COUNTED.filter((s) => h.counts?.[s]).map((s) => c(COLOUR[s], `${GLYPH[s]} ${h.counts[s]} ${s}`)).join('  ')
-  const halted = h.halted ? c('1;33', `⏸ halted — ${h.halted.nodes.length} node${h.halted.nodes.length === 1 ? '' : 's'} need${h.halted.nodes.length === 1 ? 's' : ''} you · R to resume`) : null
+  const halted = h.halted ? c('1;33', `⏸ halted — ${h.halted.nodes.length} node${h.halted.nodes.length === 1 ? '' : 's'} need${h.halted.nodes.length === 1 ? 's' : ''} you · r to resume`) : null
   const lead = [h.outage && outageOf(h.outage), halted].filter(Boolean)
   return [fit(' ' + run, W), fit(' ' + (lead.length ? lead.join(dot) + dot + counts : counts), W)]
 }
@@ -88,7 +88,7 @@ function headerLines(h, W) {
 // An Orca outage is the run's, not an agent's (ADR-0015): it heads the counts,
 // and every agent keeps its own state.
 const outageOf = (o) => c('1;33', o.phase === 'paused'
-  ? `⏸ paused: Orca outage past ${Math.round(RUNNER_SETTINGS.outageLimitMs / 60_000)}m — R to resume`
+  ? `⏸ paused: Orca outage past ${Math.round(RUNNER_SETTINGS.outageLimitMs / 60_000)}m — r to resume`
   : `⚠ Orca unreachable — waiting ${duration(o.elapsedMs)} (probe ${o.probes})`)
 
 function phaseLine(p) {
@@ -158,7 +158,7 @@ function phasePane(p, problems) {
   return lines
 }
 
-const HELP = ' ↑↓ move · ⏎/click a phase to fold · ⏎/→/click focus tab · r reclaim · l log · q quit'
+const HELP = ' ↑↓ move · ⏎/click a phase to fold · ⏎/→/click focus tab · Ctrl+R reclaim · l log · q quit'
 const TOP = 4
 
 // An agent row's width: the halt panel takes what is right of it, or 30 columns.
@@ -193,7 +193,7 @@ function wrap(text, w) {
 
 // The halt panel (#103): the run's halted.json, and the orchestrator's triage
 // of it (model.halt), in `h` lines `w` wide, drawn right of the tree's rows.
-// A triage asking, failed or never asked says so; R is the run's either way.
+// A triage asking, failed or never asked says so; r is the run's either way.
 export function haltPanel(halt, w, h) {
   const tw = w - 2
   const body = []
@@ -206,7 +206,7 @@ export function haltPanel(halt, w, h) {
   else if (t.state === 'failed') {
     add('the triage question failed:', '31')
     add(t.error ?? 'no reason given', null, '  ')
-    add('R resumes the run all the same', '90')
+    add('r resumes the run all the same', '90')
   } else {
     add(t.answer.summary)
     for (const n of t.answer.nodes) {
@@ -306,14 +306,14 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
 // --- standalone: every run the registry knows (runsView's model) ----------
 
 // The tree's key line once the standalone view opened it.
-export const TREE_HELP = ' ↑↓ move · ⏎/→/click focus tab · ⏎/click a phase to fold · ← back to the runs · r reclaim · l log · R resume'
-const RUNS_HELP = ' ↑↓ move · ⏎/→/click open a run · ←→ fold a project · r reclaim the run · R resume a dead runner · q quit'
+export const TREE_HELP = ' ↑↓ move · ⏎/→/click focus tab · ⏎/click a phase to fold · ← back to the runs · Ctrl+R reclaim · l log · r resume'
+const RUNS_HELP = ' ↑↓ move · ⏎/→/click open a run · ←→ fold a project · Ctrl+R reclaim the run · r resume a dead runner · q quit'
 
 // The key lines of `crew view`, which enters a crew run's sessions in place
 // and comes back from one with `backKey`; an Orca run's agent is its tab.
 // `?` is crew's orchestrator whatever the run's host.
 export const consoleTreeHelp = (host, backKey) => host === 'crew'
-  ? ` ↑↓ move · ⏎/→/click enter · ${backKeyLabel(backKey)} out of a session · ← runs · r reclaim · l log · R resume · ? orchestrator`
+  ? ` ↑↓ move · ⏎/→/click enter · ${backKeyLabel(backKey)} out of a session · ← runs · Ctrl+R reclaim · l log · r resume · ? orchestrator`
   : `${TREE_HELP} · ? orchestrator`
 export const consoleRunsHelp = (backKey) => `${RUNS_HELP} · ${backKeyLabel(backKey)} leaves an entered session`
 
@@ -339,7 +339,7 @@ const runLine = (r) =>
 function runPane(r) {
   // The tab outlives its runner, so whether it is open says nothing of the runner.
   const tab = r.terminal ? cyan(shortHandle(r.terminal)) : grey('—')
-  const does = ['Enter / → opens its tree', r.reclaimed ? null : r.closable ? 'r reclaims every agent and closes the run' : 'r reclaims every agent it may; the run stays open', r.resumable ? 'R resumes it: its runner is dead' : null].filter(Boolean).join(' · ')
+  const does = ['Enter / → opens its tree', r.reclaimed ? null : r.closable ? 'Ctrl+R reclaims every agent and closes the run' : 'Ctrl+R reclaims every agent it may; the run stays open', r.resumable ? 'r resumes it: its runner is dead' : null].filter(Boolean).join(' · ')
   return [
     ` ${bold(r.name ?? r.runId)}  ${grey(r.runId)}${r.spec ? `  spec ${r.spec}` : ''}  ${outcomeOf(r)}  ${r.kept} kept${r.reclaimed ? grey('  reclaimed') : ''}`,
     // A crew run's runner has no screen of its own to go to: its tree is the run.

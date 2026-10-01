@@ -20,7 +20,7 @@
 // a node whose key changed runs live, and ends replay for every later call.
 // Such a call is never handed null: a node that fails, or whose result needs
 // decisions only the operator can make, is held, and the run halts (halt.mjs)
-// until R carries it on, in this process; halted.json in the state dir names
+// until r carries it on, in this process; halted.json in the state dir names
 // the held nodes for the arming session meanwhile. A resume, from any
 // terminal, takes the journaled Run over (run-use) before it starts a worker,
 // and takes up each worker the last run left out: watched again if its host still
@@ -51,7 +51,7 @@
 // crew's daemon gone), is waited out by every host call and charged to no
 // agent (ADR-0015, outage.mjs): it is journaled (`outage`), and one past its
 // limit pauses the run, recorded in the registry as `paused` until the host
-// answers again. The runner stays in its tab meanwhile, and R in the attached
+// answers again. The runner stays in its tab meanwhile, and r in the attached
 // view has it probe the host at once.
 //
 // No change to this directory is done until the runner contract test passes
@@ -150,7 +150,7 @@ export function runnerLog(stateDir, print, clock = realClock) {
 // the runner's own (crew's session): the registry, the journal and
 // halted.json name it.
 // control: filled in with resumeHost(), which probes the host at once during an
-// outage, and resume({ node }), the attached view's R: resumeHost while an
+// outage, and resume({ node }), the attached view's r: resumeHost while an
 // outage is on, else the halted run's node, or with none every held node.
 // onHalt({ node, nodes }): told each time a node is held and the run halts.
 export async function runScript(text, { host, stateDir, out: print = (s) => console.log(s), settings = {}, clock = realClock, transcripts = sessionTranscripts(), fallbackObjective = 'workflow run', resume = false, permissionMode = null, registry = null, project = process.cwd(), script: scriptPath = null, control = {}, onHalt = () => {}, runnerTerminal = null }) {
@@ -239,7 +239,7 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
       journal({ type: 'outage', phase, since: new Date(since).toISOString(), ...(reason && { reason }), ...(ms != null && { ms }) })
       if (phase === 'start') out(`!! ${host.name} unreachable (${reason}): every ${host.name} call waits for it, and no agent is charged for it; probing it for up to ${took(limits.outageLimitMs)} before the run pauses`)
       if (phase === 'paused') {
-        out(`!!!!!!!! ${host.name} unreachable for ${Math.round(limits.outageLimitMs / 60_000)}m: run paused; R to resume (or it resumes itself once ${host.name} is back)`)
+        out(`!!!!!!!! ${host.name} unreachable for ${Math.round(limits.outageLimitMs / 60_000)}m: run paused; r to resume (or it resumes itself once ${host.name} is back)`)
         if (runIdNow()) record('paused', { runId: runIdNow(), reason: `${host.id} outage` })
       }
       if (phase === 'end') {
@@ -256,8 +256,8 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
     else if (!r.back) out(was?.phase === 'paused' ? `!! ${host.name} is still unreachable: the run stays paused, and probes it again every ${took(limits.pausedProbeMs)}` : `!! ${host.name} is still unreachable: every ${host.name} call still waits for it`)
     return r
   }
-  // The run's halt (ADR-0016). R in the attached view reaches resume(): an
-  // outage's R takes precedence while one is on.
+  // The run's halt (ADR-0016). r in the attached view reaches resume(): an
+  // outage's r takes precedence while one is on.
   const halt = runHalt({ journal, out, record, runId: runIdNow, onHalt, onChange: haltNotice })
   control.resume = async ({ node = null } = {}) => (outage.state() ? control.resumeHost() : halt.resume(node))
   // How many calls with each key this run has made.
@@ -420,7 +420,7 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
 
   // What a call returns to the script. A node that failed, or whose result
   // needs decisions only the operator can make, is held instead, and the run
-  // halts, until R carries it on (resumeNode); it returns once it succeeds.
+  // halts, until r carries it on (resumeNode); it returns once it succeeds.
   async function settle(call, value) {
     if (!call.node) return value
     let v = value
@@ -553,7 +553,7 @@ export function finish({ stateDir, summary, out }) {
 //   guard(on)    ignores a Ctrl-C that reaches the runner while a view lives:
 //                one that dies outside raw mode lets Ctrl-C reach every
 //                process on the console
-//   resume(m)    the view's R, sent as {type: 'resume', node?}: probe the host
+//   resume(m)    the view's r, sent as {type: 'resume', node?}: probe the host
 //                now during an outage, else resume the halted run's node, or
 //                every held one (runScript's control.resume)
 // Returns { start(), gate(print), closed, crashes() }. gate wraps a print so
@@ -601,7 +601,7 @@ export function attachView({ spawnView, tab, log, tail = () => [], clock = realC
     }
     c.on('message', (m) => {
       if (m?.type === 'detach') detached = true
-      if (m?.type === 'resume') Promise.resolve().then(() => resume({ node: typeof m.node === 'string' ? m.node : null })).catch((e) => log(`!! R: could not resume: ${e?.message ?? e}`))
+      if (m?.type === 'resume') Promise.resolve().then(() => resume({ node: typeof m.node === 'string' ? m.node : null })).catch((e) => log(`!! r: could not resume: ${e?.message ?? e}`))
     })
     c.on('exit', ended)
     c.on('error', (e) => {
@@ -623,10 +623,10 @@ export function attachView({ spawnView, tab, log, tail = () => [], clock = realC
   }
 }
 
-// The tree's R reaches the runner as a file: the run console's tree is no
+// The tree's r reaches the runner as a file: the run console's tree is no
 // child of the runner's, so it writes RESUME_REQUEST in the state dir
 // ({ node }, node null for every held one) and the runner, polling, takes it
-// (deletes it) and resumes as the attached view's IPC R does.
+// (deletes it) and resumes as the attached view's IPC r does.
 export function watchResumeRequests({ stateDir, resume, log = () => {}, pollMs = 1_000 }) {
   const file = join(stateDir, RESUME_REQUEST)
   const take = () => {
@@ -642,7 +642,7 @@ export function watchResumeRequests({ stateDir, resume, log = () => {}, pollMs =
       const m = JSON.parse(text)
       node = typeof m?.node === 'string' ? m.node : null
     } catch {}
-    Promise.resolve().then(() => resume({ node })).catch((e) => log(`!! R: could not resume: ${e?.message ?? e}`))
+    Promise.resolve().then(() => resume({ node })).catch((e) => log(`!! r: could not resume: ${e?.message ?? e}`))
   }
   const timer = setInterval(take, pollMs)
   timer.unref?.()

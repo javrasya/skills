@@ -145,7 +145,7 @@ export const TRIAGE_SCHEMA = Object.freeze({
 // The run directory's files, as both orchestrator uses name them.
 const runFiles = (stateDir) => `its halted.json (the held nodes, while it is halted), journal.jsonl (every call and what became of it), runner.log, the agents' results (agents/*/result.json) and summary.json (once the run has ended), all in ${stateDir}`
 
-export const triagePrompt = ({ stateDir, notice }) => `You are crew's orchestrator. A workflow run has halted: ${notice.nodes.length === 1 ? 'one node is' : `${notice.nodes.length} nodes are`} held until the operator resumes ${notice.nodes.length === 1 ? 'it' : 'them'} with R: ${notice.nodes.map((n) => n.node).join(', ')}. The run's state is ${runFiles(stateDir)}.
+export const triagePrompt = ({ stateDir, notice }) => `You are crew's orchestrator. A workflow run has halted: ${notice.nodes.length === 1 ? 'one node is' : `${notice.nodes.length} nodes are`} held until the operator resumes ${notice.nodes.length === 1 ? 'it' : 'them'} with r: ${notice.nodes.map((n) => n.node).join(', ')}. The run's state is ${runFiles(stateDir)}.
 
 Read what you need of those files, and nothing else: change nothing, and never run anything.
 
