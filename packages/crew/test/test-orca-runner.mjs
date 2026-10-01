@@ -4243,7 +4243,7 @@ async function viewedRun(mode = 'attached', { crew = false } = {}) {
 viewTest('run view: the journal gives each agent its row, its state and its phase, phases in the order the run reached them', async (mode) => {
   const { view, agent } = await viewedRun(mode)
   const m = view.model
-  assert.deepEqual(m.header, { name: 'implement-spec-783', project: 'controlayer', runId: 'run_fake1', spec: '#783', alive: true, ended: false, elapsedMs: 30 * MIN, counts: { blocked: 0, 'needs you': 0, starting: 0, running: 1, continued: 1, stuck: 1, failed: 1, queued: 1, done: 2, reclaimed: 0 }, outage: null, halted: null, paused: null })
+  assert.deepEqual(m.header, { name: 'implement-spec-783', project: 'controlayer', runId: 'run_fake1', spec: '#783', alive: true, ended: false, elapsedMs: 30 * MIN, counts: { blocked: 0, 'needs you': 0, starting: 0, running: 1, continued: 1, stuck: 1, failed: 1, queued: 1, done: 2, reclaimed: 0 }, outage: null, halted: null, paused: null, outcome: null })
   assert.deepEqual(m.phases.map((p) => [p.name, p.agents.map((a) => a.n)]), [['Discover', [1]], ['Implement', [2, 3, 4, 5, 6]], ['Gate', [7]]])
   assert.deepEqual([1, 2, 3, 4, 5, 6, 7].map((n) => [agent(n).label, agent(n).state]), [
     ['discover', 'done'], ['impl:a', 'running'], ['impl:b', 'stuck'], ['impl:c', 'continued'], ['impl:d', 'queued'], ['impl:e', 'failed'], ['gate:a', 'done'],
@@ -7121,6 +7121,28 @@ test('run view: an attended agent shows needs you with its reason while at work,
   const lines = draw(view.model, { width: 200, height: 30, flash: null, alert: view.model.alert }).lines.map(strip)
   assert.ok(lines.some((l) => /unblock +\? needs you/.test(l)), lines.join('\n'))
   assert.ok(lines.at(-2).includes('NEEDS YOU: [Unblock] unblock in tab term_fake1: blockers: no signing identity'), lines.at(-2))
+})
+
+test('run view: an ended run\'s header shows its outcome from summary.json, never a red "gone"; only a runner gone with no summary is gone', async () => {
+  const header = async (summary) => {
+    const { stateDir, view } = viewOn([startedJ(1, '[P] a', 0, 'claude', 'sid-1')], { alive: () => false })
+    if (summary) writeFileSync(join(stateDir, 'summary.json'), JSON.stringify(summary))
+    await view.refresh()
+    return [view.model.header.outcome, draw(view.model, { width: 200, height: 30 }).lines.map(strip)[0]]
+  }
+  const [done, doneLine] = await header({ runner: 'session', ok: true, result: { halted: false, state: 'ready for review' } })
+  assert.deepEqual(done, { kind: 'complete', detail: 'ready for review' })
+  assert.match(doneLine, /✓ complete — ready for review/)
+  assert.doesNotMatch(doneLine, /gone/)
+  const [halted, haltedLine] = await header({ runner: 'session', ok: true, result: { halted: true, reason: '#143 failed: not published' } })
+  assert.deepEqual(halted, { kind: 'halted', detail: '#143 failed: not published' })
+  assert.match(haltedLine, /⏸ halted — #143 failed: not published · r to resume/)
+  const [failed, failedLine] = await header({ runner: 'session', ok: false, error: 'the script threw: boom' })
+  assert.deepEqual(failed, { kind: 'failed', detail: 'the script threw: boom' })
+  assert.match(failedLine, /✗ failed — the script threw: boom/)
+  const [gone, goneLine] = await header(null)
+  assert.equal(gone, null)
+  assert.match(goneLine, /runner ○ gone/)
 })
 
 test('run view: p pauses the run, the header says how many agents are finishing; r resumes it', async () => {

@@ -219,6 +219,23 @@ function latestEvent(path) {
 // triage question asked about that `at` (triage.mjs), or null while none is;
 // `triage()`, when given, asks it, once per `at` this view sees, and is never
 // waited on.
+// How an ended run ended, from the summary.json its runner wrote (#157):
+// { kind: 'complete' | 'halted' | 'failed', detail }, or null with none, as
+// for a runner that died before it wrote one.
+export function outcomeOf(stateDir) {
+  let s
+  try {
+    s = JSON.parse(readFileSync(join(stateDir, 'summary.json'), 'utf8'))
+  } catch {
+    return null
+  }
+  if (!s || typeof s !== 'object') return null
+  if (s.ok === false) return { kind: 'failed', detail: typeof s.error === 'string' ? s.error : null }
+  const r = s.result && typeof s.result === 'object' ? s.result : {}
+  if (r.halted === true) return { kind: 'halted', detail: typeof r.reason === 'string' ? r.reason : null }
+  return { kind: 'complete', detail: typeof r.state === 'string' ? r.state : null }
+}
+
 // The agents of a run still at work: what a pause lets finish.
 const AT_WORK = ['starting', 'running', 'continued', 'stuck', 'blocked', 'needs you']
 const atWork = (agents) => agents.filter((a) => AT_WORK.includes(a.state))
@@ -391,6 +408,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
       outage,
       halted: fold.halted ? { since: fold.halted.since, nodes: fold.halted.nodes } : null,
       paused: pausedAt(stateDir) ? { finishing: atWork(agents).length } : null,
+      outcome: isAlive === true ? null : outcomeOf(stateDir),
     }
     const notice = haltNoticeOf(stateDir)
     if (notice && triage && !triaged.has(notice.at)) {
