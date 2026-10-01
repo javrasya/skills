@@ -229,8 +229,9 @@ async function runCommand(verb, args) {
   const [target] = positionals
   if (verb === 'pause') return console.log(pauseCommand({ registry, target }))
   if (verb === 'resume') return console.log(resumeCommand({ registry, target }))
+  // An unknown run is refused before any host is opened.
   const run = findRun(registry, target)
-  const hosts = await openHosts({ paths, callMs: RUNNER_SETTINGS.viewCallMs })
+  const hosts = run ? await openHosts({ paths, callMs: RUNNER_SETTINGS.viewCallMs }) : {}
   const host = hosts[run?.host] ?? hosts[LEGACY_HOST]
   const { createInterface } = await import('readline/promises')
   const rl = createInterface({ input: process.stdin, output: process.stdout })

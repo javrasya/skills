@@ -554,7 +554,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   function forceNext(handle, queue, others) {
     const [k, ...rest] = queue
     if (k) {
-      dialog = { kind: 'confirm', act: 'force', handle, k, queue: rest, others, title: `Force-delete ${k.agent.worktree}?`, lines: [k.reason, '', 'f = force-delete it, and those commits are lost · any other key keeps it'] }
+      dialog = { kind: 'confirm', act: 'force', handle, k, queue: rest, others, title: `Force-delete ${k.worktree ?? k.agent.title}?`, lines: [k.reason, '', 'f = force-delete it, and those commits are lost · any other key keeps it'] }
       layout()
       return say(`${k.agent.title}: its worktree holds unpushed commits`)
     }

@@ -50,7 +50,7 @@ export async function removeCommand({ registry = REGISTRY_PATH, target, host, as
       kept.push(`${k.agent.title}: ${k.reason}`)
       continue
     }
-    const answer = await ask(`Force-delete ${k.agent.worktree ?? k.agent.title}? ${k.reason}. [f = force-delete, anything else keeps it] `)
+    const answer = await ask(`Force-delete ${k.worktree ?? k.agent.title}? ${k.reason}. [f = force-delete, anything else keeps it] `)
     if (String(answer ?? '').trim() !== 'f') continue
     const r = await handle.force(k)
     if (!r.reclaimed) kept.push(`${k.agent.title}: ${r.reason}`)

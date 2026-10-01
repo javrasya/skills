@@ -314,7 +314,7 @@ const RUNS_HELP = ' ↑↓ move · ⏎/→/click open a run · ←→ fold a pro
 // and comes back from one with `backKey`; an Orca run's agent is its tab.
 // `?` is crew's orchestrator whatever the run's host.
 export const consoleTreeHelp = (host, backKey) => host === 'crew'
-  ? ` ↑↓ move · ⏎/→/click enter · ${backKeyLabel(backKey)} out of a session · ← runs · Ctrl+R reclaim · l log · r resume · ? orchestrator`
+  ? ` ↑↓ move · ⏎/→/click enter · ${backKeyLabel(backKey)} back · ← runs · Ctrl+R reclaim · l log · r resume · x remove · ? orchestrator`
   : `${TREE_HELP} · ? orchestrator`
 export const consoleRunsHelp = (backKey) => `${RUNS_HELP} · ${backKeyLabel(backKey)} leaves an entered session`
 

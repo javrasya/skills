@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { spawnSync } from 'child_process'
+import { spawn, spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { crewPaths } from '../src/daemon/transport.mjs'
 import { request, stopDaemon } from '../src/daemon/client.mjs'
@@ -212,6 +212,46 @@ test('crew pause | resume <run>: by run id, run folder, its name or state dir; a
     assert.match(none.stderr, /no run run_nope in the run registry: `crew ls` lists them/)
   }
   assert.equal(crew('pause', '--registry', registry).status, 2)
+})
+
+// crew rm waits on the runner it ends, so the test's event loop must be free
+// to reap that runner: spawnSync would leave it a zombie, alive to a probe.
+const crewAsync = (...args) => new Promise((resolve) => {
+  const child = spawn(process.execPath, [CREW, ...args], { env: ENV })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', (d) => (stdout += d))
+  child.stderr.on('data', (d) => (stderr += d))
+  child.stdin.end()
+  child.once('close', (status) => resolve({ status, stdout, stderr }))
+})
+
+test('crew rm <run>: asks first, and any answer but y removes nothing; y, or --yes, ends the runner its runner.pid names, forgets the run and deletes its run folder', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-bin-rm-'))
+  const registry = join(dir, 'runs.jsonl')
+  const folder = join(dir, 'runs', 'implement-spec-13-20261001-120000-ab12')
+  const stateDir = join(folder, 'orca-run')
+  mkdirSync(stateDir, { recursive: true })
+  writeFileSync(join(stateDir, 'journal.jsonl'), '')
+  runRegistry(registry).armed({ runId: 'run_c1', project: join(dir, 'proj'), runDir: stateDir, spec: 'implement-spec-13', host: 'crew' })
+  const none = crew('rm', 'run_nope', '--registry', registry)
+  assert.equal(none.status, 1)
+  assert.match(none.stderr, /no run run_nope in the run registry: `crew ls` lists them/)
+  assert.equal(crew('rm', '--registry', registry).status, 2)
+  const no = spawnSync(process.execPath, [CREW, 'rm', 'run_c1', '--registry', registry], { encoding: 'utf8', env: ENV, input: 'n\n' })
+  assert.equal(no.status, 0, no.stderr)
+  assert.match(no.stdout, /Remove run run_c1\? .*\[y\/N\] nothing removed/s)
+  assert.ok(existsSync(folder))
+  assert.match(crew('ls', '--registry', registry).stdout, /run_c1/)
+  const runner = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+  const ended = new Promise((r) => runner.once('exit', (code, signal) => r(signal)))
+  writeFileSync(join(stateDir, 'runner.pid'), String(runner.pid))
+  const yes = await crewAsync('rm', 'run_c1', '--yes', '--registry', registry)
+  assert.equal(yes.status, 0, yes.stderr)
+  assert.match(yes.stdout, /^removed run_c1$/m)
+  assert.equal(await ended, 'SIGTERM')
+  assert.ok(!existsSync(folder), 'its run folder is deleted')
+  assert.equal(crew('ls', '--registry', registry).stdout.trim(), 'the run registry holds no run yet')
 })
 
 test('crew view: with no run, the runs list; --attached and --standalone are the run view\'s own argv', () => {

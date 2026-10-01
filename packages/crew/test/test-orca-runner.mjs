@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, existsSync, readFileSync, mkdirSync, appendFileSync, copyFileSync, rmSync, readdirSync } from 'fs'
 import { tmpdir } from 'os'
 import { join, dirname } from 'path'
-import { spawnSync } from 'child_process'
+import { spawn, spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { submit } from '../src/submit.mjs'
 import { runScript, journalKey, failureSummary, finish, SUBMIT, SETTINGS, realClock, JOURNAL_ENTRIES, readJournal, attachView, runnerLog, watchResumeRequests } from '../src/runner.mjs'
@@ -25,7 +25,7 @@ import { sessionHost, missingMethods } from '../src/session-host.mjs'
 import { runRegistry, readRegistry, OUTCOMES } from '../src/registry.mjs'
 import { transcriptPath, sessionTranscripts, claudeSlug, piDir, promptDelivered, turnEnded } from '../src/transcript.mjs'
 import { agentsOf, reclaimAgent, reclaimRun } from '../src/reclaim.mjs'
-import { removeRun } from '../src/remove.mjs'
+import { removeRun, stopRunnerOf } from '../src/remove.mjs'
 import { findRun, pauseCommand, resumeCommand, removeCommand } from '../src/run-commands.mjs'
 import { runView, runsView, bandOf, STATES, RUNNER_PATH, runnerAlive, runEnded } from '../src/run-view-model.mjs'
 import { consoleRunsHelp, consoleTreeHelp, draw, drawRuns, listRuns, strip, TREE_HELP, marqueeOffset, NAME_W } from '../src/run-view/draw.mjs'
@@ -3596,6 +3596,32 @@ test('remove: an agent whose worker is still running is stopped first, then recl
   assert.equal(run.orca.worktrees.get(A_WT).removed, true)
 })
 
+test('remove: a sequential run\'s agent still at work is stopped, and its chain worktree, holding unpushed commits, is offered by its own path', async () => {
+  const run = await reclaimableChainRun(null)
+  run.chain.unpushed = 2
+  const r = await removeRun({ stateDir: run.rest.stateDir, runId: 'run_fake1', host: run.orca, unpushed: run.orca.unpushedOf, registry: runRegistry(run.registry, run.clock), stopRunner: () => {} })
+  assert.ok(run.after().some((c) => c.verb === 'workerStop' && c.dispatchId === 'ctx_fake3'), 'its agent at work was stopped')
+  assert.deepEqual(r.kept.map((k) => [k.agent.chain, k.worktree, k.unpushed]), [[true, RUN_CHAIN, 2]])
+  assert.equal(run.chain.removed, false)
+  assert.equal((await r.force(r.kept[0])).reclaimed, true)
+  assert.equal(run.chain.removed, true)
+  assert.deepEqual(r.finish(), { left: [] })
+  assert.deepEqual(readRegistry(run.registry), [])
+  assert.ok(!existsSync(run.rest.stateDir))
+})
+
+test('remove: the runner its state dir\'s runner.pid names is ended, and waited for; no runner.pid, nothing is signalled', async () => {
+  const stateDir = tmp()
+  await stopRunnerOf(stateDir, { waitMs: 0 })
+  const runner = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+  const ended = new Promise((r) => runner.once('exit', (code, signal) => r(signal)))
+  writeFileSync(join(stateDir, 'runner.pid'), String(runner.pid))
+  assert.equal(runnerAlive(stateDir), true)
+  await stopRunnerOf(stateDir)
+  assert.equal(await ended, 'SIGTERM')
+  assert.equal(runnerAlive(stateDir), false)
+})
+
 test('crew pause, resume, rm: a run is named by its run id, its run folder or its state dir', async () => {
   const run = await endedRun()
   const [r] = readRegistry(run.registry)
@@ -5067,7 +5093,7 @@ test('run console: the frames — no runner row, the key line naming the back ke
   const discover = lines.findIndex((l) => /▸ Discover/.test(l))
   assert.equal(screen.rowAt(discover + 1), 0, 'the first row is the first phase (rowAt takes a 1-based y)')
   assert.ok(!lines.some((l) => /runner {3}crew session|the runner {2}crew session/.test(l)), 'no runner row or pane')
-  assert.match(lines.at(-1), /⏎\/→\/click enter · F12 out of a session · ← runs · Ctrl\+R reclaim · l log · r resume · \? orchestrator/)
+  assert.match(lines.at(-1), /⏎\/→\/click enter · F12 back · ← runs · Ctrl\+R reclaim · l log · r resume · x remove · \? orchestrator/)
   assert.equal(consoleTreeHelp('orca', 'f12'), `${TREE_HELP} · ? orchestrator`, 'an Orca run\'s agent is its tab; ? is crew\'s orchestrator whatever the host')
   const runs = listOf.get(view)
   await runs.key('q')
@@ -7092,8 +7118,8 @@ test('run view: r on a run both paused and halted lifts the pause and asks the r
 test('run view: x asks before removing; y removes, asking f for each worktree with unpushed commits, one at a time', async () => {
   const forced = []
   const kept = [
-    { agent: { title: '[P] a', worktree: '/wt/a' }, reason: '/wt/a holds 2 unpushed commits; only a forced reclaim removes it', unpushed: 2 },
-    { agent: { title: '[P] b', worktree: '/wt/b' }, reason: '/wt/b holds 1 unpushed commit; only a forced reclaim removes it', unpushed: 1 },
+    { agent: { title: '[P] a', worktree: '/wt/a' }, reason: '/wt/a holds 2 unpushed commits; only a forced reclaim removes it', unpushed: 2, worktree: '/wt/a' },
+    { agent: { title: '[P] b', worktree: '/wt/b' }, reason: '/wt/b holds 1 unpushed commit; only a forced reclaim removes it', unpushed: 1, worktree: '/wt/b' },
   ]
   let removed = 0
   const remove = async () => (removed++, { kept, force: async (k) => (forced.push(k.agent.worktree), { reclaimed: true, notes: [] }), finish: () => ({ left: ['/wt/b'] }) })
@@ -7138,6 +7164,26 @@ test('runs list: p pauses the run under the cursor and shows it paused; r resume
   await runs.key('x')
   assert.match(runs.opened().model.dialog.title, /^Remove run run_1\?/)
   assert.match((await runs.key('n')).message, /nothing removed/)
+})
+
+test('runs list: x, then y, removes the run under the cursor: back on the list, the run gone from it and from the registry, its run folder deleted', async () => {
+  const folder = join(tmp(), 'runs', 'implement-spec-103-20261001-120000-ab12')
+  const stateDir = join(folder, 'orca-run')
+  mkdirSync(stateDir, { recursive: true })
+  writeFileSync(join(stateDir, 'journal.jsonl'), '')
+  const registry = registryIn()
+  runRegistry(registry).armed({ runId: 'run_1', project: 'C:/repos/app', runDir: stateDir, spec: 'implement-spec-103', host: 'crew' })
+  const runs = runsView({ host: { terminalList: async () => [] }, registry, transcripts: { usage: () => null }, alive: () => false })
+  await runs.refresh()
+  while (runs.model.rows[runs.model.selected]?.kind !== 'run') await runs.key('DOWN')
+  await runs.key('x')
+  const done = await runs.key('y')
+  assert.equal(done.removed, true)
+  assert.match(done.message, /^removed the run/)
+  assert.equal(runs.opened(), null, 'back on the list')
+  assert.ok(!runs.model.rows.some((r) => r.kind === 'run'))
+  assert.deepEqual(readRegistry(registry), [])
+  assert.ok(!existsSync(folder))
 })
 
 test('run view: on a halted run the header says so; r on a failed or needs-you node resumes that node, r elsewhere every held one; the view\'s r reaches the runner with its node', async () => {

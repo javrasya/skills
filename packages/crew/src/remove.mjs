@@ -5,6 +5,8 @@
 // remote has is never removed unasked: removeRun returns each as `kept`, the
 // caller asks the operator about each, one at a time, and `force` removes
 // the ones they say to; finish() forgets the run whatever was left, naming it.
+// Each kept one carries `worktree`, its path: the chain's is its run's, not
+// its agent's, which chainAgent leaves unset.
 import { rmSync } from 'fs'
 import { basename, dirname, join } from 'path'
 import { readJournal } from './journal.mjs'
@@ -43,9 +45,8 @@ export async function removeRun({ stateDir, runId, host, registry = null, unpush
       out(`!! ${a.title}: its worker could not be stopped: ${e?.message ?? e}`)
     }
   }
-  const { kept } = await reclaimRun(agents, { host, unpushed, registry, runId, chain, journaled: agents, out })
+  const kept = (await reclaimRun(agents, { host, unpushed, registry, runId, chain, journaled: agents, out })).kept.map((k) => ({ ...k, worktree: k.agent.chain ? chain.worktree : k.agent.worktree }))
   const left = new Set(kept)
-  const pathOf = (k) => (k.agent.chain ? chain.worktree : k.agent.worktree)
   return {
     kept,
     async force(k) {
@@ -58,7 +59,7 @@ export async function removeRun({ stateDir, runId, host, registry = null, unpush
     finish() {
       registry?.removed({ runId })
       rmSync(runFolderOf(stateDir), { recursive: true, force: true })
-      return { left: [...left].map(pathOf).filter(Boolean) }
+      return { left: [...left].map((k) => k.worktree).filter(Boolean) }
     },
   }
 }
