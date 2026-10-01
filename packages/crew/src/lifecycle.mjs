@@ -583,6 +583,9 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
     }
     let w, sessionId
     let attempts = 0
+    // The chain worktree a chained call starts in: what its failure names
+    // as its worktree, never one it made, so never kept or retained.
+    let chainPath = null
     try {
       ;({ w, sessionId } = await retrying(call, 'its worker did not start', async (attempt) => {
         // Assigned, not discovered: the harness is started with it (decision
@@ -599,6 +602,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
           // as a child's. A doctor's call is never chained: it keeps a
           // `<runId>-<n>` of its own.
           const chain = chained ? await life.chain(call) : null
+          chainPath = chain?.path ?? null
           const w = await host.workerStart({
             run: runId,
             asking: asking(call),
@@ -626,7 +630,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
       const retainMade = () => keepMade(call, [...made])
       const failure = { reason: e.reason, attempts: e.attempts, run: runId }
       if (patient == null) {
-        return { [SICK]: { ...failure, harness: launch.harness, sessionId: null, worktree: isolated ? [...made][0] ?? null : null, keep: retainMade, restart: { made: [...made], dispatched, baseline } } }
+        return { [SICK]: { ...failure, harness: launch.harness, sessionId: null, worktree: isolated ? [...made][0] ?? null : chainPath, keep: retainMade, restart: { made: [...made], dispatched, baseline } } }
       }
       return failAgent(call, { ...failure, ...retainMade() })
     }
@@ -654,7 +658,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
   // start's `again`, so it takes up the `<runId>-<n>` worktree an earlier
   // attempt of its start made rather than orphan it.
   async function supervise(runId, call) {
-    const { schema, isolated, launch, key, n, title, resultPath, patient = null, box = null } = call
+    const { schema, isolated, chained = false, launch, key, n, title, resultPath, patient = null, box = null } = call
     if (launch.harness === 'claude' && !launch.permissionMode && !toldNoMode) {
       toldNoMode = true
       out("!! no --permission-mode given: Claude workers start in Claude's own default permission mode, not in the orchestrator's.")
@@ -742,7 +746,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
         // A doctor is never itself doctored: its failure spends its round.
         if (kept && patient == null) {
           sick = true
-          return { [SICK]: { ...failure, harness: launch.harness, sessionId, worktree: isolated ? w.worktree ?? null : null, w, gone: !!end.gone, keep: () => ({ retained: keep(call, w) }) } }
+          return { [SICK]: { ...failure, harness: launch.harness, sessionId, worktree: isolated || chained ? w.worktree ?? null : null, w, gone: !!end.gone, keep: () => ({ retained: keep(call, w) }) } }
         }
         return failAgent(call, { ...failure, retained: retain() })
       }
@@ -860,13 +864,15 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
   // doctors, rebuilt from what the journal kept: its worker, still out and
   // kept, or, for one whose worker never started, the worktree its start left.
   async function heldFailure(call, runId) {
-    const { adopt, held, isolated, launch } = call
+    const { adopt, held, isolated, chained = false, launch } = call
     if (!adopt) {
       const made = held.restart?.made ?? []
+      // A chained patient made none: it was to start in the run's chain.
+      const chainPath = chained ? (await life.chain(call).catch(() => null))?.path ?? null : null
       // Its worker may have run in that worktree before its start failed: a
       // retry judges it against its baseline.
       return {
-        reason: held.reason, attempts: 0, run: runId, harness: launch.harness, sessionId: null, worktree: isolated ? made[0] ?? null : null,
+        reason: held.reason, attempts: 0, run: runId, harness: launch.harness, sessionId: null, worktree: isolated ? made[0] ?? null : chainPath,
         keep: () => keepMade(call, made), restart: { made, dispatched: true, baseline: held.restart?.baseline ?? null },
       }
     }
@@ -874,7 +880,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
     const end = await lookBack(w)
     return {
       reason: held.reason, attempts: 0, continuations: adopt.continuations, run: adopt.run ?? runId, workerLeft: true, harness: adopt.harness ?? launch.harness,
-      sessionId: adopt.sessionId, worktree: isolated ? w.worktree ?? null : null, w, gone: !!end?.gone, keep: () => ({ retained: keep(call, w) }),
+      sessionId: adopt.sessionId, worktree: isolated || chained ? w.worktree ?? null : null, w, gone: !!end?.gone, keep: () => ({ retained: keep(call, w) }),
     }
   }
 

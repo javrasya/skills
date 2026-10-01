@@ -1906,7 +1906,8 @@ return await agent('Patient.', { label: 'impl:#2', phase: 'Implement', schema: S
   assert.deepEqual(creates.map((c) => [c.name, c.setup]), [['run_fake1-chain', null], ['run_fake1-3', 'skip'], ['run_fake1-4', 'skip'], ['run_fake1-5', 'skip']])
   const doctors = r.orca.calls.filter((c) => c.verb === 'workerStart' && c.title === '[Implement] recover -> impl:#2')
   assert.deepEqual(doctors.map((d) => [d.placement, d.worktree]), [3, 4, 5].map((n) => ['new-child', `C:/fake/worktrees/run_fake1-${n}`]))
-  assert.match(r.orca.dispatches.get(doctors[0].dispatchId).prompt, /run_fake1-chain/, "the doctor is shown the patient's worktree, the chain")
+  assert.match(r.orca.dispatches.get(doctors[0].dispatchId).prompt, /^Worktree: C:\/fake\/worktrees\/run_fake1-chain$/m, "the doctor is shown the patient's worktree, the chain")
+  assert.deepEqual(r.journal.filter((e) => /-chain/.test(JSON.stringify([e.retained ?? null, e.alsoRetained ?? null]))), [], 'the run-owned chain is never retained')
 })
 
 test("doctor: its prompt carries the patient's title, prompt, failure reason, journal entries, log lines, transcript and worktree, and the round of three", async () => {
@@ -2502,6 +2503,18 @@ test("doctor: a start that fails through every retry starts a doctor, whose hand
   for (const e of r.journal.filter((x) => x.n === 1)) assert.equal(e.key, key, e.type)
   for (const e of r.journal.filter((x) => x.n === 2)) assert.equal(e.key, null, e.type)
   assert.deepEqual(foldJournal(r.journal).agents.map((a) => [a.origin, a.state, a.patient]), [[1, 'done', null], [2, 'done', 1]])
+})
+
+test("doctor: a chained start that fails through every retry tells its doctor the chain as its worktree, which no failure keeps; the handoff retries it there", async () => {
+  const script = `return await agent('Do a thing.', { label: 'one', phase: 'P', schema: ${JSON.stringify(SCHEMA)}, isolation: 'chain' })`
+  const r = await runOne(withDoctor(submitsWith(START_NOTE), handsOff(START_NOTE)), { script, faults: startFailsThrough() })
+  assert.deepEqual(r.result, GOOD)
+  const doctor = [...r.orca.dispatches.values()].find((d) => d.title === '[P] recover -> one')
+  assert.match(doctor.prompt, /^Worktree: C:\/fake\/worktrees\/run_fake1-chain$/m, doctor.prompt)
+  assert.deepEqual(r.journal.filter((e) => /-chain/.test(JSON.stringify([e.retained ?? null, e.alsoRetained ?? null]))), [], 'the run-owned chain is never retained')
+  assert.deepEqual(ofType(r.journal, 'failed'), [])
+  const starts = r.orca.calls.filter((c) => c.verb === 'workerStart' && c.title === '[P] one')
+  assert.deepEqual(starts.map((s) => [s.placement, s.worktree]), [['chain', 'C:/fake/worktrees/run_fake1-chain']])
 })
 
 test('doctor: an agent blocked on a human past the limit starts a doctor, and a handoff continues its session with the note, in its own tab', async () => {
