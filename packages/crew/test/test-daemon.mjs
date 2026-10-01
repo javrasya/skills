@@ -115,6 +115,9 @@ test('daemon: run and view start it too, before their own work', async () => {
   const { paths, crew } = scratch()
   const view = crew('view')
   assert.equal(view.status, 3, 'the view\'s own refusal: it needs a terminal')
+  // Bare `crew view` is the runs list now, so a second run named is the usage error.
+  const usage = crew('view', 'one', 'two')
+  assert.equal(usage.status, 2, 'the view\'s own usage error')
   assert.ok(await daemonHello(paths))
   assert.equal(crew('--help').status, 0)
 })

@@ -216,8 +216,9 @@ async function ls(args) {
 // which its runner records once it has started; 0 for a run already there.
 // With no run named, the console opens on the runs list rather than a tree.
 async function view(args, { waitMs = 0 } = {}) {
+  // Before any of its own checks, as `crew run` does: a view that bails still leaves the daemon up.
+  await daemonAnyway()
   if (['--attached', '--standalone'].includes(args[0])) {
-    await daemonAnyway()
     return launch(entry('../src/run-view/view.mjs'), args)
   }
   const { registry, rest } = registryOf(args, 'crew view')
@@ -239,7 +240,6 @@ async function view(args, { waitMs = 0 } = {}) {
     run = await find()
   }
   if (target && !run) throw new Error(`no run ${target} in the run registry ${registry}`)
-  await daemonAnyway()
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     console.error('crew view: needs a terminal')
     process.exit(3)
