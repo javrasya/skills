@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-09-27. Extends ADR-0013. Applies to the **Orca runner only**.
+Accepted — 2026-09-27. Extends ADR-0013. Applies to the **session runner** on either session host (amended 2026-09-28 by ADR-0017): an outage of crew is a session host outage like Orca's, except that crew takes its sessions down with it, and they are carried on by session continuation when it comes back.
 
 ## Context
 
@@ -18,7 +18,7 @@ Each Orca call site handled failure on its own terms: the watch loop had its err
 - **Every Orca call waits on the same outage.** No watch error, start attempt, nudge, continuation or doctor round is spent on it.
 - **The runner's clocks stop for its length.** No agent is seen while Orca is gone, so none goes stuck, blocked past its limit, or through its backoff because of it.
 - **It is waited out with a probe**: every 5s, doubling to every 30s, for up to 10 minutes. The one restart measured took about 40 seconds. Waiting costs almost nothing, and giving up costs tickets.
-- **An outage past 10 minutes pauses the run; it never fails anyone.** The runner stays in its tab (the tab survives an Orca restart, since terminals live in Orca's daemon), probes every 2 minutes, and carries on in the same process once Orca is back. `R` in the attached view probes at once. A paused run is recorded in the run registry and listed as `paused (Orca outage)`, not `running`. The standalone view's Resume run remains the path when the runner process itself is gone.
+- **An outage past 10 minutes pauses the run; it never fails anyone.** The runner stays in its tab (the tab survives an Orca restart, since terminals live in Orca's daemon), probes every 2 minutes, and carries on in the same process once Orca is back. `R` in the attached view (`r` since ADR-0020) probes at once. A paused run is recorded in the run registry and listed as `paused (Orca outage)`, not `running`. The standalone view's Resume run remains the path when the runner process itself is gone.
 - **The journal records it** with an `outage` entry when it starts and when it ends, and the run view's header says so while it lasts. A view key that needs Orca during an outage says so and does nothing.
 
 ## Considered options

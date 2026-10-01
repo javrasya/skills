@@ -1,6 +1,7 @@
 ---
 name: challenge
-description: Critically reassess a statement instead of reflexively agreeing. ALWAYS use this skill whenever the word "challenge" appears ANYWHERE in the user's message as a request to scrutinize — e.g. "challenge this", "challenge that", "challenge: <statement>", "challenge me on that", "challenge my reasoning", "can you challenge", a message beginning with "challenge", or "use challenge skill"/"the challenge skill". Also use to sanity-check a contentious claim or pressure-test reasoning.
+description: >-
+  Critically reassess a statement instead of reflexively agreeing. ALWAYS use this skill whenever the word "challenge" appears ANYWHERE in the user's message as a request to scrutinize — e.g. "challenge this", "challenge that", "challenge: <statement>", "challenge me on that", "challenge my reasoning", "can you challenge", a message beginning with "challenge", or "use challenge skill"/"the challenge skill". Also use to sanity-check a contentious claim or pressure-test reasoning.
 ---
 
 CRITICAL REASSESSMENT – Do not automatically agree.

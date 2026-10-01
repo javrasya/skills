@@ -1,13 +1,13 @@
 export const meta = {
   name: 'implement-spec-__SPEC__',
-  description: 'Implement spec #__SPEC__ as a stack of PRs: discover the ticket graph, implement each ticket in its own worktree, gate it, publish it as one stacked PR, review the whole stack, register it',
+  description: 'Implement spec #__SPEC__ as a stack of PRs: discover the ticket graph, implement each ticket in its own worktree (in sequential order, the run\'s one chain worktree), gate it, publish it as one stacked PR, review the whole stack, register it',
   phases: [
     { title: 'Graph', detail: 'read the spec and its tickets, return the task graph' },
     { title: 'Explore', detail: 'research notes saved outside the repo' },
     { title: 'Setup', detail: 'layer-0 PR when prior work already sits on a branch' },
     { title: 'Implement', detail: 'a dispatcher sizes each ticket; fresh slice agents implement it, frontier-scheduled' },
     { title: 'Gate', detail: 'code-review each ticket branch before it is published' },
-    { title: 'Stack', detail: 'serial publish lane: rebase onto the tip, one draft PR per ticket, reclaim the ticket\'s worktrees' },
+    { title: 'Stack', detail: 'serial publish lane: rebase onto the tip (never in sequential order, whose tip never moves under a ticket), one draft PR per ticket, reclaim the ticket\'s worktrees' },
     { title: 'Review', detail: 'code-review the whole stack; fixes land as the top PR' },
     { title: 'Finalize', detail: 'reconcile the stack, ready the PRs, reclaim the worktrees the lane has not' },
   ],
@@ -18,26 +18,31 @@ export const meta = {
 // roles on pi, hard ones on Claude. Every agent() call spreads its role's row.
 // harness: 'claude' (Claude Code) or 'pi'. model: always a Claude model name.
 // piModel: a pi model pattern ('provider/id'), read only for a pi row.
-// Only the Orca runner reads `harness` and `piModel`. The Workflow runner
+// Only the session runner reads `harness` and `piModel`. The Workflow runner
 // ignores both and runs every role on Claude with `model`, so a pi row keeps a
 // Claude `model` beside its `piModel` — e.g.
 // { harness: 'pi', piModel: 'openai/gpt-5', model: 'opus' } — and the same
 // rendered script runs on either runner.
-const CLAUDE = { harness: 'claude', model: 'opus' }
+// `crew start` renders this table (packages/crew/src/arm.mjs, renderRoles):
+// RUN_DEFAULT becomes the harness and model its form chose, and a role named
+// in crew's per-repo `roles` config gets a row of its own in place of
+// RUN_DEFAULT. Keep RUN_DEFAULT's line and the `<role>: RUN_DEFAULT,` rows in
+// this shape, or crew refuses to arm.
+const RUN_DEFAULT = { harness: 'claude', model: 'opus' }
 const ROLES = {
-  graph: CLAUDE,         // Graph: read the spec, return the ticket graph
-  explore: CLAUDE,       // Explore: one research note
-  layer0: CLAUDE,        // Setup: the layer-0 PR
-  dispatch: CLAUDE,      // Implement: size a ticket into slices
-  impl: CLAUDE,          // Implement: one slice
-  gate: CLAUDE,          // Gate: code-review one ticket
-  fixDispatch: CLAUDE,   // Gate, Review: route findings into fix slices
-  fix: CLAUDE,           // Gate, Review: one fix slice
-  publish: CLAUDE,       // Stack, Review: a ticket's PR, or the integration PR
-  review: CLAUDE,        // Review: code-review the whole stack
-  finalize: CLAUDE,      // Finalize: reconcile and ready the stack
-  retrospective: CLAUDE, // Finalize: the validation report
-  recover: CLAUDE,       // any phase: a doctor for an agent that failed (Orca runner only)
+  graph: RUN_DEFAULT,         // Graph: read the spec, return the ticket graph
+  explore: RUN_DEFAULT,       // Explore: one research note
+  layer0: RUN_DEFAULT,        // Setup: the layer-0 PR
+  dispatch: RUN_DEFAULT,      // Implement: size a ticket into slices
+  impl: RUN_DEFAULT,          // Implement: one slice
+  gate: RUN_DEFAULT,          // Gate: code-review one ticket
+  fixDispatch: RUN_DEFAULT,   // Gate, Review: route findings into fix slices
+  fix: RUN_DEFAULT,           // Gate, Review: one fix slice
+  publish: RUN_DEFAULT,       // Stack, Review: a ticket's PR, or the integration PR
+  review: RUN_DEFAULT,        // Review: code-review the whole stack
+  finalize: RUN_DEFAULT,      // Finalize: reconcile and ready the stack
+  retrospective: RUN_DEFAULT, // Finalize: the validation report
+  recover: RUN_DEFAULT,       // any phase: a doctor for an agent that failed (session runner only)
 }
 // Two more opts every agent() call may carry, both for the runner (ADR-0016):
 // `node` — the call's stable name for WHAT it is, never when it ran
@@ -53,7 +58,8 @@ const REPO_DIR = String.raw`__REPO_DIR__`          // main checkout
 const NOTES_DIR = String.raw`__NOTES_DIR__`        // research notes, outside the repo
 const BASE_REF = '__BASE_REF__'                    // branch the stack merges into
 const STACK_MODE = '__STACK_MODE__'                // 'native' (gh-stack + stacks API) or 'chain' (plain --base chain)
-const RUNNER = '__RUNNER__'                        // 'orca' on the Orca runner; anything else is the Workflow runner. The one line the two renderings differ in
+const RUN_ORDER = '__RUN_ORDER__'                  // 'parallel' (the frontier at once) or 'sequential' (one ticket at a time, session runner only; ADR-0020)
+const RUNNER = '__RUNNER__'                        // 'session' on the session runner (crew, on Orca), and 'orca', its value before, still; anything else is the Workflow runner. The one line the two renderings differ in
 // The project's mechanical checks — format, lint, test — one command per line,
 // confirmed by the user before launch and saved in <notes-dir>/validation.md.
 // Empty is honest: readiness then reduces to "the tests you ran are green".
@@ -108,17 +114,28 @@ const mirror = (branches) => `\`git fetch origin\`, then mirror origin into the 
 // each agent to name its own — an agent for the next ticket sits clean at the
 // same commit and is indistinguishable by git state alone.
 //
-// On the Orca runner that worktree is an Orca child of the run's worktree, and
+// On the session runner that worktree is a child of the run's worktree, made by
+// its session host, and
 // the script reclaims nothing: every agent is kept for the whole run, and the
 // runner asks the operator what to reclaim once summary.json is written
-// (ADR-0012). The reclaim steps below therefore hand an Orca run no path, and
+// (ADR-0012). The reclaim steps below therefore hand a session run no path, and
 // the rendered script stays the same under both runners but for RUNNER.
-const ON_ORCA = RUNNER === 'orca'
-// The Orca runner starts each doctor itself, with no agent() call to spread a
+const ON_SESSION = RUNNER === 'session' || RUNNER === 'orca'
+// The skill refuses this before rendering (SKILL.md step 1); this is the
+// backstop for a script rendered by hand.
+if (RUN_ORDER !== 'parallel' && RUN_ORDER !== 'sequential') throw new Error(`RUN_ORDER is '${RUN_ORDER}': it must be 'parallel' or 'sequential'`)
+if (RUN_ORDER === 'sequential' && !ON_SESSION) throw new Error('sequential run order needs the session runner: a sequential run points its agents one after another at one folder, and the Workflow runner cannot point two agents at one folder; re-arm with run order parallel, or on the session runner')
+// The session runner starts each doctor itself, with no agent() call to spread a
 // row into, so it reads the recover row from meta (ADR-0014).
-if (ON_ORCA) meta.roles = ROLES
-const WORKTREE = ON_ORCA
-  ? `Your worktree is an Orca child worktree of this run's worktree, per agent. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. Never remove it: the operator decides at the end of the run whether it is reclaimed.`
+if (ON_SESSION) meta.roles = ROLES
+// A sequential run's code agents share the run's one chain worktree, one
+// after another, each picking up the build cache the one before it left
+// (ADR-0020); a parallel run's each get one of their own.
+const ISOLATION = RUN_ORDER === 'sequential' ? 'chain' : 'worktree'
+const WORKTREE = ISOLATION === 'chain'
+  ? `Your worktree is this run's one chain worktree, made by its session host and worked in by its code agents one after another: the dependencies and build cache the agent before you left are yours to use. Leave nothing of your own in it uncommitted. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. Never remove it: the operator decides at the end of the run whether it is reclaimed.`
+  : ON_SESSION
+  ? `Your worktree is a child worktree of this run's worktree, per agent, made by this run's session host. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. Never remove it: the operator decides at the end of the run whether it is reclaimed.`
   : `Your worktree is throwaway and per agent. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. This run reclaims it — uncommitted leftovers included — once the work it holds is published.`
 
 // --- the worktree ledger ---------------------------------------------------
@@ -142,11 +159,11 @@ const worktreesKept = []
 // The publisher cannot remove its own worktree (its cwd), so it is handed to
 // the next publisher down the lane, and the last one to finalize.
 let prevPublishWorktree = null // { path, branch }
-const prevPublisher = () => (prevPublishWorktree && !ON_ORCA ? [prevPublishWorktree] : [])
+const prevPublisher = () => (prevPublishWorktree && !ON_SESSION ? [prevPublishWorktree] : [])
 // Entries not yet handed to any reclaimer. Marked reclaimed only once the reclaimer
 // returned: a reclaimer that died leaves them for the next one, or finalize.
 function pendingWorktrees(keys) {
-  if (ON_ORCA) return []
+  if (ON_SESSION) return []
   const out = []
   for (const k of keys) {
     const e = worktreesOf.get(k)
@@ -162,19 +179,19 @@ const reclaimStep = (entries) => entries.length
   ? `Reclaim these worktrees — exact paths, nothing else. Each belonged to an agent of this run that has finished, and the branch beside it holds that agent's work:
 ${entries.map((e) => `   - ${e.path} → ${ref(e.branch)}`).join('\n')}
    For each path: if it no longer exists, count it removed — the harness already cleaned it. Otherwise \`git -C <path> merge-base --is-ancestor HEAD <branch>\` must succeed; if it fails the worktree holds a commit its branch does not, so keep it and report why. Then \`git worktree remove --force <path>\` — force on purpose: the agent that used it returned and committed what it meant to keep, so whatever is uncommitted there is build output, and the ancestor check above is the real guard. If git still refuses (a file lock, say), keep the worktree and report \`{path, reason}\`. Never remove your own worktree, ${REPO_DIR}, or any path not in this list. Finish with \`git worktree prune\`. Return how many you removed and every one you kept.`
-  : ON_ORCA
+  : ON_SESSION
     ? `Remove no worktree — not yours, not any other: on this runner every agent's worktree is kept until the run ends, and the operator decides then what is reclaimed. Report 0 removed and none kept.`
     : `No worktrees to reclaim this time: report 0 removed and none kept.`
 // A dead agent never reported a path, so its worktree is not in the ledger.
 // The harness names a run's worktrees `wf_<run>-<n>`; the prefix is read off
 // any reported path so a reclaimer can NAME the strays without touching them.
-// The Orca runner reclaims nothing in-script, so there is nothing to guess.
+// The session runner reclaims nothing in-script, so there is nothing to guess.
 const strayPrefix = () => {
   for (const e of worktreesOf.values()) for (const p of e.paths) { const m = /^(.*[\\/]wf_[^\\/]+-)\d+$/.exec(p); if (m) return m[1] }
   return null
 }
 const strayStep = () => {
-  const prefix = ON_ORCA ? null : strayPrefix()
+  const prefix = ON_SESSION ? null : strayPrefix()
   return prefix
     ? `Then \`git worktree list --porcelain\`: any worktree whose path starts with \`${prefix}\` and is NOT in the list above belonged to an agent of this run that died before reporting. Do not remove it — it may hold the only copy of that agent's work — but add it to \`worktrees_kept\` with the reason "not in the ledger: its agent died before reporting".`
     : ''
@@ -331,10 +348,12 @@ const GRAPH_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['number', 'title', 'blocked_by', 'needs_human', 'human_reason'],
+        // map_position orders a sequential run only (runInOrder), so only a sequential run asks for it.
+        required: ['number', 'title', ...(RUN_ORDER === 'sequential' ? ['map_position'] : []), 'blocked_by', 'needs_human', 'human_reason'],
         properties: {
           number: { type: 'integer' },
           title: { type: 'string' },
+          ...(RUN_ORDER === 'sequential' && { map_position: { type: 'integer', description: "1-based place in the spec's own map of its tickets; 0 when the spec does not place it" } }),
           blocked_by: { type: 'array', items: { type: 'integer' } },
           needs_human: { type: 'boolean' },
           human_reason: { type: 'string', description: 'empty when needs_human is false' },
@@ -565,7 +584,9 @@ ${POINTERS}
 Find the tickets: sub-issues of #${SPEC}, issues that reference #${SPEC}, and issues linked from the spec body. Search each way — GitHub's sub-issue API is often empty even when the tickets exist.
 
 Blocking relationships: query GitHub's native dependencies first, per ticket — \`gh api "repos/${REPO}/issues/<n>/dependencies/blocked_by" -q '[.[].number]'\`. Only when that returns an empty list or a 404 fall back to prose: read the ticket's "Blocked by" section (or equivalent) and resolve it to issue numbers. A dependency the ticket calls soft or tests-only is still a dependency — record it.
-
+${RUN_ORDER === 'sequential' ? `
+map_position: where the spec itself places the ticket in its map of tickets — the ordered list, table or diagram of its slices — counting from 1. A ticket the spec does not place gets 0. Read it off the spec as written; do not rank the tickets yourself.
+` : ''}
 Set needs_human on a ticket that cannot be completed by an agent alone: it needs hardware, a running game, a physical device, credentials only a person holds, or its label says so. Put the reason in human_reason.
 
 start_ref: if work for this spec already sits on a branch (the spec or a ticket names one, or a branch exists whose commits are for this spec), return that branch — it becomes the bottom layer of the stack rather than being orphaned. Otherwise return "${BASE_REF}".
@@ -656,7 +677,7 @@ Do not disturb the user's working copy: leave ${REPO_DIR}'s checked-out branch a
 ${WORKTREE}
 
 Return the PR url and number, what the mirror found, and your worktree.`,
-    { ...ROLES.layer0, effort: 'low', phase: 'Setup', schema: LAYER0_SCHEMA, isolation: 'worktree', label: `layer0:${graph.start_ref}`, node: 'layer0' },
+    { ...ROLES.layer0, effort: 'low', phase: 'Setup', schema: LAYER0_SCHEMA, isolation: ISOLATION, label: `layer0:${graph.start_ref}`, node: 'layer0' },
   )
   if (!layer0) throw new Error('layer-0 PR failed — prior work would be orphaned')
   noteWorktree('layer0', graph.start_ref, layer0)
@@ -773,7 +794,7 @@ Every command must pass on the commit you return. Commit, then move the ticket b
 ${WORKTREE}
 
 Return the branch, a one-line summary, one result per validation command with its seconds and runs, every other build or test command you ran in \`other_runs\`, the sha the list passed on in \`validated_sha\`, anything from the brief you did not reach in \`unmet\`, what you settled yourself in \`decided\`, any contradiction for the operator in \`decisions_needed\`, and your worktree.`,
-      { ...ROLES.impl, effort: s.effort, phase: 'Implement', schema: IMPL_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}`, node: `${node}/s${i + 1}`, ...go },
+      { ...ROLES.impl, effort: s.effort, phase: 'Implement', schema: IMPL_SCHEMA, isolation: ISOLATION, label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}`, node: `${node}/s${i + 1}`, ...go },
     )
     if (!r) throw new Error(`slice implementer for #${t.number} died (${s.title})`)
     noteWorktree(t.number, `ticket/${t.number}`, r)
@@ -832,6 +853,7 @@ function enqueuePublish(t, impl, cutFrom, single) {
     const go = goOn(single)
     if (!go) return { stopped: true }
     const base = tip
+    if (RUN_ORDER === 'sequential' && cutFrom !== base) throw new Error(`publish of #${t.number}: the tip moved from ${cutFrom} to ${base} under a sequential run, whose publishes never rebase`)
     // Layers as they will stand once this PR exists — k is the ACTUAL position
     // in the stack, not the ticket's index in the plan, so the map's fourth box
     // says "layer 4". A run that lost three tickets ends "4 of 7 planned",
@@ -899,7 +921,7 @@ You are the only agent publishing right now. After the PR exists, the branch is 
 ${WORKTREE}
 
 Return whether it published, the PR url and number, what you resolved, one result per validation command with its seconds and runs plus the sha they hold for, how the stack link went, any note, the reclaim count and kept list, and your worktree.`,
-      { ...ROLES.publish, effort: 'low', phase: 'Stack', schema: PUBLISH_SCHEMA, isolation: 'worktree', label: `publish:#${t.number}`, node: `ticket/${t.number}/publish`, ...go },
+      { ...ROLES.publish, effort: 'low', phase: 'Stack', schema: PUBLISH_SCHEMA, isolation: ISOLATION, label: `publish:#${t.number}`, node: `ticket/${t.number}/publish`, ...go },
     ).then((r) => {
       recordValidation('publish', t.number, r, cutFrom !== base ? null : impl.validated)
       if (!r || !r.published) {
@@ -1006,7 +1028,7 @@ Every command must pass on the commit you return — a fix that leaves one red i
 ${WORKTREE}
 
 Return one verdict per finding in your brief you fixed or rejected, the \`location\` of any you did not reach, one result per validation command with its seconds and runs, every other build or test command you ran in \`other_runs\`, the sha the list passed on in \`validated_sha\`, and your worktree.`,
-      { ...ROLES.fix, effort: s.effort, phase: ph, schema: FIX_SLICE_SCHEMA, isolation: 'worktree', label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}`, node: `${node}/s${i + 1}`, ...go },
+      { ...ROLES.fix, effort: s.effort, phase: ph, schema: FIX_SLICE_SCHEMA, isolation: ISOLATION, label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}`, node: `${node}/s${i + 1}`, ...go },
     )
     // A dead fixer is not fatal — it is the next reviewer's problem, and that
     // reviewer reads the branch rather than anyone's account of it. But the
@@ -1151,7 +1173,7 @@ ${rejected.map((v) => `- ${v.location} — ${v.issue}\n  judged wrong because: $
         : ''}
 
 ${WORKTREE}`,
-      { ...ROLES.gate, phase: 'Gate', schema: GATE_REVIEW_SCHEMA, isolation: 'worktree', label: `gate:#${t.number}:r${round}`, node, ...go },
+      { ...ROLES.gate, phase: 'Gate', schema: GATE_REVIEW_SCHEMA, isolation: ISOLATION, label: `gate:#${t.number}:r${round}`, node, ...go },
     )
     noteWorktree(t.number, impl.branch, r)
     recordValidation('gate', t.number, r, validated)
@@ -1211,8 +1233,10 @@ function ticketDone(n) {
   return memo.get(n)
 }
 
+const awaited = (t) => t.blocked_by.filter((d) => byNum.has(d) && !blocked.has(d))
+
 async function runTicket(t) {
-  const deps = await Promise.all(t.blocked_by.filter((d) => byNum.has(d) && !blocked.has(d)).map(ticketDone))
+  const deps = await Promise.all(awaited(t).map(ticketDone))
   const waits = deps.filter((d) => d.state !== 'published')
   if (waits.length) return { number: t.number, state: 'not started', detail: `waits on ${waits.map((d) => `#${d.number} (${d.state})`).join(', ')}` }
   if (halting) return { number: t.number, state: 'not started', detail: `the run halted before it started` }
@@ -1293,8 +1317,23 @@ async function implementTicket(t) {
   return { number: t.number, state: 'published', ...impl, unfixed: gate.unfixed || [] }
 }
 
+const mapOrder = (a, b) => (a.map_position || Infinity) - (b.map_position || Infinity) || a.number - b.number
+async function runInOrder() {
+  const queue = [...auto].sort(mapOrder)
+  const out = []
+  while (queue.length) {
+    const i = queue.findIndex((t) => awaited(t).every((d) => memo.has(d)))
+    if (i < 0) {
+      out.push(...queue.map((t) => ({ number: t.number, state: 'not started', detail: `blocked in a cycle among ${queue.map((x) => '#' + x.number).join(', ')}` })))
+      break
+    }
+    out.push(await ticketDone(queue.splice(i, 1)[0].number))
+  }
+  return out
+}
+
 phase('Implement')
-const outcomes = await Promise.all(auto.map((t) => ticketDone(t.number)))
+const outcomes = RUN_ORDER === 'sequential' ? await runInOrder() : await Promise.all(auto.map((t) => ticketDone(t.number)))
 const layer0Line = () => (hasLayer0 ? [`layer 0 (pre-existing): ${layer0.pr_url}`] : [])
 
 // --- a halted run: no review, no finalize, nothing more on GitHub ----------
@@ -1341,7 +1380,7 @@ Invoke the \`code-review\` skill with \`${ref(BASE_REF)}\` as the fixed point an
 Every ticket was already reviewed alone on its own branch, so look hardest at what that could not see: two implementations of one helper, abstractions that contradict each other, a contract one ticket relies on that another changed. Return every finding; change no code yourself.
 
 ${WORKTREE}`,
-  { ...ROLES.review, phase: 'Review', schema: REVIEW_SCHEMA, isolation: 'worktree', label: `review:spec-${SPEC}`, node: 'review' },
+  { ...ROLES.review, phase: 'Review', schema: REVIEW_SCHEMA, isolation: ISOLATION, label: `review:spec-${SPEC}`, node: 'review' },
 )
 noteWorktree('review', tip, review)
 // Fail closed: a review that never returned is not a review with zero findings.
@@ -1406,7 +1445,7 @@ ${reclaimStep(integrationReclaim)}
 ${WORKTREE}
 
 Return the PR url and number, the branch, the reclaim count and kept list, and your worktree.`,
-      { ...ROLES.publish, effort: 'low', phase: 'Review', schema: INTEGRATION_SCHEMA, isolation: 'worktree', label: 'publish:integration', node: 'review/publish' },
+      { ...ROLES.publish, effort: 'low', phase: 'Review', schema: INTEGRATION_SCHEMA, isolation: ISOLATION, label: 'publish:integration', node: 'review/publish' },
     )
     if (integration && integration.pr_number) {
       // The prompt reclaims only after the PR exists, so a returned-but-unopened
@@ -1486,7 +1525,7 @@ ${complete
     ? `3. Append the line \`Closes #${SPEC}\` to the TOP PR's body (\`gh pr edit\` — keep the existing body, add the line). Merging the whole stack from the top then closes every ticket and the spec at once.`
     : `3. Add NO \`Closes #${SPEC}\` anywhere — the spec is not complete. Comment on the TOP PR and on issue #${SPEC}: the stack in merge order (the PR list above), and what remains for a human: ${remains.join('; ')}. A later run stacks the remainder on top.`}
 4. ${reclaimStep(finalReclaim)}
-${ON_ORCA ? '' : `   The lane already reclaimed each published ticket's worktrees; these are the rest. ${strayStep()}
+${ON_SESSION ? '' : `   The lane already reclaimed each published ticket's worktrees; these are the rest. ${strayStep()}
 `}   Touch no other worktree — the user's own checkout in particular — and delete no branches and close no PRs.
 
 Do not merge anything — merging is the operator's.
@@ -1567,7 +1606,7 @@ return {
     const unpublished = auto.filter((t) => !stacked.some((x) => x.number === t.number)).map((t) => `ticket/${t.number}`)
     if (integration === null && findings.length) unpublished.push(`spec/${SPEC}-integration`)
     return unpublished.length
-      ? { note: `Never pushed. Any work these carry is on the branch in ${REPO_DIR}'s clone only — ${ON_ORCA ? 'the worktrees that built it are kept until the operator reclaims them at the end of the run' : 'the worktrees that built it were removed where clean and on the branch, kept otherwise; see worktrees_kept'}.`, refs: unpublished }
+      ? { note: `Never pushed. Any work these carry is on the branch in ${REPO_DIR}'s clone only — ${ON_SESSION ? 'the worktrees that built it are kept until the operator reclaims them at the end of the run' : 'the worktrees that built it were removed where clean and on the branch, kept otherwise; see worktrees_kept'}.`, refs: unpublished }
       : null
   })(),
   // Every worktree a reclaim refused to remove, with git's reason. Each is a

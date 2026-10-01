@@ -1,0 +1,11 @@
+ ▐▛███▛█   Claude Code v2.1.286
+▝▜██████▀  Opus 5.5 · Claude Max
+ ▝▝   ▝▝   ~/Workspace/controlayer
+  Get to finished work sooner with Opus 5.5. Switch anytime with /model.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Try "refactor feature.py"
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker · restart with CLAUDE_CODE_FORCE_SESSION_PE…
+   ⎇ main  (+4,-1)
+   Model: Opus 5.5  [░░░░░░░░░░░░░░░░] 0/1.0M (0%)
+  ⏵⏵ auto mode on (shift+tab to cycle)

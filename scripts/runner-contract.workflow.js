@@ -3,7 +3,7 @@ export const meta = { name: 'runner-contract', description: 'the guarantees the 
 // The runner contract test (ADR-0011): run it under the Workflow runner and
 // under the Orca runner, then resume each run; each of the four must return
 // its runner's expected object in
-// skills/engineering/implement-spec-in-workflow/orca/README.md: EXPECTED, with
+// packages/crew/README.md: EXPECTED, with
 // each RUNNER_OWN case at that runner's value. How to run it, and the one hand
 // step (killing contract:continue once and contract:kill until it stays dead),
 // is in that README.

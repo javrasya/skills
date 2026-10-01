@@ -1,21 +1,21 @@
 ---
 name: orca-runs
-description: "Open the Orca run view in standalone mode: every Orca-runner run on this machine, by project, to look into, reclaim, or resume one whose runner died."
+description: "Open the Orca run view in standalone mode: every Orca-hosted session-runner run on this machine, by project, to look into, reclaim, or resume one whose runner died. Crew-hosted runs are crew ls and crew view."
 disable-model-invocation: true
 ---
 
-The **run view** is the operator's terminal screen for runs of [`implement-spec-in-workflow`](../implement-spec-in-workflow/SKILL.md) on the Orca runner (ADR-0012). The runner shows it attached, in its own tab, on its own run. This skill opens it **standalone**: every run in the run registry (`~/.claude/orca-runs.jsonl`, or `$CLAUDE_CONFIG_DIR/orca-runs.jsonl` when that is set), finished, paused or dead, with no runner needed.
+The **run view** is the operator's terminal screen for runs of [`implement-spec-in-workflow`](../implement-spec-in-workflow/SKILL.md) on the **session runner** (ADR-0012, ADR-0017). This skill serves **Orca-hosted runs**: those whose session host is Orca. A **crew-hosted run** — crew being the default session host — is not this skill's: the operator lists those with `crew ls` and opens one in the **run console** with `crew view`; point them there and stop. On Orca the runner shows it attached, in its own tab, on its own run. This skill opens it **standalone**: every run in the run registry (`~/.claude/orca-runs.jsonl`, or `$CLAUDE_CONFIG_DIR/orca-runs.jsonl` when that is set), finished, paused or dead, with no runner needed.
 
-The view is code of `implement-spec-in-workflow`, not of this skill: one copy, beside the runner that also starts it. Both skills are installed side by side, so it is reached from this skill's directory.
+The view is code of the `crew` package, not of this skill: one copy, beside the runner that also starts it, reached through the `crew` bin.
 
-**Requires** Node, and a session inside an Orca terminal (`TERM_PROGRAM` is `Orca`). On its first start the view installs its one dependency, terminal-kit, beside itself with `npm ci`, which needs npm and the network once.
+**Requires** Node, crew installed (`npm install -g @javrasya/crew`, or from a checkout of this repo `npm install -g <repo>/packages/crew`), and a session inside an Orca terminal (`TERM_PROGRAM` is `Orca`). On its first start the view installs its one dependency, terminal-kit, beside itself with `npm ci`, which needs npm and the network once.
 
 ## Steps
 
-1. **Open it in a new Orca tab.** `<skill-dir>` is the directory holding this file:
+1. **Open it in a new Orca tab:**
 
    ```
-   orca terminal create --title "Orca runs" --command "node \"<skill-dir>/../implement-spec-in-workflow/orca/run-view/view.mjs\" --standalone" --focus --json
+   orca terminal create --title "Orca runs" --command "crew view --standalone" --focus --json
    ```
 
    If the command fails, or `result.terminal.surface` is not `visible`, tell the operator the view has no visible tab, and stop. Outside Orca, say the view needs an Orca terminal, and stop.
@@ -27,4 +27,4 @@ The view is code of `implement-spec-in-workflow`, not of this skill: one copy, b
    - **r** on a run reclaims every agent it keeps, under the reclaim rules: an agent still live is kept, and so is one whose worktree holds commits no remote has. The run itself is marked reclaimed once its runner is known dead, ended or not; a run whose runner is alive, or may be, stays open, so the agents it starts later are kept. Inside a run, **r** opens the reclaim dialog: Reclaim Selected (the agent or phase under the cursor), Reclaim Successful Ones, or Reclaim All once the run has ended (even while its runner waits on the view), greyed while the run is still going; Enter accepts, Esc reclaims nothing, and **f** then confirms each agent holding unpushed commits or kept with its worker running.
    - **R** resumes a run whose runner is dead. It opens a new tab in the run's worktree, running the runner with `--resume`, which takes the run over, keeps every node that finished, and carries each failed or needs-decision node on: the result its worker submitted late, else its session continued, else a fresh start. It is not offered while the runner is alive, nor on a run already reclaimed. A halted run whose runner is alive is resumed from its own tab: **R** there on a failed or needs-you node resumes that node, anywhere else every held one.
 
-The view touches only worktrees a run made, named `<runId>-<n>`; any other worktree is never shown or touched. Reading, stopping and releasing a run's workers needs no takeover, so reclaiming works on any run. Details are in `implement-spec-in-workflow/orca/README.md`, *The run view standalone*.
+The view touches only worktrees a run made, named `<runId>-<n>`; any other worktree is never shown or touched. Reading, stopping and releasing a run's workers needs no takeover, so reclaiming works on any run. Details are in `packages/crew/README.md` (in the skills repo), *The run view standalone*.

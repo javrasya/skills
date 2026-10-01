@@ -1,0 +1,32 @@
+{
+  "name": "@javrasya/crew",
+  "version": "0.1.0",
+  "description": "The session runner: runs a rendered workflow script, starting each agent() as a supervised session on a session host (crew, the default, or Orca), with its run view.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/javrasya/skills.git",
+    "directory": "packages/crew"
+  },
+  "bin": {
+    "crew": "bin/crew.mjs"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "workflow.template.js"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node test/test-shared.mjs && node test/test-screens.mjs && node test/test-orca-runner.mjs && node test/test-crew-bin.mjs && node test/test-daemon.mjs && node test/test-console.mjs && node test/test-host-contract.mjs && node test/test-crew-run.mjs && node test/test-start-form.mjs && node test/test-crew-start.mjs && node test/test-orchestrator.mjs",
+    "prepack": "node scripts/pack-template.mjs",
+    "postpack": "node scripts/pack-template.mjs --clean"
+  },
+  "dependencies": {
+    "@xterm/headless": "6.0.0",
+    "node-pty": "1.1.0"
+  }
+}

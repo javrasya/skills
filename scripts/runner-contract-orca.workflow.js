@@ -2,7 +2,7 @@ export const meta = { name: 'runner-contract-orca', description: 'the guarantees
 
 // Orca-only guarantees, which scripts/runner-contract.workflow.js (byte-identical
 // under both runners) cannot hold. The expected object and the agent-driven
-// procedure: skills/engineering/implement-spec-in-workflow/orca/README.md.
+// procedure: packages/crew/README.md.
 // No Date.now(), Math.random() or argless new Date(): they break a resume's replay.
 
 const EXPECTED = {
@@ -20,6 +20,12 @@ const EXPECTED = {
   // Killed until its continuations are spent, then three doctors that each
   // give up: the call returns null only after them (ADR-0014).
   doctored: null,
+  // Two agents one after another in the run's one <runId>-chain worktree
+  // (ADR-0020): the second reads the file the first committed there.
+  chain: [{ word: 'hello', count: 3 }, { word: 'hello', count: 3 }],
+  // Two more in it: the first leaves a file uncommitted through the leftover
+  // check's follow-up (#127), and the second is told of it in its prompt.
+  leftover: [{ word: 'hello', count: 3 }, { word: 'hello', count: 3 }],
 }
 
 const HELLO = {
@@ -34,6 +40,9 @@ const WAIT = 'run the shell command node -e "setTimeout(() => {}, 540000)" in th
 
 const C = { phase: 'Contract', effort: 'low' }
 const NEEDS_YOU_FILE = 'contract-needs-you.txt'
+const CHAIN_FILE = 'contract-chain.txt'
+const LEFTOVER_FILE = 'contract-leftover.txt'
+const IN_CHAIN = 'count 3 if the name of your working directory\'s own folder ends with "-chain", or count 0 if it does not'
 const NOT_A_TASK = 'This is a check of the workflow runner, not a task: read no files and run nothing except what returning your result needs.'
 
 const canon = (v) =>
@@ -100,6 +109,30 @@ const doctored = await awaited('orca-contract:doctored', () => agent(
   { ...C, label: 'orca-contract:doctored', schema: DONE },
 ))
 
+// After doctored, so the preload's one held create is long spent.
+const chain = []
+chain.push(await awaited('orca-contract:chain-first', () => agent(
+  `${NOT_A_TASK} It checks that agents of a sequential run share one worktree. Write the word hello into the file ${CHAIN_FILE} in your working directory, then stage it and commit it with git, so nothing you made is left uncommitted. Your result is word "hello" and ${IN_CHAIN}.`,
+  { ...C, label: 'orca-contract:chain-first', schema: HELLO, isolation: 'chain' },
+)))
+chain.push(await awaited('orca-contract:chain-second', () => agent(
+  `${NOT_A_TASK} It checks that agents of a sequential run share one worktree. Your result is, as word, the text of the file ${CHAIN_FILE} in your working directory, trimmed, or "none" if there is no such file, and ${IN_CHAIN}. Never create, edit or delete that file.`,
+  { ...C, label: 'orca-contract:chain-second', schema: { ...HELLO, properties: { ...HELLO.properties, word: { type: 'string' } } }, isolation: 'chain' },
+)))
+
+// After the chain: one agent leaves a file uncommitted on purpose, so the
+// runner's leftover check types its follow-up and journals what stays; the
+// next chain agent's prompt must name the file.
+const leftover = []
+leftover.push(await awaited('orca-contract:leftover-left', () => agent(
+  `${NOT_A_TASK} It checks that a file a chain agent leaves uncommitted is followed up and named to the next one. Write the word hello into the file ${LEFTOVER_FILE} in your working directory, and neither commit it, stage it nor remove it. Your result is word "hello" and ${IN_CHAIN}. After your result is in you will be told that you left files uncommitted and asked to commit or remove them: this check expects ${LEFTOVER_FILE} to stay exactly as it is, so leave it, change nothing, and stop.`,
+  { ...C, label: 'orca-contract:leftover-left', schema: HELLO, isolation: 'chain' },
+)))
+leftover.push(await awaited('orca-contract:leftover-told', () => agent(
+  `${NOT_A_TASK} It checks that a chain agent is told what an agent before it left uncommitted. Your result is word "hello", and count 3 if this prompt names the file ${LEFTOVER_FILE} as left uncommitted by an agent before you, or count 0 if it does not. Never create, edit or delete any file.`,
+  { ...C, label: 'orca-contract:leftover-told', schema: HELLO, isolation: 'chain' },
+)))
+
 const result = {
   returned: expect('returned', returned),
   dirtyRetry: expect('dirtyRetry', dirtyRetry),
@@ -107,6 +140,8 @@ const result = {
   needsYou: expect('needsYou', needsYou),
   neverStarted: expect('neverStarted', neverStarted),
   doctored: expect('doctored', doctored),
+  chain: expect('chain', chain),
+  leftover: expect('leftover', leftover),
 }
 for (const f of failures) log('FAIL ' + f)
 log(failures.length ? `${failures.length} contract failure(s)` : 'contract holds')
