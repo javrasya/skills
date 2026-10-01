@@ -114,7 +114,7 @@ test('daemon: with none running, a crew command starts one that outlives its ter
 test('daemon: run and view start it too, before their own work', async () => {
   const { paths, crew } = scratch()
   const view = crew('view')
-  assert.equal(view.status, 2, 'the view\'s own usage error')
+  assert.equal(view.status, 3, 'the view\'s own refusal: it needs a terminal')
   assert.ok(await daemonHello(paths))
   assert.equal(crew('--help').status, 0)
 })

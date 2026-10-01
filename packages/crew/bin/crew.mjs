@@ -239,12 +239,12 @@ async function view(args, { waitMs = 0 } = {}) {
     run = await find()
   }
   if (target && !run) throw new Error(`no run ${target} in the run registry ${registry}`)
+  await daemonAnyway()
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     console.error('crew view: needs a terminal')
     process.exit(3)
   }
   const { backKey } = readCrewConfig(paths)
-  await daemonAnyway()
   if (run) await runs.open(run.runId)
   else await runs.refresh()
   await runsConsole({ paths, stdin: process.stdin, stdout: process.stdout, runs, backKey }).done
