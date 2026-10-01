@@ -20,6 +20,9 @@ const EXPECTED = {
   // Killed until its continuations are spent, then three doctors that each
   // give up: the call returns null only after them (ADR-0014).
   doctored: null,
+  // Two agents one after another in the run's one <runId>-chain worktree
+  // (ADR-0020): the second reads what the first left there uncommitted.
+  chain: [{ word: 'hello', count: 3 }, { word: 'hello', count: 3 }],
 }
 
 const HELLO = {
@@ -34,6 +37,8 @@ const WAIT = 'run the shell command node -e "setTimeout(() => {}, 540000)" in th
 
 const C = { phase: 'Contract', effort: 'low' }
 const NEEDS_YOU_FILE = 'contract-needs-you.txt'
+const CHAIN_FILE = 'contract-chain.txt'
+const IN_CHAIN = 'count 3 if the name of your working directory\'s own folder ends with "-chain", or count 0 if it does not'
 const NOT_A_TASK = 'This is a check of the workflow runner, not a task: read no files and run nothing except what returning your result needs.'
 
 const canon = (v) =>
@@ -100,6 +105,17 @@ const doctored = await awaited('orca-contract:doctored', () => agent(
   { ...C, label: 'orca-contract:doctored', schema: DONE },
 ))
 
+// After doctored, so the preload's one held create is long spent.
+const chain = []
+chain.push(await awaited('orca-contract:chain-first', () => agent(
+  `${NOT_A_TASK} It checks that agents of a sequential run share one worktree. Write the word hello into the file ${CHAIN_FILE} in your working directory, and neither commit it nor stage it. Your result is word "hello" and ${IN_CHAIN}.`,
+  { ...C, label: 'orca-contract:chain-first', schema: HELLO, isolation: 'chain' },
+)))
+chain.push(await awaited('orca-contract:chain-second', () => agent(
+  `${NOT_A_TASK} It checks that agents of a sequential run share one worktree. Your result is, as word, the text of the file ${CHAIN_FILE} in your working directory, trimmed, or "none" if there is no such file, and ${IN_CHAIN}. Never create, edit or delete that file.`,
+  { ...C, label: 'orca-contract:chain-second', schema: { ...HELLO, properties: { ...HELLO.properties, word: { type: 'string' } } }, isolation: 'chain' },
+)))
+
 const result = {
   returned: expect('returned', returned),
   dirtyRetry: expect('dirtyRetry', dirtyRetry),
@@ -107,6 +123,7 @@ const result = {
   needsYou: expect('needsYou', needsYou),
   neverStarted: expect('neverStarted', neverStarted),
   doctored: expect('doctored', doctored),
+  chain: expect('chain', chain),
 }
 for (const f of failures) log('FAIL ' + f)
 log(failures.length ? `${failures.length} contract failure(s)` : 'contract holds')

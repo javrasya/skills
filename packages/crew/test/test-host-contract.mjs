@@ -3,7 +3,9 @@
 // whose workers are the fake harness (fixtures/crew/fake-harness.mjs) in real
 // ptys held by a real daemon under a scratch crew home. Through the crew
 // adapter it also covers the daemon's client protocol, which that adapter is
-// the only client of. A scenario is { name, run(h) }, h being what a host's
+// the only client of. The Orca adapter (orca-cli.mjs) runs the worktree
+// scenarios, a host's `scenarios`, against Orca's CLI played offline
+// (fake-orca.mjs's fakeOrcaCli): it has no worker to play the rest. A scenario is { name, run(h) }, h being what a host's
 // open() gives: { host, stopped(w), dead(w), title(w) }, `w` a started
 // worker; one that needs more of a host adds it to both HOSTS: ids(w), the
 // IDs a worker's preamble gave it; send(ids, message) and submit(ids, files),
@@ -24,7 +26,8 @@ import { dirname, join, resolve } from 'path'
 import { randomUUID } from 'crypto'
 import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
-import { fakeOrca } from '../src/fake-orca.mjs'
+import { fakeOrca, fakeOrcaCli } from '../src/fake-orca.mjs'
+import { orcaCli } from '../src/orca-cli.mjs'
 import { crewHost, crewWorktrees } from '../src/crew-host.mjs'
 import { repoConfig } from '../src/crew-config.mjs'
 import { CREW_ONLY, RUN_METHODS, SESSION_METHODS, hostUnreachable } from '../src/session-host.mjs'
@@ -169,6 +172,20 @@ const HOSTS = [
         status: async (path) => (await request(paths, { op: 'worktree.statuses' })).statuses[resolve(path)] ?? null,
         removed: async (path) => !existsSync(path),
         setups: async (path) => (existsSync(setupLog) ? readFileSync(setupLog, 'utf8').split('\n').filter((l) => l && resolve(l) === resolve(path)).length : 0),
+      }
+    },
+  },
+  {
+    name: 'orca',
+    scenarios: /^(child|chain) worktree:/,
+    open() {
+      const cli = fakeOrcaCli({ setupLeaves: SETUP_LEAVES })
+      return {
+        host: orcaCli({ call: cli.call, git: cli.git }),
+        stopped: async (w) => cli.dispatches.get(w.dispatchId)?.stopped === true,
+        status: async (path) => cli.worktrees.get(path)?.status ?? null,
+        removed: async (path) => cli.worktrees.get(path)?.removed === true,
+        setups: async (path) => cli.worktrees.get(path)?.setups ?? 0,
       }
     },
   },
@@ -416,7 +433,7 @@ export const SCENARIOS = [
     },
   },
   {
-    name: 'chain worktree: made once as <runId>-chain, its setup hook run once and its output its baseline; workers start in it one after another, and a child beside it is made as ever',
+    name: 'chain worktree: made once as <runId>-chain, its setup hook run once and its output its baseline; workers start in it one after another, a child beside it is made as ever, and a doctor\'s with setup skipped',
     async run(h) {
       const run = await runOf(h)
       const baselines = []
@@ -440,8 +457,11 @@ export const SCENARIOS = [
       assert.equal(worktreeName(own.worktree), `${run}-1`)
       assert.equal(await h.setups(own.worktree), 1)
       await assert.rejects(start(h, 'taken', { child: child(`${run}-1`) }), (e) => e.code === 'worktree_name_taken' && e.final === true)
-      await h.host.worktreeRemove({ path: chain.path })
-      await h.host.worktreeRemove({ path: own.worktree })
+      const doctor = await start(h, 'doctor', { child: child(`${run}-2`, { setup: 'skip', onBaseline }) })
+      assert.equal(worktreeName(doctor.worktree), `${run}-2`)
+      assert.deepEqual(baselines.at(-1), { worktree: doctor.worktree, lines: [] })
+      assert.deepEqual([await h.setups(doctor.worktree), await h.setups(chain.path)], [0, 1])
+      for (const path of [chain.path, own.worktree, doctor.worktree]) await h.host.worktreeRemove({ path })
     },
   },
   {
@@ -464,7 +484,7 @@ for (const kind of HOSTS) {
     const { host } = kind.open()
     assert.deepEqual([...SESSION_METHODS, ...RUN_METHODS].filter((m) => typeof host[m] !== 'function'), [])
   })
-  for (const scenario of SCENARIOS) test(`${kind.name} host: ${scenario.name}`, () => scenario.run(kind.open()))
+  for (const scenario of SCENARIOS.filter((s) => !kind.scenarios || kind.scenarios.test(s.name))) test(`${kind.name} host: ${scenario.name}`, () => scenario.run(kind.open()))
 }
 
 // The crew host alone: what the fake host has no pty, harness or daemon for.

@@ -464,12 +464,6 @@ test('session host: the Orca adapter and the fake Orca both implement every meth
   assert.throws(() => sessionHost({ ...fakeOrca(), workerShow: undefined }), /not a session host: workerShow missing/)
 })
 
-test('session host: the Orca adapter refuses a chain worktree for good, and a worker started in one, rather than run it anywhere else', async () => {
-  const refused = (e) => e.code === 'chain_unsupported' && e.final === true
-  await assert.rejects(orcaCli().chainWorktree({ runId: 'run_1' }), refused)
-  await assert.rejects(orcaCli().workerStart({ run: 'run_1', prompt: 'p', title: 't', sessionId: 's', chain: 'C:/repo.crew/run_1-chain' }), refused)
-})
-
 test('session host: no runner module names Orca in its code; only the Orca adapter, the fake Orca and the host list do', () => {
   const SRC = new URL('../src/', import.meta.url)
   const ADAPTERS = new Set(['orca-cli.mjs', 'fake-orca.mjs', 'hosts.mjs'])
@@ -1052,6 +1046,51 @@ test("orca-cli: a doctor's child worktree is created with setup skipped; any oth
     assert.deepEqual(verbsOf([create]), ['worktree create'])
     assert.equal(create.includes('--setup') ? flag(create, '--setup') : null, setup)
   }
+})
+
+// The run's chain worktree, as Orca holds it once made.
+const CHAIN = 'C:/wt/run_1-chain'
+function chainCli(create = () => ({ worktree: { id: `repo::${CHAIN}`, path: CHAIN }, startupTerminal: { handle: 'term_shell' } })) {
+  let held = []
+  return recordingCli({
+    'worktree list': () => ({ worktrees: held }),
+    'worktree create': (args) => {
+      held = [{ path: CHAIN, branch: 'refs/heads/run_1-chain' }]
+      return create(args)
+    },
+  }, { git: gitStub({ status: '?? setup.out\n' }).git })
+}
+
+test("orca-cli: the run's chain worktree is made once, as <runId>-chain from the run's worktree under the repo's setup policy, its baseline taken; asked again, the same one", async () => {
+  const { argvs, orca } = chainCli()
+  const baselines = []
+  const onBaseline = (b) => baselines.push(b)
+  assert.deepEqual(await orca.chainWorktree({ runId: 'run_1', onBaseline }), { path: CHAIN, made: true, baseline: ['?? setup.out'], warnings: [] })
+  assert.deepEqual(verbsOf(argvs), ['worktree list', 'worktree create', 'terminal close'])
+  const create = argvs[1]
+  assert.deepEqual([flag(create, '--name'), flag(create, '--parent-worktree'), create.includes('--setup')], ['run_1-chain', 'current', false])
+  assert.deepEqual(baselines, [{ worktree: CHAIN, lines: ['?? setup.out'] }])
+  argvs.length = 0
+  assert.deepEqual(await orca.chainWorktree({ runId: 'run_1', onBaseline }), { path: CHAIN, made: false, baseline: null, warnings: [] })
+  assert.deepEqual(verbsOf(argvs), ['worktree list'])
+  assert.equal(baselines.length, 1)
+})
+
+test("orca-cli: a chain create answered too late is taken up as made, with a warning and no baseline, its setup maybe still running", async () => {
+  const { orca } = chainCli(() => { throw new OrcaError('call_timeout', 'killed after 120s', 'worktree create') })
+  const baselines = []
+  const r = await orca.chainWorktree({ runId: 'run_1', onBaseline: (b) => baselines.push(b) })
+  assert.deepEqual([r.path, r.made, r.baseline, r.warnings.length, baselines], [CHAIN, true, null, 1, []])
+})
+
+test("orca-cli: a worker started in the chain runs its terminal there, making and setting no worktree, and a failed start never names the chain as its own", async () => {
+  const { argvs, orca } = chainCli()
+  const w = await orca.workerStart({ ...START, harness: 'claude', chain: CHAIN })
+  assert.deepEqual(verbsOf(argvs), ['terminal create', 'terminal wait', 'orchestration worker-start'])
+  assert.deepEqual([flag(argvs[0], '--worktree'), flag(argvs[2], '--worktree'), w.worktree], [`path:${CHAIN}`, `path:${CHAIN}`, CHAIN])
+  const { orca: failing } = recordingCli({ 'orchestration worker-start': () => { throw new OrcaError('boom', '', 'orchestration worker-start') } })
+  const e = await failing.workerStart({ ...START, harness: 'claude', chain: CHAIN }).catch((x) => x)
+  assert.deepEqual([e.code, e.worktree, e.dispatched], ['boom', undefined, true])
 })
 
 test("orca-cli: the Run mailbox is checked from the runner's own terminal, each message tied to its dispatch by its payload, and an ack is answered with the next batch", async () => {
