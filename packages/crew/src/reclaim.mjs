@@ -8,6 +8,9 @@
 //   - a worktree holding unpushed commits is removed only when forced;
 //   - a worktree is the run's only by its `<runId>-<n>` name — any other is
 //     the operator's own, and never touched;
+//   - a sequential run's `<runId>-chain` (ADR-0020) is the run's, never one
+//     agent's: reclaiming its agents leaves it, and only reclaiming the whole
+//     run once it has ended, every agent of it reclaimed, removes it;
 //   - reclaiming releases the worker, closes its tab if Orca's terminal list
 //     still shows it, and removes its worktree.
 import { madeByRun, readJournal } from './journal.mjs'
@@ -43,9 +46,24 @@ export function agentsOf(journalPath) {
   }))
 }
 
-// The worktree reclaim may remove, and the run view may show: one the run
-// created, by its name.
-export const ownWorktree = (a) => (a.worktree && worktreeName(a.worktree).startsWith(`${a.runId}-`) ? a.worktree : null)
+// The worktree the run view may show: one the run created, by its name.
+export const runWorktree = (a) => (a.worktree && worktreeName(a.worktree).startsWith(`${a.runId}-`) ? a.worktree : null)
+
+// The worktree an agent's reclaim may remove: one the run created for that
+// agent alone, never the chain its sequential run shares.
+export const ownWorktree = (a) => (runWorktree(a) && worktreeName(a.worktree) !== `${a.runId}-chain` ? a.worktree : null)
+
+// A refusal while `worktree` holds commits no remote has, unless `force`.
+async function heldBack(worktree, { unpushed, force }) {
+  if (force) return null
+  let ahead
+  try {
+    ahead = await unpushed(worktree)
+  } catch (e) {
+    return { reason: `could not tell whether ${worktree} holds unpushed commits: ${e?.message ?? e}` }
+  }
+  return ahead > 0 ? { reason: `${worktree} holds ${ahead} unpushed commit${ahead === 1 ? '' : 's'}; only a forced reclaim removes it`, unpushed: ahead } : null
+}
 
 // The name the run registry records an agent's reclaim under. Only a journal
 // whose take-up never carried its origin leaves the worktree's name as the one
@@ -90,15 +108,8 @@ export async function reclaimAgent(agent, { host, unpushed = worktreeUnpushed, f
     }
   }
   const worktree = ownWorktree(agent)
-  if (worktree && !force) {
-    let ahead
-    try {
-      ahead = await unpushed(worktree)
-    } catch (e) {
-      return refuse(`could not tell whether ${worktree} holds unpushed commits: ${e?.message ?? e}`)
-    }
-    if (ahead > 0) return { ...refuse(`${worktree} holds ${ahead} unpushed commit${ahead === 1 ? '' : 's'}; only a forced reclaim removes it`), unpushed: ahead }
-  }
+  const held = worktree && (await heldBack(worktree, { unpushed, force }))
+  if (held) return { ...refuse(held.reason), ...(held.unpushed && { unpushed: held.unpushed }) }
   let tabs = open
   if (agent.terminal && !tabs) {
     try {
@@ -141,15 +152,34 @@ export async function reclaimAgent(agent, { host, unpushed = worktreeUnpushed, f
   return { reclaimed: true, notes }
 }
 
+// Removes a sequential run's chain worktree, `chain` the journal's
+// { runId, worktree }: { reclaimed: true, notes } or { reclaimed: false,
+// reason }, `unpushed` as an agent's. Only once every agent of its run is
+// reclaimed, so none is still at work in it: the caller sees to that. One
+// already gone is reclaimed.
+export async function reclaimChain(chain, { host, unpushed = worktreeUnpushed, force = false }) {
+  const held = await heldBack(chain.worktree, { unpushed, force })
+  if (held) return { reclaimed: false, ...held }
+  try {
+    await host.worktreeRemove({ path: chain.worktree })
+  } catch (e) {
+    if (e?.code !== 'selector_not_found') return { reclaimed: false, reason: `its worktree ${chain.worktree} was not removed: ${e?.message ?? e}`, ...(hostUnreachable(host, e) && { unreachable: true }) }
+  }
+  return { reclaimed: true, notes: [] }
+}
+
 // Reclaims a run's agents, one at a time, except those `keep(agent)` names a
 // reason to keep. Each reclaim is appended to the run registry (`registry`, a
 // runRegistry writer, or null); once no agent of a run is left, so is the whole
 // run, unless `closeRun` is false: a run that may still start agents must stay
 // open, since no registry entry undoes a whole-run reclaim. A registry write
-// that fails is reported through `out`, never thrown.
+// that fails is reported through `out`, never thrown. `chain`, the journal's
+// chain of a sequential run, is removed with the run it closes, and kept as
+// `{ agent: { runId, title, chain: true }, reason }` while any agent of it is
+// kept or it is refused, which keeps the run open too.
 // Returns { reclaimed: [agent], kept: [{ agent, reason }] }, a kept one also
 // `unreachable` when Orca was not there to reclaim it.
-export async function reclaimRun(agents, { host, unpushed = worktreeUnpushed, force = false, keep = () => null, registry = null, closeRun = true, out = () => {} }) {
+export async function reclaimRun(agents, { host, unpushed = worktreeUnpushed, force = false, keep = () => null, registry = null, closeRun = true, chain = null, out = () => {} }) {
   const record = (entry) => {
     try {
       registry?.reclaimed(entry)
@@ -182,7 +212,12 @@ export async function reclaimRun(agents, { host, unpushed = worktreeUnpushed, fo
     reclaimed.push(agent)
     record({ runId: agent.runId, agent: agent.name })
   }
-  if (closeRun) for (const runId of new Set(agents.map((a) => a.runId))) {
+  if (chain && closeRun) {
+    const agent = { runId: chain.runId, title: worktreeName(chain.worktree), chain: true }
+    const r = kept.some((k) => k.agent.runId === chain.runId) ? { reason: 'an agent of its run was kept' } : await reclaimChain(chain, { host, unpushed, force })
+    if (!r.reclaimed) kept.push({ agent, reason: r.reason, ...(r.unreachable && { unreachable: true }), ...(r.unpushed && { unpushed: r.unpushed }) })
+  }
+  if (closeRun) for (const runId of new Set([...agents.map((a) => a.runId), ...(chain ? [chain.runId] : [])])) {
     if (!kept.some((k) => k.agent.runId === runId)) record({ runId })
   }
   return { reclaimed, kept }

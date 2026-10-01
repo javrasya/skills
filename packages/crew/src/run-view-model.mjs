@@ -11,10 +11,10 @@ import { basename, dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { sessionTranscripts } from './transcript.mjs'
 import { pathKey, samePath } from './paths.mjs'
-import { agentName, agentsOf, ownWorktree, reclaimAgent, reclaimRun } from './reclaim.mjs'
-import { foldJournal, journalLines, timeOf } from './journal.mjs'
+import { agentName, agentsOf, reclaimAgent, reclaimChain, reclaimRun, runWorktree } from './reclaim.mjs'
+import { foldJournal, journalLines, readJournal, timeOf } from './journal.mjs'
 import { REGISTRY_PATH, readRegistry, runRegistry } from './registry.mjs'
-import { worktreeUnpushed } from './git.mjs'
+import { worktreeName, worktreeUnpushed } from './git.mjs'
 import { hostUnreachable } from './session-host.mjs'
 import { isOrchestratorTitle } from './orchestrator.mjs'
 import { haltNoticeOf, readTriage } from './triage.mjs'
@@ -189,8 +189,9 @@ function latestEvent(path) {
 // waiting, nextAt, workerLeft, patient, round, doctors, tabOpen, reclaimed, context, band, tokens,
 // elapsedMs, transcript }. state is one of STATES: reclaimed once the registry
 // records it so, whatever it was before. worktree
-// is only ever one named `<runId>-<n>`: any other, the run's own checkout
-// included, is the operator's and never shown. tabOpen
+// is only ever one named `<runId>-<n>`, or a sequential run's `<runId>-chain`
+// its agents share: any other, the run's own checkout included, is the
+// operator's and never shown. tabOpen
 // is whether Orca's terminal list shows its tab, never what its worker's
 // state says: Orca marks every tab the runner launched retained for good. It
 // is null when the agent has no tab or the list could not be read. context,
@@ -223,6 +224,9 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   let phases = []
   // The superseded attempts: no row, but Reclaim All's.
   let superseded = []
+  // A sequential run's chain worktree, as the journal names it: Reclaim All's
+  // alone (ADR-0020).
+  let chain = null
   let header = null
   let selectedKey = null
   let selected = 0
@@ -232,8 +236,8 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   let latest = null
   let alert = null
   let logTab = null
-  // null, { kind: 'choose', highlight }, or { kind: 'confirm', n, title,
-  // lines, confirm, queue }: queue holds the confirmations still to ask after
+  // null, { kind: 'choose', highlight }, or { kind: 'confirm', n, chain, title,
+  // lines, confirm, queue }, chain true when it confirms the chain worktree's: queue holds the confirmations still to ask after
   // this one, each a reclaim's answer.
   let dialog = null
   let halt = null
@@ -295,6 +299,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     const entries = journalLines(journalPath)
     latest = latestEvent(join(stateDir, 'runner.log'))
     const fold = foldJournal(entries)
+    chain = fold.chain
     const every = agentsIn(fold)
     const agents = every.filter((a) => !a.superseded)
     const now = clock.now()
@@ -319,7 +324,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
       const reclaimed = !!a.runId && (run?.reclaimed === true || reclaimedNames.has(agentName(a)))
       Object.assign(a, {
         ...(reclaimed && { state: 'reclaimed' }),
-        worktree: ownWorktree(a),
+        worktree: runWorktree(a),
         tabOpen: a.terminal && open ? open.has(a.terminal) : null,
         reclaimed,
         context: usage?.context ?? null,
@@ -506,6 +511,20 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     return { ...say(`reclaimed ${what}${withDoctors(r ? doctors.reclaimed.length : 0)}${notes.length ? `; ${notes.join('; ')}` : ''}`), reclaim: r, agent: target, ...also }
   }
 
+  // Reclaim All's last step on a sequential run, every agent of it reclaimed:
+  // its chain worktree, as `reclaim` answers for an agent.
+  async function reclaimTheChain({ force = false } = {}) {
+    const target = { n: null, title: worktreeName(chain.worktree), chain: true }
+    let r
+    try {
+      r = await reclaimChain({ ...chain, runId: chain.runId ?? header?.runId }, { host, unpushed, force })
+    } catch (e) {
+      r = { reclaimed: false, reason: e?.message ?? String(e) }
+    }
+    if (!r.reclaimed) return { ...say(r.unreachable ? HOST_GONE : `kept ${target.title}: ${r.reason}`), reclaim: r, agent: target }
+    return { ...say(`reclaimed ${target.title}`), reclaim: r, agent: target }
+  }
+
   // The confirmation a refused reclaim `res` asks for, as the dialog, or null:
   // `f` stops the worker of an agent kept running when it failed (stop), or
   // removes a worktree that holds unpushed commits (force). `confirmed` is
@@ -514,7 +533,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   function confirmationOf(res, confirmed = {}) {
     const r = res?.reclaim
     if (!res?.agent || !r || r.reclaimed) return null
-    const about = { kind: 'confirm', n: res.agent.n, title: `Reclaim ${res.agent.title}?` }
+    const about = { kind: 'confirm', n: res.agent.n, chain: res.agent.chain === true, title: `Reclaim ${res.agent.title}?` }
     if (r.stoppable && !confirmed.stop) return { ...about, confirm: { ...confirmed, stop: true }, lines: [r.reason, '', 'f = stop its worker, then reclaim it · any other key cancels'] }
     if (r.unpushed > 0 && !confirmed.force) return { ...about, confirm: { ...confirmed, force: true }, lines: [r.reason, '', 'f = force the reclaim, and those commits are lost · any other key cancels'] }
     return null
@@ -552,7 +571,8 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
       return { ...res, option: option.id }
     }
     const list = chosen(option.id, row)
-    if (!list.length) return { ...say(`${what}: no agent left to reclaim`), option: option.id, reclaimed: [], kept: [] }
+    const withChain = option.id === 'all' && !!chain
+    if (!list.length && !withChain) return { ...say(`${what}: no agent left to reclaim`), option: option.id, reclaimed: [], kept: [] }
     const total = list.reduce((n, a) => n + 1 + doctorsOf(a).length, 0)
     const reclaimed = []
     const kept = []
@@ -568,11 +588,19 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
       if (r) put({ n: a.n, title: a.title }, r)
       for (const { agent, reclaim: dr } of [...doctors.reclaimed, ...doctors.kept]) put(agent, dr)
     }
-    if (reclaimed.length) await refresh()
+    // The chain goes last, and only with no agent kept: one kept may still be at work in it.
+    let chainGone = false
+    if (withChain) {
+      const res = kept.length ? null : await reclaimTheChain()
+      if (res?.reclaim.reclaimed) chainGone = true
+      else kept.push({ agent: { n: null, title: worktreeName(chain.worktree), chain: true }, reclaim: res?.reclaim ?? { reclaimed: false, reason: 'an agent of the run was kept' } })
+    }
+    if (reclaimed.length || chainGone) await refresh()
     dialog = nextConfirmation(kept)
     const asked = kept.filter((k) => confirmationOf(k)).length
     const text = kept.some((k) => k.reclaim.unreachable) ? `${HOST_GONE}; reclaimed ${reclaimed.length} of ${total} before it went` : [
       `reclaimed ${reclaimed.length} of ${total} agent${total === 1 ? '' : 's'} of ${what}`,
+      ...(chainGone ? [`removed ${worktreeName(chain.worktree)}`] : []),
       ...kept.filter((k) => !confirmationOf(k)).map(({ agent, reclaim: r }) => `kept ${agent.title}: ${r.reason}`),
       ...(asked ? [`${asked} to confirm`] : []),
       ...notes,
@@ -583,13 +611,13 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   // A key while the dialog is open: the tree takes none.
   async function dialogKey(name) {
     if (dialog.kind === 'confirm') {
-      const { n, confirm, queue, title } = dialog
+      const { n, chain: ofChain, confirm, queue, title } = dialog
       dialog = null
       if (name !== 'f') {
         dialog = nextConfirmation(queue)
         return say(`${title.replace(/^Reclaim (.*)\?$/, '$1')}: reclaim cancelled`)
       }
-      const res = await reclaim({ n, ...confirm })
+      const res = ofChain ? await reclaimTheChain(confirm) : await reclaim({ n, ...confirm })
       const again = confirmationOf(res, confirm)
       dialog = again ? { ...again, queue: [...(res.doctors?.kept ?? []), ...queue] } : nextConfirmation([...(res.doctors?.kept ?? []), ...queue])
       layout()
@@ -923,9 +951,11 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
     try {
       const done = new Set(readRegistry(registry).find((e) => e.runId === runId)?.reclaimedAgents.map((a) => a.agent) ?? [])
       left = run.runDir ? agentsOf(join(run.runDir, 'journal.jsonl')).filter((a) => a.runId === runId && !done.has(a.name)) : []
+      const ran = run.runDir ? readJournal(join(run.runDir, 'journal.jsonl')).chain : null
+      const chained = ran && { ...ran, runId: ran.runId ?? runId }
       const writer = runRegistry(registry, clock)
-      r = await reclaimRun(left, { host: hostOf(run.host), unpushed, registry: writer, closeRun: !stays, out: (s) => notes.push(s.replace(/^!! /, '')) })
-      if (!left.length && !stays) writer.reclaimed({ runId })
+      r = await reclaimRun(left, { host: hostOf(run.host), unpushed, registry: writer, closeRun: !stays, chain: chained?.runId === runId ? chained : null, out: (s) => notes.push(s.replace(/^!! /, '')) })
+      if (!left.length && !stays && !r.kept.length && !(chained?.runId === runId)) writer.reclaimed({ runId })
     } catch (e) {
       return say(`could not reclaim ${label}: ${e?.message ?? e}`)
     }
