@@ -363,6 +363,57 @@ test('daemon: a real pty parked and entered again runs its resume line and shows
   }
 })
 
+test('daemon: after a restart every agent session comes back under its old id, parked, its env never on disk; a working one shows hostDied for its runner to continue, and entering any resumes it with crew\'s env', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const registry = join(dir, 'runs.jsonl')
+  const spawned = []
+  const spawnSession = quietSession(spawned, new Map())
+  const exits = []
+  await startDaemon({ paths, registry, spawnSession, parkAfterMs: 0, exit: () => exits.push(1), log: () => {} })
+  const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c', runner: null })
+  const worker = async (name, outcome) => {
+    const { session } = await request(paths, { op: 'session.spawn', command: ['claude', '--session-id', `uuid-${name}`, '--model', 'opus'], cwd: join(dir, name), env: { SECRET: 's3cret' }, title: name })
+    const { worker: w } = await request(paths, { op: 'run.worker', run: run.id, session: session.id, coordinator: 'c' })
+    if (outcome) await request(paths, { op: 'mail.send', taskId: w.taskId, dispatchId: session.id, capability: w.capability, type: 'worker_done', outcome })
+    return session.id
+  }
+  const done = await worker('done', 'succeeded')
+  const failed = await worker('failed', 'failed')
+  const working = await worker('working', null)
+  const closed = await worker('closed', 'succeeded')
+  const { session: plain } = await request(paths, { op: 'session.spawn', command: ['node', 'tail.mjs'], cwd: dir })
+  await request(paths, { op: 'session.rename', id: done, title: 'done, renamed' })
+  await request(paths, { op: 'session.close', id: closed })
+  await request(paths, { op: 'stop', force: true })
+  await until('the first daemon to stop', () => exits.length === 1)
+  assert.doesNotMatch(readFileSync(join(paths.home, 'runs.json'), 'utf8'), /s3cret/, 'no session env on disk')
+
+  spawned.length = 0
+  const second = await startDaemon({ paths, registry, spawnSession, parkAfterMs: 0, exit: () => {}, log: () => {} })
+  try {
+    const { sessions } = await request(paths, { op: 'session.list' })
+    assert.deepEqual(sessions.map((s) => s.id).sort(), [done, failed, working].sort(), 'every agent session but the closed one; no session of no dispatch')
+    const of = (id) => sessions.find((s) => s.id === id)
+    assert.deepEqual([of(done).title, of(done).cwd, of(done).command, of(done).alive, of(done).parked], ['done, renamed', join(dir, 'done'), ['claude', '--session-id', 'uuid-done', '--model', 'opus'], false, true])
+    assert.equal(spawned.length, 0, 'no harness started until someone enters')
+    const show = async (id) => (await request(paths, { op: 'worker.show', id })).worker
+    assert.deepEqual(await show(working), { settled: false, outcome: null, gone: true, exited: false, waiting: null, terminal: working, hostDied: true })
+    assert.deepEqual([(await show(done)).settled, (await show(done)).gone, (await show(failed)).outcome], [true, false, 'failed'])
+
+    for (const id of [done, working]) (await enterSession(paths, { id }, () => {})).socket.destroy()
+    const [a, b] = spawned
+    assert.deepEqual([a.id, a.command, a.cwd], [done, ['claude', '--resume', 'uuid-done', '--model', 'opus'], join(dir, 'done')])
+    assert.deepEqual([a.env.CREW_SESSION, a.env.CREW_HOST, a.env.CREW_HOME, a.env.CLAUDE_CODE_DISABLE_AGENT_VIEW, a.env.SECRET], [done, 'crew', paths.home, '1', undefined])
+    assert.equal(b.id, working)
+    // Revived, a working agent is a live session again: its runner watches it, nothing to continue.
+    assert.deepEqual([(await show(working)).gone, (await show(working)).hostDied], [false, undefined])
+  } finally {
+    second.shutdown('test over')
+  }
+})
+
 test('daemon: one that died with a run live is followed by one that starts its runner again; a worker lost with it shows hostDied, one that ended before does not, and stop names the live run', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
   const paths = crewPaths({ CREW_HOME: join(dir, 'home') })

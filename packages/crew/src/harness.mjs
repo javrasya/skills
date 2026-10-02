@@ -93,6 +93,10 @@ export const nativeEnv = (env) => Object.fromEntries(Object.entries(env).filter(
 // macOS and Windows; pi reads nothing of it.
 export const HOSTED_ENV = { CLAUDE_CODE_DISABLE_AGENT_VIEW: '1' }
 
+// The environment a crew-hosted harness runs in: `env` without the marks of
+// any session it was started from, crew's own on top, and its session's id.
+export const crewSessionEnv = (env, { home, session = null }) => ({ ...nativeEnv(env), ...HOSTED_ENV, CREW_HOST: 'crew', CREW_HOME: home, ...(session != null && { CREW_SESSION: session }) })
+
 const settingsOf = (path) => {
   try {
     const s = JSON.parse(readFileSync(path, 'utf8'))

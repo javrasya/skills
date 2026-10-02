@@ -25,6 +25,33 @@ export function ensureSpawnHelper() {
 }
 ensureSpawnHelper()
 
+// An agent's session an earlier daemon held, restored with no program: its
+// record only, until entering it starts its harness again (daemon.mjs).
+export function restoredSession({ id, command, cwd, cols = 120, rows = 30, title = null }) {
+  return {
+    id,
+    info: () => ({ id, title, command, cwd, pid: null, cols, rows, alive: false, exit: null, quietMs: null, restored: true }),
+    rename(to) {
+      title = to
+    },
+    screen: async () => ({ lines: Array(rows).fill(''), cursor: { x: 0, y: 0 }, alternate: false }),
+    write() {
+      throw new Error(`session ${id} has no program until it is entered`)
+    },
+    paste() {
+      throw new Error(`session ${id} has no program until it is entered`)
+    },
+    resize(c, r) {
+      cols = c
+      rows = r
+    },
+    onData: () => () => {},
+    onExit() {},
+    enter: () => () => {},
+    kill() {},
+  }
+}
+
 // conpty finds a bare name on Path only with its extension given, so a
 // Windows command is looked up first (command.mjs).
 export function ptySession({ id, command, cwd, env, cols = 120, rows = 30, title = null }) {

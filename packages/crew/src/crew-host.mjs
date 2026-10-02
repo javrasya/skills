@@ -18,7 +18,7 @@ import { fileURLToPath } from 'url'
 import { crewPaths } from './daemon/transport.mjs'
 import { daemonGone, ensureDaemon, request } from './daemon/client.mjs'
 import { runnerCommand } from './daemon/runs.mjs'
-import { HOSTED_ENV, launchedSession, launchWords, nativeEnv, resumeWords } from './harness.mjs'
+import { crewSessionEnv, launchedSession, launchWords, resumeWords } from './harness.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { SCREENS, readScreen, readsReady } from './screens.mjs'
 import { CLAUDE_HOOK_EVENTS } from './waiting.mjs'
@@ -125,7 +125,7 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
   // The crew session this adapter's runner runs in, if any: the daemon starts
   // it again, resuming its Run, should the daemon die under it.
   const runner = env.CREW_SESSION ?? null
-  const sessionEnv = { ...nativeEnv(env), ...HOSTED_ENV, CREW_HOST: 'crew', CREW_HOME: paths.home }
+  const sessionEnv = crewSessionEnv(env, { home: paths.home })
   const bound = { ms: callMs }
   let daemon = null
   let outage = null

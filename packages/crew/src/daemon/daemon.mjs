@@ -54,7 +54,7 @@ import { connect, crewPaths, lineDecoder, noDaemon, send } from './transport.mjs
 import { runBook, runnerCommand, runnerTitle } from './runs.mjs'
 import { REGISTRY_PATH } from '../registry.mjs'
 import { pathKey } from '../paths.mjs'
-import { resumedCommand } from '../harness.mjs'
+import { crewSessionEnv, resumedCommand } from '../harness.mjs'
 import { PARK_AFTER_MS, readCrewConfig } from '../crew-config.mjs'
 import { sleep } from '../util.mjs'
 
@@ -122,9 +122,10 @@ const runKey = (dir) => pathKey(dir)
 // are; a lost runner still running after `runnerGoneMs` (a pty's children may
 // trail their owner by a moment) is left alone, never run twice. parkAfterMs:
 // crew's config's unless given, 0 for never; looked for every `parkSweepMs`.
-export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PATH, liveRuns = null, spawnSession, exit = (code) => process.exit(code), log: say = log, runnerGoneMs = 10_000, parkAfterMs = null, parkSweepMs = 30_000 } = {}) {
+export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PATH, liveRuns = null, spawnSession, restoreSession, exit = (code) => process.exit(code), log: say = log, runnerGoneMs = 10_000, parkAfterMs = null, parkSweepMs = 30_000 } = {}) {
   parkAfterMs ??= configuredParkAfterMs(paths, say)
   const open = spawnSession ?? (await import('./session.mjs')).ptySession
+  const restore = restoreSession ?? (await import('./session.mjs')).restoredSession
   const sessions = new Map()
   const book = runBook({ sessions, file: paths.runs ?? join(paths.home, 'runs.json'), registry })
   liveRuns ??= book.liveRuns
@@ -185,6 +186,7 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
     const session = waitsOn(open({ id, ...spec }))
     sessions.set(id, session)
     spawnedWith.set(id, spec)
+    book.spawned(id, spec)
     book.started(id)
     // A session a stopping daemon ends died with the daemon, as in a crash.
     // A parked one revived before its old program's exit came in is the new
@@ -301,6 +303,7 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
     'session.rename': ({ id, title }) => {
       const session = sessionOf(id)
       session.rename(text(title, 'title'))
+      book.renamed(session.id, title)
       return { session: session.info() }
     },
     'session.kill': ({ id }) => {
@@ -401,6 +404,20 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
       }
     })
   })
+
+  // Every agent session the last daemon held comes back parked, under its
+  // own id: entering it resumes its harness (#164). Its env was never kept,
+  // so it runs in this daemon's, with crew's own on top. One with no session
+  // to resume is forgotten.
+  for (const { id, command, cwd, title } of book.restorable()) {
+    if (!resumedCommand(command)) {
+      book.closed(id)
+      continue
+    }
+    sessions.set(id, waitsOn(restore({ id, command, cwd, title })))
+    spawnedWith.set(id, { command, cwd, title, env: crewSessionEnv(process.env, { home: paths.home, session: id }) })
+    parked.add(id)
+  }
 
   // Claimed before the first request can be answered: a runner started for one
   // of these by anyone else meanwhile would be its second.

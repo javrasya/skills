@@ -79,6 +79,9 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
   const runs = new Map()
   const dispatches = new Map()
   const statuses = new Map()
+  // Session id -> { command, cwd, title }: what an agent's session ran, so the
+  // next daemon can bring it back. Never its env, which holds the person's keys.
+  const specs = new Map()
   let messages = 0
   let deliveries = 0
   let nextSession = 1
@@ -97,6 +100,9 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
     for (const r of kept.runs ?? []) if (!r.orchestrator) runs.set(r.id, { ...r, acked: new Set(r.acked) })
     for (const d of kept.dispatches ?? []) if (runs.has(d.run)) dispatches.set(d.id, d)
     for (const [path, status] of Object.entries(kept.statuses ?? {})) statuses.set(path, status)
+    // Only an agent's session comes back: one of no dispatch was a log tail
+    // or a runner, which is started again its own way, or not at all.
+    for (const [id, spec] of Object.entries(kept.sessions ?? {})) if (dispatches.has(id)) specs.set(id, spec)
     ;({ messages = 0, deliveries = 0, nextSession = 1 } = kept)
     died = new Set(kept.running ?? [])
   }
@@ -104,7 +110,7 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
     if (!file) return
     const book = {
       runs: [...runs.values()].map((r) => ({ ...r, acked: [...r.acked] })), dispatches: [...dispatches.values()],
-      statuses: Object.fromEntries(statuses), messages, deliveries, nextSession, running: [...running, ...died],
+      statuses: Object.fromEntries(statuses), sessions: Object.fromEntries(specs), messages, deliveries, nextSession, running: [...running, ...died],
     }
     // Whole or not at all: a daemon killed mid-write must not lose the book.
     writeJsonAtomic(file, book)
@@ -127,9 +133,13 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
   }
   const shown = (r) => ({ id: r.id, coordinator: r.coordinator })
 
+  // An unsettled agent's session restored from an earlier daemon and not yet
+  // revived is, to its runner, the session that daemon lost: gone, its host died, so the runner
+  // continues it as it would one never restored.
   const show = (d) => {
     const s = sessions.get(d.id)?.info() ?? null
-    return { settled: d.settled, outcome: d.outcome, gone: !s, exited: !!s && !s.alive, waiting: s?.waiting ?? null, terminal: d.id, ...(!s && !d.settled && died.has(d.id) && { hostDied: true }) }
+    const lost = !s || (!!s.restored && !s.alive && !d.settled)
+    return { settled: d.settled, outcome: d.outcome, gone: lost, exited: !lost && !s.alive, waiting: s?.waiting ?? null, terminal: d.id, ...(lost && !d.settled && died.has(d.id) && { hostDied: true }) }
   }
 
   const ops = {
@@ -265,9 +275,23 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
     ended(id) {
       if (running.delete(id)) save()
     },
-    // Session `id` is closed: the orchestrator Run it was a dispatch of goes,
-    // once no session of it is left.
+    // What session `id` runs, kept for the next daemon; its title as renamed.
+    spawned(id, { command, cwd, title }) {
+      specs.set(id, { command, cwd, title })
+      save()
+    },
+    renamed(id, title) {
+      if (!specs.has(id)) return
+      specs.get(id).title = title
+      save()
+    },
+    // The agent sessions an earlier daemon held and never closed: { id,
+    // command, cwd, title }.
+    restorable: () => [...specs].map(([id, spec]) => ({ id, ...spec })),
+    // Session `id` is closed: forgotten, and the orchestrator Run it was a
+    // dispatch of goes, once no session of it is left.
     closed(id) {
+      if (specs.delete(String(id))) save()
       const r = runs.get(dispatches.get(String(id))?.run)
       if (!r?.orchestrator) return
       const own = [...dispatches.values()].filter((d) => d.run === r.id)
