@@ -241,7 +241,7 @@ function dialogBox(d, mw) {
     o.disabled ? c('100;90', fit(`   ${o.label} — ${o.reason}`, mw))
       : i === d.highlight ? c('7', fit(` ▸ ${o.label} — ${o.detail}`, mw))
       : plain(`  ${o.label} — ${o.detail}`))
-  return { box: [head, ...options, plain(''), plain('↑↓ or the mouse moves · Enter reclaims · Esc closes'), plain('')], first: 1 }
+  return { box: [head, ...options, plain(''), plain(`↑↓ or the mouse moves · Enter ${d.verb ?? 'reclaims'} · Esc closes`), plain('')], first: 1 }
 }
 
 // model: runView's model, its dialog drawn over the middle, and its halt, while
@@ -256,7 +256,7 @@ function dialogBox(d, mw) {
 // optionAt(y), the index of the dialog's option drawn there, or null; and
 // scrolling, whether the selected row's name overflows, and so scrolls: the
 // screen changes with `now` alone only then.
-export function draw(model, { width: W = 140, height: H = 40, flash = null, alert = null, help = HELP, now = null } = {}) {
+export function draw(model, { width: W = 140, height: H = 40, flash = null, alert = null, help = HELP, helpOffset = 0, now = null } = {}) {
   const rows = model?.rows ?? []
   const selected = model?.selected ?? 0
   const body = Math.max(1, H - TOP - 1 - PANE - 2)
@@ -282,7 +282,9 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
   const paneLines = !pane ? [grey(' no agent has started yet')] : pane.kind === 'agent' ? agentPane(pane.agent) : phasePane(pane.phase, pane.problems)
   for (let i = 0; i < PANE; i++) lines.push(fit(paneLines[i] ?? '', W))
   lines.push(fit(flash ? ' ' + c('1;36', flash) : alert ? ' ' + c(COLOUR[alert.startsWith('NEEDS YOU') ? 'needs you' : 'blocked'], alert) : '', W))
-  lines.push(fit(grey(help), W))
+  const key = helpLine(help, W, helpOffset)
+  lines.push(fit(key.text, W))
+  const helpAt = Math.min(lines.length, H)
 
   const dialog = model?.dialog ?? null
   let optionsAt = null
@@ -298,6 +300,8 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
   }
   return {
     lines: lines.slice(0, H),
+    helpAt,
+    helpOffset: key.offset,
     scrolling,
     rowAt: (y) => {
       const i = top + (y - TOP - 1)
@@ -314,6 +318,20 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
 // --- standalone: every run the registry knows (runsView's model) ----------
 
 // The tree's key line once the standalone view opened it.
+// The key line, W wide, `offset` characters of it scrolled off to the left
+// when it is longer than the screen (a sideways scroll over it in `crew
+// view`): a ‹ where some is cut on the left, a › where some is cut on the
+// right. offset: the one taken, clamped to what the line has to show.
+export function helpLine(help, W, offset = 0) {
+  const chars = [...help]
+  if (chars.length <= W) return { text: grey(help), offset: 0 }
+  const at = Math.max(0, Math.min(offset, chars.length - (W - 1)))
+  const room = W - (at > 0 ? 1 : 0)
+  const cut = at + room < chars.length
+  const shown = chars.slice(at, at + room - (cut ? 1 : 0)).join('')
+  return { text: (at > 0 ? c('36', '‹') : '') + grey(shown) + (cut ? c('36', '›') : ''), offset: at }
+}
+
 export const TREE_HELP = ' ↑↓ move · ⏎/→/click focus tab · ⏎/click a phase to fold · ← back to the runs · Ctrl+R reclaim · l log · p pause · r resume · x remove'
 const RUNS_HELP = ' ↑↓ move · ⏎/→/click open a run · ←→ fold a project · Ctrl+R reclaim the run · p pause · r resume · x remove · q quit'
 
@@ -321,7 +339,7 @@ const RUNS_HELP = ' ↑↓ move · ⏎/→/click open a run · ←→ fold a pro
 // and comes back from one with `backKey`; an Orca run's agent is its tab.
 // `?` is crew's orchestrator whatever the run's host.
 export const consoleTreeHelp = (host, backKey) => host === 'crew'
-  ? ` ↑↓ move · ⏎/→/click enter · ${backKeyLabel(backKey)} out of a session · ← runs · Ctrl+R reclaim · l log · p pause · r resume · x remove · ? orchestrator`
+  ? ` ↑↓ move · ⏎/→/click enter · ${backKeyLabel(backKey)} out of a session · ← runs · Ctrl+R reclaim · Ctrl+P park · l log · p pause · r resume · x remove · ? orchestrator`
   : `${TREE_HELP} · ? orchestrator`
 export const consoleRunsHelp = (backKey) => `${RUNS_HELP} · ${backKeyLabel(backKey)} leaves an entered session`
 
@@ -359,7 +377,7 @@ function runPane(r) {
 
 // model: runsView's, with no run opened. As draw: the lines, and rowAt(y).
 // title: what the runs are, help: the key line.
-export function drawRuns(model, { width: W = 140, height: H = 40, flash = null, title = 'Orca runs', help = RUNS_HELP } = {}) {
+export function drawRuns(model, { width: W = 140, height: H = 40, flash = null, title = 'Orca runs', help = RUNS_HELP, helpOffset = 0 } = {}) {
   const rows = model?.rows ?? []
   const selected = model?.selected ?? 0
   const body = Math.max(1, H - TOP - 1 - PANE - 2)
@@ -387,9 +405,12 @@ export function drawRuns(model, { width: W = 140, height: H = 40, flash = null, 
     : [` ${bold(row.project.name)}  ${grey(row.project.path ?? '')}`, grey(`   ${count(row.project.runs.length, 'run')} · ${row.project.folded ? '→ / Enter to unfold' : '← / Enter to fold'}`)]
   for (let i = 0; i < PANE; i++) lines.push(fit(paneLines[i] ?? '', W))
   lines.push(fit(flash ? ' ' + c('1;36', flash) : '', W))
-  lines.push(fit(grey(help), W))
+  const key = helpLine(help, W, helpOffset)
+  lines.push(fit(key.text, W))
   return {
     lines: lines.slice(0, H),
+    helpAt: Math.min(lines.length, H),
+    helpOffset: key.offset,
     rowAt: (y) => {
       const i = top + (y - TOP - 1)
       return y > TOP && y <= TOP + body && i < rows.length ? i : null

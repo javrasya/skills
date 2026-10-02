@@ -22,6 +22,9 @@
 //   session.revive { id, cols, rows }      → { session }: a parked session's
 //     harness started again in place, on its resume line; any other left as
 //     it is. Its caller waits for the harness to be ready before typing
+//   session.park { id }                    → { session }: a done agent's
+//     session parked now, however recently it drew (the run tree's Ctrl+P);
+//     refused, naming why, for any other
 //   session.rename { id, title }           → { session }
 //   session.kill { id }                    → { session }: its program ends,
 //     the session and its last screen stay until closed
@@ -216,11 +219,14 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
 
   function parkIdle() {
     for (const [id, session] of sessions) {
-      if (!parkable(id, session)) continue
-      parked.add(id)
-      session.kill()
-      say(`session ${id} parked: its agent is done and was quiet ${Math.round(session.info().quietMs / 1000)}s`)
+      if (parkable(id, session)) park(id, session, `its agent is done and was quiet ${Math.round(session.info().quietMs / 1000)}s`)
     }
+  }
+
+  function park(id, session, why) {
+    parked.add(id)
+    session.kill()
+    say(`session ${id} parked: ${why}`)
   }
 
   // A parked session's harness again, on its resume line, in its own id, cwd
@@ -338,6 +344,16 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
     'session.resize': ({ id, cols, rows }) => {
       const session = sessionOf(id)
       session.resize(size(cols), size(rows))
+      return { session: session.info() }
+    },
+    'session.park': ({ id }) => {
+      const session = sessionOf(id)
+      if (!parked.has(session.id)) {
+        const i = session.info()
+        const why = !book.done(session.id) ? 'its agent is not done' : entered.get(session.id) ? 'someone has it entered' : !i.alive ? 'its program has ended' : !resumedCommand(i.command) ? 'it has no session to resume' : null
+        if (why) throw new Error(`session ${id} is not parked: ${why}`)
+        park(session.id, session, 'asked to')
+      }
       return { session: session.info() }
     },
     'session.revive': ({ id, cols, rows }) => {

@@ -226,6 +226,8 @@ term.on('mouse', (name, d) => {
     if (k === t.model.dialog.highlight) return
     return act(() => t.highlight(k))
   }
+  // The wheel moves the selection, as ↑↓ do.
+  if (name === 'MOUSE_WHEEL_UP' || name === 'MOUSE_WHEEL_DOWN') return act(async () => said(await top.key(name === 'MOUSE_WHEEL_UP' ? 'UP' : 'DOWN')))
   if (name !== 'MOUSE_LEFT_BUTTON_PRESSED') return
   const i = rowAt(d.y)
   if (i === null) return

@@ -441,6 +441,31 @@ test('daemon: session.revive starts a parked session\'s harness again in place a
   }
 })
 
+test('daemon: session.park parks a done agent\'s session at once, however recently it drew; anything else is refused, naming why', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const spawned = []
+  const daemon = await startDaemon({ paths, registry: join(dir, 'runs.jsonl'), spawnSession: quietSession(spawned, new Map([['done', 10], ['working', 10]])), parkAfterMs: 0, exit: () => {}, log: () => {} })
+  try {
+    const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c', runner: null })
+    const worker = async (name, outcome) => {
+      const { session } = await request(paths, { op: 'session.spawn', command: ['claude', '--session-id', `uuid-${name}`, name], cwd: dir })
+      const { worker: w } = await request(paths, { op: 'run.worker', run: run.id, session: session.id, coordinator: 'c' })
+      if (outcome) await request(paths, { op: 'mail.send', taskId: w.taskId, dispatchId: session.id, capability: w.capability, type: 'worker_done', outcome })
+      return session.id
+    }
+    const done = await worker('done', 'succeeded')
+    const working = await worker('working', null)
+    const { session: park } = await request(paths, { op: 'session.park', id: done })
+    assert.deepEqual([park.alive, park.parked], [false, true])
+    await request(paths, { op: 'session.park', id: done })
+    await assert.rejects(request(paths, { op: 'session.park', id: working }), /session \d+ is not parked: its agent is not done/)
+  } finally {
+    daemon.shutdown('test over')
+  }
+})
+
 test('daemon: one that died with a run live is followed by one that starts its runner again; a worker lost with it shows hostDied, one that ended before does not, and stop names the live run', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
   const paths = crewPaths({ CREW_HOME: join(dir, 'home') })

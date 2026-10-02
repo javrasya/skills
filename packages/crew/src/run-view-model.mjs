@@ -181,9 +181,9 @@ function latestEvent(path) {
 //           `latest` until it is answered; else null
 //   dialog  null, or what Ctrl+R opened, which takes every key and click until it
 //           closes (the tree keeps refreshing behind it):
-//           { kind: 'choose', title, options: [{ id, label, detail, disabled, reason }], highlight }
-//             the reclaim dialog, its options in RECLAIM_OPTIONS order and
-//             highlight the index of the one Enter takes
+//           { kind: 'choose', title, verb, options: [{ id, label, detail, disabled, reason }], highlight }
+//             the reclaim dialog (Ctrl+R), or the park dialog (Ctrl+P, crew
+//             only), highlight the index of the option Enter takes
 //           { kind: 'confirm', title, lines }
 //             a reclaim refused until the operator confirms it with `f`
 // An agent is { n, origin, label, title, phase, state, continuations, reason,
@@ -278,7 +278,20 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     return p && !p.reclaimed ? p : a
   }
   const withDoctors = (n) => (n ? `, with ${n === 1 ? 'its doctor' : `its ${n} doctors`}` : '')
-  function optionsFor(row) {
+  // The park dialog's options: Park Selected only while a done agent is
+  // selected, Park All Done always. An agent is parkable while its crew
+  // session runs: done, its session open, not parked yet (ADR-0024).
+  const parkable = (a) => a.state === 'done' && !!a.terminal && a.tabOpen === true && !a.parked
+  function parkOptions(row) {
+    const one = row?.kind === 'agent' && row.agent.state === 'done' ? row.agent : null
+    const n = agentsNow().filter(parkable).length
+    return [
+      ...(one ? [{ id: 'park-selected', label: 'Park Selected', detail: one.title, disabled: !parkable(one), reason: one.parked ? 'it is parked already' : 'its session is not running' }] : []),
+      { id: 'park-done', label: 'Park All Done', detail: `the ${n} done agent${n === 1 ? '' : 's'} with a running session`, disabled: false, reason: null },
+    ]
+  }
+  const optionsFor = (row) => (dialog?.of === 'park' ? parkOptions(row) : reclaimOptions(row))
+  function reclaimOptions(row) {
     const done = chosen('successful', row)
     const ended = header?.ended
     const one = row?.kind === 'agent' ? withPatient(row.agent) : null
@@ -296,7 +309,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     if (dialog.kind === 'confirm') return { kind: 'confirm', title: dialog.title, lines: dialog.lines }
     const options = optionsFor(row)
     if (options[dialog.highlight]?.disabled !== false) dialog.highlight = Math.max(0, options.findIndex((o) => !o.disabled))
-    return { kind: 'choose', title: 'Reclaim', options, highlight: dialog.highlight }
+    return dialog.of === 'park' ? { kind: 'choose', title: 'Park', verb: 'parks', options, highlight: dialog.highlight } : { kind: 'choose', title: 'Reclaim', options, highlight: dialog.highlight }
   }
 
   function layout() {
@@ -607,8 +620,10 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   async function accept() {
     const row = current()
     const option = optionsFor(row)[dialog.highlight]
+    const of = dialog.of
     dialog = null
     if (option.disabled) return say(`${option.label} is not available: ${option.reason}`)
+    if (of === 'park') return acceptPark(option.id === 'park-selected' ? [row.agent] : agentsNow().filter(parkable))
     if (option.id === 'selected' && !row) return say('select an agent or a phase to reclaim')
     const what = option.id === 'selected' ? (row.kind === 'agent' ? row.agent.title : row.phase.name) : option.id === 'successful' ? 'the done agents' : 'the run'
     if (option.id === 'selected' && row.kind === 'agent') {
@@ -658,6 +673,23 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     return { ...say(text), option: option.id, reclaimed, kept: kept.map(({ agent, reclaim: r }) => ({ agent, reason: r.reason })) }
   }
 
+  // Each agent parked in turn; one the daemon refuses is named with its reason.
+  async function acceptPark(list) {
+    let n = 0
+    const kept = []
+    for (const a of list) {
+      try {
+        await host.terminalPark({ terminal: a.terminal })
+        n++
+      } catch (e) {
+        if (hostUnreachable(host, e)) return say(HOST_GONE)
+        kept.push(`kept ${a.title}: ${e?.message ?? e}`)
+      }
+    }
+    if (n) await refresh()
+    return say([`parked ${n} of ${list.length} done agent${list.length === 1 ? '' : 's'}`, ...kept].join('; '))
+  }
+
   // A key while the dialog is open: the tree takes none.
   async function dialogKey(name) {
     if (dialog.act === 'remove') {
@@ -701,9 +733,11 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
       }
       case 'ENTER':
         return accept()
-      case 'ESCAPE':
+      case 'ESCAPE': {
+        const of = dialog.of
         dialog = null
-        return say('nothing reclaimed')
+        return say(of === 'park' ? 'nothing parked' : 'nothing reclaimed')
+      }
       default:
         return {}
     }
@@ -806,6 +840,12 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
       case 'CTRL_R':
         if (hostAway()) return say(HOST_GONE)
         dialog = { kind: 'choose', highlight: 0 }
+        layout()
+        return {}
+      case 'CTRL_P':
+        if (!host.terminalPark) return say('only crew parks agent sessions; this run is on Orca')
+        if (hostAway()) return say(HOST_GONE)
+        dialog = { kind: 'choose', of: 'park', highlight: 0 }
         layout()
         return {}
       case 'l':
