@@ -4965,6 +4965,39 @@ test('run console: a done agent whose crew session is parked keeps its done stat
   assert.equal(orca.agent(1).parked, false, 'a host that cannot park says nothing of it')
 })
 
+test('run console: Ctrl+P opens the park dialog, Park Selected only on a done agent, Park All Done parking every done agent\'s open session; Orca has none to park', async () => {
+  const { view, rowOf, host } = await viewedRun('console', { crew: true })
+  const parkedNow = new Set()
+  host.terminalsParked = async () => [...parkedNow]
+  host.terminalPark = async ({ terminal }) => { parkedNow.add(terminal) }
+  const press = pressOn(view)
+  await view.click(rowOf('phase:Discover'))
+  await view.click(rowOf('agent:1'))
+  await press('CTRL_P')
+  assert.equal(view.model.dialog.title, 'Park')
+  assert.deepEqual(view.model.dialog.options.map((o) => [o.id, o.label, o.detail]), [['park-selected', 'Park Selected', '[Discover] discover'], ['park-done', 'Park All Done', 'the 1 done agent with a running session']])
+  const drawn = draw(view.model, { width: 140, height: 30 }).lines.map(strip)
+  assert.ok(drawn.some((l) => /Enter parks · Esc closes/.test(l)), 'the dialog says what Enter does')
+  await press('ESCAPE')
+  assert.equal(view.model.dialog, null)
+
+  // On an agent that is not done, only Park All Done.
+  await view.click(rowOf('agent:3'))
+  await press('CTRL_P')
+  assert.deepEqual(view.model.dialog.options.map((o) => o.id), ['park-done'])
+  const res = await press('ENTER')
+  assert.deepEqual([...parkedNow], ['term_fake1'])
+  assert.match(res.message, /parked 1 of 1 done agent/)
+  assert.equal(view.model.phases[0].agents[0].parked, true)
+  // Nothing left to park.
+  await press('CTRL_P')
+  assert.match(view.model.dialog.options[0].detail, /the 0 done agents/)
+  await press('ESCAPE')
+
+  const orca = await viewedRun('console')
+  assert.match((await pressOn(orca.view)('CTRL_P')).message, /only crew parks/)
+})
+
 test('run console: a crew run\'s tree is its phases and agents, no runner row; Enter or a click on an agent answers its session to enter, brings no tab forward, and the selection stays on that row', async () => {
   const { view, rowOf, orca, after } = await viewedRun('console', { crew: true })
   const press = pressOn(view)
@@ -5119,7 +5152,7 @@ test('run console: the frames — no runner row, the key line naming the back ke
   const discover = lines.findIndex((l) => /▸ Discover/.test(l))
   assert.equal(screen.rowAt(discover + 1), 0, 'the first row is the first phase (rowAt takes a 1-based y)')
   assert.ok(!lines.some((l) => /runner {3}crew session|the runner {2}crew session/.test(l)), 'no runner row or pane')
-  assert.match(lines.at(-1), /⏎\/→\/click enter · F12 out of a session · ← runs · Ctrl\+R reclaim · l log · p pause · r resume · x remove · \? orchestrator/)
+  assert.match(lines.at(-1), /⏎\/→\/click enter · F12 out of a session · ← runs · Ctrl\+R reclaim · Ctrl\+P park · l log · p pause · r resume · x remove · \? orchestrator/)
   assert.equal(consoleTreeHelp('orca', 'f12'), `${TREE_HELP} · ? orchestrator`, 'an Orca run\'s agent is its tab; ? is crew\'s orchestrator whatever the host')
   const runs = listOf.get(view)
   await runs.key('q')

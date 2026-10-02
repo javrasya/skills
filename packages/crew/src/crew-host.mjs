@@ -426,6 +426,11 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     async terminalsParked() {
       return (await sessions()).filter((s) => s.parked).map((s) => s.id)
     },
+    // A done agent's session parked now (the run tree's Ctrl+P); the daemon
+    // refuses any other, naming why. Crew's own, beyond the interface.
+    async terminalPark({ terminal }) {
+      await call({ op: 'session.park', id: terminal })
+    },
     async terminalClose({ terminal }) {
       await call({ op: 'session.close', id: terminal })
     },

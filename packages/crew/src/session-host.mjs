@@ -49,7 +49,7 @@
 // orchestration send` (bin/crew.mjs; on Orca a worker sends with Orca's own
 // CLI, and fake-orca.mjs has one only to play a worker in the suite). The
 // contract suite checks the crew host has both.
-export const CREW_ONLY = Object.freeze(['sessionStart', 'mailSend', 'terminalsParked'])
+export const CREW_ONLY = Object.freeze(['sessionStart', 'mailSend', 'terminalsParked', 'terminalPark'])
 
 export const SESSION_HOST = Object.freeze([
   'unreachable', 'probe', 'guardWith',

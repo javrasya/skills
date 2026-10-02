@@ -241,7 +241,7 @@ function dialogBox(d, mw) {
     o.disabled ? c('100;90', fit(`   ${o.label} — ${o.reason}`, mw))
       : i === d.highlight ? c('7', fit(` ▸ ${o.label} — ${o.detail}`, mw))
       : plain(`  ${o.label} — ${o.detail}`))
-  return { box: [head, ...options, plain(''), plain('↑↓ or the mouse moves · Enter reclaims · Esc closes'), plain('')], first: 1 }
+  return { box: [head, ...options, plain(''), plain(`↑↓ or the mouse moves · Enter ${d.verb ?? 'reclaims'} · Esc closes`), plain('')], first: 1 }
 }
 
 // model: runView's model, its dialog drawn over the middle, and its halt, while
@@ -321,7 +321,7 @@ const RUNS_HELP = ' ↑↓ move · ⏎/→/click open a run · ←→ fold a pro
 // and comes back from one with `backKey`; an Orca run's agent is its tab.
 // `?` is crew's orchestrator whatever the run's host.
 export const consoleTreeHelp = (host, backKey) => host === 'crew'
-  ? ` ↑↓ move · ⏎/→/click enter · ${backKeyLabel(backKey)} out of a session · ← runs · Ctrl+R reclaim · l log · p pause · r resume · x remove · ? orchestrator`
+  ? ` ⏎/→/click enter · ${backKeyLabel(backKey)} out of a session · ← runs · Ctrl+R reclaim · Ctrl+P park · l log · p pause · r resume · x remove · ? orchestrator`
   : `${TREE_HELP} · ? orchestrator`
 export const consoleRunsHelp = (backKey) => `${RUNS_HELP} · ${backKeyLabel(backKey)} leaves an entered session`
 
