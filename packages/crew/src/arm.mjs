@@ -34,7 +34,7 @@ export function templatePath(candidates = TEMPLATES) {
   return found
 }
 
-export const PLACEHOLDERS = ['SPEC', 'REPO', 'REPO_DIR', 'NOTES_DIR', 'BASE_REF', 'STACK_MODE', 'RUN_ORDER', 'RUNNER', 'VALIDATION']
+export const PLACEHOLDERS = ['SPEC', 'REPO', 'REPO_DIR', 'NOTES_DIR', 'BASE_REF', 'START_REF', 'STACK_MODE', 'RUN_ORDER', 'RUNNER', 'VALIDATION']
 const PLACEHOLDER = new RegExp(`__(${PLACEHOLDERS.join('|')})__`, 'g')
 
 // SKILL.md step 3: substitute, never rewrite. One pass, so a value that
@@ -218,7 +218,7 @@ async function draftStep({ target, answers, orchestrate, paths, stdin, stdout, h
 export async function armRun({ target, answers, roles, newId, attempts = 5, template = readFileSync(templatePath(), 'utf8'), launch }) {
   const { spec, repo, repoDir, notesDir, title, validation } = target
   const render = (runFolder) => renderRoles(renderTemplate(template, {
-    SPEC: spec, REPO: repo, REPO_DIR: repoDir, NOTES_DIR: runFolder, BASE_REF: answers.base, STACK_MODE: answers.stackMode, RUN_ORDER: answers.runOrder, RUNNER: 'session', VALIDATION: validation,
+    SPEC: spec, REPO: repo, REPO_DIR: repoDir, NOTES_DIR: runFolder, BASE_REF: answers.base, START_REF: answers.startRef, STACK_MODE: answers.stackMode, RUN_ORDER: answers.runOrder, RUNNER: 'session', VALIDATION: validation,
   }), { runDefault: answers, roles })
   let runFolder, rendered
   for (let i = 1; ; i++) {
@@ -248,7 +248,7 @@ export class StartError extends Error {
   }
 }
 
-// `crew start <spec#> [--harness h] [--model m] [--base b] [--stack-mode s]
+// `crew start <spec#> [--harness h] [--model m] [--base b] [--start-ref r] [--stack-mode s]
 // [--run-order o] [--permission-mode p]`. With no terminal each row's flag is required, and so
 // is the spec's validation list, since nobody is there to confirm a draft of
 // one; at one, the form shows, pre-filled from the flags and the repo's

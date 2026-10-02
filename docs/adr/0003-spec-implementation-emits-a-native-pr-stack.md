@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-08-29. Amends ADR-0002, whose output shape (one PR per spec) this supersedes; everything else in ADR-0002 — the workflow script, the gate loop, the rejection ledger, the serial lane — stands.
+Accepted — 2026-08-29. Amends ADR-0002, whose output shape (one PR per spec) this supersedes; everything else in ADR-0002 — the workflow script, the gate loop, the rejection ledger, the serial lane — stands. Amended by ADR-0023: the layer-0 branch is named by the operator at arm time, never found by an agent.
 
 ## Context
 

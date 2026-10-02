@@ -8,7 +8,8 @@ const TPL = fileURLToPath(new URL('../skills/engineering/implement-spec-in-workf
 
 const SIM_CHECK = 'npm t'
 
-function render(runner, runOrder = 'parallel') {
+// `startRef` is the operator's prior work (ADR-0023): the base itself for none.
+function render(runner, runOrder = 'parallel', startRef = 'main') {
   let s = readFileSync(TPL, 'utf8')
   s = s
     .replace(/__SPEC__/g, '224')
@@ -16,6 +17,7 @@ function render(runner, runOrder = 'parallel') {
     .replace(/__REPO_DIR__/g, '/tmp/x')
     .replace(/__NOTES_DIR__/g, '/tmp/n')
     .replace(/__BASE_REF__/g, 'main')
+    .replace(/__START_REF__/g, startRef)
     .replace(/__STACK_MODE__/g, 'native')
     .replace(/__RUN_ORDER__/g, runOrder)
     .replace(/__RUNNER__/g, runner)
@@ -58,7 +60,7 @@ function completeToSchema(result, opts, label) {
   return filled
 }
 
-async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel' } = {}) {
+async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel', startRef = 'main' } = {}) {
   const calls = []
   const defaults = {
     graph: () => ({
@@ -66,7 +68,6 @@ async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel' 
         { number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' },
         { number: 11, title: 'T11', blocked_by: [10], needs_human: false, human_reason: '' },
       ],
-      start_ref: 'main',
       explorations: [{ label: 'area-a', question: 'q?' }],
     }),
     explore: () => ({ path: '/tmp/n/01-area-a.md', blockers: [] }),
@@ -85,7 +86,7 @@ async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel' 
     publish: (label, prompt) => {
       const n = label.match(/#(\d+)/)[1]
       const stack_link = /gh stack link [a-z]/.test(prompt) ? 'registered' : /stack_link: "skipped"/.test(prompt) ? 'skipped' : 'disabled'
-      return { published: true, pr_url: 'https://pr/' + n, pr_number: 100 + Number(n), conflicts_resolved: [], stack_link, note: '', worktree: '/wt/publish-' + n, worktrees_removed: 0, worktrees_kept: [] }
+      return { published: true, nothing_to_publish: false, pr_url: 'https://pr/' + n, pr_number: 100 + Number(n), conflicts_resolved: [], stack_link, note: '', worktree: '/wt/publish-' + n, worktrees_removed: 0, worktrees_kept: [] }
     },
     review: () => ({ findings: [] }),
     integration: () => ({ pr_url: 'https://pr/int', pr_number: 999, branch: 'spec/224-integration', worktree: '/wt/int', worktrees_removed: 0, worktrees_kept: [] }),
@@ -135,7 +136,7 @@ async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel' 
   const phase = () => {}
 
   // The session runner's own loader, so the script is loaded one way everywhere.
-  const result = await loadScript(render(runner, runOrder))(agent, parallel, phase, log, {})
+  const result = await loadScript(render(runner, runOrder, startRef))(agent, parallel, phase, log, {})
   EVERY_CALL.push(...calls)
   EVERY_RUN.push(calls)
   return { result, calls, logs, timeline }
@@ -175,12 +176,11 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
 // --- scenario U: blockers found at discovery are cleared first (ADR-0021) ---
 const SIGNING = { subject: 'Developer ID signing identity', tickets: [10], why: 'the app must be signed with it', evidence: 'security find-identity shows none', check: 'security find-identity -v -p codesigning | grep "Developer ID Application"' }
 const NOTARY = { subject: 'notary credentials', tickets: [11], why: 'notarization', evidence: 'no keychain profile', check: 'xcrun notarytool history --keychain-profile notary' }
-const withBlockers = (blockers, start_ref = 'main') => () => ({
+const withBlockers = (blockers) => () => ({
   tickets: [
     { number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' },
     { number: 11, title: 'T11', blocked_by: [10], needs_human: false, human_reason: '' },
   ],
-  start_ref,
   explorations: [{ label: 'area-a', question: 'q?' }],
   blockers,
 })
@@ -202,9 +202,80 @@ const withBlockers = (blockers, start_ref = 'main') => () => ({
   check('U1: explorers that return blockers still hand the dispatcher their notes by path', calls.find((c) => c.label === 'dispatch:#10').prompt.includes('/tmp/n/01-area-a.md'), '')
 }
 {
-  const { calls } = await run({ graph: withBlockers([SIGNING], 'feat/prior') }, { runner: 'session' })
+  const { calls } = await run({ graph: withBlockers([SIGNING]) }, { runner: 'session', startRef: 'feat/prior' })
   const seq = calls.map((c) => c.label)
   check('U6: unblock runs before Setup builds layer 0', seq.includes('unblock') && seq.findIndex((l) => l.startsWith('layer0')) > seq.indexOf('unblock'), seq.join(' | '))
+}
+
+// --- scenario P: prior work is the operator's, never an agent's (ADR-0023) --
+// The #827 incident: the graph agent picked an aborted run's integration
+// branch as start_ref, then the run re-implemented a ticket whose work was
+// already on it and halted at publish with "No commits between". Now the
+// operator names prior work when arming; the graph agent says which tickets
+// it already finishes, and those are closed by the layer-0 PR, not rebuilt;
+// and a publisher whose branch adds nothing records the ticket as subsumed
+// instead of halting the run.
+{
+  const { result, calls } = await run({})
+  const graph = calls.find((c) => c.label.startsWith('graph'))
+  check('P1: with no prior work the graph agent is told not to look for any', /Prior work: the operator named none/.test(graph.prompt) && /never yours/.test(graph.prompt) && !graph.opts.schema.properties.start_ref && !graph.opts.schema.required.includes('start_ref'), graph.prompt.slice(-400))
+  check('P1: with no prior work the graph schema asks nothing about it', !graph.opts.schema.properties.tickets.items.properties.done_in_prior_work, '')
+  check('P1: a graph that volunteers a start ref anyway changes nothing', !calls.some((c) => c.label.startsWith('layer0')) && result.state.startsWith('complete'), calls.map((c) => c.label).join(' | '))
+}
+{
+  const { result, calls, logs } = await run({
+    graph: () => ({
+      tickets: [
+        { number: 1199, title: 'T1199', blocked_by: [], needs_human: false, human_reason: '', done_in_prior_work: true, prior_work_evidence: '4ff25216 Keychain store moves (#1199)' },
+        { number: 1200, title: 'T1200', blocked_by: [1199], needs_human: false, human_reason: '', done_in_prior_work: false, prior_work_evidence: '' },
+      ],
+      explorations: [],
+    }),
+  }, { startRef: 'spec/827-integration' })
+  const seq = calls.map((c) => c.label)
+  const graph = calls.find((c) => c.label.startsWith('graph'))
+  const layer0 = calls.find((c) => c.label.startsWith('layer0'))
+  check('P2: with prior work the graph agent is asked, per ticket, whether it is already done there', graph.opts.schema.properties.tickets.items.required.includes('done_in_prior_work') && /origin\/main\.\.origin\/spec\/827-integration/.test(graph.prompt) && /never guess from titles alone/.test(graph.prompt), graph.prompt.slice(-600))
+  check('P2: a ticket already done on the prior work gets no agent', !seq.some((l) => /#1199/.test(l)), seq.join(' | '))
+  check('P2: its dependants are not blocked by it', seq.includes('publish:#1200') && calls.find((c) => c.label === 'impl:#1200').prompt.includes('git switch --detach origin/spec/827-integration'), seq.join(' | '))
+  check('P2: the layer-0 PR closes it, with the evidence', layer0 && layer0.prompt.includes('Closes #<n>') && layer0.prompt.includes('#1199: 4ff25216 Keychain store moves (#1199)') && /The operator named `spec\/827-integration` as prior work/.test(layer0.prompt), layer0 && layer0.prompt.slice(-700))
+  check('P2: the layer count excludes it', layer0.prompt.includes('Layer 1 of 2 planned') && calls.find((c) => c.label === 'publish:#1200').prompt.includes('Layer 2 of 2 planned'), '')
+  check('P2: the log says what prior work already covers', logs.some((l) => /Already done on spec\/827-integration.*#1199 \(4ff25216/.test(l)), logs.join(' | '))
+  check('P2: the run completes', result.halted === false && result.state.startsWith('complete'), result.state)
+}
+{
+  const { result, calls, logs } = await run({
+    graph: () => ({
+      tickets: [{ number: 1199, title: 'T1199', blocked_by: [], needs_human: false, human_reason: '', done_in_prior_work: true, prior_work_evidence: 'all of it' }],
+      explorations: [],
+    }),
+  }, { startRef: 'feat/prior' })
+  check('P3: every ticket already done is a refusal naming the way out, with no agent past the graph', result.error && /already done on feat\/prior/.test(result.error) && result.subsumed[0] === 1199 && calls.length === 1, JSON.stringify(result))
+  void logs
+}
+{
+  // The publisher finds the branch adds nothing to the tip: not a halt.
+  const { result, calls, logs } = await run({
+    publish: (label, prompt) => {
+      const n = label.match(/#(\d+)/)[1]
+      if (n === '10') return { published: false, nothing_to_publish: true, pr_url: '', pr_number: 0, conflicts_resolved: [], stack_link: 'skipped', note: 'ticket/10 == main', worktree: '/wt/publish-10', worktrees_removed: 0, worktrees_kept: [], decisions_needed: [] }
+      const stack_link = /gh stack link [a-z]/.test(prompt) ? 'registered' : 'skipped'
+      return { published: true, nothing_to_publish: false, pr_url: 'https://pr/' + n, pr_number: 100 + Number(n), conflicts_resolved: [], stack_link, note: '', worktree: '/wt/publish-' + n, worktrees_removed: 0, worktrees_kept: [] }
+    },
+  })
+  const seq = calls.map((c) => c.label)
+  const pub = calls.find((c) => c.label === 'publish:#10')
+  check('P4: the publisher is told to count the commits it adds and to stop when there are none', /git rev-list --count origin\/main\.\.ticket\/10/.test(pub.prompt) && /`nothing_to_publish: true`/.test(pub.prompt), pub.prompt.slice(0, 1500))
+  check('P4: nothing to publish is not a halt: the run goes on to its dependants, review and finalize', result.halted === false && seq.includes('publish:#11') && seq.includes('review:spec-224') && seq.includes('finalize'), seq.join(' | '))
+  check('P4: the tip stays where it was', calls.find((c) => c.label === 'impl:#11').prompt.includes('git switch --detach origin/main'), '')
+  check('P4: the ticket is open still, so the spec is not complete, and the brief says why', !result.state.startsWith('complete') && result.finalize !== undefined && /nothing to publish/.test(calls.find((c) => c.label === 'finalize').prompt), result.state)
+  check('P4: the log names it', logs.some((l) => /#10: nothing to publish/.test(l)), logs.join(' | '))
+  check('P4: its branch is not listed as unpublished work', !(result.local_only_branches && result.local_only_branches.refs.includes('ticket/10')), JSON.stringify(result.local_only_branches))
+}
+{
+  const { calls } = await run({})
+  const pub = calls.find((c) => c.label === 'publish:#10')
+  check('P5: the lane checks origin before its one push, and a branch already there is a stop, never a fast-forward', /git ls-remote --exit-code --heads origin ticket\/10/.test(pub.prompt) && /not even fast-forward/.test(pub.prompt), pub.prompt.slice(-2500))
 }
 {
   const { result, calls } = await run({ graph: withBlockers([SIGNING]), unblock: () => ({ resolved: [], decisions_needed: ['Developer ID signing identity: no Account Holder access today'] }) }, { runner: 'session' })
@@ -269,7 +340,6 @@ const withBlockers = (blockers, start_ref = 'main') => () => ({
         { number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' },
         { number: 11, title: 'T11', blocked_by: [], needs_human: false, human_reason: '' },
       ],
-      start_ref: 'main',
       explorations: [],
     }),
   })
@@ -284,7 +354,7 @@ const withBlockers = (blockers, start_ref = 'main') => () => ({
 // --- scenario C: remainder survives every dispatch round — the run halts ---
 {
   const { result, calls } = await run({
-    graph: () => ({ tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }], start_ref: 'main', explorations: [] }),
+    graph: () => ({ tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }], explorations: [] }),
     impl: () => ({ branch: 'ticket/10', summary: 'partial', tests_run: 'npm t', tests_green: true, unmet: ['criterion Z'] }),
   })
   const seq = calls.map((c) => c.label)
@@ -310,11 +380,10 @@ const withBlockers = (blockers, start_ref = 'main') => () => ({
         { number: 1189, title: 'T1189', blocked_by: [1188], needs_human: false, human_reason: '' },
         { number: 1190, title: 'T1190', blocked_by: [1189], needs_human: false, human_reason: '' },
       ],
-      start_ref: 'feat/prior',
       explorations: [],
     }),
     impl: () => null,
-  })
+  }, { startRef: 'feat/prior' })
   const seq = calls.map((c) => c.label)
   const st = Object.fromEntries(result.tickets.map((x) => [x.ticket, x]))
   check('C2: one failed ticket halts the run despite a layer 0', result.halted === true && !seq.some((l) => l.startsWith('review') || l === 'finalize'), seq.join(' | '))
@@ -328,7 +397,7 @@ const withBlockers = (blockers, start_ref = 'main') => () => ({
 // in unmet; the script re-dispatched it, and the new slice blocked on a reply.
 {
   const { result, calls } = await run({
-    graph: () => ({ tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }, { number: 11, title: 'T11', blocked_by: [10], needs_human: false, human_reason: '' }], start_ref: 'main', explorations: [] }),
+    graph: () => ({ tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }, { number: 11, title: 'T11', blocked_by: [10], needs_human: false, human_reason: '' }], explorations: [] }),
     impl: (label) => label.includes('#10')
       ? { branch: 'ticket/10', summary: 's', unmet: ['criterion Q'], decisions_needed: ['criterion Q: the ticket says keep X, ADR-0003 says drop it — which?'] }
       : { branch: 'ticket/11', summary: 's', unmet: [] },
@@ -356,7 +425,6 @@ const withBlockers = (blockers, start_ref = 'main') => () => ({
         { number: 12, title: 'T12', blocked_by: [11], needs_human: false, human_reason: '' },
         { number: 13, title: 'T13', blocked_by: [], needs_human: false, human_reason: '' },
       ],
-      start_ref: 'main',
       explorations: [],
     }),
     dispatch: (label) => label.includes('#13')
@@ -380,7 +448,7 @@ const withBlockers = (blockers, start_ref = 'main') => () => ({
 // --- scenario C5: a contradiction closed inside the ticket reaches the PR ----
 {
   const { calls } = await run({
-    graph: () => ({ tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }], start_ref: 'main', explorations: [] }),
+    graph: () => ({ tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }], explorations: [] }),
     impl: () => ({ branch: 'ticket/10', summary: 's', unmet: [], decided: ['criterion 2 and 3 disagree on the flag name; kept `--dry`, which the ticket leaves open'] }),
   })
   check('C5: a decision the implementer made is put on its PR', /kept `--dry`/.test(calls.find((c) => c.label === 'publish:#10').prompt), '')
@@ -391,7 +459,7 @@ const withBlockers = (blockers, start_ref = 'main') => () => ({
 {
   let gateRound = 0
   const { result, calls } = await run({
-    graph: () => ({ tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }], start_ref: 'main', explorations: [] }),
+    graph: () => ({ tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }], explorations: [] }),
     gate: () => (++gateRound === 1
       ? { findings: [{ severity: 'blocker', location: 'a.js:1', issue: 'bug', fix: 'fix it' }, { severity: 'major', location: 'b.js:2', issue: 'other bug', fix: 'fix that' }] }
       : { findings: [] }),
@@ -420,7 +488,7 @@ const withBlockers = (blockers, start_ref = 'main') => () => ({
 {
   let gateRound = 0
   const { result, calls, logs } = await run({
-    graph: () => ({ tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }], start_ref: 'main', explorations: [] }),
+    graph: () => ({ tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }], explorations: [] }),
     gate: () => (++gateRound === 1
       ? { findings: [{ severity: 'blocker', location: 'a.js:1', issue: 'bug', fix: 'fix it' }, { severity: 'blocker', location: 'b.js:2', issue: 'dropped one', fix: 'fix that' }] }
       : { findings: [] }),
@@ -479,7 +547,6 @@ const withBlockers = (blockers, start_ref = 'main') => () => ({
         { number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' },
         { number: 11, title: 'T11', blocked_by: [10], needs_human: false, human_reason: '' },
       ],
-      start_ref: 'main',
       explorations: [],
     }),
   })
@@ -501,10 +568,9 @@ const withBlockers = (blockers, start_ref = 'main') => () => ({
   const { calls } = await run({
     graph: () => ({
       tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }],
-      start_ref: 'feat/prior',
       explorations: [],
     }),
-  })
+  }, { startRef: 'feat/prior' })
   const layer0 = calls.find((c) => c.label.startsWith('layer0'))
   const first = calls.find((c) => c.label === 'publish:#10')
   check('H2: layer 0 cannot register alone', /needs two layers/.test(layer0.prompt), layer0.prompt.slice(-300))
@@ -525,7 +591,6 @@ const withBlockers = (blockers, start_ref = 'main') => () => ({
         { number: 11, title: 'T11', blocked_by: [10], needs_human: false, human_reason: '' },
         { number: 12, title: 'T12', blocked_by: [11], needs_human: false, human_reason: '' },
       ],
-      start_ref: 'main',
       explorations: [],
     }),
     publish: (label) => {
@@ -559,7 +624,6 @@ const withBlockers = (blockers, start_ref = 'main') => () => ({
         { number: 11, title: 'T11', blocked_by: [10], needs_human: false, human_reason: '' },
         { number: 12, title: 'T12', blocked_by: [11], needs_human: false, human_reason: '' },
       ],
-      start_ref: 'feat/prior',
       explorations: [],
     }),
     layer0: () => ({ pr_url: 'https://pr/layer0', pr_number: 90, note: 'moved feat/prior off stale 54a41bb0 to origin', worktree: '/wt/layer0' }),
@@ -568,7 +632,7 @@ const withBlockers = (blockers, start_ref = 'main') => () => ({
       const stack_link = n === '12' ? 'registered' : 'rejected'
       return { published: true, pr_url: 'https://pr/' + n, pr_number: 100 + Number(n), conflicts_resolved: [], stack_link, note: 'feat/prior local 54a41bb0 vs origin ac46c84a', worktree: '/wt/publish-' + n, worktrees_removed: 0, worktrees_kept: [] }
     },
-  })
+  }, { startRef: 'feat/prior' })
   const layer0 = calls.find((c) => c.label.startsWith('layer0'))
   const first = calls.find((c) => c.label === 'publish:#10')
   const second = calls.find((c) => c.label === 'publish:#11')
@@ -594,7 +658,6 @@ const withBlockers = (blockers, start_ref = 'main') => () => ({
         { number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' },
         { number: 11, title: 'T11', blocked_by: [10], needs_human: false, human_reason: '' },
       ],
-      start_ref: 'main',
       explorations: [],
     }),
     publish: (label) => {
@@ -659,7 +722,6 @@ const withBlockers = (blockers, start_ref = 'main') => () => ({
   const ticket = (number, map_position, blocked_by = []) => ({ number, title: 'T' + number, map_position, blocked_by, needs_human: false, human_reason: '' })
   const graph = () => ({
     tickets: [ticket(15, 0), ticket(11, 0), ticket(14, 2, [13]), ticket(13, 3), ticket(12, 1)],
-    start_ref: 'main',
     explorations: [{ label: 'area-a', question: 'a?' }, { label: 'area-b', question: 'b?' }],
   })
   const overrides = {
@@ -696,7 +758,7 @@ const withBlockers = (blockers, start_ref = 'main') => () => ({
 
   // A chain of blockers leaves a parallel run one order too: both publish the
   // same layers, each PR on the same base, linked by the same commands.
-  const line = { ...overrides, graph: () => ({ tickets: [ticket(12, 3, [11]), ticket(11, 2, [10]), ticket(10, 1)], start_ref: 'main', explorations: [] }) }
+  const line = { ...overrides, graph: () => ({ tickets: [ticket(12, 3, [11]), ticket(11, 2, [10]), ticket(10, 1)], explorations: [] }) }
   const published = ({ calls, result }) => ({
     stack: result.stack_bottom_to_top,
     layers: calls.filter((c) => c.label.startsWith('publish:')).map((c) => [c.label, c.prompt.match(/gh pr create[^\n]*/)?.[0] ?? null, c.prompt.match(/gh stack link [a-z][^\n`]*/)?.[0] ?? null]),
@@ -709,7 +771,7 @@ const withBlockers = (blockers, start_ref = 'main') => () => ({
   const st = Object.fromEntries(failed.result.tickets.map((x) => [x.ticket, x]))
   check('S: a failed ticket halts a sequential run with nothing else started', failed.result.halted === true && st[12].state === 'failed' && [11, 13, 14, 15].every((n) => st[n].state === 'not started') && !failed.calls.some((c) => /#1[1345]\b/.test(c.label)), JSON.stringify(failed.result.tickets))
 
-  const cycle = await run({ graph: () => ({ tickets: [ticket(10, 1, [11]), ticket(11, 2, [10])], start_ref: 'main', explorations: [] }) }, { runner: 'session', runOrder: 'sequential' })
+  const cycle = await run({ graph: () => ({ tickets: [ticket(10, 1, [11]), ticket(11, 2, [10])], explorations: [] }) }, { runner: 'session', runOrder: 'sequential' })
   check('S: a blocking cycle halts a sequential run instead of hanging it', cycle.result.halted === true && cycle.result.tickets.every((x) => x.state === 'not started' && /cycle/.test(x.detail)), JSON.stringify(cycle.result.tickets))
 }
 

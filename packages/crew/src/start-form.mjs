@@ -1,5 +1,5 @@
 // The form `crew start` arms a run from (#100): harness, model, base branch,
-// stack mode, run order and permission mode, each with a default and a flag. Pure but
+// prior work, stack mode, run order and permission mode, each with a default and a flag. Pure but
 // for probeStart, which gathers the facts the form is drawn from, and the
 // answer file, so the command drives it by flags alone or row by row.
 //
@@ -17,9 +17,9 @@ import { samePath } from './paths.mjs'
 import { branchNames, currentBranch, execProgram, ghRepo, ghStackInstalled, stacksApi } from './git.mjs'
 import { HARNESSES, lastUsedModel, piModels } from './harness.mjs'
 
-export const ROWS = ['harness', 'model', 'base', 'stackMode', 'runOrder', 'permissionMode']
-export const FLAGS = { harness: '--harness', model: '--model', base: '--base', stackMode: '--stack-mode', runOrder: '--run-order', permissionMode: '--permission-mode' }
-export const LABELS = { harness: 'Harness', model: 'Model', base: 'Base branch', stackMode: 'Stack mode', runOrder: 'Run order', permissionMode: 'Permission mode' }
+export const ROWS = ['harness', 'model', 'base', 'startRef', 'stackMode', 'runOrder', 'permissionMode']
+export const FLAGS = { harness: '--harness', model: '--model', base: '--base', startRef: '--start-ref', stackMode: '--stack-mode', runOrder: '--run-order', permissionMode: '--permission-mode' }
+export const LABELS = { harness: 'Harness', model: 'Model', base: 'Base branch', startRef: 'Prior work', stackMode: 'Stack mode', runOrder: 'Run order', permissionMode: 'Permission mode' }
 const HARNESS_LABELS = { claude: 'Claude Code', pi: 'pi' }
 
 // A stack mode's answer is the template's STACK_MODE, but for `install`,
@@ -33,8 +33,20 @@ export const RUN_ORDERS = { parallel: 'Parallel', sequential: 'Sequential' }
 
 // The rows flag-only use may leave out, and the answer each then takes, never
 // the remembered one: a script written before Run order existed arms as it
-// did, parallel (ADR-0020).
-export const FLAG_DEFAULTS = { runOrder: 'parallel' }
+// did, parallel (ADR-0020); one that names no prior work has none (ADR-0023),
+// which the form spells as the base branch itself (`null` here: the answer is
+// whatever the base is).
+export const FLAG_DEFAULTS = { runOrder: 'parallel', startRef: null }
+
+// Prior work (ADR-0023): the branch that already carries work for the spec and
+// becomes the stack's layer 0, named by the operator at arm time and never
+// found by an agent. The template's START_REF; "none" is the base branch
+// itself, which the template reads as no layer 0. Never remembered: it is a
+// fact about this run, not a preference.
+export const noPriorWork = (base) => base
+// A `spec/<n>-integration` branch is a run's whole-stack review fixes, never
+// a ticket's work: the form says so beside it.
+const INTEGRATION_BRANCH = /^spec\/\d+-integration$/
 
 // The modes a Claude worker can start in; `auto` first, as it is the default.
 export const PERMISSION_MODES = ['auto', 'acceptEdits', 'bypassPermissions', 'dontAsk', 'default']
@@ -100,6 +112,12 @@ export function startForm(facts, { remembered = {}, flags = {} } = {}) {
     if (row === 'harness') return HARNESSES.map((h) => ({ value: h, label: HARNESS_LABELS[h] ?? h, disabled: false }))
     if (row === 'model') return unique([...(facts.models[values.harness]?.list ?? []), values.model]).map((m) => ({ value: m, label: m, disabled: false }))
     if (row === 'base') return unique([...facts.branches, values.base]).map((b) => ({ value: b, label: b, disabled: false }))
+    if (row === 'startRef') {
+      return [
+        { value: noPriorWork(values.base), label: `None — the stack starts on ${values.base}`, disabled: false },
+        ...unique([...facts.branches, values.startRef]).filter((b) => b !== values.base).map((b) => ({ value: b, label: b, disabled: false, ...(INTEGRATION_BRANCH.test(b) && { note: "an earlier run's whole-stack review fixes, not a ticket's work" }) })),
+      ]
+    }
     if (row === 'stackMode') return stacks
     if (row === 'runOrder') return Object.entries(RUN_ORDERS).map(([value, label]) => ({ value, label, disabled: false }))
     if (row === 'permissionMode') return PERMISSION_MODES.map((m) => ({ value: m, label: m, disabled: false }))
@@ -110,6 +128,7 @@ export function startForm(facts, { remembered = {}, flags = {} } = {}) {
   values.harness = HARNESSES.includes(remembered.harness) ? remembered.harness : HARNESSES[0]
   values.model = modelFor(values.harness)
   values.base = facts.branches.includes(remembered.base) ? remembered.base : facts.branch ?? facts.branches[0] ?? null
+  values.startRef = noPriorWork(values.base)
   values.stackMode = usable('stackMode', remembered.stackMode) ? remembered.stackMode : stacks.find((o) => o.value === 'native' && !o.disabled) ? 'native' : 'chain'
   values.runOrder = Object.hasOwn(RUN_ORDERS, remembered.runOrder) ? remembered.runOrder : 'parallel'
   values.permissionMode = PERMISSION_MODES.includes(remembered.permissionMode) ? remembered.permissionMode : PERMISSION_MODES[0]
@@ -127,10 +146,13 @@ export function startForm(facts, { remembered = {}, flags = {} } = {}) {
         return form
       }
       const option = options(row).find((o) => o.value === value)
-      if (row === 'base' && !option) throw new Error(`${flag}: no branch ${value}`)
+      if ((row === 'base' || row === 'startRef') && !option) throw new Error(`${flag}: no branch ${value}`)
       if (!option) throw new Error(`${flag}: ${value} is not one of ${options(row).filter((o) => !o.disabled).map((o) => o.value).join(', ')}`)
       if (option.disabled) throw new Error(`${flag}: ${option.label} cannot be used, ${option.note}`)
       if (row === 'harness' && value !== values.harness) values.model = modelFor(value)
+      // Prior work "none" is the base itself, so it follows a base that moves;
+      // a named branch stays, unless it is the new base, which is then "none".
+      if (row === 'base' && (values.startRef === noPriorWork(values.base) || values.startRef === value)) values.startRef = noPriorWork(value)
       values[row] = value
       return form
     },
@@ -152,10 +174,11 @@ export function startForm(facts, { remembered = {}, flags = {} } = {}) {
     answers: () => Object.fromEntries(ROWS.filter(shown).map((r) => [r, values[r]])),
     // The answers of flag-only use: a row with no flag takes its FLAG_DEFAULTS answer.
     flagAnswers() {
-      for (const [row, value] of Object.entries(FLAG_DEFAULTS)) if (flags[row] === undefined) form.set(row, value)
+      for (const [row, value] of Object.entries(FLAG_DEFAULTS)) if (flags[row] === undefined) form.set(row, value ?? noPriorWork(values.base))
       return form.answers()
     },
   }
+  // The base first: prior work is spelled against it.
   for (const row of ROWS) if (flags[row] !== undefined) form.set(row, flags[row])
   return form
 }
@@ -204,6 +227,8 @@ export function rememberAnswers(paths, repo, answers) {
     models: { ...before.models, [answers.harness]: answers.model },
   }
   delete all[key].model
+  // Prior work is this run's, not the repo's habit (ADR-0023).
+  delete all[key].startRef
   mkdirSync(paths.home, { recursive: true })
   const file = answersFile(paths)
   writeJsonAtomic(file, all)

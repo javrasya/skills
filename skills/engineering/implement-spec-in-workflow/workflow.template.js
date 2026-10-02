@@ -5,7 +5,7 @@ export const meta = {
     { title: 'Graph', detail: 'read the spec and its tickets, return the task graph' },
     { title: 'Explore', detail: 'research notes saved outside the repo' },
     { title: 'Unblock', detail: 'when discovery found blockers: an attended session where the operator clears them, before anything is built' },
-    { title: 'Setup', detail: 'layer-0 PR when prior work already sits on a branch' },
+    { title: 'Setup', detail: 'layer-0 PR when the operator named prior work at arm time (ADR-0023)' },
     { title: 'Implement', detail: 'a dispatcher sizes each ticket; fresh slice agents implement it, frontier-scheduled' },
     { title: 'Gate', detail: 'code-review each ticket branch before it is published' },
     { title: 'Stack', detail: 'serial publish lane: rebase onto the tip (never in sequential order, whose tip never moves under a ticket), one draft PR per ticket, reclaim the ticket\'s worktrees' },
@@ -59,6 +59,7 @@ const SPEC = __SPEC__                              // spec issue number
 const REPO_DIR = String.raw`__REPO_DIR__`          // main checkout
 const NOTES_DIR = String.raw`__NOTES_DIR__`        // research notes, outside the repo
 const BASE_REF = '__BASE_REF__'                    // branch the stack merges into
+const START_REF = '__START_REF__'                  // prior work the operator named at arm time: the stack's layer 0, or BASE_REF itself for none (ADR-0023). No agent of this run chooses it
 const STACK_MODE = '__STACK_MODE__'                // 'native' (gh-stack + stacks API) or 'chain' (plain --base chain)
 const RUN_ORDER = '__RUN_ORDER__'                  // 'parallel' (the frontier at once) or 'sequential' (one ticket at a time, session runner only; ADR-0020)
 const RUNNER = '__RUNNER__'                        // 'session' on the session runner (crew, on Orca), and 'orca', its value before, still; anything else is the Workflow runner. The one line the two renderings differ in
@@ -79,7 +80,7 @@ const POINTERS = `Repo ${REPO}, checkout ${REPO_DIR}. Spec: \`gh issue view ${SP
 //
 // Two kinds of ref follow. One this run CREATED is authoritative locally and
 // may not be on origin at all. One the run INHERITED — the base branch, prior
-// work on start_ref — is authoritative on origin, where the operator or
+// work on START_REF — is authoritative on origin, where the operator or
 // another machine may have moved it, so it is fetched and addressed there.
 const runRefs = new Set()
 const ref = (r) => (runRefs.has(r) ? r : /^[0-9a-f]{7,40}$/.test(r) ? r : `origin/${r}`)
@@ -134,6 +135,14 @@ if (ON_SESSION) meta.roles = ROLES
 // after another, each picking up the build cache the one before it left
 // (ADR-0020); a parallel run's each get one of their own.
 const ISOLATION = RUN_ORDER === 'sequential' ? 'chain' : 'worktree'
+
+// Layer 0 (ADR-0003, ADR-0023): prior work the OPERATOR named when arming,
+// which becomes the bottom of the stack with a PR of its own. The graph agent
+// used to find such a branch itself, and an observed run (#827) had it pick
+// up an aborted run's integration branch, then re-implement a ticket whose
+// work was already on it. Now the operator names it or there is none, and the
+// graph agent's one job about it is to say which tickets it already covers.
+const hasLayer0 = START_REF !== BASE_REF
 const WORKTREE = ISOLATION === 'chain'
   ? `Your worktree is this run's one chain worktree, made by its session host and worked in by its code agents one after another: the dependencies and build cache the agent before you left are yours to use. Leave nothing of your own in it uncommitted. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. Never remove it: the operator decides at the end of the run whether it is reclaimed.`
   : ON_SESSION
@@ -365,15 +374,16 @@ const BLOCKERS_FIELD = {
 const GRAPH_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['tickets', 'start_ref', 'explorations', 'blockers'],
+  required: ['tickets', 'explorations', 'blockers'],
   properties: {
     tickets: {
       type: 'array',
       items: {
         type: 'object',
         additionalProperties: false,
-        // map_position orders a sequential run only (runInOrder), so only a sequential run asks for it.
-        required: ['number', 'title', ...(RUN_ORDER === 'sequential' ? ['map_position'] : []), 'blocked_by', 'needs_human', 'human_reason'],
+        // map_position orders a sequential run only (runInOrder), so only a sequential run asks for it;
+        // done_in_prior_work is asked only when the operator named prior work (ADR-0023).
+        required: ['number', 'title', ...(RUN_ORDER === 'sequential' ? ['map_position'] : []), 'blocked_by', 'needs_human', 'human_reason', ...(hasLayer0 ? ['done_in_prior_work', 'prior_work_evidence'] : [])],
         properties: {
           number: { type: 'integer' },
           title: { type: 'string' },
@@ -381,10 +391,13 @@ const GRAPH_SCHEMA = {
           blocked_by: { type: 'array', items: { type: 'integer' } },
           needs_human: { type: 'boolean' },
           human_reason: { type: 'string', description: 'empty when needs_human is false' },
+          ...(hasLayer0 && {
+            done_in_prior_work: { type: 'boolean', description: `true only when every acceptance criterion of the ticket is already met by \`${BASE_REF}..${START_REF}\`` },
+            prior_work_evidence: { type: 'string', description: 'the commits (sha and subject) or files that show it; empty when done_in_prior_work is false' },
+          }),
         },
       },
     },
-    start_ref: { type: 'string', description: 'branch already carrying work for this spec — it becomes the bottom layer of the stack; else the base ref' },
     ...BLOCKERS_FIELD,
     explorations: {
       type: 'array',
@@ -468,9 +481,13 @@ const DISPATCH_SCHEMA = {
 const PUBLISH_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['published', 'pr_url', 'pr_number', 'conflicts_resolved', 'checks', 'validated_sha', 'stack_link', 'note', 'worktree', 'worktrees_removed', 'worktrees_kept', 'decisions_needed'],
+  required: ['published', 'nothing_to_publish', 'pr_url', 'pr_number', 'conflicts_resolved', 'checks', 'validated_sha', 'stack_link', 'note', 'worktree', 'worktrees_removed', 'worktrees_kept', 'decisions_needed'],
   properties: {
     published: { type: 'boolean' },
+    // The branch has no commit beyond the tip it was cut from: the ticket's
+    // work was already there, and there is no PR to open. Not a failure and
+    // not a decision: the script records the ticket as subsumed and moves on.
+    nothing_to_publish: { type: 'boolean', description: 'true when `git rev-list --count <base>..<branch>` is 0; then published is false and decisions_needed is empty' },
     // A publisher that cannot publish says why here: the runner holds its node
     // and halts the run, and a resume carries the same session on once the
     // operator acted, rather than replaying a publish that never happened.
@@ -651,8 +668,9 @@ Set needs_human on a ticket whose work itself cannot be done by an agent alone �
 
 blockers: what this machine is missing that a person can supply once so agents can do the rest — a credential, a signing identity or profile, an account or permission, a device or service set up and running. Check, do not guess: look for it (the keychain, the config file, the running process, the env var) and record what you ran as evidence. Something missing that a person supplies once is a blocker, not needs_human: the tickets that need it stay automated, and the run clears its blockers with the operator before it builds anything. Give each a \`check\` command that succeeds once it is there. Nothing missing: an empty list.
 
-start_ref: if work for this spec already sits on a branch (the spec or a ticket names one, or a branch exists whose commits are for this spec), return that branch — it becomes the bottom layer of the stack rather than being orphaned. Otherwise return "${BASE_REF}".
-
+${hasLayer0 ? `done_in_prior_work: the operator named \`${START_REF}\` as prior work for this spec; it becomes the bottom layer of the stack, and this run builds on it. Read what it already holds — \`git fetch origin\`, then \`git log --format='%h %s' ${ref(BASE_REF)}..${ref(START_REF)}\` and, where a subject names a ticket, its diff — and for each ticket say whether EVERY one of its acceptance criteria is already met there. A ticket that is becomes no agent's work: it is closed by the layer-0 PR. Partly done is false: its implementer starts from that branch and finishes it. Cite the commits or files in prior_work_evidence; never guess from titles alone.
+` : `Prior work: the operator named none, so the stack starts on \`${BASE_REF}\`. Do not look for a branch carrying work for this spec, and propose none: which branch the stack starts on is the operator's call, made when the run was armed, never yours.
+`}
 explorations: propose up to 4 research questions whose answers implementers will need — the code paths, the external API contracts, the existing test arrangement. A question need not serve every ticket: give each a label that names its subject plainly, so an implementer can tell whether it bears on their ticket. Ask what is expensive to discover, not what a ticket already states.`,
   { ...ROLES.graph, phase: 'Graph', schema: GRAPH_SCHEMA, label: `graph:spec-${SPEC}`, node: 'graph' },
 )
@@ -660,21 +678,34 @@ if (!graph) throw new Error('graph discovery failed')
 
 const all = graph.tickets
 const byNum = new Map(all.map((t) => [t.number, t]))
+// A ticket the prior work already finishes (ADR-0023) is nobody's work: it
+// is closed by the layer-0 PR, and it blocks nothing — its work is on the
+// branch every later ticket is cut from.
+const subsumed = hasLayer0 ? all.filter((t) => t.done_in_prior_work) : []
+const isSubsumed = (n) => subsumed.some((t) => t.number === n)
 const blocked = new Set()
 for (let pass = 0; pass < all.length + 1; pass++) {
   for (const t of all) {
+    if (isSubsumed(t.number)) continue
     if (t.needs_human) blocked.add(t.number)
     if (t.blocked_by.some((d) => blocked.has(d))) blocked.add(t.number)
   }
 }
-const auto = all.filter((t) => !blocked.has(t.number))
+const auto = all.filter((t) => !blocked.has(t.number) && !isSubsumed(t.number))
 const deferred = all.filter((t) => blocked.has(t.number))
 log(`${all.length} tickets. Automating ${auto.map((t) => '#' + t.number).join(', ') || 'none'}.`)
+if (subsumed.length) {
+  log(`Already done on ${START_REF}, closed by the layer-0 PR: ${subsumed.map((t) => `#${t.number} (${t.prior_work_evidence})`).join(', ')}`)
+}
 if (deferred.length) {
   log(`Deferred to a human: ${deferred.map((t) => '#' + t.number + (t.needs_human ? '' : ' (downstream)')).join(', ')}`)
 }
 if (!all.length) throw new Error(`spec #${SPEC} has no implementation tickets — break it into ticket sub-issues first, then arm again`)
-if (!auto.length) return { spec: SPEC, error: 'every ticket needs a human', deferred: deferred.map((t) => t.number) }
+if (!auto.length) {
+  return subsumed.length
+    ? { spec: SPEC, error: `every automatable ticket is already done on ${START_REF}: publish that branch by hand and close them, or arm again with no prior work`, subsumed: subsumed.map((t) => t.number), deferred: deferred.map((t) => t.number) }
+    : { spec: SPEC, error: 'every ticket needs a human', deferred: deferred.map((t) => t.number) }
+}
 
 // --- step 2: exploration subagents, notes saved outside the repo ----------
 phase('Explore')
@@ -761,7 +792,6 @@ End when every blocker's check passes: each in \`resolved\`, with the check you 
 // on a merge into the default branch — so prior work must ride IN the stack,
 // as its own layer with its own PR, not be the branch the stack merges into.
 phase('Setup')
-const hasLayer0 = graph.start_ref !== BASE_REF
 // Every PR body says which layer it is out of how many are PLANNED — layer 0
 // plus the automatable tickets. Planned, not promised: a ticket can fail or be
 // deferred, so a stack that lands short must read as short rather than broken.
@@ -778,24 +808,27 @@ if (hasLayer0) {
 ${POINTERS}
 ${GIT}
 
-The branch \`${graph.start_ref}\` already carries work for this spec, done before this run. It becomes the bottom layer of the stack. \`git fetch origin\`, then \`git switch --detach ${ref(graph.start_ref)}\` so your worktree sits on the layer it publishes (the reclaim that later removes it checks exactly that), confirm the branch exists on origin (push it from the local checkout if it only exists locally — plain push, no force), then open a DRAFT PR: head \`${graph.start_ref}\`, base \`${BASE_REF}\`, title from the branch's work. The body must open with exactly this line:
+The operator named \`${START_REF}\` as prior work for this spec when arming this run: it already carries work done before the run, and it becomes the bottom layer of the stack. \`git fetch origin\`, then \`git switch --detach ${ref(START_REF)}\` so your worktree sits on the layer it publishes (the reclaim that later removes it checks exactly that), confirm the branch exists on origin (push it from the local checkout if it only exists locally — plain push, no force), then open a DRAFT PR: head \`${START_REF}\`, base \`${BASE_REF}\`, title from the branch's work. The body must open with exactly this line:
 
 ${layerLine(1)}
 
-and then say plainly that this PR carries pre-existing work for spec #${SPEC} that this run did not implement or gate — the operator should review it with that in mind.
+and then say plainly that this PR carries pre-existing work for spec #${SPEC} that this run did not implement or gate — the operator should review it with that in mind.${subsumed.length ? `
 
-Do not register a stack: \`gh stack link\` needs two layers and this is the only one so far. The next PR of the stack registers both — and every one of those calls names this branch, so: ${mirror([graph.start_ref])}
+The graph agent found these tickets already finished on this branch, so this PR closes them: put one line per ticket in the body, exactly \`Closes #<n>\`, for ${subsumed.map((t) => `#${t.number}`).join(', ')}, each followed by the evidence in one line:
+${subsumed.map((t) => `- #${t.number}: ${t.prior_work_evidence}`).join('\n')}` : ''}
+
+Do not register a stack: \`gh stack link\` needs two layers and this is the only one so far. The next PR of the stack registers both — and every one of those calls names this branch, so: ${mirror([START_REF])}
 
 Do not disturb the user's working copy: leave ${REPO_DIR}'s checked-out branch and its uncommitted changes exactly as you found them.
 
 ${WORKTREE}
 
 Return the PR url and number, what the mirror found, and your worktree.`,
-    { ...ROLES.layer0, effort: 'low', phase: 'Setup', schema: LAYER0_SCHEMA, isolation: ISOLATION, label: `layer0:${graph.start_ref}`, node: 'layer0' },
+    { ...ROLES.layer0, effort: 'low', phase: 'Setup', schema: LAYER0_SCHEMA, isolation: ISOLATION, label: `layer0:${START_REF}`, node: 'layer0' },
   )
   if (!layer0) throw new Error('layer-0 PR failed — prior work would be orphaned')
-  noteWorktree('layer0', graph.start_ref, layer0)
-  log(`Layer 0: ${layer0.pr_url} (pre-existing work on ${graph.start_ref}) — ${layer0.note}`)
+  noteWorktree('layer0', START_REF, layer0)
+  log(`Layer 0: ${layer0.pr_url} (pre-existing work on ${START_REF}) — ${layer0.note}`)
 }
 
 // --- steps 4-6: frontier scheduling, gate, then the serial publish lane ---
@@ -939,7 +972,7 @@ Return the branch, a one-line summary, one result per validation command with it
 // Publish-once: a branch is rebased and pushed only BEFORE its PR exists;
 // after enqueuePublish resolves, nothing touches that branch again.
 const stacked = []
-let tip = hasLayer0 ? graph.start_ref : BASE_REF
+let tip = hasLayer0 ? START_REF : BASE_REF
 
 // The stack is registered as it grows, not at the end: the operator sees a
 // real stack map from the second PR onward instead of waiting for the run.
@@ -950,7 +983,7 @@ let tip = hasLayer0 ? graph.start_ref : BASE_REF
 // `link` reconciles rather than replaces ("existing PRs are never removed"),
 // so re-listing needs no stack number to discover and no state to carry
 // between agents — the same reason the tip is derived and never remembered.
-const stackLayers = () => [...(hasLayer0 ? [graph.start_ref] : []), ...stacked.map((s) => s.branch)]
+const stackLayers = () => [...(hasLayer0 ? [START_REF] : []), ...stacked.map((s) => s.branch)]
 let stackRegistered = false
 // The last non-transient link failure, for the brief: a rejected push is a
 // fact about a branch, not the weather, and the operator has to hear it.
@@ -991,12 +1024,12 @@ ${POINTERS}
 ${GIT}
 Ticket branch: \`${impl.branch}\` — a LOCAL ref this run created. It is not on origin, and putting it there is your job. Cut from \`${ref(cutFrom)}\` (\`gh issue view ${t.number}\` for what it was meant to do).
 Current stack tip: \`${ref(base)}\` — what your PR must be based on.
-Stack so far, bottom to top: ${stacked.length ? stacked.map((s) => `#${s.number} (${s.branch})`).join(' → ') : hasLayer0 ? `layer 0 (${graph.start_ref})` : 'empty'}.
+Stack so far, bottom to top: ${stacked.length ? stacked.map((s) => `#${s.number} (${s.branch})`).join(' → ') : hasLayer0 ? `layer 0 (${START_REF})` : 'empty'}.
 
 1. \`git fetch origin\` — for the inherited refs; this run's own branches are already local.
 2. ${reclaimStep(toReclaim)}${toReclaim.length ? `
    This comes before any rebase on purpose: the check is that a worktree's HEAD sits on its branch, and a rebase would orphan every one of them from the branch they built.` : ''}
-3. \`git switch --detach ${impl.branch}\`.
+3. \`git switch --detach ${impl.branch}\`. Then \`git rev-list --count ${ref(base)}..${impl.branch}\`: if it is 0 the branch adds nothing to \`${base}\` — the ticket's work was already there — and there is no PR to open. Stop here: return \`published: false\`, \`nothing_to_publish: true\`, an empty \`decisions_needed\`, and in \`note\` what \`git log --oneline -5 ${impl.branch}\` shows. Push nothing, remove nothing beyond step 2.
 ${cutFrom !== base ? `4. The tip moved since this ticket was cut. Replay its commits onto the tip: \`git rebase --onto ${ref(base)} ${ref(cutFrom)}\`. This rewrites only local commits that have never left this clone, so it needs no force and destroys nothing. Resolve any conflict in favour of keeping BOTH tickets' behaviour.
 5. The rebase produced a tree nobody has validated. ${validationLine}
    Get every command green, committing any fix.
@@ -1004,7 +1037,7 @@ ${cutFrom !== base ? `4. The tip moved since this ticket was cut. Replay its com
 5. ${validationLine}
    ${inherit(impl.validated)}
 6. The branch already points at the work; nothing to move.`}
-7. Put it on origin for the first time: \`git push origin ${impl.branch}\`. This CREATES the branch there — it overwrites nothing and needs no force. A rejected push means something you do not know about is going on: stop and report it.
+7. Put it on origin for the first time. First \`git ls-remote --exit-code --heads origin ${impl.branch}\`: exit 0 means the branch is ALREADY on origin — an earlier run's, or someone's — and this run may not move it, not even fast-forward (publish-once, ADR-0005): stop, return \`published: false\`, and put in \`decisions_needed\` the branch, its origin sha and this run's sha, and that the operator must delete or rename the origin branch before the run can publish. Exit 2 (no such ref): \`git push origin ${impl.branch}\`. This CREATES the branch there — it overwrites nothing and needs no force. A rejected push means something you do not know about is going on: stop and report it.
 8. Open a DRAFT PR: \`gh pr create --draft --head ${impl.branch} --base ${base}\` — \`--base\` takes the branch name. Title = the ticket's title. The body must open with exactly this line:
 
    ${layerLine(layers.length)}
@@ -1040,6 +1073,13 @@ Return whether it published, the PR url and number, what you resolved, one resul
       { ...ROLES.publish, effort: 'low', phase: 'Stack', schema: PUBLISH_SCHEMA, isolation: ISOLATION, label: `publish:#${t.number}`, node: `ticket/${t.number}/publish`, ...go },
     ).then((r) => {
       recordValidation('publish', t.number, r, cutFrom !== base ? null : impl.validated)
+      if (r && !r.published && r.nothing_to_publish) {
+        // Nothing to stack: the tip stays, and the ticket is recorded as
+        // subsumed rather than published, failed or held.
+        noteWorktree(t.number, impl.branch, r)
+        log(`#${t.number}: nothing to publish — ${impl.branch} adds no commit to ${base} (${r.note})`)
+        return { ...r, subsumed: true }
+      }
       if (!r || !r.published) {
         // A publisher that returned without publishing still used a
         // worktree: file it under the ticket so finalize reclaims it. Its
@@ -1349,11 +1389,17 @@ function ticketDone(n) {
   return memo.get(n)
 }
 
-const awaited = (t) => t.blocked_by.filter((d) => byNum.has(d) && !blocked.has(d))
+// A dependency already done on the prior work (subsumed at the graph) is on
+// the branch every ticket is cut from: nothing to wait for.
+const awaited = (t) => t.blocked_by.filter((d) => byNum.has(d) && !blocked.has(d) && !isSubsumed(d))
+// A ticket is settled once published, or once its publisher found its
+// branch added nothing to the tip (subsumed there): either way its
+// dependants can start, and the run is not halted by it.
+const settledStates = ['published', 'subsumed']
 
 async function runTicket(t) {
   const deps = await Promise.all(awaited(t).map(ticketDone))
-  const waits = deps.filter((d) => d.state !== 'published')
+  const waits = deps.filter((d) => !settledStates.includes(d.state))
   if (waits.length) return { number: t.number, state: 'not started', detail: `waits on ${waits.map((d) => `#${d.number} (${d.state})`).join(', ')}` }
   if (halting) return { number: t.number, state: 'not started', detail: `the run halted before it started` }
   try {
@@ -1430,6 +1476,7 @@ async function implementTicket(t) {
   }
   const pub = await enqueuePublish(t, impl, cutFrom, tk.single)
   if (pub.stopped) return stop('the run halted before its publish')
+  if (pub.subsumed) return { number: t.number, state: 'subsumed', detail: `${impl.branch} adds no commit to the tip it was cut from: the ticket's work was already there. No PR; close the ticket by hand once that work is merged.`, ...impl, unfixed: gate.unfixed || [] }
   return { number: t.number, state: 'published', ...impl, unfixed: gate.unfixed || [] }
 }
 
@@ -1457,7 +1504,9 @@ const layer0Line = () => (hasLayer0 ? [`layer 0 (pre-existing): ${layer0.pr_url}
 // less is halted, and waits to be resumed rather than finished with gaps. It
 // reclaims nothing either: a resume carries each failed node on in its own
 // worktree (ADR-0016).
-const unpublished = outcomes.filter((o) => o.state !== 'published')
+// A subsumed ticket (its branch added nothing to the tip) is settled, not
+// unpublished: there was no PR to open.
+const unpublished = outcomes.filter((o) => !settledStates.includes(o.state))
 if (unpublished.length) {
   const cause = haltedBy || unpublished[0]
   log(`HALTED on #${cause.number} (${cause.state}) — ${unpublished.map((o) => `#${o.number} ${o.state}`).join(', ')}`)
@@ -1488,7 +1537,7 @@ const review = await agent(
 
 ${POINTERS}
 ${GIT}
-The stack, bottom to top: ${[...(hasLayer0 ? [`${graph.start_ref} (pre-existing work)`] : []), ...stacked.map((s) => `#${s.number} (${s.branch})`)].join(' → ')}.
+The stack, bottom to top: ${[...(hasLayer0 ? [`${START_REF} (pre-existing work)`] : []), ...stacked.map((s) => `#${s.number} (${s.branch})`)].join(' → ')}.
 Review \`${ref(BASE_REF)}...${ref(tip)}\` — everything the stack adds.
 
 Invoke the \`code-review\` skill with \`${ref(BASE_REF)}\` as the fixed point and spec #${SPEC} as the spec — both its axes: this repo's documented standards, and whether the stack matches what the spec and its tickets asked for.
@@ -1514,7 +1563,7 @@ let integrationUnaccounted = []
 if (findings.length) {
   const branch = `spec/${SPEC}-integration`
   runRefs.add(branch)
-  const stackLine = [...(hasLayer0 ? [`${graph.start_ref} (pre-existing work)`] : []), ...stacked.map((s) => `#${s.number} (${s.branch})`)].join(' → ')
+  const stackLine = [...(hasLayer0 ? [`${START_REF} (pre-existing work)`] : []), ...stacked.map((s) => `#${s.number} (${s.branch})`)].join(' → ')
   const out = await fixFindings(findings, {
     subject: `spec #${SPEC}`,
     brief: `The whole stack for spec #${SPEC}, bottom to top: ${stackLine}. These findings come from the review of the stack as a whole, so they are the seams BETWEEN tickets — one helper implemented twice, abstractions that contradict each other, a contract one ticket relies on that another changed — not any single ticket's work. They land on \`${branch}\`, a new branch cut from the stack tip; every branch below it is published and must not be touched.`,
@@ -1593,14 +1642,17 @@ phase('Finalize')
 // get to say the spec is done.
 const gateUnfixedTickets = outcomes.filter((o) => o.unfixed && o.unfixed.length)
 const integrationOpen = findings.length && (!integration || integrationUnaccounted.length)
-const complete = !deferred.length && !gateUnfixedTickets.length && !integrationOpen && !reviewMissing
+// A ticket whose branch had nothing to publish is open still: no PR closes it.
+const subsumedOutcomes = outcomes.filter((o) => o.state === 'subsumed')
+const complete = !deferred.length && !gateUnfixedTickets.length && !integrationOpen && !reviewMissing && !subsumedOutcomes.length
 const bottomToTop = [
-  ...(hasLayer0 ? [{ label: `layer 0 (pre-existing)`, branch: graph.start_ref, pr_url: layer0.pr_url, pr_number: layer0.pr_number }] : []),
+  ...(hasLayer0 ? [{ label: `layer 0 (pre-existing)`, branch: START_REF, pr_url: layer0.pr_url, pr_number: layer0.pr_number }] : []),
   ...stacked.map((s) => ({ label: `#${s.number}`, branch: s.branch, pr_url: s.pr_url, pr_number: s.pr_number })),
   ...(integration ? [{ label: 'integration', branch: integration.branch, pr_url: integration.pr_url, pr_number: integration.pr_number }] : []),
 ]
 const remains = [
   ...deferred.map((t) => `#${t.number} — ${t.human_reason || 'downstream of a human ticket'}`),
+  ...subsumedOutcomes.map((o) => `#${o.number} — nothing to publish: ${o.detail}`),
   ...gateUnfixedTickets.map((o) => `#${o.number} — published with ${o.unfixed.length} unresolved gate finding(s)`),
   ...(integrationOpen ? [`whole-stack review findings not fully fixed or not published`] : []),
   ...(reviewMissing ? ['the whole-stack review never ran — review the stack as a whole by hand'] : []),
@@ -1719,7 +1771,7 @@ return {
   ],
   notes: NOTES_DIR,
   local_only_branches: (() => {
-    const unpublished = auto.filter((t) => !stacked.some((x) => x.number === t.number)).map((t) => `ticket/${t.number}`)
+    const unpublished = auto.filter((t) => !stacked.some((x) => x.number === t.number) && !outcomes.some((o) => o.number === t.number && o.state === 'subsumed')).map((t) => `ticket/${t.number}`)
     if (integration === null && findings.length) unpublished.push(`spec/${SPEC}-integration`)
     return unpublished.length
       ? { note: `Never pushed. Any work these carry is on the branch in ${REPO_DIR}'s clone only — ${ON_SESSION ? 'the worktrees that built it are kept until the operator reclaims them at the end of the run' : 'the worktrees that built it were removed where clean and on the branch, kept otherwise; see worktrees_kept'}.`, refs: unpublished }
