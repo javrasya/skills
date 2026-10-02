@@ -42,7 +42,7 @@ This is the README of its code, the **crew** package, `packages/crew` in this re
 | `headless.mjs` | a harness run once, headless (`claude -p`, `pi -p`): the orchestrator's questions, and `crew start`'s login and model check |
 | `screens.mjs` | each harness's screen reader: its ready screen, and the dialogs only the person answers (ADR-0019) |
 | `triage.mjs` | halt triage: each new halt a question to the orchestrator, for the run console's halt panel |
-| `daemon/` | the crew daemon: `daemon.mjs` (its sessions and requests, and parking a done agent's harness until it is entered again, ADR-0024), `session.mjs` (one session in a pty and a headless terminal), `runs.mjs` (crew's Runs, dispatches and mailboxes), `modes.mjs` (a session's terminal modes), `client.mjs` and `transport.mjs` (a command's side, and where the daemon lives) |
+| `daemon/` | the crew daemon: `daemon.mjs` (its sessions and requests, and parking a done agent's harness until it is entered again, ADR-0024; every agent's session restored parked after a restart, ADR-0025), `session.mjs` (one session in a pty and a headless terminal), `runs.mjs` (crew's Runs, dispatches and mailboxes), `modes.mjs` (a session's terminal modes), `client.mjs` and `transport.mjs` (a command's side, and where the daemon lives) |
 
 ```
 crew run [--host crew|orca] <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]
