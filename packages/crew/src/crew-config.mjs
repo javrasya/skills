@@ -14,12 +14,19 @@
 //   "claudeModels": ["opus", …]
 //                          the models `crew start` cycles Claude through,
 //                          beside the one Claude last ran with (start-form.mjs)
+//   "parkAfterMs": 900000  how long a done agent's harness may sit quiet before
+//                          the daemon ends it, kept to resume when its session
+//                          is entered (daemon.mjs); 0 never parks. Read when the
+//                          daemon starts. Longer than the runner's followUpMs,
+//                          which may still type into a done chain agent
 import { readFileSync } from 'fs'
 import { isAbsolute, resolve } from 'path'
 import { HARNESSES } from './harness.mjs'
 import { samePath } from './paths.mjs'
 
-export const DEFAULTS = Object.freeze({ backKey: 'ctrl+shift+left', claudeModels: Object.freeze(['opus', 'sonnet', 'haiku', 'opus[1m]', 'sonnet[1m]']) })
+export const PARK_AFTER_MS = 15 * 60_000
+
+export const DEFAULTS = Object.freeze({ backKey: 'ctrl+shift+left', parkAfterMs: PARK_AFTER_MS, claudeModels: Object.freeze(['opus', 'sonnet', 'haiku', 'opus[1m]', 'sonnet[1m]']) })
 
 // The bytes each key arrives as in raw input. The F-keys have a few spellings:
 // xterm's, the VT220's, and libuv's on the Windows console (F12 is ESC[24~ in all).
@@ -89,6 +96,7 @@ export function readCrewConfig(paths) {
     backKeySequences(merged.backKey)
     reposOf(merged.repos)
     harnessesOf(merged.harnesses)
+    if (!Number.isSafeInteger(merged.parkAfterMs) || merged.parkAfterMs < 0) throw new Error('parkAfterMs: not a whole number of milliseconds, 0 for never')
     if (!Array.isArray(merged.claudeModels) || !merged.claudeModels.every((m) => typeof m === 'string' && m)) throw new Error('claudeModels: not a list of model names')
   } catch (e) {
     throw new Error(`${paths.config}: ${e.message}`)

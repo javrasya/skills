@@ -226,7 +226,11 @@ const CONSOLE_KEYS = [...ARROW_KEYS, ...ENTER_KEYS, ['k', 'up'], ['j', 'down'], 
 // One daemon session as a line: `crew session list`'s fields apart by tabs,
 // for a script to cut; `crew console`'s by two spaces, a tab having no width
 // its list can fit.
-export const describeSession = (s, sep = '\t') => [s.id, s.alive ? 'running' : `exited ${s.exit?.code ?? s.exit?.signal}`, `pid ${s.pid}`, `${s.cols}x${s.rows}`, s.command.join(' ')].join(sep)
+export const describeSession = (s, sep = '\t') => [s.id, s.alive ? 'running' : s.parked ? 'parked' : `exited ${s.exit?.code ?? s.exit?.signal}`, `pid ${s.pid}`, `${s.cols}x${s.rows}`, s.command.join(' ')].join(sep)
+
+// Whether a session can be entered: a running one, or a parked one, which
+// the daemon starts again on its resume line as it is entered.
+export const enterable = (s) => !!s && (s.alive || !!s.parked)
 
 // `crew console`, for debugging: the daemon's sessions in a flat list, until q or Ctrl+C.
 export function runConsole({ paths, stdin, stdout, backKey = 'ctrl+shift+left', refreshMs = 1_000, holdMs = 50 }) {
@@ -282,7 +286,7 @@ export function runConsole({ paths, stdin, stdout, backKey = 'ctrl+shift+left', 
           else if (key === 'down') selected = Math.min(sessions.length - 1, selected + 1)
           else if (key === 'enter') {
             const s = sessions[selected]
-            if (s?.alive) return { enter: s.id }
+            if (enterable(s)) return { enter: s.id }
             if (s) status = `session ${s.id} has exited`
           }
         }

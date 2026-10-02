@@ -11,6 +11,9 @@ import { ARROW_KEYS, decodeKeys } from '../src/keys.mjs'
 import { writeJsonAtomic } from '../src/fsutil.mjs'
 import { slug } from '../src/util.mjs'
 import { piAgentDir, piDir, transcriptPath } from '../src/transcript.mjs'
+import { resumedCommand } from '../src/harness.mjs'
+import { crewPaths } from '../src/daemon/transport.mjs'
+import { PARK_AFTER_MS, readCrewConfig } from '../src/crew-config.mjs'
 
 test('parseFlags: values keyed by the flag, positionals apart, errors in crew\'s words', () => {
   const spec = { strings: ['--state-dir'], booleans: ['--resume'] }
@@ -69,4 +72,27 @@ test('pi\'s dir: PI_CODING_AGENT_DIR moves its settings and its sessions alike',
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, '2026-01-01_sid-1.jsonl'), '{}\n')
   assert.equal(transcriptPath({ harness: 'pi', sessionId: 'sid-1', worktree, scan: false, home: root, env }), join(dir, '2026-01-01_sid-1.jsonl'))
+})
+
+test('resumedCommand: a launched harness\'s own command, carrying on its session; claude swaps --session-id for --resume, pi reopens with it as it is', () => {
+  const settings = ['--settings', '{"hooks":{}}']
+  assert.deepEqual(resumedCommand(['claude', '--session-id', 'u-1', '--model', 'opus', ...settings]), ['claude', '--resume', 'u-1', '--model', 'opus', ...settings])
+  assert.deepEqual(resumedCommand(['node', 'fake-harness.mjs', '--session-id', 'u-1']), ['node', 'fake-harness.mjs', '--resume', 'u-1'], 'a harness program crew\'s config put in its place')
+  assert.deepEqual(resumedCommand(['claude', '--resume', 'u-1']), ['claude', '--resume', 'u-1'])
+  assert.deepEqual(resumedCommand(['pi', '--approve', '--session-id', 'u-1', '-e', 'ext.ts']), ['pi', '--approve', '--session-id', 'u-1', '-e', 'ext.ts'])
+  assert.equal(resumedCommand(['node', 'runner.mjs']), null, 'no session to carry on')
+})
+
+test('crew config: parkAfterMs is 15 minutes unless ~/.crew/config.json names another, 0 for never; anything else is refused', () => {
+  const paths = crewPaths({ CREW_HOME: mkdtempSync(join(tmpdir(), 'crew-config-')) })
+  assert.equal(PARK_AFTER_MS, 15 * 60_000)
+  assert.equal(readCrewConfig(paths).parkAfterMs, PARK_AFTER_MS)
+  writeFileSync(paths.config, JSON.stringify({ parkAfterMs: 0 }))
+  assert.equal(readCrewConfig(paths).parkAfterMs, 0)
+  writeFileSync(paths.config, JSON.stringify({ parkAfterMs: 60_000 }))
+  assert.equal(readCrewConfig(paths).parkAfterMs, 60_000)
+  for (const bad of [-1, 1.5, '600000', null]) {
+    writeFileSync(paths.config, JSON.stringify({ parkAfterMs: bad }))
+    assert.throws(() => readCrewConfig(paths), /parkAfterMs: not a whole number of milliseconds/)
+  }
 })
