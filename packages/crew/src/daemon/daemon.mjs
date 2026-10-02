@@ -19,6 +19,9 @@
 //     waits on the person for, or null, as the harness's own events tell it
 //     (hooks/); with keep, set only while it waits on nothing. Its info, and
 //     its worker's worker.show, carry it
+//   session.revive { id, cols, rows }      → { session }: a parked session's
+//     harness started again in place, on its resume line; any other left as
+//     it is. Its caller waits for the harness to be ready before typing
 //   session.rename { id, title }           → { session }
 //   session.kill { id }                    → { session }: its program ends,
 //     the session and its last screen stay until closed
@@ -60,6 +63,9 @@ import { sleep } from '../util.mjs'
 
 const VERSION = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
 const log = (...parts) => console.log(new Date().toISOString(), ...parts)
+
+// Longer than any caller waits for a woken harness to be ready (crew-host's readyMs).
+const WAKE_HOLD_MS = 5 * 60_000
 
 // A daemon listening already: another client started one first.
 class AlreadyRunning extends Error {}
@@ -140,6 +146,10 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
   const spawnedWith = new Map()
   const parked = new Set()
   const entered = new Map()
+  // Session id -> when session.revive woke it for a caller about to type: not
+  // parked again before that write lands, or WAKE_HOLD_MS goes by, whatever
+  // parkAfterMs says, since the caller waits for its harness to be ready first.
+  const woken = new Map()
   let parking = null
 
   // A run has one runner at a time.
@@ -199,6 +209,7 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
   // nobody in it, that has a session to resume.
   function parkable(id, session) {
     if (parked.has(id) || entered.get(id) || !book.done(id)) return false
+    if (woken.has(id) && Date.now() - woken.get(id) < WAKE_HOLD_MS) return false
     const i = session.info()
     return i.alive && !i.waiting && i.quietMs !== null && i.quietMs >= parkAfterMs && !!resumedCommand(i.command)
   }
@@ -289,8 +300,9 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
     'session.screen': async ({ id }) => ({ screen: await sessionOf(id).screen() }),
     'session.write': async ({ id, data, paste = false }) => {
       const session = sessionOf(id)
-      if (parked.has(session.id)) throw new Error(`session ${id} is parked: its agent is done and its harness was ended while idle; enter it to resume`)
+      if (parked.has(session.id)) throw new Error(`session ${id} is parked: its harness is not running; revive it (session.revive) or enter it to resume`)
       if (!session.info().alive) throw new Error(`session ${id} has exited`)
+      woken.delete(session.id)
       if (paste) await session.paste(text(data, 'data'))
       else session.write(text(data, 'data'))
       return { session: session.info() }
@@ -318,6 +330,7 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
       spawnedWith.delete(session.id)
       parked.delete(session.id)
       entered.delete(session.id)
+      woken.delete(session.id)
       book.closed(session.id)
       say(`session ${id} closed`)
       return { session: session.info() }
@@ -327,13 +340,24 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
       session.resize(size(cols), size(rows))
       return { session: session.info() }
     },
+    'session.revive': ({ id, cols, rows }) => {
+      const session = wake(id, cols, rows)
+      woken.set(session.id, Date.now())
+      return { session: session.info() }
+    },
     'session.enter': ({ id, cols, rows }, connection) => {
-      const sized = cols !== undefined || rows !== undefined ? [size(cols), size(rows)] : null
-      const session = parked.has(String(id)) ? revive(String(id), { cols, rows }) : sessionOf(id)
-      if (sized) session.resize(...sized)
+      const session = wake(id, cols, rows)
       connection.hold(session.id)
       return { session: session.info(), afterReply: () => connection.enter(session) }
     },
+  }
+
+  // The session, its harness started again first if it is parked, sized as asked.
+  function wake(id, cols, rows) {
+    const sized = cols !== undefined || rows !== undefined ? [size(cols), size(rows)] : null
+    const session = parked.has(String(id)) ? revive(String(id), { cols, rows }) : sessionOf(id)
+    if (sized) session.resize(...sized)
+    return session
   }
 
   const text = (s, what) => {

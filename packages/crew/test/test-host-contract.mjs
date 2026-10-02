@@ -43,6 +43,7 @@ import { submit } from '../src/submit.mjs'
 import { SUBMIT } from '../src/lifecycle.mjs'
 import { crewPaths } from '../src/daemon/transport.mjs'
 import { request, stopDaemon } from '../src/daemon/client.mjs'
+import { startDaemon } from '../src/daemon/daemon.mjs'
 
 const FAKE_HARNESS = fileURLToPath(new URL('./fixtures/crew/fake-harness.mjs', import.meta.url))
 const CREW_BIN = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url))
@@ -804,4 +805,36 @@ test('crew daemon protocol: an ended session takes no keys, and a title must be 
   assert.deepEqual((await h.host.terminalScreen({ terminal: w.terminal, lines: 1 })).length, 1, 'its last screen stays')
   await h.host.terminalClose({ terminal: w.terminal })
   await assert.rejects(request(h.paths, { op: 'session.screen', id: w.terminal }), /no session/)
+})
+
+// Its own daemon, in this process, so it parks within the test (ADR-0024).
+test('crew host: anything sent to a parked session revives it first, under its own id, and waits for its prompt before typing', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'crew-revive-')))
+  const env = { ...process.env, CREW_HOME: join(root, 'home'), CLAUDE_CONFIG_DIR: join(root, 'claude') }
+  const paths = crewPaths(env)
+  const cwd = join(root, 'worktree')
+  mkdirSync(cwd, { recursive: true })
+  const daemon = await startDaemon({ paths, registry: join(root, 'runs.jsonl'), parkAfterMs: 600, parkSweepMs: 50, exit: () => {}, log: () => {} })
+  try {
+    const host = crewHost({ paths, env, cwd, harnesses: harnessAs([process.execPath, FAKE_HARNESS]), quietMs: 300, readyMs: 20_000, start: async () => {} })
+    const { runId } = await host.runCreate({ objective: 'revive' })
+    const sessionId = randomUUID()
+    const w = await host.workerStart({ run: runId, prompt: 'First prompt.', title: 'sleeper', harness: 'claude', sessionId })
+    const transcript = () => readFileSync(transcriptPath({ harness: 'claude', sessionId, worktree: cwd, env }), 'utf8')
+    const text = await eventually('the preamble in the transcript', () => existsSync(transcriptPath({ harness: 'claude', sessionId, worktree: cwd, env }) ?? '') && /--dispatch-id/.test(transcript()) && transcript())
+    const [, , capability, taskId, dispatchId] = /--from ([\w-]+) --dispatch-capability ([\w-]+) --task-id ([\w-]+) --dispatch-id ([\w-]+)/.exec(text)
+    await request(paths, { op: 'mail.send', taskId, dispatchId, capability, type: 'worker_done', outcome: 'succeeded' })
+    const info = async () => (await request(paths, { op: 'session.list' })).sessions.find((s) => s.id === w.terminal)
+    await eventually('it to be parked', async () => (await info())?.parked)
+    const { pid } = await info()
+
+    await host.terminalSend({ terminal: w.terminal, text: 'Follow up after parking.' })
+    const now = await info()
+    assert.deepEqual([now.alive, !!now.parked], [true, false])
+    assert.notEqual(now.pid, pid, 'a new harness, in the same session')
+    assert.ok(now.command.includes('--resume') && now.command.includes(sessionId), now.command.join(' '))
+    await eventually('the follow-up delivered whole, after the resume', () => host.promptDelivered({ harness: 'claude', sessionId, worktree: cwd, needle: 'Follow up after parking.' }))
+  } finally {
+    daemon.shutdown('test over')
+  }
 })

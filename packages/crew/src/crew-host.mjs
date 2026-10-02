@@ -196,7 +196,20 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     }
   }
 
-  const type = (terminal, data, paste = false) => call({ op: 'session.write', id: terminal, data, paste })
+  // Anything typed into a parked session (ADR-0024, ADR-0025) revives it
+  // first, in place, and waits for its harness's prompt, as a launch does:
+  // the daemon refuses the write rather than lose it to a harness starting.
+  const PARKED = /is parked: /
+  async function type(terminal, data, paste = false) {
+    try {
+      return await call({ op: 'session.write', id: terminal, data, paste })
+    } catch (e) {
+      if (!PARKED.test(e?.message ?? '')) throw e
+    }
+    const { session } = await call({ op: 'session.revive', id: terminal })
+    await ready(session.id, session.command, { harness: launchedSession(session.command).harness })
+    return call({ op: 'session.write', id: terminal, data, paste })
+  }
 
   async function terminalSend({ terminal, text }) {
     await type(terminal, text, true)
