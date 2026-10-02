@@ -33,9 +33,9 @@ const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '')
 // as scripts/simulate-implement-spec-workflow.mjs renders it.
 const skillRender = (template, v) => PLACEHOLDERS.reduce((s, k) => s.split(`__${k}__`).join(String(v[k])), template)
 
-const VALUES = { SPEC: 94, REPO: 'acme/app', REPO_DIR: 'C:\\work\\app', NOTES_DIR: 'C:\\Users\\me\\.claude\\spec-notes\\app-94', BASE_REF: 'develop', STACK_MODE: 'native', RUN_ORDER: 'parallel', VALIDATION: 'npm test\n# lint\nnpm run lint\n' }
+const VALUES = { SPEC: 94, REPO: 'acme/app', REPO_DIR: 'C:\\work\\app', NOTES_DIR: 'C:\\Users\\me\\.claude\\spec-notes\\app-94', BASE_REF: 'develop', START_REF: 'develop', STACK_MODE: 'native', RUN_ORDER: 'parallel', VALIDATION: 'npm test\n# lint\nnpm run lint\n' }
 
-test('render: the template with the nine values is what the skill renders, RUNNER session', () => {
+test('render: the template with the ten values is what the skill renders, RUNNER session', () => {
   const template = readFileSync(templatePath(), 'utf8')
   assert.equal(templatePath(), SKILL_TEMPLATE, 'in a checkout the skill folder\'s template is the one rendered')
   const rendered = renderTemplate(template, { ...VALUES, RUNNER: 'session' })
@@ -107,7 +107,7 @@ const lastScreen = (out) => strip(out.text.split('\x1b[2J\x1b[H').pop())
 
 test('form at a terminal: every row with its default and flag, GH Stack shown disabled with the docs link', () => {
   const lines = drawStartForm(startForm(FACTS), 0, 'crew start').map(strip)
-  for (const [label, value, flag] of [['Harness', 'Claude Code', '--harness'], ['Model', 'opus', '--model'], ['Base branch', 'develop', '--base'], ['Stack mode', 'Basic Git stacking', '--stack-mode'], ['Run order', 'Parallel', '--run-order'], ['Permission mode', 'auto', '--permission-mode']]) {
+  for (const [label, value, flag] of [['Harness', 'Claude Code', '--harness'], ['Model', 'opus', '--model'], ['Base branch', 'develop', '--base'], ['Prior work', 'None \u2014 the stack starts on develop', '--start-ref'], ['Stack mode', 'Basic Git stacking', '--stack-mode'], ['Run order', 'Parallel', '--run-order'], ['Permission mode', 'auto', '--permission-mode']]) {
     assert.ok(lines.some((l) => l.includes(label) && l.includes(value) && l.includes(flag)), `${label}: ${lines.join('\n')}`)
   }
   assert.ok(lines.some((l) => l.includes('GH Stack (unavailable): not enabled for this repo') && l.includes(STACKS_DOCS)), lines.join('\n'))
@@ -117,13 +117,13 @@ test('form at a terminal: every row with its default and flag, GH Stack shown di
 
 test('form at a terminal: Enter through it takes every default; arrows change a row; Esc cancels', async () => {
   const through = fakeStdout()
-  const stdin = new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r'])
-  assert.deepEqual(await runStartForm({ form: startForm(FACTS), stdin, stdout: through }), { harness: 'claude', model: 'opus', base: 'develop', stackMode: 'chain', runOrder: 'parallel', permissionMode: 'auto' })
+  const stdin = new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r', '\r'])
+  assert.deepEqual(await runStartForm({ form: startForm(FACTS), stdin, stdout: through }), { harness: 'claude', model: 'opus', base: 'develop', startRef: 'develop', stackMode: 'chain', runOrder: 'parallel', permissionMode: 'auto' })
   assert.deepEqual(stdin.raw, [true, false], 'raw mode on for the form, off after')
-  // Harness to pi drops the permission row: five Enters answer the form, Sequential picked on the way.
+  // Harness to pi drops the permission row: six Enters answer the form, Sequential picked on the way, prior work left at none.
   const out = fakeStdout()
-  const picked = await runStartForm({ form: startForm(FACTS), stdin: new FakeStdin(['\x1b[C', '\r', '\r', '\x1b[C', '\r', '\r', '\x1b[C', '\r']), stdout: out })
-  assert.deepEqual(picked, { harness: 'pi', model: 'lmstudio/qwen3', base: 'main', stackMode: 'chain', runOrder: 'sequential' })
+  const picked = await runStartForm({ form: startForm(FACTS), stdin: new FakeStdin(['\x1b[C', '\r', '\r', '\x1b[C', '\r', '\r', '\r', '\x1b[C', '\r']), stdout: out })
+  assert.deepEqual(picked, { harness: 'pi', model: 'lmstudio/qwen3', base: 'main', startRef: 'main', stackMode: 'chain', runOrder: 'sequential' })
   assert.deepEqual(await runStartForm({ form: startForm(FACTS), stdin: new FakeStdin(['\r', '\x1b']), stdout: fakeStdout() }), null)
   assert.match(lastScreen(through), /› Permission mode/)
 })
@@ -142,16 +142,16 @@ test('form at a terminal: typing searches the focused row, Left/Right step throu
   const form = () => startForm(MANY, { flags: { harness: 'pi' } })
   const out = fakeStdout()
   // Down to Model, type "qwen": the only match is picked.
-  assert.equal((await runStartForm({ form: form(), stdin: new FakeStdin(['\x1b[B', 'qwen', '\r', '\r', '\r', '\r']), stdout: out })).model, 'lmstudio/qwen3-coder')
+  assert.equal((await runStartForm({ form: form(), stdin: new FakeStdin(['\x1b[B', 'qwen', '\r', '\r', '\r', '\r', '\r']), stdout: out })).model, 'lmstudio/qwen3-coder')
   assert.match(lastScreen(out), /Stack mode/)
   // "m11" matches m110..m119; Right steps to the second, Left wraps back past the first.
-  assert.equal((await runStartForm({ form: form(), stdin: new FakeStdin(['\x1b[B', 'm11', '\x1b[C', '\r', '\r', '\r', '\r']), stdout: fakeStdout() })).model, 'm111')
-  assert.equal((await runStartForm({ form: form(), stdin: new FakeStdin(['\x1b[B', 'm11', '\x1b[D', '\r', '\r', '\r', '\r']), stdout: fakeStdout() })).model, 'm119')
+  assert.equal((await runStartForm({ form: form(), stdin: new FakeStdin(['\x1b[B', 'm11', '\x1b[C', '\r', '\r', '\r', '\r', '\r']), stdout: fakeStdout() })).model, 'm111')
+  assert.equal((await runStartForm({ form: form(), stdin: new FakeStdin(['\x1b[B', 'm11', '\x1b[D', '\r', '\r', '\r', '\r', '\r']), stdout: fakeStdout() })).model, 'm119')
   // Backspace widens; a query matching nothing keeps the value.
   const screen = fakeStdout()
-  assert.equal((await runStartForm({ form: form(), stdin: new FakeStdin(['\x1b[B', 'zzz', '\r', '\r', '\r', '\r']), stdout: screen })).model, 'm000')
+  assert.equal((await runStartForm({ form: form(), stdin: new FakeStdin(['\x1b[B', 'zzz', '\r', '\r', '\r', '\r', '\r']), stdout: screen })).model, 'm000')
   // Esc with a query only clears it; the second one cancels.
-  assert.equal((await runStartForm({ form: form(), stdin: new FakeStdin(['\x1b[B', 'qwen', '\x1b', '\r', '\r', '\r', '\r']), stdout: fakeStdout() })).model, 'lmstudio/qwen3-coder')
+  assert.equal((await runStartForm({ form: form(), stdin: new FakeStdin(['\x1b[B', 'qwen', '\x1b', '\r', '\r', '\r', '\r', '\r']), stdout: fakeStdout() })).model, 'lmstudio/qwen3-coder')
   assert.equal(await runStartForm({ form: form(), stdin: new FakeStdin(['\x1b[B', 'q', '\x1b', '\x1b']), stdout: fakeStdout() }), null)
   assert.equal(await runStartForm({ form: form(), stdin: new FakeStdin(['\x1b[B', 'q', '\x03']), stdout: fakeStdout() }), null, 'Ctrl+C cancels at once')
 })
@@ -237,7 +237,7 @@ test('crew start: the harness is checked on the answered model, in the checkout,
     checked.push(c)
     throw new Error('claude answered with an error: Invalid API key · Please run /login')
   }
-  await assert.rejects(w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r']), stdout: fakeStdout(), orchestrate, check: refused }), (e) => e.code === 1 && /^claude on \S+ cannot run here: claude answered with an error: Invalid API key · Please run \/login; nothing armed$/.test(e.message))
+  await assert.rejects(w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r', '\r']), stdout: fakeStdout(), orchestrate, check: refused }), (e) => e.code === 1 && /^claude on \S+ cannot run here: claude answered with an error: Invalid API key · Please run \/login; nothing armed$/.test(e.message))
   assert.deepEqual([checked[0].repoDir, checked[0].harness, typeof checked[0].model], [w.repoDir, 'claude', 'string'])
   assert.equal(asked, 0, 'the orchestrator is never asked')
   assert.equal(w.launches.length, 0)
@@ -258,7 +258,7 @@ test("crew start at a terminal, no validation.md: the orchestrator's draft is th
   const w = world({ validation: null })
   await w.ready
   const out = fakeStdout()
-  const keys = ['\r', '\r', '\r', '\r', '\r', '\r', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[F', '\r', 'make check', '\x13']
+  const keys = ['\r', '\r', '\r', '\r', '\r', '\r', '\r', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[F', '\r', 'make check', '\x13']
   const armed = await w.start(['94'], { tty: true, stdin: new FakeStdin(keys), stdout: out })
   const draft = out.text.split('\x1b[2J\x1b[H').map(strip).find((screen) => screen.includes("drafted by crew's orchestrator"))
   assert.ok(draft, out.text)
@@ -275,9 +275,9 @@ test("crew start at a terminal, no validation.md: the orchestrator's draft is th
 test('crew start at a terminal: cancelling the draft writes nothing and arms nothing; an orchestrator with no valid answer is reported, and writes nothing either', async () => {
   const w = world({ validation: null })
   await w.ready
-  await assert.rejects(w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r', 'x', '\x1b']), stdout: fakeStdout() }), (e) => e.code === 130 && /no validation list written, nothing armed/.test(e.message))
+  await assert.rejects(w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r', '\r', 'x', '\x1b']), stdout: fakeStdout() }), (e) => e.code === 130 && /no validation list written, nothing armed/.test(e.message))
   const failing = () => ({ ask: async () => { throw new OrchestratorError('validation-list', 'its session settled failed') } })
-  await assert.rejects(w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r']), stdout: fakeStdout(), orchestrate: failing }), (e) => e.code === 1 && /the orchestrator gave no valid answer to validation-list: its session settled failed; no validation list written, nothing armed/.test(e.message))
+  await assert.rejects(w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r', '\r']), stdout: fakeStdout(), orchestrate: failing }), (e) => e.code === 1 && /the orchestrator gave no valid answer to validation-list: its session settled failed; no validation list written, nothing armed/.test(e.message))
   assert.equal(w.launches.length, 0)
   assert.ok(!existsSync(join(w.notesDir, 'validation.md')))
   assert.ok(!existsSync(join(w.notesDir, 'runs')))
@@ -307,7 +307,7 @@ test('crew start at a terminal: Ctrl+C while the orchestrator drafts closes its 
       },
     }
   }
-  await assert.rejects(w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r']), stdout: fakeStdout(), orchestrate: drafting, interrupt }), (e) => e.code === 130 && /cancelled while the orchestrator drafted; its session closed, no validation list written, nothing armed/.test(e.message))
+  await assert.rejects(w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r', '\r']), stdout: fakeStdout(), orchestrate: drafting, interrupt }), (e) => e.code === 130 && /cancelled while the orchestrator drafted; its session closed, no validation list written, nothing armed/.test(e.message))
   assert.equal(closed, 1, 'the question given up, its session closed')
   assert.equal(listening, false, 'Ctrl+C is crew start\'s own again')
   assert.equal(w.launches.length, 0)
@@ -319,7 +319,7 @@ test("crew start at a terminal: a draft edited to hold a backtick is not confirm
   await w.ready
   const out = fakeStdout()
   const one = () => ({ ask: async () => ({ checks: [{ command: 'npm test', source: 'package.json' }] }) })
-  const keys = ['\r', '\r', '\r', '\r', '\r', '\r', '\x1b[B', '\x1b[F', ' `x`', '\x13', '\b', '\b', '\b', '\b', '\x13']
+  const keys = ['\r', '\r', '\r', '\r', '\r', '\r', '\r', '\x1b[B', '\x1b[F', ' `x`', '\x13', '\b', '\b', '\b', '\b', '\x13']
   const armed = await w.start(['94'], { tty: true, stdin: new FakeStdin(keys), stdout: out, orchestrate: one })
   const refused = out.text.split('\x1b[2J\x1b[H').map(strip).find((screen) => screen.includes('Not confirmed'))
   assert.ok(refused, out.text)
@@ -342,7 +342,7 @@ test('crew start at a terminal: a repo with no discoverable checks gets an empty
   await w.ready
   const out = fakeStdout()
   const none = () => ({ ask: async () => ({ checks: [] }) })
-  const armed = await w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r', '\x13']), stdout: out, orchestrate: none })
+  const armed = await w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r', '\r', '\x13']), stdout: out, orchestrate: none })
   assert.match(lastScreen(out), /found no checks in this repo's CI config, workflow files, Makefile or package scripts, so the list is empty/)
   assert.equal(readFileSync(join(w.notesDir, 'validation.md'), 'utf8'), '')
   assert.equal(armed.target.validation, '')
@@ -352,7 +352,7 @@ test('crew start at a terminal: Enter through the form renders workflow.js into 
   const w = world({ validation: 'npm t\n' })
   await w.ready
   const out = fakeStdout()
-  const armed = await w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r']), stdout: out })
+  const armed = await w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r', '\r']), stdout: out })
   assert.match(lastScreen(out), /crew start: acme\/app #94: Crew, the session runner/)
   const runDir = join(w.notesDir, 'runs', '94-r1')
   const script = join(runDir, 'workflow.js')
@@ -362,8 +362,8 @@ test('crew start at a terminal: Enter through the form renders workflow.js into 
   assert.ok(!existsSync(join(runDir, 'validation.md')), 'the validation list is read from the spec\'s notes dir, never copied into the run')
   const template = readFileSync(templatePath(), 'utf8')
   // Its research notes are its own too; the validation list stays the spec's.
-  assert.equal(readFileSync(script, 'utf8'), skillRender(template, { SPEC: 94, REPO: 'acme/app', REPO_DIR: w.repoDir, NOTES_DIR: runDir, BASE_REF: 'develop', STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session', VALIDATION: 'npm t\n' }))
-  assert.deepEqual(rememberedAnswers(w.paths, w.repoDir), { harness: 'claude', base: 'develop', stackMode: 'native', runOrder: 'parallel', permissionMode: 'auto', models: { claude: 'opus' } })
+  assert.equal(readFileSync(script, 'utf8'), skillRender(template, { SPEC: 94, REPO: 'acme/app', REPO_DIR: w.repoDir, NOTES_DIR: runDir, BASE_REF: 'develop', START_REF: 'develop', STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session', VALIDATION: 'npm t\n' }))
+  assert.deepEqual(rememberedAnswers(w.paths, w.repoDir), { harness: 'claude', base: 'develop', stackMode: 'native', runOrder: 'parallel', permissionMode: 'auto', models: { claude: 'opus' } }, 'prior work is never remembered')
   assert.ok(!w.calls.some((c) => c.startsWith('gh extension install')), 'the extension is installed only when chosen')
 })
 
