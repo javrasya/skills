@@ -11,7 +11,7 @@ import { spawn, spawnSync } from 'child_process'
 import net from 'net'
 import { fileURLToPath } from 'url'
 import { crewPaths, lineDecoder } from '../src/daemon/transport.mjs'
-import { daemonHello, request, stopDaemon } from '../src/daemon/client.mjs'
+import { daemonHello, enterSession, request, stopDaemon } from '../src/daemon/client.mjs'
 import { startDaemon } from '../src/daemon/daemon.mjs'
 import { resolveCommand } from '../src/command.mjs'
 import { runRegistry } from '../src/registry.mjs'
@@ -249,6 +249,119 @@ function fakeSession({ id, command, cwd, env, title = null }) {
     resize() {},
   }
 }
+
+// A session whose quiet the test sets, and that can be entered.
+function quietSession(spawned, quiet) {
+  return (s) => {
+    const session = fakeSession(s)
+    const { info } = session
+    let title = s.title
+    session.rename = (to) => (title = to)
+    session.info = () => ({ ...info(), title, quietMs: quiet.get(s.command.at(-1)) ?? null })
+    session.enter = () => () => {}
+    spawned.push({ ...s, session })
+    return session
+  }
+}
+
+test('daemon: parks a done agent\'s harness once quiet past parkAfterMs, never an unsettled, failed, busy, entered or asking one, and refuses a write to it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const spawned = []
+  const quiet = new Map([['done', 5_000], ['busy', 10], ['unsettled', 5_000], ['failed', 5_000], ['entered', 5_000], ['asking', 5_000]])
+  const daemon = await startDaemon({ paths, registry: join(dir, 'runs.jsonl'), spawnSession: quietSession(spawned, quiet), parkAfterMs: 1_000, parkSweepMs: 20, exit: () => {}, log: () => {} })
+  try {
+    const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c', runner: null })
+    const worker = async (name, outcome) => {
+      const { session } = await request(paths, { op: 'session.spawn', command: ['claude', '--session-id', `uuid-${name}`, name], cwd: dir, title: name })
+      const { worker: w } = await request(paths, { op: 'run.worker', run: run.id, session: session.id, coordinator: 'c' })
+      if (outcome) await request(paths, { op: 'mail.send', taskId: w.taskId, dispatchId: session.id, capability: w.capability, type: 'worker_done', outcome })
+      return session.id
+    }
+    const done = await worker('done', 'succeeded')
+    const busy = await worker('busy', 'succeeded')
+    const unsettled = await worker('unsettled', null)
+    const failed = await worker('failed', 'failed')
+    const entered = await worker('entered', 'succeeded')
+    const asking = await worker('asking', 'succeeded')
+    await request(paths, { op: 'session.waiting', id: asking, waiting: 'a permission dialog' })
+    const { socket } = await enterSession(paths, { id: entered }, () => {})
+    const info = async (id) => (await request(paths, { op: 'session.list' })).sessions.find((s) => s.id === id)
+    await until('the done agent to be parked', async () => (await info(done)).parked)
+    await sleep(100)
+    assert.deepEqual([(await info(done)).alive, (await info(done)).parked], [false, true])
+    for (const id of [busy, unsettled, failed, entered, asking]) assert.deepEqual([(await info(id)).alive, !!(await info(id)).parked], [true, false], `session ${id} kept`)
+    assert.equal((await request(paths, { op: 'worker.show', id: done })).worker.exited, true)
+    await assert.rejects(request(paths, { op: 'session.write', id: done, data: 'hi' }), /session \d+ is parked: .*enter it to resume/)
+    socket.destroy()
+  } finally {
+    daemon.shutdown('test over')
+  }
+})
+
+test('daemon: entering a parked session starts its harness again on its resume line, in the same session id, cwd, env and title', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const spawned = []
+  const daemon = await startDaemon({ paths, registry: join(dir, 'runs.jsonl'), spawnSession: quietSession(spawned, new Map([['done', 5_000]])), parkAfterMs: 1_000, parkSweepMs: 20, exit: () => {}, log: () => {} })
+  try {
+    const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c', runner: null })
+    const { session } = await request(paths, { op: 'session.spawn', command: ['claude', '--session-id', 'uuid-1', 'done'], cwd: dir, env: { A: '1' }, title: 'the agent' })
+    const id = session.id
+    const { worker: w } = await request(paths, { op: 'run.worker', run: run.id, session: id, coordinator: 'c' })
+    await request(paths, { op: 'mail.send', taskId: w.taskId, dispatchId: id, capability: w.capability, type: 'worker_done', outcome: 'succeeded' })
+    await request(paths, { op: 'session.rename', id, title: 'renamed' })
+    await until('it to be parked', async () => (await request(paths, { op: 'session.list' })).sessions.find((s) => s.id === id).parked)
+
+    const { session: back, socket } = await enterSession(paths, { id, cols: 100, rows: 40 }, () => {})
+    socket.destroy()
+    assert.equal(spawned.length, 2)
+    const again = spawned[1]
+    assert.equal(again.id, id)
+    assert.deepEqual(again.command, ['claude', '--resume', 'uuid-1', 'done'])
+    assert.deepEqual([again.cwd, again.env.A, again.env.CREW_SESSION, again.title, again.cols, again.rows], [dir, '1', id, 'renamed', 100, 40])
+    assert.deepEqual([back.alive, !!back.parked], [true, false])
+    // Its dispatch is the same one, still settled: once quiet again it parks again.
+    assert.equal((await request(paths, { op: 'worker.show', id })).worker.settled, true)
+    await until('it to be parked again', async () => (await request(paths, { op: 'session.list' })).sessions.find((s) => s.id === id).parked)
+  } finally {
+    daemon.shutdown('test over')
+  }
+})
+
+test('daemon: a real pty parked and entered again runs its resume line and shows it to whoever entered', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const daemon = await startDaemon({ paths, registry: join(dir, 'runs.jsonl'), parkAfterMs: 300, parkSweepMs: 50, exit: () => {}, log: () => {} })
+  try {
+    const harness = "process.stdout.write('ran ' + process.argv.slice(1).join(' ') + '\\r\\n'); setInterval(() => {}, 1000)"
+    const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c', runner: null })
+    const { session } = await request(paths, { op: 'session.spawn', command: [process.execPath, '-e', harness, '--', '--session-id', 'u-9'], cwd: dir })
+    const id = session.id
+    const { worker: w } = await request(paths, { op: 'run.worker', run: run.id, session: id, coordinator: 'c' })
+    await request(paths, { op: 'mail.send', taskId: w.taskId, dispatchId: id, capability: w.capability, type: 'worker_done', outcome: 'succeeded' })
+    await until('it to be parked', async () => (await request(paths, { op: 'session.list' })).sessions.find((s) => s.id === id).parked)
+    const { pid } = (await request(paths, { op: 'session.list' })).sessions.find((s) => s.id === id)
+    await until('its program to end', () => !alive(pid))
+
+    let seen = ''
+    const { socket } = await enterSession(paths, { id }, (bytes) => (seen += bytes))
+    await until('its resume line to run', () => seen.includes('ran --resume u-9'))
+    const back = (await request(paths, { op: 'session.list' })).sessions.find((s) => s.id === id)
+    assert.deepEqual([back.alive, !!back.parked], [true, false])
+    assert.notEqual(back.pid, pid)
+    // Entered, it is never parked, however quiet.
+    await sleep(500)
+    assert.equal((await request(paths, { op: 'session.list' })).sessions.find((s) => s.id === id).alive, true)
+    socket.destroy()
+    await until('it to park again once left', async () => (await request(paths, { op: 'session.list' })).sessions.find((s) => s.id === id).parked)
+  } finally {
+    daemon.shutdown('test over')
+  }
+})
 
 test('daemon: one that died with a run live is followed by one that starts its runner again; a worker lost with it shows hostDied, one that ended before does not, and stop names the live run', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))

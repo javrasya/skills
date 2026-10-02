@@ -48,6 +48,17 @@ export function launchedSession(words) {
   return { harness: words.includes('--approve') ? 'pi' : 'claude', sessionId: after('--session-id') ?? after('--resume') }
 }
 
+// A launched harness's own command, past any program words crew's config put
+// in place of its name, carrying on the session it started, as a parked
+// session is entered again (daemon.mjs): Claude's --session-id becomes
+// --resume, pi's reopens the session as it is. null for a command with no
+// session to carry on.
+export function resumedCommand(words) {
+  const { harness, sessionId } = launchedSession(words)
+  if (!sessionId) return null
+  return harness === 'claude' ? words.map((w) => (w === '--session-id' ? '--resume' : w)) : [...words]
+}
+
 function commandWords(harness, session, { model, effort, permissionMode }) {
   let argv
   if (harness === 'pi') {

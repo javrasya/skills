@@ -36,13 +36,13 @@ This is the README of its code, the **crew** package, `packages/crew` in this re
 | `run-layout.mjs` | where a run's files live: a `crew start` run's folder, `<notes-dir>/runs/<id>`, its state dir, and the run folder a state dir lies in |
 | `start-form.mjs`, `start-tui.mjs` | the form `crew start` arms a run from, its model and its terminal |
 | `validation-list.mjs` | what a rendered script's validation list may hold |
-| `crew-config.mjs` | crew's own config, `~/.crew/config.json`: the back key, and per repo its setup hook and role overrides |
+| `crew-config.mjs` | crew's own config, `~/.crew/config.json`: the back key, `parkAfterMs` (how long a done agent's harness sits quiet before the daemon parks it, 15 minutes by default, 0 never), and per repo its setup hook and role overrides |
 | `console.mjs` | the run console and the debug console: a page drawn on the terminal, and entering a session from it |
 | `orchestrator.mjs` | the orchestrator: the agent crew hands one question at a time, each a fresh headless run in the project |
 | `headless.mjs` | a harness run once, headless (`claude -p`, `pi -p`): the orchestrator's questions, and `crew start`'s login and model check |
 | `screens.mjs` | each harness's screen reader: its ready screen, and the dialogs only the person answers (ADR-0019) |
 | `triage.mjs` | halt triage: each new halt a question to the orchestrator, for the run console's halt panel |
-| `daemon/` | the crew daemon: `daemon.mjs` (its sessions and requests), `session.mjs` (one session in a pty and a headless terminal), `runs.mjs` (crew's Runs, dispatches and mailboxes), `modes.mjs` (a session's terminal modes), `client.mjs` and `transport.mjs` (a command's side, and where the daemon lives) |
+| `daemon/` | the crew daemon: `daemon.mjs` (its sessions and requests, and parking a done agent's harness until it is entered again, ADR-0024), `session.mjs` (one session in a pty and a headless terminal), `runs.mjs` (crew's Runs, dispatches and mailboxes), `modes.mjs` (a session's terminal modes), `client.mjs` and `transport.mjs` (a command's side, and where the daemon lives) |
 
 ```
 crew run [--host crew|orca] <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]

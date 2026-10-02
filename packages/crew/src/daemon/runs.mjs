@@ -276,6 +276,12 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
       runs.delete(r.id)
       save()
     },
+    // Whether session `id` runs a dispatch marked done: settled by a
+    // worker_done that succeeded, never a failed or cancelled one.
+    done(id) {
+      const d = dispatches.get(String(id))
+      return !!d && d.settled && d.outcome === 'succeeded'
+    },
     // A recovered run's runner is its new session from now on: recovered once.
     recovered(runId, session) {
       runs.get(runId).runner = session

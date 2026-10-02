@@ -20,7 +20,7 @@ import { startDaemon } from '../src/daemon/daemon.mjs'
 import { ptySession } from '../src/daemon/session.mjs'
 import { RESET, repaint, stripHostModes, trackModes } from '../src/daemon/modes.mjs'
 import { backKeyLabel, backKeySequences, readCrewConfig } from '../src/crew-config.mjs'
-import { backKeyFilter, blockKeys, keyNames, runConsole, runsConsole } from '../src/console.mjs'
+import { backKeyFilter, blockKeys, describeSession, enterable, keyNames, runConsole, runsConsole } from '../src/console.mjs'
 import { crewHost } from '../src/crew-host.mjs'
 import { runRegistry } from '../src/registry.mjs'
 import { runsView } from '../src/run-view-model.mjs'
@@ -431,6 +431,14 @@ test('crew view: Ctrl+C and Ctrl+D typed in an agent\'s session never reach it; 
   term.press('q')
   term.press('q')
   await crew.done
+})
+
+test('crew console: a parked session is listed as parked and entered like a running one, which starts it again; an exited one is neither', () => {
+  const base = { id: '3', pid: 9, cols: 80, rows: 24, command: ['claude', '--session-id', 'u'] }
+  assert.equal(describeSession({ ...base, alive: true }, '  '), '3  running  pid 9  80x24  claude --session-id u')
+  assert.equal(describeSession({ ...base, alive: false, parked: true, exit: { code: null, signal: 15 } }, '  '), '3  parked  pid 9  80x24  claude --session-id u')
+  assert.equal(describeSession({ ...base, alive: false, exit: { code: 0 } }, '  '), '3  exited 0  pid 9  80x24  claude --session-id u')
+  assert.deepEqual([enterable({ alive: true }), enterable({ alive: false, parked: true }), enterable({ alive: false })], [true, true, false])
 })
 
 test('crew console: needs a terminal, and takes no arguments', () => {

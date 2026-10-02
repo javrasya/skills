@@ -14,7 +14,7 @@
 //   session.list                           → { sessions }
 //   session.screen { id }                  → { screen: { lines, cursor, alternate } }
 //   session.write { id, data, paste }      → { session }: data typed as keys,
-//     or with paste as pasted text
+//     or with paste as pasted text; refused for a parked session
 //   session.waiting { id, waiting, keep } → { session }: what its harness
 //     waits on the person for, or null, as the harness's own events tell it
 //     (hooks/); with keep, set only while it waits on nothing. Its info, and
@@ -27,9 +27,18 @@
 //   session.enter { id, cols, rows }       → { session }, then the connection
 //     turns into the session's raw byte stream both ways: its screen repaint
 //     and live output out, the terminal's keys in. Hanging up leaves the
-//     session, which keeps running; the daemon hangs up when it ends.
+//     session, which keeps running; the daemon hangs up when it ends. A
+//     parked session's harness is started again first (below)
 //   run.*, worker.*, mail.*, worktree.*    crew's Runs, their workers'
 //     dispatches and their mailboxes (runs.mjs)
+//
+// A session is parked (#161) once its dispatch is done (a worker_done that
+// succeeded), nobody has it entered and it has been quiet for parkAfterMs
+// (crew's config): its program ends, its id, record and last screen stay, and
+// its info says parked. Entering it starts the harness again in the same
+// session id, cwd and env on its resume line (resumedCommand), so a done
+// agent holds no process until someone looks at it. A write does not revive
+// it: text typed before the harness is ready would be lost.
 //
 // Started after a daemon that died with runs live (a crash, a kill, a reboot,
 // a forced stop), it starts each such run's runner again, resuming the run
@@ -45,6 +54,8 @@ import { connect, crewPaths, lineDecoder, noDaemon, send } from './transport.mjs
 import { runBook, runnerCommand, runnerTitle } from './runs.mjs'
 import { REGISTRY_PATH } from '../registry.mjs'
 import { pathKey } from '../paths.mjs'
+import { resumedCommand } from '../harness.mjs'
+import { PARK_AFTER_MS, readCrewConfig } from '../crew-config.mjs'
 import { sleep } from '../util.mjs'
 
 const VERSION = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
@@ -109,8 +120,10 @@ const runKey = (dir) => pathKey(dir)
 // liveRuns: the runs this daemon is host to that are not over, which stop
 // refuses over (runs.mjs). registry: the run registry, which says which runs
 // are; a lost runner still running after `runnerGoneMs` (a pty's children may
-// trail their owner by a moment) is left alone, never run twice.
-export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PATH, liveRuns = null, spawnSession, exit = (code) => process.exit(code), log: say = log, runnerGoneMs = 10_000 } = {}) {
+// trail their owner by a moment) is left alone, never run twice. parkAfterMs:
+// crew's config's unless given, 0 for never; looked for every `parkSweepMs`.
+export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PATH, liveRuns = null, spawnSession, exit = (code) => process.exit(code), log: say = log, runnerGoneMs = 10_000, parkAfterMs = null, parkSweepMs = 30_000 } = {}) {
+  parkAfterMs ??= configuredParkAfterMs(paths, say)
   const open = spawnSession ?? (await import('./session.mjs')).ptySession
   const sessions = new Map()
   const book = runBook({ sessions, file: paths.runs ?? join(paths.home, 'runs.json'), registry })
@@ -121,6 +134,12 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
   // is starting a runner for, claimed until that runner's session holds it.
   const runnerDirs = new Map()
   const recovering = new Map()
+  // Session id -> what it was spawned with, to start it again once parked; the
+  // parked ones; and how many connections have each entered.
+  const spawnedWith = new Map()
+  const parked = new Set()
+  const entered = new Map()
+  let parking = null
 
   // A run has one runner at a time.
   function vacant(runDir) {
@@ -143,7 +162,7 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
     return Object.assign(session, {
       info: () => {
         const i = info()
-        return { ...i, waiting: i.alive ? waiting : null }
+        return { ...i, waiting: i.alive ? waiting : null, ...(parked.has(i.id) && { parked: true }) }
       },
       wait(what, keep = false) {
         if (!(keep && waiting)) waiting = what
@@ -156,13 +175,50 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
     // Always the directory it was asked for, never the daemon's own: that is
     // wherever the crew command that started the daemon happened to run.
     if (typeof cwd !== 'string' || !cwd) throw new Error(`session.spawn needs the directory to start ${command[0]} in`)
-    const session = waitsOn(open({ id, command, cwd, env: { ...(env ?? process.env), CREW_SESSION: id }, cols, rows, title }))
-    sessions.set(id, session)
+    const session = openOne(id, { command, cwd, env: { ...(env ?? process.env), CREW_SESSION: id }, cols, rows, title })
     if (runDir !== null) runnerDirs.set(id, runKey(runDir))
+    say(`session ${id} spawned: ${command.join(' ')} (pid ${session.info().pid})`)
+    return session
+  }
+
+  function openOne(id, spec) {
+    const session = waitsOn(open({ id, ...spec }))
+    sessions.set(id, session)
+    spawnedWith.set(id, spec)
     book.started(id)
     // A session a stopping daemon ends died with the daemon, as in a crash.
-    session.onExit?.(() => stopping || book.ended(id))
-    say(`session ${id} spawned: ${command.join(' ')} (pid ${session.info().pid})`)
+    // A parked one revived before its old program's exit came in is the new
+    // session's id now: that late exit is not the new session ending.
+    session.onExit?.(() => stopping || sessions.get(id) !== session || book.ended(id))
+    return session
+  }
+
+  // A done agent's harness, quiet past parkAfterMs, waiting on nobody, with
+  // nobody in it, that has a session to resume.
+  function parkable(id, session) {
+    if (parked.has(id) || entered.get(id) || !book.done(id)) return false
+    const i = session.info()
+    return i.alive && !i.waiting && i.quietMs !== null && i.quietMs >= parkAfterMs && !!resumedCommand(i.command)
+  }
+
+  function parkIdle() {
+    for (const [id, session] of sessions) {
+      if (!parkable(id, session)) continue
+      parked.add(id)
+      session.kill()
+      say(`session ${id} parked: its agent is done and was quiet ${Math.round(session.info().quietMs / 1000)}s`)
+    }
+  }
+
+  // A parked session's harness again, on its resume line, in its own id, cwd
+  // and env, at the size it is entered at.
+  function revive(id, { cols, rows }) {
+    const old = sessionOf(id)
+    const { command, title, cols: wasCols, rows: wasRows } = old.info()
+    const spec = { ...spawnedWith.get(id), command: resumedCommand(command), title, cols: cols ?? wasCols, rows: rows ?? wasRows }
+    const session = openOne(id, spec)
+    parked.delete(id)
+    say(`session ${id} resumed: ${spec.command.join(' ')} (pid ${session.info().pid})`)
     return session
   }
 
@@ -205,6 +261,7 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
     if (stopping) return
     stopping = true
     say(`stopping: ${why}`)
+    clearInterval(parking)
     for (const session of sessions.values()) session.kill()
     for (const socket of sockets) socket.end()
     server.close(() => exit(0))
@@ -230,6 +287,7 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
     'session.screen': async ({ id }) => ({ screen: await sessionOf(id).screen() }),
     'session.write': async ({ id, data, paste = false }) => {
       const session = sessionOf(id)
+      if (parked.has(session.id)) throw new Error(`session ${id} is parked: its agent is done and its harness was ended while idle; enter it to resume`)
       if (!session.info().alive) throw new Error(`session ${id} has exited`)
       if (paste) await session.paste(text(data, 'data'))
       else session.write(text(data, 'data'))
@@ -254,6 +312,9 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
       const session = sessionOf(id)
       session.kill()
       sessions.delete(session.id)
+      spawnedWith.delete(session.id)
+      parked.delete(session.id)
+      entered.delete(session.id)
       book.closed(session.id)
       say(`session ${id} closed`)
       return { session: session.info() }
@@ -264,8 +325,10 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
       return { session: session.info() }
     },
     'session.enter': ({ id, cols, rows }, connection) => {
-      const session = sessionOf(id)
-      if (cols !== undefined || rows !== undefined) session.resize(size(cols), size(rows))
+      const sized = cols !== undefined || rows !== undefined ? [size(cols), size(rows)] : null
+      const session = parked.has(String(id)) ? revive(String(id), { cols, rows }) : sessionOf(id)
+      if (sized) session.resize(...sized)
+      connection.hold(session.id)
       return { session: session.info(), afterReply: () => connection.enter(session) }
     },
   }
@@ -287,7 +350,17 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
     // Until a session is entered the connection carries JSON lines; after, raw bytes.
     let raw = null
     const text = new StringDecoder('utf8')
+    // Entered from the request on, not from the attach after its reply, so no
+    // sweep in between parks the session being entered.
+    let held = null
+    socket.on('close', () => {
+      if (held !== null && entered.has(held)) entered.set(held, entered.get(held) - 1)
+    })
     const connection = {
+      hold(id) {
+        held = id
+        entered.set(id, (entered.get(id) ?? 0) + 1)
+      },
       enter(session) {
         raw = (keys) => session.write(keys)
         const leave = session.enter(
@@ -336,8 +409,20 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
   mkdirSync(paths.home, { recursive: true })
   await claim(server, paths.endpoint)
   say(`crew daemon ${VERSION} pid ${process.pid} listening on ${paths.endpoint}`)
+  if (parkAfterMs > 0) parking = setInterval(parkIdle, parkSweepMs)
+  parking?.unref?.()
   const recovered = recover(lost).catch((e) => say(`could not resume the runs live when the last daemon went: ${e?.stack ?? e}`))
   return { server, sessions, shutdown, recovered }
+}
+
+// A config that does not read still leaves the daemon able to start.
+function configuredParkAfterMs(paths, say) {
+  try {
+    return readCrewConfig(paths).parkAfterMs
+  } catch (e) {
+    say(`${e.message}; parking done agents after ${PARK_AFTER_MS / 60_000} minutes`)
+    return PARK_AFTER_MS
+  }
 }
 
 const isMain = process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))
