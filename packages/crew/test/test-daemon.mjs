@@ -414,6 +414,33 @@ test('daemon: after a restart every agent session comes back under its old id, p
   }
 })
 
+test('daemon: session.revive starts a parked session\'s harness again in place and holds it unparked until written to; a live one is left as it is', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const spawned = []
+  const daemon = await startDaemon({ paths, registry: join(dir, 'runs.jsonl'), spawnSession: quietSession(spawned, new Map([['done', 5_000]])), parkAfterMs: 1_000, parkSweepMs: 20, exit: () => {}, log: () => {} })
+  try {
+    const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c', runner: null })
+    const { session } = await request(paths, { op: 'session.spawn', command: ['claude', '--session-id', 'uuid-r', 'done'], cwd: dir })
+    const { worker: w } = await request(paths, { op: 'run.worker', run: run.id, session: session.id, coordinator: 'c' })
+    await request(paths, { op: 'mail.send', taskId: w.taskId, dispatchId: session.id, capability: w.capability, type: 'worker_done', outcome: 'succeeded' })
+    await until('it to be parked', async () => (await request(paths, { op: 'session.list' })).sessions.find((s) => s.id === session.id).parked)
+    const { session: back } = await request(paths, { op: 'session.revive', id: session.id })
+    assert.deepEqual([back.id, back.alive, !!back.parked, back.command], [session.id, true, false, ['claude', '--resume', 'uuid-r', 'done']])
+    await request(paths, { op: 'session.revive', id: session.id })
+    assert.equal(spawned.length, 2, 'a live session is not started twice')
+    // Woken for a caller about to type, it is not parked again before that write, however quiet.
+    await sleep(200)
+    assert.equal((await request(paths, { op: 'session.list' })).sessions.find((s) => s.id === session.id).parked, undefined)
+    await request(paths, { op: 'session.write', id: session.id, data: 'follow up' })
+    await until('it to park again once written to', async () => (await request(paths, { op: 'session.list' })).sessions.find((s) => s.id === session.id).parked)
+    await assert.rejects(request(paths, { op: 'session.revive', id: '999' }), /no session 999/)
+  } finally {
+    daemon.shutdown('test over')
+  }
+})
+
 test('daemon: one that died with a run live is followed by one that starts its runner again; a worker lost with it shows hostDied, one that ended before does not, and stop names the live run', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
   const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
