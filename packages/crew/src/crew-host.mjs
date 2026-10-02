@@ -407,6 +407,12 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     async terminalList() {
       return (await sessions()).map((s) => s.id)
     },
+    // The sessions the daemon has parked: a done agent's harness ended while
+    // idle, started again on its resume line when entered (ADR-0024).
+    // Crew's own, beyond the session host interface (session-host.mjs CREW_ONLY).
+    async terminalsParked() {
+      return (await sessions()).filter((s) => s.parked).map((s) => s.id)
+    },
     async terminalClose({ terminal }) {
       await call({ op: 'session.close', id: terminal })
     },

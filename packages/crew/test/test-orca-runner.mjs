@@ -4945,6 +4945,26 @@ function crewHosted(orca) {
   return { ...orca, id: 'crew', name: 'crew', inPlace: true, terminalList: async () => [...(await orca.terminalList()), 'term_runner'] }
 }
 
+test('run console: a done agent whose crew session is parked keeps its done state, its row tagged parked and its pane saying Enter resumes it; an Orca run has no such tag', async () => {
+  const { view, agent, rowOf, host } = await viewedRun('console', { crew: true })
+  host.terminalsParked = async () => ['term_fake1']
+  await view.refresh()
+  assert.deepEqual([agent(1).state, agent(1).parked], ['done', true])
+  assert.deepEqual([2, 3, 4].map((n) => agent(n).parked), [false, false, false])
+  assert.equal(view.model.header.counts.done, 2, 'parked is no state: still counted done')
+  const plainLines = () => draw(view.model, { width: 140, height: 30 }).lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''))
+  // A phase whose agents are all done is folded: unfold it to see the row.
+  await view.click(rowOf('phase:Discover'))
+  const row = plainLines().find((l) => /discover/.test(l) && /✓ done/.test(l))
+  assert.match(row, /✓ done .*10m00s   ⏾ parked *$/)
+  assert.ok(!plainLines().some((l) => /impl:a/.test(l) && /parked/.test(l)))
+  await view.click(rowOf('agent:1'))
+  assert.ok(plainLines().some((l) => /tab term_fake1 \(parked: Enter resumes it\)/.test(l)))
+
+  const orca = await viewedRun('console')
+  assert.equal(orca.agent(1).parked, false, 'a host that cannot park says nothing of it')
+})
+
 test('run console: a crew run\'s tree is its phases and agents, no runner row; Enter or a click on an agent answers its session to enter, brings no tab forward, and the selection stays on that row', async () => {
   const { view, rowOf, orca, after } = await viewedRun('console', { crew: true })
   const press = pressOn(view)

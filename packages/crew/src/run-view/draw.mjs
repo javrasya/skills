@@ -138,7 +138,7 @@ function nameCell(a, depth, elapsed) {
 }
 
 const agentLine = (a, depth = 0, elapsed = null) =>
-  `  ${String(a.n).padStart(3)}   ${nameCell(a, depth, elapsed).text} ${fit(stateOf(a), STATE_W)} ${contextCell(a)}   ${grey(size(a.tokens).padStart(6))}   ${duration(a.elapsedMs).padStart(7)}`
+  `  ${String(a.n).padStart(3)}   ${nameCell(a, depth, elapsed).text} ${fit(stateOf(a), STATE_W)} ${contextCell(a)}   ${grey(size(a.tokens).padStart(6))}   ${duration(a.elapsedMs).padStart(7)}${a.parked ? grey('   ⏾ parked') : ''}`
 
 const PANE = 4
 
@@ -147,7 +147,7 @@ const PANE = 4
 const shortHandle = (h) => h.replace(/^(term_[0-9a-f]{8})-[-0-9a-f]+$/, '$1')
 
 function agentPane(a) {
-  const tab = a.terminal ? `${cyan(shortHandle(a.terminal))}${a.tabOpen === true ? grey(' (open)') : a.tabOpen === false ? grey(' (closed)') : ''}` : grey('—')
+  const tab = a.terminal ? `${cyan(shortHandle(a.terminal))}${a.parked ? grey(' (parked: Enter resumes it)') : a.tabOpen === true ? grey(' (open)') : a.tabOpen === false ? grey(' (closed)') : ''}` : grey('—')
   return [
     ` ${bold(a.title ?? `[${a.phase}] ${a.label}`)}  ${stateOf(a)}  ctx ${a.context == null ? '—' : banded(a, size(a.context))}  total ${grey(size(a.tokens))}  ${duration(a.elapsedMs)}`,
     ` worktree ${a.worktree ? cyan(worktreeName(a.worktree)) : grey('—')}   tab ${tab}   session ${grey(a.sessionId ?? '—')}${a.continuations ? `   ${c(COLOUR.continued, `the runner continued it ${a.continuations} time${a.continuations === 1 ? '' : 's'}`)}` : ''}`,

@@ -336,9 +336,12 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     }
     chain = fold.chain && !run?.reclaimed && !run?.chainReclaimed ? fold.chain : null
     let open = null
+    let parked = null
     if (every.some((a) => a.terminal)) {
       try {
         open = new Set(await host.terminalList())
+        // Only crew parks a session (ADR-0024); any other host has none.
+        parked = new Set((await host.terminalsParked?.()) ?? [])
       } catch {}
     }
     const reclaimedNames = new Set(run?.reclaimedAgents?.map((r) => r.agent) ?? [])
@@ -349,6 +352,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
         ...(reclaimed && { state: 'reclaimed' }),
         worktree: runWorktree(a),
         tabOpen: a.terminal && open ? open.has(a.terminal) : null,
+        parked: !!(a.terminal && parked?.has(a.terminal)),
         reclaimed,
         context: usage?.context ?? null,
         band: bandOf(usage?.context),
