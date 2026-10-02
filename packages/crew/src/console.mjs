@@ -83,8 +83,10 @@ export const blockKeys = (text) => text.replace(BLOCKED, (all, kitty, other) => 
 // a terminal that knows neither ignores both.
 const KEYBOARD_RESET = '\x1b[=0;1u\x1b[>4;0m'
 
-// Raw input as the key names the run view's model takes (terminal-kit's), and
-// a left click as { click: { x, y } } (1-based, from SGR mouse reports).
+// Raw input as the key names the run view's model takes (terminal-kit's), a
+// left click as { click: { x, y } } and the wheel as { wheel, x, y }, wheel
+// 'up', 'down', 'left' or 'right' (1-based, from SGR mouse reports: buttons
+// 64-67; Shift + wheel, 68 and 69, is sideways, as most terminals take it).
 // A key's modifiers do not change what it does here: Ctrl+Left is Left.
 // ESC O c / d are rxvt's Ctrl+Right / Ctrl+Left. A kitty keyboard protocol
 // release event (event type 3, after a colon) is no key at all.
@@ -96,7 +98,10 @@ export function keyNames(text) {
     const mouse = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])/.exec(rest)
     const csi = /^\x1b(?:\[([0-9;:]*)|O)([A-Za-z~])/.exec(rest)
     if (mouse) {
-      if (mouse[1] === '0' && mouse[4] === 'M') keys.push({ click: { x: Number(mouse[2]), y: Number(mouse[3]) } })
+      const button = Number(mouse[1])
+      const at = { x: Number(mouse[2]), y: Number(mouse[3]) }
+      if (button === 0 && mouse[4] === 'M') keys.push({ click: at })
+      else if (button >= 64 && button <= 69 && mouse[4] === 'M') keys.push({ wheel: ['up', 'down', 'left', 'right', 'left', 'right'][button - 64], ...at })
       i += mouse[0].length
     } else if (csi) {
       const release = /:3(?:$|;)/.test(csi[1] ?? '')
@@ -297,6 +302,9 @@ export function runConsole({ paths, stdin, stdout, backKey = 'ctrl+shift+left', 
   })
 }
 
+// How many characters one sideways scroll moves the key line.
+const HELP_STEP = 4
+
 // `crew view`: runsView's runs (run-view-model.mjs), drawn as the standalone
 // run view draws them, and a run's tree once opened, until q on the runs or
 // Ctrl+C. The model takes every key and click; an action that answers
@@ -311,6 +319,9 @@ export function runsConsole({ paths, stdin, stdout, runs, backKey = 'ctrl+shift+
   let timer = null
   let rowAt = () => null
   let optionAt = () => null
+  // The key line's row, and how far it is scrolled sideways.
+  let helpAt = null
+  let helpOffset = 0
   let busy = Promise.resolve()
   const size = () => ({ width: stdout.columns || 80, height: stdout.rows || 24 })
 
@@ -319,10 +330,12 @@ export function runsConsole({ paths, stdin, stdout, runs, backKey = 'ctrl+shift+
     const t = runs.opened()
     const host = t ? runs.model.projects.flatMap((p) => p.runs).find((r) => r.runId === runs.model.opened?.runId)?.host : null
     const screen = t
-      ? draw(t.model, { ...size(), flash: flash ?? (t.model?.alert ? null : t.model?.latest), alert: t.model?.alert, now: now(), help: consoleTreeHelp(host, backKey) })
-      : drawRuns(runs.model, { ...size(), flash: flash ?? runs.model?.message, title: 'crew runs', help: consoleRunsHelp(backKey) })
+      ? draw(t.model, { ...size(), flash: flash ?? (t.model?.alert ? null : t.model?.latest), alert: t.model?.alert, now: now(), help: consoleTreeHelp(host, backKey), helpOffset })
+      : drawRuns(runs.model, { ...size(), flash: flash ?? runs.model?.message, title: 'crew runs', help: consoleRunsHelp(backKey), helpOffset })
     rowAt = screen.rowAt
     optionAt = screen.optionAt ?? (() => null)
+    helpAt = screen.helpAt ?? null
+    helpOffset = screen.helpOffset ?? 0
     stdout.write('\x1b[?25l\x1b[H' + screen.lines.join('\r\n'))
   }
 
@@ -339,6 +352,17 @@ export function runsConsole({ paths, stdin, stdout, runs, backKey = 'ctrl+shift+
 
   async function one(key) {
     const t = runs.opened()
+    // The wheel moves the selection, as ↑↓ do; sideways over the key line it
+    // scrolls that line, the one too long to show whole.
+    if (key.wheel) {
+      if (key.wheel === 'left' || key.wheel === 'right') {
+        if (key.y !== helpAt) return null
+        helpOffset = Math.max(0, helpOffset + (key.wheel === 'right' ? HELP_STEP : -HELP_STEP))
+        return {}
+      }
+      if (t?.model?.dialog) return null
+      return runs.key(key.wheel === 'up' ? 'UP' : 'DOWN')
+    }
     if (key.click) {
       const { y } = key.click
       if (t?.model?.dialog) {

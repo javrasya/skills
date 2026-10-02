@@ -31,7 +31,7 @@ import { holdQueue } from '../src/hold.mjs'
 import { runHalt } from '../src/halt.mjs'
 import { runPause, pauseRun as pauseRunIn, unpauseRun } from '../src/pause.mjs'
 import { runView, runsView, bandOf, STATES, RUNNER_PATH, runnerAlive, runEnded } from '../src/run-view-model.mjs'
-import { consoleRunsHelp, consoleTreeHelp, draw, drawRuns, listRuns, strip, TREE_HELP, marqueeOffset, NAME_W } from '../src/run-view/draw.mjs'
+import { consoleRunsHelp, consoleTreeHelp, draw, drawRuns, helpLine, listRuns, strip, TREE_HELP, marqueeOffset, NAME_W } from '../src/run-view/draw.mjs'
 import { EventEmitter } from 'events'
 import { daemonGone } from '../src/daemon/client.mjs'
 
@@ -4965,6 +4965,19 @@ test('run console: a done agent whose crew session is parked keeps its done stat
   assert.equal(orca.agent(1).parked, false, 'a host that cannot park says nothing of it')
 })
 
+test('help line: one too long for the screen scrolls by an offset, clamped, a ‹ or › where more is cut; one that fits never moves', () => {
+  const help = 'abcdefghij'
+  assert.deepEqual([strip(helpLine(help, 20, 5).text), helpLine(help, 20, 5).offset], ['abcdefghij', 0])
+  assert.deepEqual([strip(helpLine(help, 6, 0).text), helpLine(help, 6, 0).offset], ['abcde›', 0])
+  assert.deepEqual([strip(helpLine(help, 6, 2).text), helpLine(help, 6, 2).offset], ['‹cdef›', 2])
+  assert.deepEqual([strip(helpLine(help, 6, 99).text), helpLine(help, 6, 99).offset], ['‹fghij', 5])
+  assert.equal(helpLine(help, 6, -3).offset, 0)
+  // draw scrolls its last line, says where it is and the offset it took.
+  const screen = draw(null, { width: 6, height: 20, help, helpOffset: 99 })
+  assert.deepEqual([strip(screen.lines.at(-1)), screen.helpAt, screen.helpOffset], ['‹fghij', screen.lines.length, 5])
+  assert.match(consoleTreeHelp('crew', 'f12'), /^ ↑↓ move · /)
+})
+
 test('run console: Ctrl+P opens the park dialog, Park Selected only on a done agent, Park All Done parking every done agent\'s open session; Orca has none to park', async () => {
   const { view, rowOf, host } = await viewedRun('console', { crew: true })
   const parkedNow = new Set()
@@ -5152,7 +5165,9 @@ test('run console: the frames — no runner row, the key line naming the back ke
   const discover = lines.findIndex((l) => /▸ Discover/.test(l))
   assert.equal(screen.rowAt(discover + 1), 0, 'the first row is the first phase (rowAt takes a 1-based y)')
   assert.ok(!lines.some((l) => /runner {3}crew session|the runner {2}crew session/.test(l)), 'no runner row or pane')
-  assert.match(lines.at(-1), /⏎\/→\/click enter · F12 out of a session · ← runs · Ctrl\+R reclaim · Ctrl\+P park · l log · p pause · r resume · x remove · \? orchestrator/)
+  // Too long for 140 columns: cut with a ›, the rest a sideways scroll away.
+  assert.match(lines.at(-1), /^ ↑↓ move · ⏎\/→\/click enter · F12 out of a session · ← runs · Ctrl\+R reclaim · Ctrl\+P park · l log · .*›$/)
+  assert.match(strip(draw(view.model, { width: 140, height: 30, help: consoleTreeHelp('crew', 'f12'), helpOffset: 99 }).lines.at(-1)), /^‹.*x remove · \? orchestrator$/)
   assert.equal(consoleTreeHelp('orca', 'f12'), `${TREE_HELP} · ? orchestrator`, 'an Orca run\'s agent is its tab; ? is crew\'s orchestrator whatever the host')
   const runs = listOf.get(view)
   await runs.key('q')
