@@ -19,6 +19,10 @@
 //     waits on the person for, or null, as the harness's own events tell it
 //     (hooks/); with keep, set only while it waits on nothing. Its info, and
 //     its worker's worker.show, carry it
+//   session.ready { id }                   → { session }: its harness takes a
+//     prompt now, as its own events tell it (hooks/crew-pi.mjs on pi's
+//     session_start). Its info carries it as `ready`, false until told, false
+//     again once its program ends or is started again
 //   session.revive { id, cols, rows }      → { session }: a parked session's
 //     harness started again in place, on its resume line; any other left as
 //     it is. Its caller waits for the harness to be ready before typing
@@ -169,17 +173,23 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
   }
 
   // What the session's harness waits on the person for, as its own events
-  // told (session.waiting), in its info; null once its program has ended.
+  // told (session.waiting), and whether it takes a prompt (session.ready),
+  // in its info; neither once its program has ended. A dialog does not
+  // unsay ready: a harness past its startup stays past it while it asks.
   function waitsOn(session) {
     const { info } = session
     let waiting = null
+    let ready = false
     return Object.assign(session, {
       info: () => {
         const i = info()
-        return { ...i, waiting: i.alive ? waiting : null, ...(parked.has(i.id) && { parked: true }) }
+        return { ...i, waiting: i.alive ? waiting : null, ready: i.alive && ready, ...(parked.has(i.id) && { parked: true }) }
       },
       wait(what, keep = false) {
         if (!(keep && waiting)) waiting = what
+      },
+      readyNow() {
+        ready = true
       },
     })
   }
@@ -316,6 +326,11 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
     'session.waiting': ({ id, waiting = null, keep = false }) => {
       const session = sessionOf(id)
       session.wait(waiting === null ? null : text(waiting, 'waiting'), keep === true)
+      return { session: session.info() }
+    },
+    'session.ready': ({ id }) => {
+      const session = sessionOf(id)
+      session.readyNow()
       return { session: session.info() }
     },
     'session.rename': ({ id, title }) => {

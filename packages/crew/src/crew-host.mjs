@@ -20,7 +20,7 @@ import { daemonGone, ensureDaemon, request } from './daemon/client.mjs'
 import { runnerCommand } from './daemon/runs.mjs'
 import { crewSessionEnv, launchedSession, launchWords, resumeWords } from './harness.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
-import { SCREENS, readScreen, readsReady } from './screens.mjs'
+import { SCREENS, readScreen, readsReady, tellsReady } from './screens.mjs'
 import { CLAUDE_HOOK_EVENTS } from './waiting.mjs'
 import { sessionTranscripts } from './transcript.mjs'
 import { readCrewConfig, repoConfig } from './crew-config.mjs'
@@ -149,8 +149,10 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
 
   // A prompt typed into a TUI still starting is lost, as on Orca, and one
   // typed into a dialog answers it: a prompt goes in only once the screen is
-  // the harness's input prompt (screens.mjs), steady for `settleMs`, or, for
-  // a harness whose ready screen crew cannot tell, once its terminal is quiet.
+  // the harness's input prompt (screens.mjs), or the harness has said it is
+  // ready (its session's `ready`, told by hooks/), either steady for
+  // `settleMs`, since a startup dialog may follow either by a moment; or, for
+  // a harness that neither shows nor says, once its terminal is quiet.
   // A dialog on the screen is the person's to answer: `asking({ terminal,
   // dialog, ask, detail })` is called when one shows, `asking(null)` once it
   // is gone, and nothing is typed meanwhile, however long it waits. A screen
@@ -159,7 +161,12 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
   // screen not ready at `readyMs`, fails the start.
   async function ready(id, command, { harness, asking = null }) {
     const deadline = Date.now() + readyMs
-    const byScreen = readsReady(harness, screens)
+    // How this harness is known to be ready, and what a start that ran out says.
+    const way = readsReady(harness, screens)
+      ? { isReady: (seen) => seen?.state === 'ready', settle: settleMs, ranOut: 'never showed its input prompt' }
+      : tellsReady(harness, screens)
+        ? { isReady: (seen, s) => s.ready === true, settle: settleMs, ranOut: 'never said it was ready' }
+        : { isReady: (seen, s) => s.quietMs !== null && s.quietMs >= quietMs, settle: 0, ranOut: 'never went quiet' }
     let shown = null
     let steadySince = null
     const show = async (seen) => {
@@ -179,16 +186,16 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
         await show(seen)
       } else {
         const now = Date.now()
-        const isReady = byScreen ? seen?.state === 'ready' : s.quietMs !== null && s.quietMs >= quietMs
+        const isReady = way.isReady(seen, s)
         if (isReady) {
           steadySince ??= now
-          if (now - steadySince >= (byScreen ? settleMs : 0)) {
+          if (now - steadySince >= way.settle) {
             if (shown) await show(null)
             return
           }
         } else steadySince = null
         if (now > deadline) {
-          if (!asking) throw new Error(`\`${command.join(' ')}\` in crew session ${id} ${byScreen ? 'never showed its input prompt' : 'never went quiet'} within ${Math.round(readyMs / 1000)}s; its screen:\n${(await screen(id, 15).catch(() => [])).join('\n')}`)
+          if (!asking) throw new Error(`\`${command.join(' ')}\` in crew session ${id} ${way.ranOut} within ${Math.round(readyMs / 1000)}s; its screen:\n${(await screen(id, 15).catch(() => [])).join('\n')}`)
           if (!isReady) await show({ dialog: UNRECOGNISED, ask: `crew does not recognise ${harness}'s screen after ${Math.round(readyMs / 1000)}s: enter the session and get it to its input prompt`, detail: null })
         } else if (shown && !isReady) await show(null)
       }

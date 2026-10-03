@@ -146,9 +146,9 @@ const HOSTS = [
   },
   {
     name: 'crew',
-    open({ harness = [process.execPath, FAKE_HARNESS], env: extra = {} } = {}) {
+    open({ harness = [process.execPath, FAKE_HARNESS], env: extra = {}, readyMs = 20_000 } = {}) {
       const { env, paths, cwd, agentEnv, setupLog } = crewScratch()
-      const make = () => crewHost({ paths, env: { ...env, ...extra }, cwd, harnesses: harnessAs(harness), quietMs: 300, readyMs: 20_000 })
+      const make = () => crewHost({ paths, env: { ...env, ...extra }, cwd, harnesses: harnessAs(harness), quietMs: 300, readyMs })
       const info = async (w) => (await request(paths, { op: 'session.list' })).sessions.find((s) => s.id === w.terminal)
       const ended = async (w) => (await info(w))?.alive === false
       // As the worker reads them: from its preamble, in its session's transcript.
@@ -542,7 +542,11 @@ test('crew host: pi\'s transcript is written in pi\'s format, where the runner f
   const s = await h.info(w)
   assert.deepEqual(s.command.slice(2), ['--approve', '--session-id', w.sessionId, '--model', 'sonnet', '--thinking', 'low', '-e', PI_EXTENSION])
   const transcripts = sessionTranscripts({ env: crewScratch().env })
-  const usage = await eventually('pi\'s transcript', () => transcripts.usage({ harness: 'pi', sessionId: w.sessionId, worktree: w.worktree }))
+  // The reply lands in its own append, a moment after the file appears.
+  const usage = await eventually('pi\'s transcript, its reply in', () => {
+    const u = transcripts.usage({ harness: 'pi', sessionId: w.sessionId, worktree: w.worktree })
+    return u?.tokens !== null && u
+  })
   assert.match(usage.path, new RegExp(`_${w.sessionId}\\.jsonl$`))
   assert.equal(usage.tokens, 15)
 })
@@ -621,6 +625,28 @@ test("crew host: pi's dialog before the first prompt is heard of from pi's own e
   const transcripts = sessionTranscripts({ env: crewScratch().env })
   const path = await eventually("pi's transcript", () => transcripts.usage({ harness: 'pi', sessionId: w.sessionId, worktree: w.worktree })?.path)
   assert.ok(readFileSync(path, 'utf8').includes(w.prompt), 'the start prompt went in')
+})
+
+test("crew host: pi is ready once it says so, from its own session_start event, however much its terminal draws; one that never says so is not ready, and needs the person at readyMs", async () => {
+  const ticking = crewKind.open({ env: { CREW_FAKE_TICK: '1' } })
+  const w = await start(ticking, 'pi ticking', { harness: 'pi' })
+  const s = (await request(ticking.paths, { op: 'session.list' })).sessions.find((x) => x.id === w.terminal)
+  assert.ok(s.quietMs < 300, `its terminal never went quiet: last drew ${s.quietMs}ms ago`)
+  const transcripts = sessionTranscripts({ env: crewScratch().env })
+  const path = await eventually("pi's transcript", () => transcripts.usage({ harness: 'pi', sessionId: w.sessionId, worktree: w.worktree })?.path)
+  assert.ok(readFileSync(path, 'utf8').includes(w.prompt), 'the start prompt went in')
+
+  const mute = crewKind.open({ env: { CREW_FAKE_TICK: '1', CREW_FAKE_MUTE: '1' }, readyMs: 1_500 })
+  await assert.rejects(start(mute, 'pi mute', { harness: 'pi' }), /never said it was ready within 2s; its screen:\n[\s\S]*❯/)
+  const heard = []
+  const asked = start(mute, 'pi mute asked', { harness: 'pi', asking: (seen) => heard.push(seen) })
+  const shown = await eventually('the person asked', () => heard[0])
+  assert.deepEqual([shown.dialog, shown.ask], ['unrecognised screen', "crew does not recognise pi's screen after 2s: enter the session and get it to its input prompt"])
+  await request(mute.paths, { op: 'session.ready', id: shown.terminal })
+  const w2 = await asked
+  assert.deepEqual(heard.slice(1), [null], 'ready at last, the ask is withdrawn')
+  const path2 = await eventually("pi's transcript", () => transcripts.usage({ harness: 'pi', sessionId: w2.sessionId, worktree: w2.worktree })?.path)
+  assert.ok(readFileSync(path2, 'utf8').includes(w2.prompt), 'the start prompt went in once told')
 })
 
 for (const [harness, asks] of [['claude', 'Claude asks permission to use Bash: touch asked.txt'], ['pi', 'pi asks: Allow Bash?']]) {

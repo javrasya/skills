@@ -1493,6 +1493,44 @@ test("transcripts: a pi session's size counts its subagents' run sessions", () =
   assert.equal(t.size({ harness: 'pi', sessionId: SID, worktree: wt }), 9)
 })
 
+test("transcripts: a Claude session's size counts its background shells' output, so a worker waiting on one is movement", () => {
+  const home = tmp()
+  const wt = join(home, 'wt')
+  const t = sessionTranscripts({ home, env: { CLAUDE_CODE_TMPDIR: join(home, 'tmp') } })
+  const at = join(home, '.claude', 'projects', claudeSlug(wt), `${SID}.jsonl`)
+  mkdirSync(dirname(at), { recursive: true })
+  writeFileSync(at, 'abc\n')
+  assert.equal(t.size({ harness: 'claude', sessionId: SID, worktree: wt }), 4, 'no background shell yet')
+  // As Claude 2.1.286 names it when a Bash call runs in the background:
+  // "Output is being written to: /tmp/claude-<uid>/<slug>/<id>/tasks/<task>.output".
+  const tasks = join(home, 'tmp', `claude-${process.getuid()}`, claudeSlug(wt), SID, 'tasks')
+  mkdirSync(tasks, { recursive: true })
+  writeFileSync(join(tasks, 'b90ofhpmx.output'), 'xy\n')
+  assert.equal(t.size({ harness: 'claude', sessionId: SID, worktree: wt }), 7)
+  appendFileSync(join(tasks, 'b90ofhpmx.output'), 'z\n')
+  assert.equal(t.size({ harness: 'claude', sessionId: SID, worktree: wt }), 9, 'the main transcript still, a background shell writing')
+})
+
+test("transcripts: a pi session's size counts its background tasks' output, kept by pi-background-tasks in its worktree", () => {
+  const home = tmp()
+  const wt = join(home, 'wt')
+  const t = sessionTranscripts({ home, env: {} })
+  const at = join(home, '.pi', 'agent', 'sessions', piDir(wt), `2026-09-24T16-26-07-244Z_${SID}.jsonl`)
+  mkdirSync(dirname(at), { recursive: true })
+  writeFileSync(at, 'abc\n')
+  assert.equal(t.size({ harness: 'pi', sessionId: SID, worktree: wt }), 4)
+  // pi-background-tasks keys the dir by the session id and pi's pid, so
+  // another session's tasks in the same worktree are not this one's.
+  const tasks = join(wt, '.pi', 'tasks', `${SID}-26857`)
+  mkdirSync(tasks, { recursive: true })
+  writeFileSync(join(tasks, 'b5d1c84a7.output'), 'xy\n')
+  mkdirSync(join(wt, '.pi', 'tasks', 'other-session-1'), { recursive: true })
+  writeFileSync(join(wt, '.pi', 'tasks', 'other-session-1', 'x.output'), 'not this session\n')
+  assert.equal(t.size({ harness: 'pi', sessionId: SID, worktree: wt }), 7)
+  appendFileSync(join(tasks, 'b5d1c84a7.output'), 'z\n')
+  assert.equal(t.size({ harness: 'pi', sessionId: SID, worktree: wt }), 9)
+})
+
 // Board status: in progress while an isolated agent works, in review for a
 // Gate agent, completed once an agent reports the PR it published.
 const PUB_SCHEMA = { type: 'object', required: ['worktree', 'pr_url', 'published'], properties: { worktree: { type: 'string' }, pr_url: { type: 'string' }, published: { type: 'boolean' } } }

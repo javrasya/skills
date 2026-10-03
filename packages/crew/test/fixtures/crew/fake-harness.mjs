@@ -22,6 +22,11 @@
 //                 name for it, as Claude does; pi emits ui_prompt_start and
 //                 ui_prompt_end to the extensions its -e names
 //
+// As pi, it emits session_start to those extensions once its input is drawn,
+// as pi does once its editor submits; CREW_FAKE_MUTE=1 keeps it from saying
+// so. CREW_FAKE_TICK=1 redraws a clock every 100 ms from the start, as a pi
+// with a ticking status line draws, so its terminal never goes quiet.
+//
 // It plays a worker's part in a run too, from what the session was told, the
 // prompts of the transcript it resumed included. Given the runner's submit
 // command and a preamble's IDs (the latest one), it submits at the end of
@@ -90,8 +95,16 @@ for (let i = argv.indexOf('-e'); i !== -1; i = argv.indexOf('-e', i + 1)) {
   const ext = await import(pathToFileURL(argv[i + 1]).href)
   ext.default({ on: (type, fn) => handlers.set(type, [...(handlers.get(type) ?? []), fn]) })
 }
-const emit = (event) => {
-  for (const fn of handlers.get(event.type) ?? []) fn(event, {})
+// As pi's runner does: each handler awaited in turn, one that rejects
+// reported and the rest still run, the harness never failed by it.
+const emit = async (event) => {
+  for (const fn of handlers.get(event.type) ?? []) {
+    try {
+      await fn(event, {})
+    } catch (e) {
+      process.stderr.write(`fake ${harness}: extension failed on ${event.type}: ${e?.message ?? e}\n`)
+    }
+  }
 }
 const settings = after('--settings')
 const hooks = settings ? JSON.parse(settings.trim().startsWith('{') ? settings : readFileSync(settings, 'utf8')).hooks ?? {} : {}
@@ -221,7 +234,15 @@ function draw() {
 }
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
+// A clock redrawn every 100 ms, turn or none, once started.
 let drawing = null
+function tick() {
+  if (drawing) return
+  drawing = setInterval(() => {
+    status = `· ${new Date().toISOString()}`
+    draw()
+  }, 100)
+}
 async function turn(prompt) {
   const recorded = !/\[unrecorded\]/.test(prompt)
   said.push(...prompt.split('\n').map((l) => `> ${l}`))
@@ -231,12 +252,7 @@ async function turn(prompt) {
     doctor(prompt)
     return reply(prompt, recorded)
   }
-  if (/\[draw\]/.test(prompt) && !drawing) {
-    drawing = setInterval(() => {
-      status = `· ${new Date().toISOString()}`
-      draw()
-    }, 100)
-  }
+  if (/\[draw\]/.test(prompt)) tick()
   if (/\[die\]/.test(prompt)) {
     status = 'working…'
     draw()
@@ -285,6 +301,8 @@ function reply(prompt, recorded) {
 process.stdout.write(`fake ${harness} starting\r\n`)
 process.stdout.write('\x1b[?1049h\x1b[?2004h\x1b[?25l')
 draw()
+if (process.env.CREW_FAKE_TICK === '1') tick()
+if (harness === 'pi' && process.env.CREW_FAKE_MUTE !== '1') emit({ type: 'session_start', reason: 'startup' })
 if (process.env.CREW_FAKE_DIALOG === 'pi-mcp' && harness === 'pi') {
   setTimeout(() => {
     piDialog = true

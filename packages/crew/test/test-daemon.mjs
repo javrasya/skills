@@ -264,6 +264,29 @@ function quietSession(spawned, quiet) {
   }
 }
 
+test('daemon: a session is ready once its harness says so, whatever its terminal draws; not before, and not once its program ends', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const spawned = []
+  const daemon = await startDaemon({ paths, registry: join(dir, 'runs.jsonl'), spawnSession: quietSession(spawned, new Map([['busy', 10]])), exit: () => {}, log: () => {} })
+  try {
+    const { session } = await request(paths, { op: 'session.spawn', command: ['pi', '--approve', '--session-id', 'uuid-busy', 'busy'], cwd: dir, title: 'busy' })
+    const info = async () => (await request(paths, { op: 'session.list' })).sessions.find((s) => s.id === session.id)
+    assert.deepEqual([session.ready, (await info()).ready], [false, false], 'not ready until told')
+    const told = await request(paths, { op: 'session.ready', id: session.id })
+    assert.deepEqual([told.session.ready, (await info()).ready, (await info()).quietMs], [true, true, 10], 'ready once told, however much it draws')
+    await request(paths, { op: 'session.waiting', id: session.id, waiting: 'pi asks: Allow?' })
+    assert.deepEqual([(await info()).ready, (await info()).waiting], [true, 'pi asks: Allow?'], 'a dialog does not unsay it')
+    await request(paths, { op: 'session.kill', id: session.id })
+    await until('the program to end', async () => !(await info()).alive)
+    assert.equal((await info()).ready, false, 'an ended program is not ready')
+    await assert.rejects(request(paths, { op: 'session.ready', id: '99' }), /no session 99/)
+  } finally {
+    daemon.shutdown('test over')
+  }
+})
+
 test('daemon: parks a done agent\'s harness once quiet past parkAfterMs, never an unsettled, failed, busy, entered or asking one, and refuses a write to it', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
   const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
@@ -425,9 +448,10 @@ test('daemon: session.revive starts a parked session\'s harness again in place a
     const { session } = await request(paths, { op: 'session.spawn', command: ['claude', '--session-id', 'uuid-r', 'done'], cwd: dir })
     const { worker: w } = await request(paths, { op: 'run.worker', run: run.id, session: session.id, coordinator: 'c' })
     await request(paths, { op: 'mail.send', taskId: w.taskId, dispatchId: session.id, capability: w.capability, type: 'worker_done', outcome: 'succeeded' })
+    await request(paths, { op: 'session.ready', id: session.id })
     await until('it to be parked', async () => (await request(paths, { op: 'session.list' })).sessions.find((s) => s.id === session.id).parked)
     const { session: back } = await request(paths, { op: 'session.revive', id: session.id })
-    assert.deepEqual([back.id, back.alive, !!back.parked, back.command], [session.id, true, false, ['claude', '--resume', 'uuid-r', 'done']])
+    assert.deepEqual([back.id, back.alive, !!back.parked, back.command, back.ready], [session.id, true, false, ['claude', '--resume', 'uuid-r', 'done'], false], 'a revived harness has yet to say it is ready')
     await request(paths, { op: 'session.revive', id: session.id })
     assert.equal(spawned.length, 2, 'a live session is not started twice')
     // Woken for a caller about to type, it is not parked again before that write, however quiet.

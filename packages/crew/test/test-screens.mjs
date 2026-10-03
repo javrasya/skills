@@ -6,7 +6,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'fs'
-import { SCREENS, readScreen, readsReady } from '../src/screens.mjs'
+import { SCREENS, readScreen, readsReady, tellsReady } from '../src/screens.mjs'
 import { foldJournal } from '../src/journal.mjs'
 
 const screen = (name) => readFileSync(new URL(`./fixtures/screens/${name}.txt`, import.meta.url), 'utf8').split('\n')
@@ -29,9 +29,10 @@ test('claude: a screen still loading, or one with no rule around its ❯, is not
   assert.equal(readScreen('claude', [...screen('claude-ready'), ...screen('claude-trust')]).dialog, 'workspace trust')
 })
 
-test('readers: pi has no ready screen crew reads, so it is ready once quiet; an unknown harness has no reader; a reader is a table another CLI adds to', () => {
-  assert.equal(readsReady('claude'), true)
-  assert.equal(readsReady('pi'), false)
+test('readers: pi has no ready screen crew reads, and tells crew itself when it takes a prompt; Claude shows it; an unknown harness has neither; a reader is a table another CLI adds to', () => {
+  assert.deepEqual([readsReady('claude'), tellsReady('claude')], [true, false])
+  assert.deepEqual([readsReady('pi'), tellsReady('pi')], [false, true])
+  assert.deepEqual([readsReady('codex'), tellsReady('codex')], [false, false])
   assert.equal(readScreen('pi', screen('claude-trust')), null)
   assert.equal(readScreen('codex', screen('claude-trust')), null)
   const screens = { ...SCREENS, codex: { ready: (lines) => lines.includes('> '), dialogs: [{ name: 'sandbox', match: (text) => /Allow sandbox/.test(text), ask: 'codex asks about its sandbox' }] } }
