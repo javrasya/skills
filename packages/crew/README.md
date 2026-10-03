@@ -38,11 +38,11 @@ This is the README of its code, the **crew** package, `packages/crew` in this re
 | `validation-list.mjs` | what a rendered script's validation list may hold |
 | `crew-config.mjs` | crew's own config, `~/.crew/config.json`: the back key, `parkAfterMs` (how long a done agent's harness sits quiet before the daemon parks it, 15 minutes by default, 0 never), and per repo its setup hook and role overrides |
 | `console.mjs` | the run console and the debug console: a page drawn on the terminal, and entering a session from it |
-| `orchestrator.mjs` | the orchestrator: the agent crew hands one question at a time, each a fresh headless run in the project |
+| `orchestrator.mjs` | the orchestrator: the agent crew hands one question at a time, each a fresh headless run in the project; and the run console's `?` sessions, recorded in the run's `orchestrator.jsonl` so the tree lists them (ADR-0026) |
 | `headless.mjs` | a harness run once, headless (`claude -p`, `pi -p`): the orchestrator's questions, and `crew start`'s login and model check |
 | `screens.mjs` | each harness's screen reader: its ready screen, and the dialogs only the person answers (ADR-0019) |
 | `triage.mjs` | halt triage: each new halt a question to the orchestrator, for the run console's halt panel |
-| `daemon/` | the crew daemon: `daemon.mjs` (its sessions and requests, and parking a done agent's harness until it is entered again, ADR-0024; every agent's session restored parked after a restart, ADR-0025), `session.mjs` (one session in a pty and a headless terminal), `runs.mjs` (crew's Runs, dispatches and mailboxes), `modes.mjs` (a session's terminal modes), `client.mjs` and `transport.mjs` (a command's side, and where the daemon lives) |
+| `daemon/` | the crew daemon: `daemon.mjs` (its sessions and requests, and parking a done agent's harness, or a `?` session's, until it is entered again, ADR-0024 and ADR-0026; every agent's and `?` session restored parked after a restart, ADR-0025), `session.mjs` (one session in a pty and a headless terminal), `runs.mjs` (crew's Runs, dispatches and mailboxes), `modes.mjs` (a session's terminal modes), `client.mjs` and `transport.mjs` (a command's side, and where the daemon lives) |
 
 ```
 crew run [--host crew|orca] <rendered-script.js> [--state-dir <dir>] [--resume] [--permission-mode <mode>]
@@ -62,6 +62,7 @@ A `crew start` never launches over an earlier run's files: its run folder is new
 Together, the journal and the log say what happened in a run, whether or not the runner's tab is still open.
 
 - **`runner.log`** holds every line the runner printed, each prefixed with an ISO timestamp, including the result or the error it ended with. Each run appends to the log, so a resumed run follows the earlier one.
+- **`orchestrator.jsonl`** holds the run's `?` sessions (ADR-0026), one JSON line each, written by the run console that opens one, never by the runner: `starting` (`n`, `harness`, `model`, `dir`) as the start begins, then `started` (`n`, `terminal`, `sessionId`) once the harness has its prompt, or `failed` (`n`, `reason`); and `closed` (`n`) once the operator closes it from the tree. The tree reads it through `consultSessions` in `orchestrator.mjs`: a `starting` with nothing after it is a start under way, or one whose console died mid-start, read as failed past `CONSULT_START_MS` (15 minutes).
 - **`journal.jsonl`** holds one JSON entry per line. Every entry has a `type` and `at`, an ISO timestamp. `JOURNAL_ENTRIES` in `journal.mjs` lists the fields each type always carries:
 
 | type | written when | fields besides `type` and `at` |
@@ -130,6 +131,8 @@ It writes **`halted.json`** to the state dir instead, the arming session's notic
 A dead runner's run is carried on with the standalone view's r, which resumes it with `--resume` (above).
 
 On crew, each new `at` is also one **halt triage** question to crew's orchestrator (ADR-0018), whose answer — each held node's reason, its questions, and what the operator must decide — the run console's halt panel shows. The run console asks it: a run that halts while nobody has it open in `crew view`, or is watched only from the runner's attached view, is triaged when someone next opens it there. Quitting `crew view` while a triage is still asked gives it up, its headless run ended so none outlives the view, and the next console to open the run asks it again. An orchestrator question is a headless run of the harness in the run's project (ADR-0019), never a session or a Run.
+
+**`?`** in a run's tree opens a session with the orchestrator for a conversation about the run, seeded with its run directory, and enters it; the back key returns to the tree. Each one is a row of the **Orchestrator** phase, drawn first, above the run's phases (ADR-0026): `console 1`, `console 2`, in the order opened, numbered on their own, never as agents of the run. Its state is crew's session's: `◌ starting` while its harness boots, `● running`, `? needs you` with what its harness waits on the person for, `✓ done` with the `⏾ parked` tag once parked, `✗ failed` with why when its session is gone from crew or its start never finished. Enter on its row enters it again, Ctrl+P parks it at once, and Ctrl+R's Reclaim Selected closes its session and drops the row (Reclaim All, and removing the run, close every one). The daemon parks a `?` session like a done agent's: once quiet past `parkAfterMs`, and as soon as its harness ends, so Enter always resumes the conversation; after a daemon restart it comes back parked under its old id (ADR-0025). The header's counts, a pause's agents finishing and the reclaim of worktrees know nothing of it.
 
 ### Pausing and removing a run
 

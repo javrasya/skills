@@ -23,7 +23,9 @@
 // is flagged `orchestrator` at its creation: it is crew's own question, no
 // workflow run, so it is never live, and it is dropped from the book, its
 // dispatches with it, once every session of it is closed, and by the next
-// daemon, which none of its sessions outlive.
+// daemon, which none of its sessions outlive. A session of no Run titled as
+// the orchestrator's `?` is (`console`): the person's conversation about a
+// run, kept for the next daemon as an agent's session is (#168).
 //
 // The mailbox is Orca's: a check freezes every waiting message into a batch
 // and hands that batch back, marked replayed, until it is acknowledged; `ack`
@@ -100,9 +102,10 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
     for (const r of kept.runs ?? []) if (!r.orchestrator) runs.set(r.id, { ...r, acked: new Set(r.acked) })
     for (const d of kept.dispatches ?? []) if (runs.has(d.run)) dispatches.set(d.id, d)
     for (const [path, status] of Object.entries(kept.statuses ?? {})) statuses.set(path, status)
-    // Only an agent's session comes back: one of no dispatch was a log tail
-    // or a runner, which is started again its own way, or not at all.
-    for (const [id, spec] of Object.entries(kept.sessions ?? {})) if (dispatches.has(id)) specs.set(id, spec)
+    // An agent's session comes back, and a `?` session; any other of no
+    // dispatch was a log tail or a runner, which is started again its own
+    // way, or not at all.
+    for (const [id, spec] of Object.entries(kept.sessions ?? {})) if (dispatches.has(id) || isOrchestratorTitle(spec?.title)) specs.set(id, spec)
     ;({ messages = 0, deliveries = 0, nextSession = 1 } = kept)
     died = new Set(kept.running ?? [])
   }
@@ -305,6 +308,11 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
     done(id) {
       const d = dispatches.get(String(id))
       return !!d && d.settled && d.outcome === 'succeeded'
+    },
+    // Whether session `id` is a `?` session: titled as the orchestrator's,
+    // of no dispatch.
+    console(id) {
+      return !dispatches.has(String(id)) && isOrchestratorTitle(specs.get(String(id))?.title)
     },
     // A recovered run's runner is its new session from now on: recovered once.
     recovered(runId, session) {

@@ -500,7 +500,7 @@ for (const kind of HOSTS) {
 // The crew host alone: what the fake host has no pty, harness or daemon for.
 const crewKind = HOSTS.find((k) => k.name === 'crew')
 
-test('crew host: has crew\'s own methods beyond the interface, sessionStart and mailSend', () => {
+test('crew host: has crew\'s own methods beyond the interface, sessionStart, mailSend and terminalsInfo', () => {
   const { host } = crewKind.open()
   assert.deepEqual(CREW_ONLY.filter((m) => typeof host[m] !== 'function'), [])
 })

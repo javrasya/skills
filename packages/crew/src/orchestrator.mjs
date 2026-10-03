@@ -4,10 +4,14 @@
 // question's schema. Anything short of a valid answer is an
 // OrchestratorError, never a value.
 //
-// It runs in no session: no run's graph shows it. Only the run console's `?`
-// is a session, titled `orchestrator/console`, for a person to talk to. It
+// It runs in no session: no run's graph shows it as a node. Only the run
+// console's `?` is a session, titled `orchestrator/console`, for a person to
+// talk to: recorded in the run's state dir (CONSULT_FILE, #168), so the run
+// tree lists it under Orchestrator and the person can enter it again. It
 // never answers a scheduling question: the questions are crew's, and none is one.
 import { randomUUID } from 'crypto'
+import { appendFileSync, readFileSync } from 'fs'
+import { join } from 'path'
 import { checkSchema } from './schema.mjs'
 import { runHeadless } from './headless.mjs'
 import { validationLineProblem } from './validation-list.mjs'
@@ -155,10 +159,83 @@ Answer with a short "summary" of the halt, and one entry per held node, in the o
 // operator about one run, seeded with its run directory.
 export const consultPrompt = (stateDir) => `You are crew's orchestrator, opened from the run console for a conversation with the operator about one workflow run. The run's state is ${runFiles(stateDir)}. Read what you need of it, then wait for the operator's questions. Change nothing unless the operator asks you to.`
 
+// The `?` sessions of a run, one JSON line each in its state dir, appended by
+// the console that opens one (never by the runner, whose journal a resume
+// rewrites): `starting` { n, at, harness, model, dir } as the start begins,
+// then `started` { n, at, terminal, sessionId } once the harness has its
+// prompt, or `failed` { n, at, reason }; `closed` { n, at } once the operator
+// closes it from the tree. Numbered from 1 in the order opened. A `starting`
+// with nothing after it is a start under way, or one whose console died
+// mid-start, which nothing else records: past CONSULT_START_MS it is read as
+// failed, so the tree never shows it starting for good.
+export const CONSULT_FILE = 'orchestrator.jsonl'
+// The phase the run tree lists them under, drawn before the run's own.
+export const CONSOLE_PHASE = 'Orchestrator'
+// A `?` session's title in the tree, its label `console <n>` under its phase.
+export const consoleTitle = (n) => `[${CONSOLE_PHASE}] console ${n}`
+export const CONSULT_START_MS = 15 * 60_000
+const STALE_START = 'its start was never recorded as done: the console that started it went away'
+
+const consultLines = (stateDir) => {
+  let text
+  try {
+    text = readFileSync(join(stateDir, CONSULT_FILE), 'utf8')
+  } catch (e) {
+    if (e?.code === 'ENOENT') return []
+    throw e
+  }
+  const lines = []
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue
+    try {
+      lines.push(JSON.parse(line))
+    } catch {
+      // A line cut short by a console killed mid-write: the ones before it stand.
+    }
+  }
+  return lines
+}
+
+const consultWrite = (stateDir, entry, now) => appendFileSync(join(stateDir, CONSULT_FILE), `${JSON.stringify({ ...entry, at: new Date(now).toISOString() })}\n`)
+
+// Every `?` session the run dir records, in the order opened: { n, at, state,
+// terminal, sessionId, harness, model, dir, reason }, state one of starting,
+// started, failed, closed, as the last line of its n says; `at` the time of
+// its starting line. `now` is when a starting line goes stale.
+export function consultSessions(stateDir, { now = Date.now() } = {}) {
+  const byN = new Map()
+  for (const e of consultLines(stateDir)) {
+    if (e.type === 'starting') byN.set(e.n, { n: e.n, at: e.at, state: 'starting', terminal: null, sessionId: null, harness: e.harness ?? 'claude', model: e.model ?? null, dir: e.dir ?? null, reason: null })
+    const s = byN.get(e.n)
+    if (!s) continue
+    if (e.type === 'started') Object.assign(s, { state: 'started', terminal: e.terminal, sessionId: e.sessionId ?? null })
+    else if (e.type === 'failed') Object.assign(s, { state: 'failed', reason: e.reason ?? null })
+    else if (e.type === 'closed') s.state = 'closed'
+  }
+  for (const s of byN.values()) {
+    if (s.state === 'starting' && now - Date.parse(s.at) >= CONSULT_START_MS) Object.assign(s, { state: 'failed', reason: STALE_START })
+  }
+  return [...byN.values()].sort((a, b) => a.n - b.n)
+}
+
+// Session `n` closed by the operator: its record says so, and the tree drops it.
+export const closeConsult = (stateDir, n, { now = Date.now() } = {}) => consultWrite(stateDir, { type: 'closed', n }, now)
+
 // A fresh `?` session on a host that starts sessions of no Run (the crew
 // host's sessionStart): titled orchestrator/console, in no run's journal, so
-// never a node of any run's graph. Returns its session id.
-export async function consultSession({ host, stateDir, harness = 'claude', model = null, effort = null, permissionMode = null, dir }) {
-  const { terminal } = await host.sessionStart({ title: orchestratorTitle('console'), prompt: consultPrompt(stateDir), harness, model, effort, permissionMode, sessionId: randomUUID(), dir })
-  return terminal
+// never a node of any run's graph; recorded in the run dir as above. Returns
+// { terminal, n }, its session id and its number among the run's.
+export async function consultSession({ host, stateDir, harness = 'claude', model = null, effort = null, permissionMode = null, dir, now = Date.now }) {
+  const n = (consultSessions(stateDir, { now: now() }).at(-1)?.n ?? 0) + 1
+  const sessionId = randomUUID()
+  consultWrite(stateDir, { type: 'starting', n, harness, model, dir }, now())
+  let terminal
+  try {
+    ;({ terminal } = await host.sessionStart({ title: orchestratorTitle('console'), prompt: consultPrompt(stateDir), harness, model, effort, permissionMode, sessionId, dir }))
+  } catch (e) {
+    consultWrite(stateDir, { type: 'failed', n, reason: e?.message ?? String(e) }, now())
+    throw e
+  }
+  consultWrite(stateDir, { type: 'started', n, terminal, sessionId }, now())
+  return { terminal, n }
 }

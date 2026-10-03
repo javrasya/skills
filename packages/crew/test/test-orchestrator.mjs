@@ -11,8 +11,8 @@ import { join } from 'path'
 import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { preflight, runHeadless } from '../src/headless.mjs'
-import { OrchestratorError, consultSession, draftValidation, isOrchestratorTitle, orchestrator, validationText } from '../src/orchestrator.mjs'
-import { runView, runsView } from '../src/run-view-model.mjs'
+import { CONSULT_FILE, CONSULT_START_MS, OrchestratorError, closeConsult, consultSession, consultSessions, draftValidation, isOrchestratorTitle, orchestrator, validationText } from '../src/orchestrator.mjs'
+import { STATES, runView, runsView } from '../src/run-view-model.mjs'
 import { TRIAGE_STALE_MS, readTriage, triageHalt } from '../src/triage.mjs'
 import { runDefaultOf, runOrchestrator } from '../src/arm.mjs'
 import { runRegistry } from '../src/registry.mjs'
@@ -95,6 +95,126 @@ test("graph: a journal naming an orchestrator session shows no row for it, in an
   assert.deepEqual(titles, ['[Implement] impl:a', '[Implement] orchestrator/x'])
 })
 
+// A run dir with one agent of Implement, and the ? sessions `consults`
+// records as orchestrator.jsonl lines.
+function runWithConsults(consults) {
+  const stateDir = scratch('consults')
+  const at = '2026-09-28T10:00:00.000Z'
+  const journal = [
+    { type: 'run', at, runId: 'run_1', terminal: 'coord_1' },
+    { type: 'started', n: 1, key: 'k1', title: '[Implement] impl:a', at, run: 'run_1', dispatchId: 'term_1', harness: 'claude', sessionId: 'sid-1', worktree: null, terminal: 'term_1' },
+  ]
+  writeFileSync(join(stateDir, 'journal.jsonl'), journal.map((e) => `${JSON.stringify(e)}\n`).join(''))
+  writeFileSync(join(stateDir, 'runner.log'), '')
+  writeFileSync(join(stateDir, CONSULT_FILE), consults.map((e) => `${JSON.stringify({ at, ...e })}\n`).join(''))
+  return { stateDir, at }
+}
+const consult = (n, terminal, ...more) => [{ type: 'starting', n, harness: 'claude', model: 'opus', dir: 'C:/repo' }, ...(terminal ? [{ type: 'started', n, terminal, sessionId: `sid-${terminal}` }] : []), ...more]
+
+test('graph: the ? sessions the run dir records are the rows of an Orchestrator phase drawn first (#168), each in the state crew has its session in, none counted as an agent; Enter enters one; a closed one is no row', async () => {
+  const { stateDir, at } = runWithConsults([
+    ...consult(1, 'c1'), ...consult(2, 'c2'), ...consult(3, 'c3'), ...consult(4, 'c4', { type: 'closed', n: 4 }), ...consult(5, null),
+    ...consult(6, null, { type: 'failed', n: 6, reason: 'crew: agent_not_ready' }), ...consult(7, 'c7'),
+  ])
+  const infos = [
+    { terminal: 'c1', alive: true, parked: false, waiting: null }, { terminal: 'c2', alive: true, parked: false, waiting: 'a permission dialog' },
+    { terminal: 'c3', alive: false, parked: true, waiting: null }, { terminal: 'term_1', alive: true, parked: false, waiting: null },
+  ]
+  const host = { inPlace: true, terminalList: async () => infos.map((i) => i.terminal), terminalsParked: async () => ['c3'], terminalsInfo: async () => infos }
+  const now = Date.parse(at) + 90_000
+  const usage = ({ harness, sessionId, worktree }) => (sessionId === 'sid-c1' && harness === 'claude' && worktree === 'C:/repo' ? { context: 1_000, tokens: 5_000, path: 'C:/t/c1.jsonl' } : null)
+  const view = runView({ stateDir, host, registry: null, transcripts: { usage }, alive: () => true, clock: { now: () => now }, enter: true })
+  await view.refresh()
+  const { model } = view
+  assert.deepEqual(model.phases.map((p) => p.name), ['Orchestrator', 'Implement'])
+  assert.deepEqual(model.rows.map((r) => r.key), ['phase:Orchestrator', 'console:1', 'console:2', 'console:3', 'console:5', 'console:6', 'console:7', 'phase:Implement', 'agent:1'])
+  const rows = model.rows.filter((r) => r.key.startsWith('console:')).map((r) => r.agent)
+  assert.deepEqual(rows.map((a) => [a.n, a.state, a.reason, a.parked, a.tabOpen, a.terminal]), [
+    [1, 'running', null, false, true, 'c1'],
+    [2, 'needs you', 'a permission dialog', false, true, 'c2'],
+    [3, 'done', null, true, true, 'c3'],
+    [5, 'starting', null, false, null, null],
+    [6, 'failed', 'crew: agent_not_ready', false, null, null],
+    [7, 'failed', 'its crew session is gone', false, false, 'c7'],
+  ])
+  const [one] = rows
+  assert.deepEqual([one.label, one.title, one.phase, one.console, one.worktree, one.harness, one.sessionId, one.context, one.tokens, one.transcript, one.elapsedMs], ['console 1', '[Orchestrator] console 1', 'Orchestrator', true, null, 'claude', 'sid-c1', 1_000, 5_000, 'C:/t/c1.jsonl', 90_000])
+  const orch = model.phases[0]
+  assert.deepEqual([orch.console, orch.total, orch.folded, orch.mix.running, orch.mix['needs you'], orch.mix.done, orch.mix.starting, orch.mix.failed], [true, 6, false, 1, 1, 1, 1, 2])
+  assert.deepEqual(model.header.counts, { ...Object.fromEntries(STATES.map((s) => [s, 0])), running: 1 }, 'the header counts the run\'s agents only')
+  const screen = draw(model, { width: 140, height: 30 }).lines.map(strip)
+  assert.match(screen[4], /^ ▾ Orchestrator 6 sessions\s+\?1 ◌1 ●1 ✗2 ✓1\s*$/, 'the phase row counts sessions, not done ones')
+  assert.match(screen[5], /^\s+1   console 1\s+● running/)
+  assert.equal(model.alert, null, 'a console waiting on the person is no run alert')
+
+  assert.deepEqual(await view.click(1), { enter: { session: 'c1', title: '[Orchestrator] console 1' } })
+  assert.match((await view.click(4)).message, /console 5 has no session: it is still starting/)
+  assert.match((await view.click(6)).message, /console 7's crew session c7 is closed/)
+  assert.deepEqual([view.model.pane.kind, view.model.pane.agent.title], ['agent', '[Orchestrator] console 7'])
+
+  // Every ? session parked folds the phase, as a phase of done agents folds.
+  const parked = runWithConsults([...consult(1, 'c1')])
+  const quiet = runView({ stateDir: parked.stateDir, host: { inPlace: true, terminalList: async () => ['c1'], terminalsParked: async () => ['c1'], terminalsInfo: async () => [{ terminal: 'c1', alive: false, parked: true, waiting: null }] }, registry: null, transcripts: { usage: () => null }, alive: () => true, clock: { now: () => now } })
+  await quiet.refresh()
+  assert.deepEqual(quiet.model.rows.map((r) => r.key), ['phase:Orchestrator', 'phase:Implement', 'agent:1'])
+  // Crew's sessions not readable: a started one stays running, saying so.
+  const unread = runView({ stateDir: parked.stateDir, host: { inPlace: true, terminalList: async () => ['c1'], terminalsParked: async () => [], terminalsInfo: async () => { throw new Error('crew: ECONNREFUSED') } }, registry: null, transcripts: { usage: () => null }, alive: () => true, clock: { now: () => now } })
+  await unread.refresh()
+  assert.deepEqual([unread.model.rows[1].agent.state, unread.model.rows[1].agent.reason], ['running', "crew's sessions could not be read: crew: ECONNREFUSED"])
+  // A run with no ? session has no Orchestrator phase.
+  const none = runWithConsults([])
+  const plain = runView({ stateDir: none.stateDir, host: { terminalList: async () => [] }, registry: null, transcripts: { usage: () => null }, alive: () => true, clock: { now: () => now } })
+  await plain.refresh()
+  assert.deepEqual(plain.model.rows.map((r) => r.key), ['phase:Implement', 'agent:1'])
+})
+
+test('tree: Ctrl+R on a ? session\'s row closes its session and drops the row (#168), on the Orchestrator row or Reclaim All every one; Ctrl+P parks a running one at once', async () => {
+  const { stateDir, at } = runWithConsults([...consult(1, 'c1'), ...consult(2, 'c2'), ...consult(3, null, { type: 'failed', n: 3, reason: 'crew: agent_not_ready' }), ...consult(4, 'c4')])
+  const closed = []
+  const parked = new Set()
+  const infos = () => ['c1', 'c2', 'c4'].filter((t) => !closed.includes(t)).map((terminal) => ({ terminal, alive: !parked.has(terminal), parked: parked.has(terminal), waiting: null }))
+  const host = {
+    inPlace: true, terminalList: async () => infos().map((i) => i.terminal), terminalsParked: async () => [...parked], terminalsInfo: async () => infos(),
+    terminalClose: async ({ terminal }) => closed.push(terminal), terminalPark: async ({ terminal }) => parked.add(terminal),
+  }
+  const view = runView({ stateDir, host, registry: null, transcripts: { usage: () => null }, alive: () => false, clock: { now: () => Date.parse(at) + 1000 }, enter: true })
+  await view.refresh()
+  const keys = () => view.model.rows.map((r) => r.key)
+  assert.deepEqual(keys(), ['phase:Orchestrator', 'console:1', 'console:2', 'console:3', 'console:4', 'phase:Implement', 'agent:1'])
+
+  await view.key('DOWN')
+  await view.key('CTRL_R')
+  assert.deepEqual(view.model.dialog.options[0], { id: 'selected', label: 'Reclaim Selected', detail: 'console 1: closes its session', disabled: false, reason: null })
+  assert.match((await view.key('ENTER')).message, /^closed \[Orchestrator\] console 1$/)
+  assert.deepEqual([closed, keys()], [['c1'], ['phase:Orchestrator', 'console:2', 'console:3', 'console:4', 'phase:Implement', 'agent:1']])
+  assert.deepEqual(consultSessions(stateDir).map((s) => s.state), ['closed', 'started', 'failed', 'started'])
+
+  // Ctrl+P: Park Selected on a running one; a parked one is refused with why.
+  await view.key('CTRL_P')
+  assert.deepEqual(view.model.dialog.options[0], { id: 'park-selected', label: 'Park Selected', detail: '[Orchestrator] console 2', disabled: false, reason: null })
+  assert.match((await view.key('ENTER')).message, /parked 1 of 1/)
+  assert.deepEqual([[...parked], view.model.rows[1].agent.state, view.model.rows[1].agent.parked], [['c2'], 'done', true])
+  await view.key('CTRL_P')
+  assert.deepEqual([view.model.dialog.options[0].disabled, view.model.dialog.options[0].reason], [true, 'it is parked already'])
+  await view.key('ESCAPE')
+
+  // A failed start has no session to close: its row goes all the same.
+  await view.key('DOWN')
+  await view.key('CTRL_R')
+  assert.deepEqual(view.model.dialog.options[0].detail, 'console 3: drops it, its start having failed')
+  assert.match((await view.key('ENTER')).message, /^closed \[Orchestrator\] console 3$/)
+  assert.deepEqual([closed, keys()], [['c1'], ['phase:Orchestrator', 'console:2', 'console:4', 'phase:Implement', 'agent:1']])
+
+  // Reclaim All, the run ended: every ? session left is closed too, the parked one included.
+  await view.key('CTRL_R')
+  await view.key('DOWN')
+  await view.key('DOWN')
+  assert.equal(view.model.dialog.options[view.model.dialog.highlight].id, 'all')
+  const all = await view.key('ENTER')
+  assert.match(all.message, /closed 2 orchestrator sessions/)
+  assert.deepEqual([closed, keys()], [['c1', 'c2', 'c4'], ['phase:Implement', 'agent:1']])
+})
+
 // The crew host, and the fake harness run headless, in a scratch crew home
 // and Claude dir; crew's config names the fake harness as Claude.
 const homes = []
@@ -143,6 +263,35 @@ test('preflight: a harness that answers passes; one whose login or model fails i
 })
 
 // --- halt triage and ? (#103) ---------------------------------------------
+
+test('?: consultSession records each session in the run dir (#168), starting then started, numbered on; a start that fails is recorded failed with why; a starting line left by a console that went away is failed once stale; closeConsult records closed', async () => {
+  const stateDir = scratch('consult')
+  const starts = []
+  const host = { sessionStart: async (s) => (starts.push(s), { terminal: String(starts.length) }) }
+  assert.deepEqual(await consultSession({ host, stateDir, harness: 'claude', model: 'opus', dir: 'C:/repo' }), { terminal: '1', n: 1 })
+  assert.deepEqual(await consultSession({ host, stateDir, harness: 'pi', dir: 'C:/repo' }), { terminal: '2', n: 2 })
+  const failing = { sessionStart: async () => { throw new Error('crew: agent_not_ready') } }
+  await assert.rejects(consultSession({ host: failing, stateDir, dir: 'C:/repo' }), /agent_not_ready/)
+  const lines = readFileSync(join(stateDir, CONSULT_FILE), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+  assert.deepEqual(lines.map((l) => [l.type, l.n]), [['starting', 1], ['started', 1], ['starting', 2], ['started', 2], ['starting', 3], ['failed', 3]])
+  const sessions = consultSessions(stateDir)
+  assert.deepEqual(sessions.map((s) => [s.n, s.state, s.terminal, s.harness, s.model, s.sessionId, s.dir, s.reason]), [
+    [1, 'started', '1', 'claude', 'opus', starts[0].sessionId, 'C:/repo', null],
+    [2, 'started', '2', 'pi', null, starts[1].sessionId, 'C:/repo', null],
+    [3, 'failed', null, 'claude', null, null, 'C:/repo', 'crew: agent_not_ready'],
+  ])
+  assert.ok(sessions.every((s) => typeof s.at === 'string' && !Number.isNaN(Date.parse(s.at))))
+  closeConsult(stateDir, 1)
+  assert.deepEqual(consultSessions(stateDir).map((s) => s.state), ['closed', 'started', 'failed'])
+  assert.deepEqual(consultSessions(scratch('none')), [])
+
+  // A console that died between starting and started leaves a starting line: shown so until stale, then failed.
+  const at = '2026-09-28T10:00:00.000Z'
+  writeFileSync(join(stateDir, CONSULT_FILE), `${JSON.stringify({ type: 'starting', at, n: 1, harness: 'claude', model: null, dir: 'C:/repo' })}\n`)
+  assert.equal(consultSessions(stateDir, { now: Date.parse(at) + CONSULT_START_MS - 1 })[0].state, 'starting')
+  const stale = consultSessions(stateDir, { now: Date.parse(at) + CONSULT_START_MS })[0]
+  assert.deepEqual([stale.state, stale.reason], ['failed', 'its start was never recorded as done: the console that started it went away'])
+})
 
 const AT = '2026-09-28T10:00:00.000Z'
 const ANSWER = { summary: 'impl:a failed its tests', nodes: [{ node: 'impl:a', reason: 'its tests fail on Windows', questions: ['keep the new API?'], decide: 'whether to keep the new API or revert it' }] }
@@ -309,25 +458,33 @@ test('triage: a question that fails says so in the panel, and r resumes the run 
   assert.match(aged.error, /no answer was recorded/)
 })
 
-test('?: on an opened run, a fresh orchestrator session seeded with its run directory, entered and closed on leaving; its halt triaged once; the graph unchanged', async () => {
+test('?: on an opened run, a fresh orchestrator session seeded with its run directory, entered and kept on leaving, a row of the Orchestrator phase from then on (#168); its halt triaged once', async () => {
   const stateDir = haltedRun()
   const registry = join(scratch('registry'), 'runs.jsonl')
   runRegistry(registry).armed({ runId: 'run_1', project: 'C:/repos/app', runDir: stateDir, spec: 'implement-spec-103', host: 'crew' })
   const consulted = []
   const triaged = []
   let n = 0
-  const orchestrator = { triage: async (run) => triaged.push(run.runDir), consult: async (run) => (consulted.push(run.runDir), `sess_${++n}`) }
-  const runs = runsView({ host: { terminalList: async () => [] }, registry, enter: true, transcripts: { usage: () => null }, alive: () => true, orchestrator })
+  const sessionHost = { sessionStart: async () => ({ terminal: `sess_${++n}` }) }
+  const orchestrator = { triage: async (run) => triaged.push(run.runDir), consult: async (run) => (consulted.push(run.runDir), consultSession({ host: sessionHost, stateDir: run.runDir, dir: run.project })) }
+  const open = []
+  const host = { inPlace: true, terminalList: async () => open, terminalsParked: async () => [], terminalsInfo: async () => open.map((terminal) => ({ terminal, alive: true, parked: false, waiting: null })) }
+  const runs = runsView({ host, registry, enter: true, transcripts: { usage: () => null }, alive: () => true, orchestrator })
   await runs.refresh()
   await runs.open('run_1')
-  const rows = runs.opened().model.rows.map((r) => r.key)
+  const keys = () => runs.opened().model.rows.map((r) => r.key)
+  const rows = keys()
   await runs.refresh()
   assert.deepEqual(triaged, [stateDir], 'the opened run\'s halt, once')
-  assert.deepEqual(await runs.key('?'), { enter: { session: 'sess_1', close: true } })
-  assert.deepEqual(await runs.key('?'), { enter: { session: 'sess_2', close: true } }, 'each ? a fresh session')
+  open.push('sess_1')
+  assert.deepEqual(await runs.key('?'), { enter: { session: 'sess_1', title: '[Orchestrator] console 1' } }, 'entered, and never closed on leaving')
+  assert.deepEqual(keys(), ['phase:Orchestrator', 'console:1', ...rows], 'its row is there as the session is entered')
+  open.push('sess_2')
+  assert.deepEqual(await runs.key('?'), { enter: { session: 'sess_2', title: '[Orchestrator] console 2' } }, 'each ? a fresh session')
   assert.deepEqual(consulted, [stateDir, stateDir])
   await runs.refresh()
-  assert.deepEqual(runs.opened().model.rows.map((r) => r.key), rows)
+  assert.deepEqual(keys(), ['phase:Orchestrator', 'console:1', 'console:2', ...rows])
+  assert.deepEqual(runs.opened().model.rows[1].agent.state, 'running')
 
   orchestrator.consult = async () => {
     throw new Error('crew: agent_not_ready')
@@ -350,7 +507,8 @@ test('run default: the orchestrator of an armed run runs on the harness and mode
   const cwds = []
   const orch = runOrchestrator({ paths: { home: dir }, host: (cwd) => (cwds.push(cwd), { sessionStart: async (s) => (starts.push(s), { terminal: '42' }) }) })
   const runDir = join(dir, 'orca-run')
-  assert.equal(await orch.consult({ runDir, script, project: 'C:/repos/app', permissionMode: 'acceptEdits' }), '42')
+  mkdirSync(runDir)
+  assert.deepEqual(await orch.consult({ runDir, script, project: 'C:/repos/app', permissionMode: 'acceptEdits' }), { terminal: '42', n: 1 })
   const [s] = starts
   assert.deepEqual([s.title, s.harness, s.model, s.permissionMode, s.dir, cwds[0]], ['orchestrator/console', 'pi', 'lm/qwen', 'acceptEdits', 'C:/repos/app', 'C:/repos/app'])
   assert.ok(isOrchestratorTitle(s.title))
@@ -362,14 +520,17 @@ test('run default: the orchestrator of an armed run runs on the harness and mode
 
 test('crew host: ? starts the fake harness in a session of no run, titled orchestrator/console, in the project, told the run directory', async () => {
   const { paths, repo, root, host } = crewScratch()
-  const id = await consultSession({ host, stateDir: 'C:/runs/app/orca-run', harness: 'claude', model: 'opus', dir: repo })
+  const stateDir = join(root, 'orca-run')
+  mkdirSync(stateDir)
+  const { terminal: id } = await consultSession({ host, stateDir, harness: 'claude', model: 'opus', dir: repo })
   const s = (await request(paths, { op: 'session.list' })).sessions.find((x) => x.id === id)
   assert.deepEqual([s.title, s.alive, realpathSync(s.cwd)], ['orchestrator/console', true, repo])
+  assert.deepEqual((await host.terminalsInfo()).find((i) => i.terminal === id), { terminal: id, alive: true, parked: false, waiting: null, exit: null }, 'what the tree reads its state from')
   await assert.rejects(request(paths, { op: 'worker.show', id }), /dispatch_not_found/, 'no dispatch of any run: never a node')
   const transcripts = () => (existsSync(join(root, 'claude')) ? readdirSync(join(root, 'claude'), { recursive: true }).filter((f) => f.endsWith('.jsonl')).map((f) => readFileSync(join(root, 'claude', f), 'utf8')) : [])
   for (const until = Date.now() + 10_000; !transcripts().length && Date.now() < until;) await new Promise((done) => setTimeout(done, 50))
   const told = transcripts()
-  assert.ok(told.some((t) => t.includes('opened from the run console') && t.includes('C:/runs/app/orca-run')), 'its first prompt names the run directory')
+  assert.ok(told.some((t) => t.includes('opened from the run console') && t.includes(stateDir)), 'its first prompt names the run directory')
   assert.ok(!told.some((t) => t.includes("Your session host's preamble")), 'no worker preamble')
   await request(paths, { op: 'session.close', id })
 })

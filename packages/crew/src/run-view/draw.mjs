@@ -99,9 +99,12 @@ const outageOf = (o) => c('1;33', o.phase === 'paused'
   ? `⏸ paused: Orca outage past ${Math.round(RUNNER_SETTINGS.outageLimitMs / 60_000)}m — r to resume`
   : `⚠ Orca unreachable — waiting ${duration(o.elapsedMs)} (probe ${o.probes})`)
 
+// The Orchestrator phase (#168) counts its `?` sessions, none of them done
+// in any sense a run has.
 function phaseLine(p) {
   const peak = p.folded && p.peakContext != null ? grey('   peak ctx ') + banded({ band: bandOf(p.peakContext) }, size(p.peakContext)) : ''
-  return ` ${p.folded ? '▸' : '▾'} ${bold(p.name.padEnd(10))} ${grey(`${p.done}/${p.total} done`.padEnd(10))}  ${mixOf(p.mix)}${peak}`
+  const count = p.console ? `${p.total} session${p.total === 1 ? '' : 's'}` : `${p.done}/${p.total} done`
+  return ` ${p.folded ? '▸' : '▾'} ${bold(p.name.padEnd(10))} ${grey(count.padEnd(10))}  ${mixOf(p.mix)}${peak}`
 }
 
 // The name column's width. A name that overflows it is cut, ending in …, on

@@ -26,6 +26,7 @@ import { runRegistry, readRegistry, OUTCOMES } from '../src/registry.mjs'
 import { transcriptPath, sessionTranscripts, claudeSlug, piDir, promptDelivered, turnEnded } from '../src/transcript.mjs'
 import { agentsOf, reclaimAgent, reclaimRun } from '../src/reclaim.mjs'
 import { removeRun, stopRunnerOf } from '../src/remove.mjs'
+import { CONSULT_FILE } from '../src/orchestrator.mjs'
 import { findRun, pauseCommand, resumeCommand, removeCommand } from '../src/run-commands.mjs'
 import { holdQueue } from '../src/hold.mjs'
 import { runHalt } from '../src/halt.mjs'
@@ -3578,6 +3579,32 @@ test('remove: a run is reclaimed, its unpushed worktree offered for a force, the
   assert.deepEqual(r.finish(), { left: [] })
   assert.deepEqual(readRegistry(run.registry), [])
   assert.ok(!existsSync(run.stateDir), 'its folder is deleted')
+})
+
+test('remove: the run\'s ? sessions are closed with it (#168); one closed already, or never started, is left alone', async () => {
+  const run = await endedRun()
+  const runId = readRegistry(run.registry)[0].runId
+  const at = '2026-09-28T10:00:00.000Z'
+  const lines = [
+    { type: 'starting', n: 1, at }, { type: 'started', n: 1, at, terminal: 'console_1', sessionId: 's1' },
+    { type: 'starting', n: 2, at }, { type: 'started', n: 2, at, terminal: 'console_2', sessionId: 's2' }, { type: 'closed', n: 2, at },
+    { type: 'starting', n: 3, at },
+  ]
+  writeFileSync(join(run.stateDir, CONSULT_FILE), lines.map((l) => `${JSON.stringify(l)}\n`).join(''))
+  const closed = []
+  const host = { ...run.orca, terminalClose: async ({ terminal }) => closed.push(terminal) }
+  const notes = []
+  const r = await removeRun({ stateDir: run.stateDir, runId, host, unpushed: run.orca.unpushedOf, registry: runRegistry(run.registry, run.clock), stopRunner: () => {}, out: (s) => notes.push(s) })
+  assert.deepEqual(closed.filter((t) => t.startsWith('console_')), ['console_1'])
+  assert.deepEqual(notes.filter((n) => /console/.test(n)), [])
+  r.finish()
+  // One crew cannot close is named, and the run is still removed.
+  const again = await endedRun()
+  writeFileSync(join(again.stateDir, CONSULT_FILE), lines.slice(0, 2).map((l) => `${JSON.stringify(l)}\n`).join(''))
+  const failing = { ...again.orca, terminalClose: async () => { throw new Error('no crew session console_1') } }
+  const said = []
+  await removeRun({ stateDir: again.stateDir, runId: readRegistry(again.registry)[0].runId, host: failing, unpushed: again.orca.unpushedOf, registry: runRegistry(again.registry, again.clock), stopRunner: () => {}, out: (s) => said.push(s) })
+  assert.deepEqual(said.filter((n) => /console \d/.test(n)), ['!! [Orchestrator] console 1: its session could not be closed: no crew session console_1'])
 })
 
 test('remove: a worktree not forced is left on disk and named; the run is still forgotten', async () => {
