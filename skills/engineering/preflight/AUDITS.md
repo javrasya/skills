@@ -48,6 +48,8 @@ Find how an implementation agent proves its work today: test runners and their p
 Report:
 
 - Every command, with its scope (one file, one package, everything), the CI job it mirrors, and its last known wall time if CI records one.
+- Each **absent kind** (formatter, linter, type checker, unit, component, end-to-end) as its own finding, with the cheapest tool that fits the repo's language and dependency stance, so the main agent can measure its baseline.
+- Every **repo gate**: a rule in the repo's docs that names what must run before a change is done, with where it is written and what it costs.
 - How each tool **narrows**: changed-files mode, per-file or per-package targets, affected-test selection, test filters and tags, a single e2e spec, incremental or cached runs, parallel workers. These are the raw material of each ticket's validation recipe.
 - The **broadest** suite of each kind, which leaves per-ticket validation for the review stage.
 - Whether the repo can drive the app end to end today, and for a UI, which toolkit it uses and which driving tools fit it.
