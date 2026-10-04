@@ -44,6 +44,8 @@ import { SUBMIT } from '../src/lifecycle.mjs'
 import { crewPaths } from '../src/daemon/transport.mjs'
 import { request, stopDaemon } from '../src/daemon/client.mjs'
 import { startDaemon } from '../src/daemon/daemon.mjs'
+import crewPi from '../src/hooks/crew-pi.mjs'
+import { tool } from '../src/tools.mjs'
 
 const FAKE_HARNESS = fileURLToPath(new URL('./fixtures/crew/fake-harness.mjs', import.meta.url))
 const CREW_BIN = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url))
@@ -750,6 +752,81 @@ test("crew host: a worker's dispatch knows its agent's role, schema and result f
 
   const doctor = await start(h, 'a doctor', { role: 'doctor' })
   await assert.rejects(request(h.paths, { op: 'worker.submit', id: doctor.terminal, payload: 'done' }), /is a doctor's: a doctor submits no result/)
+})
+
+// A pi as crew's extension sees it: what it registers, and its session_start.
+function stubPi(env) {
+  const on = new Map()
+  const tools = []
+  crewPi({ on: (type, fn) => on.set(type, fn), registerTool: (t) => tools.push(t) }, env)
+  return { tools, start: () => on.get('session_start')({ type: 'session_start', reason: 'startup' }, {}) }
+}
+
+test("crew host: crew's pi extension gives a worker's session `submit`, the table's description and its schema as parameters, which submits by session; a doctor's, one of no dispatch and an operator's own pi get none; a daemon gone is named (#174)", async () => {
+  const h = crewKind.open()
+  const schema = { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } }
+  const resultPath = join(scratchDir(), 'result.json')
+  const w = await start(h, 'stub pi', { prompt: 'Contract prompt for stub pi. [turn 600000]', role: 'worker', schema, resultPath })
+  const env = { CREW_HOME: h.paths.home, CREW_SESSION: w.terminal }
+  const pi = stubPi(env)
+  await pi.start()
+  assert.deepEqual(
+    pi.tools.map((t) => [t.name, t.description, t.parameters]),
+    [['submit', tool('submit').description, schema]],
+  )
+  const said = await pi.tools[0].execute('call_1', { ok: true })
+  assert.match(said.content[0].text, /^Submitted: the workflow has your result\. It is recorded at .*result\.json\. Nothing remains for this task: stop and idle\.$/)
+  assert.deepEqual(JSON.parse(readFileSync(resultPath, 'utf8')), { ok: true })
+  assert.deepEqual(await h.host.workerResult({ dispatch: w.dispatchId }), { result: { ok: true }, outcome: 'succeeded', submissions: 1 })
+  // The daemon checks it again, and says why it refuses.
+  await assert.rejects(pi.tools[0].execute('call_2', { ok: 'yes' }), /submit rejected: 1 validation error\(s\)/)
+  env.CREW_HOME = join(crewScratch().root, 'no-daemon-here')
+  await assert.rejects(pi.tools[0].execute('call_3', { ok: true }), (e) => /^crew's daemon is not reachable \(.*\), so your result was not submitted\. Submit it with the command line in your instructions instead \(node ".*submit\.mjs" …\)/.test(e.message))
+
+  const text = await start(h, 'stub pi text', { prompt: 'Contract prompt for stub pi text. [turn 600000]', role: 'worker' })
+  const textPi = stubPi({ CREW_HOME: h.paths.home, CREW_SESSION: text.terminal })
+  await textPi.start()
+  assert.deepEqual(textPi.tools[0].parameters.required, ['text'])
+  await textPi.tools[0].execute('call_1', { text: 'plain words' })
+  assert.equal((await h.host.workerResult({ dispatch: text.dispatchId })).result, 'plain words')
+
+  const doctor = await start(h, 'stub pi doctor', { prompt: 'Contract prompt for stub pi doctor. [turn 600000]', role: 'doctor' })
+  for (const none of [{ CREW_HOME: h.paths.home, CREW_SESSION: doctor.terminal }, { CREW_HOME: h.paths.home, CREW_SESSION: 'no-such-session' }, { CREW_HOME: h.paths.home }]) {
+    const other = stubPi(none)
+    // Its ready is pi's to report, for a session the daemon does not hold.
+    await other.start().catch((e) => assert.match(e.message, /^no session no-such-session$/))
+    assert.deepEqual(other.tools, [], JSON.stringify(none))
+  }
+})
+
+test("crew host: a pi worker calls crew's submit tool: pi rejects a payload that fails its schema in the turn, and the one it repairs settles its dispatch (#174)", async () => {
+  const h = crewKind.open()
+  const schema = { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } }
+  const resultPath = join(scratchDir(), 'result.json')
+  const w = await start(h, 'pi submits', { harness: 'pi', prompt: 'Contract prompt for pi submits. [call submit {"ok":"yes"}] [call submit {"ok":true}]', role: 'worker', schema, resultPath })
+  await eventually('it settled', async () => (await shown(h, w)).settled)
+  assert.deepEqual(await h.host.workerResult({ dispatch: w.dispatchId }), { result: { ok: true }, outcome: 'succeeded', submissions: 1 })
+  assert.deepEqual(JSON.parse(readFileSync(resultPath, 'utf8')), { ok: true })
+  const results = await eventually("both tool results in pi's transcript", () => {
+    const path = transcriptPath({ harness: 'pi', sessionId: w.sessionId, worktree: w.worktree, env: crewScratch().env })
+    const r =
+      path && existsSync(path)
+        ? readFileSync(path, 'utf8')
+            .split('\n')
+            .filter(Boolean)
+            .map((l) => JSON.parse(l).message)
+            .filter((m) => m?.role === 'toolResult')
+        : []
+    return r.length === 2 && r
+  })
+  assert.deepEqual(
+    results.map((m) => [m.toolName, m.isError]),
+    [
+      ['submit', true],
+      ['submit', false],
+    ],
+  )
+  assert.match(results[0].content[0].text, /^Validation failed for tool "submit":\n {2}- \$\.ok: expected boolean, got string/)
 })
 
 test('crew host: an ended harness is idle, and a session the daemon does not hold is refused', async () => {

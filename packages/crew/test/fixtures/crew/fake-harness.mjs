@@ -21,6 +21,12 @@
 //                 <tool>, until Enter: Claude runs the hooks its --settings
 //                 name for it, as Claude does; pi emits ui_prompt_start and
 //                 ui_prompt_end to the extensions its -e names
+//   [call <tool> <json>]  the turn calls the tool an extension registered
+//                 (pi's registerTool), with that JSON as its arguments,
+//                 each such word in order: as pi does, arguments that fail
+//                 the tool's parameters are an error result without the
+//                 tool run, and the call and its result go in pi's
+//                 transcript. A turn that calls a tool submits nothing else
 //
 // As pi, it emits session_start to those extensions once its input is drawn,
 // as pi does once its editor submits; CREW_FAKE_MUTE=1 keeps it from saying
@@ -48,6 +54,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { claudeDir, claudeSlug, piDir, transcriptPath } from '../../../src/transcript.mjs'
+import { validate } from '../../../src/schema.mjs'
 
 const FIXED_DRAFT = {
   checks: [
@@ -96,9 +103,10 @@ async function tui() {
   // pi's extensions, as -e names them, given a pi that only emits events; and
   // the hooks Claude's --settings names, run as Claude runs a command hook.
   const handlers = new Map()
+  const tools = new Map()
   for (let i = argv.indexOf('-e'); i !== -1; i = argv.indexOf('-e', i + 1)) {
     const ext = await import(pathToFileURL(argv[i + 1]).href)
-    ext.default({ on: (type, fn) => handlers.set(type, [...(handlers.get(type) ?? []), fn]) })
+    ext.default({ on: (type, fn) => handlers.set(type, [...(handlers.get(type) ?? []), fn]), registerTool: (t) => tools.set(t.name, t) })
   }
   // As pi's runner does: each handler awaited in turn, one that rejects
   // reported and the rest still run, the harness never failed by it.
@@ -188,18 +196,21 @@ async function tui() {
     parent = user
   }
 
+  const PI_USAGE = { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15 }
+  function piMessage(message) {
+    const timestamp = new Date().toISOString()
+    if (!piStarted) write({ type: 'session', version: 3, id: sessionId, timestamp, cwd })
+    piStarted = true
+    if (piHeld) write(piHeld)
+    piHeld = null
+    const id = randomUUID().slice(0, 8)
+    write({ type: 'message', id, parentId: parent, timestamp, message: { ...message, timestamp: Date.now() } })
+    parent = id
+  }
+
   function replied(reply) {
     const timestamp = new Date().toISOString()
-    if (harness === 'pi') {
-      if (!piStarted) write({ type: 'session', version: 3, id: sessionId, timestamp, cwd })
-      piStarted = true
-      if (piHeld) write(piHeld)
-      piHeld = null
-      const id = randomUUID().slice(0, 8)
-      write({ type: 'message', id, parentId: parent, timestamp, message: { role: 'assistant', content: [{ type: 'text', text: reply }], stopReason: 'stop', usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15 }, timestamp: Date.now() } })
-      parent = id
-      return
-    }
+    if (harness === 'pi') return piMessage({ role: 'assistant', content: [{ type: 'text', text: reply }], stopReason: 'stop', usage: PI_USAGE })
     const id = randomUUID()
     write({ type: 'assistant', uuid: id, parentUuid: parent, sessionId, cwd, timestamp, message: { id: `msg_${id}`, role: 'assistant', content: [{ type: 'text', text: reply }], stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 5 } } })
     parent = id
@@ -276,6 +287,10 @@ async function tui() {
     } else if (how === 'turn') await sleep(Number(ms))
     const ask = /\[ask ([^\]]+)\]/.exec(prompt)?.[1]
     if (ask) await waitOn(ask)
+    if (/\[call /.test(prompt)) {
+      await calls(prompt, recorded)
+      return reply(prompt, recorded)
+    }
     const decide = /\[decide ([^\]]*)\]/.exec(prompt)?.[1]
     const answer = /\[answer ([^\]]*)\]/.exec(prompt)?.[1]
     submit(decide && answer ? JSON.stringify({ ...JSON.parse(answer), decisions_needed: [decide] }) : null)
@@ -287,6 +302,37 @@ async function tui() {
       submit()
     }
     reply(prompt, recorded)
+  }
+
+  async function calls(prompt, recorded) {
+    for (const [, name, json] of prompt.matchAll(/\[call (\S+) ([^\]]*)\]/g)) {
+      const t = tools.get(name)
+      const id = `call_${randomUUID().slice(0, 8)}`
+      let args
+      try {
+        args = JSON.parse(json)
+      } catch {
+        args = json
+      }
+      let text
+      let isError = true
+      const errors = t ? validate(t.parameters, args) : []
+      if (!t) text = `Tool ${name} not found`
+      else if (errors.length) text = `Validation failed for tool "${name}":\n${errors.map((e) => `  - ${e}`).join('\n')}`
+      else {
+        try {
+          text = (await t.execute(id, args, undefined, undefined, {})).content.map((c) => c.text ?? '').join('')
+          isError = false
+        } catch (e) {
+          text = e?.message ?? String(e)
+        }
+      }
+      said.push(`tool ${name}${isError ? ' error' : ''}: ${text.replace(/\s+/g, ' ')}`.slice(0, 200))
+      if (harness === 'pi' && recorded) {
+        piMessage({ role: 'assistant', content: [{ type: 'toolCall', id, name, arguments: args }], stopReason: 'toolUse', usage: PI_USAGE })
+        piMessage({ role: 'toolResult', toolCallId: id, toolName: name, content: [{ type: 'text', text }], isError })
+      }
+    }
   }
 
   async function waitOn(tool) {

@@ -515,6 +515,11 @@ test("daemon: a session submits and mails by its id alone, its result checked ag
     const { result, outcome, submissions } = await request(paths, { op: 'worker.result', id })
     return { result, outcome, submissions }
   }
+  // What its harness equips each session with: a session of no agent, or of
+  // one released, is told it has none, not refused.
+  const agents = async () => Promise.all([worker, text, doctor, released, bare, 'nope'].map(async (id) => (await request(paths, { op: 'worker.schema', id })).agent))
+  const AGENTS = [{ role: 'worker', schema }, { role: 'worker', schema: null }, { role: 'doctor', schema: null }, null, null, null]
+  assert.deepEqual(await agents(), AGENTS)
 
   // Every error at once, nothing stored or settled.
   await assert.rejects(submit(worker, { ok: 1, extra: true }), (e) => /2 validation error\(s\) against its schema\n {2}\$\.ok: expected boolean, got integer\n {2}\$: unexpected property "extra"\nFix the payload and submit again\./.test(e.message))
@@ -562,6 +567,7 @@ test("daemon: a session submits and mails by its id alone, its result checked ag
   await until('the first daemon to stop', () => exits.length === 1)
   const second = await startDaemon({ paths, registry, spawnSession, parkAfterMs: 60_000, exit: () => {}, log: () => {} })
   try {
+    assert.deepEqual(await agents(), AGENTS)
     await assert.rejects(submit(worker, { ok: 'no' }), /expected boolean, got string/)
     await submit(worker, { ok: true })
     assert.deepEqual(await result(worker), { result: { ok: true }, outcome: 'succeeded', submissions: 3 })

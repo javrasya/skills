@@ -51,6 +51,7 @@
 //   worker.result { id }                        → { result, outcome, submissions }: its last worker_done's
 //   worker.stop { id }                          → { worker }: its program ended, unsettled ones cancelled
 //   worker.release { id }                       → { worker }
+//   worker.schema { id }                        → { agent: { role, schema } | null }: session id's, null for one of no dispatch or a released one
 //   worker.submit { id, payload }               → { id, resultPath }: session id's result, sent as its worker_done
 //   worker.mail { id, type, subject, body, outcome } → { id }: as mail.send, from session id
 //   mail.send { from, capability, taskId, dispatchId, type, subject, body, outcome, result } → { id }
@@ -269,6 +270,12 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
       }
       return post(d, { type, subject, body, outcome, result })
     },
+    // What a session's harness equips it with (hooks/crew-pi.mjs): asked as
+    // it starts, so a session crew started for no agent is told so, not refused.
+    'worker.schema': ({ id }) => {
+      const d = dispatches.get(String(id))
+      return { agent: d && !d.released ? { role: d.role ?? 'worker', schema: d.schema ?? null } : null }
+    },
     'worker.submit': ({ id, payload }) => {
       const d = sessionDispatch(id, 'results')
       if (d.role === 'doctor') throw new Error(`session ${id} is a doctor's: a doctor submits no result, it reports with a handoff or an escalation`)
@@ -312,7 +319,7 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
   }
 
   for (const [name, op] of Object.entries(ops)) {
-    if (name === 'worker.show' || name === 'worker.result' || name === 'worktree.statuses') continue
+    if (name === 'worker.show' || name === 'worker.result' || name === 'worker.schema' || name === 'worktree.statuses') continue
     // Reflect.apply, since the ops differ in arity and this wraps them all alike.
     ops[name] = (...args) => {
       const reply = Reflect.apply(op, null, args)

@@ -8491,6 +8491,15 @@ test('prompts: every worker may use subagents, and is told never to start a dyna
   assert.match(NO_WORKFLOW, /[Nn]ever start a dynamic workflow/)
 })
 
+test("prompts: a worker's finishing words name crew's submit tool first, shaped by its schema, and the CLI submit as the fallback (#174)", () => {
+  const p = workerPrompt('Do a thing.', { schema: { type: 'object' }, schemaPath: 's.json', resultPath: 'r.json', payloadPath: 'p.json' })
+  const toolAt = p.indexOf('If your session has a tool named `submit`, finish with it: call it with your result as its arguments, which must match the JSON Schema in s.json.')
+  const fallbackAt = p.indexOf("Without that tool, or if it says crew's daemon is not reachable, submit with the command below instead:\n1. Write your result to p.json")
+  assert.ok(toolAt !== -1 && fallbackAt > toolAt && p.indexOf(`node "${SUBMIT}"`) > fallbackAt, p)
+  assert.match(workerPrompt('Do a thing.', { schemaPath: null, resultPath: 'r.json', payloadPath: 'p.txt' }), /call it with your answer as its `text`\. It rejects/)
+  assert.match(workerPrompt('Do a thing.', { schema: { type: 'array' }, schemaPath: 's.json', resultPath: 'r.json', payloadPath: 'p.json' }), /call it with your result as its `result`, which must match/)
+})
+
 test('prompts: an attended worker is told a person will join, and never that nobody answers', () => {
   const p = workerPrompt('Help.', { schemaPath: 's.json', resultPath: 'r.json', payloadPath: 'p.json', attended: 'blockers: x' })
   assert.ok(!p.includes(NO_ASK))

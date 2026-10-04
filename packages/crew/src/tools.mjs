@@ -54,3 +54,14 @@ export const tool = (name) => {
   if (!t) throw new Error(`no crew tool named ${name}`)
   return t
 }
+
+// The arguments `submit` takes for a result `schema`, and the payload they
+// make: a tool's arguments are always an object, so an object schema is its
+// parameters as they stand, any other wraps under `result`, and a text result
+// (no schema) is its `text`. `how` says so in the worker's prompt
+// (lifecycle.mjs), the extension registers it (hooks/crew-pi.mjs).
+export function submitShape(schema) {
+  if (schema == null) return { parameters: { type: 'object', required: ['text'], properties: { text: { type: 'string', description: 'Your answer, as plain text.' } } }, payload: (args) => args.text, how: 'your answer as its `text`' }
+  if (schema.type === 'object') return { parameters: schema, payload: (args) => args, how: 'your result as its arguments' }
+  return { parameters: { type: 'object', required: ['result'], properties: { result: schema } }, payload: (args) => args.result, how: 'your result as its `result`' }
+}

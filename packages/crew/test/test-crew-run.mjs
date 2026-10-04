@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url'
 import { runScript } from '../src/runner.mjs'
 import { crewHost, crewWorktrees } from '../src/crew-host.mjs'
 import { sessionHost } from '../src/session-host.mjs'
-import { sessionTranscripts } from '../src/transcript.mjs'
+import { sessionTranscripts, transcriptPath } from '../src/transcript.mjs'
 import { readJournal } from '../src/journal.mjs'
 import { crewPaths } from '../src/daemon/transport.mjs'
 import { stopDaemon } from '../src/daemon/client.mjs'
@@ -158,6 +158,57 @@ test('a harness dialog before the prompt: the agent needs you in the session sho
     ['starting', 'dialog', 'dialogClosed', 'started'],
   )
   assert.equal(readJournal(journal).agents[0].state, 'done')
+})
+
+test("pi agents on the crew host finish with crew's submit tool: one's value reaches the script, and one whose payload pi rejected in the turn repairs it and its repaired value does (#174)", async () => {
+  const cwd = join(root, 'submit-tool-repo')
+  mkdirSync(cwd)
+  const host = sessionHost(crewHost({ paths, env, cwd, harnesses: { claude: [process.execPath, FAKE_HARNESS], pi: [process.execPath, FAKE_HARNESS] }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
+  const stateDir = join(root, 'submit-tool-state')
+  const said = []
+  const result = await runScript(fixture('submit-tool.workflow.js'), { host, stateDir, out: (s) => said.push(s), settings: FAST, transcripts: sessionTranscripts({ env }), project: cwd })
+  const log = said.join('\n')
+  assert.deepEqual(result, { first: 'tool', second: 'repaired' }, log)
+  const entries = readFileSync(join(stateDir, 'journal.jsonl'), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l))
+  const started = entries.filter((e) => e.type === 'started')
+  assert.deepEqual(
+    started.map((e) => e.harness),
+    ['pi', 'pi'],
+    JSON.stringify(started),
+  )
+  // No CLI submit: each settled on its tool call alone, pi's rejection never reaching the daemon.
+  const toolResults = (label) => {
+    const s = started.find((e) => e.dir.endsWith(`-${label}`))
+    return readFileSync(transcriptPath({ harness: 'pi', sessionId: s.sessionId, worktree: s.worktree, env }), 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l).message)
+      .filter((m) => m?.role === 'toolResult')
+      .map((m) => [m.toolName, m.isError, m.content[0].text.split('\n')[0]])
+  }
+  assert.deepEqual(
+    toolResults('caller').map(([name, isError]) => [name, isError]),
+    [['submit', false]],
+    log,
+  )
+  const repairs = toolResults('repairer')
+  assert.deepEqual(
+    repairs.map(([name, isError]) => [name, isError]),
+    [
+      ['submit', true],
+      ['submit', false],
+    ],
+    log,
+  )
+  assert.equal(repairs[0][2], 'Validation failed for tool "submit":')
+  assert.deepEqual(
+    entries.filter((e) => ['continued', 'remedy', 'doctor'].includes(e.type)),
+    [],
+    log,
+  )
 })
 
 test('a resubmit on the crew host: a node whose result needs decisions is held, its agent submits again through the CLI, and the script gets the value with no resume request', async () => {

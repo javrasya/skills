@@ -18,7 +18,7 @@ import { sessionTranscripts } from './transcript.mjs'
 import { agentId, extraLines, porcelainPaths, unionLines } from './git.mjs'
 import { chainEntry } from './journal.mjs'
 import { DOCTOR_NUDGE, doctorContinuePrompt, notePrompt, runMailbox, doctorRounds } from './doctor.mjs'
-import { tool } from './tools.mjs'
+import { submitShape, tool } from './tools.mjs'
 
 export { doctorPrompt, notePrompt } from './doctor.mjs'
 export { SUBMIT } from './tools.mjs'
@@ -84,13 +84,20 @@ export const NO_WORKFLOW = 'You may use subagents, in the foreground or the back
 // `leftovers`: those an agent before it left in its chain worktree.
 // `note`: a doctor's note for a start retried after its retries were spent.
 // `attended`: a person joins it, so it is told to ask them, not that nobody answers.
-export function workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline = null, leftovers = [], note = null, attended = null }) {
+// `schema`: the one at schemaPath, which shapes the submit tool's arguments;
+// one not given is taken for an object's.
+// The tool comes first (ADR-0027); the CLI line is for a session without it,
+// as every one but a crew host's pi worker is, and for a daemon gone.
+export function workerPrompt(prompt, { schema = null, schemaPath, resultPath, payloadPath, baseline = null, leftovers = [], note = null, attended = null }) {
   const what = schemaPath ? `Write your result to ${payloadPath} as one JSON object that matches the JSON Schema in ${schemaPath}.` : `Write your answer to ${payloadPath} as plain text.`
   const command = tool('submit').fallback({ schemaPath, resultPath, payloadPath })
+  const { how } = submitShape(schemaPath ? (schema ?? { type: 'object' }) : null)
   return `${prompt}${baselineSection(baseline, leftovers)}
 
 ---
-How this run receives your result: your final message is not read. Your result reaches the workflow only through the submit command below, and submit sends your worker_done for you — never send worker_done yourself.
+How this run receives your result: your final message is not read. Your result reaches the workflow only through submit, and submit sends your worker_done for you — never send worker_done yourself.
+If your session has a tool named \`submit\`, finish with it: call it with ${how}${schemaPath ? `, which must match the JSON Schema in ${schemaPath}` : ''}. It rejects a result that does not match, saying why: fix it and call it again until it is accepted. Then stop and idle.
+Without that tool, or if it says crew's daemon is not reachable, submit with the command below instead:
 1. ${what}
 2. Run this, replacing the four <placeholders> with the values from your session host's preamble, copied exactly:
    ${command}
@@ -677,7 +684,10 @@ export function agentLifecycle({
           const w = await host.workerStart({
             run: runId,
             asking: asking(call),
-            prompt: patient != null ? prompt : (baseline) => (sent = workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline: baseline ?? (chain ? (chainState?.baseline ?? null) : null), leftovers: chain ? (chainState?.leftovers ?? []) : [], note: again?.note ?? null, attended: call.attended ?? null })),
+            prompt:
+              patient != null
+                ? prompt
+                : (baseline) => (sent = workerPrompt(prompt, { schema: call.schema ?? null, schemaPath, resultPath, payloadPath, baseline: baseline ?? (chain ? (chainState?.baseline ?? null) : null), leftovers: chain ? (chainState?.leftovers ?? []) : [], note: again?.note ?? null, attended: call.attended ?? null })),
             title,
             ...launch,
             ...agentOf(call),

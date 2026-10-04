@@ -269,7 +269,9 @@ export function crewHost({
   async function launch(line, { harness, dir, title, prompt, run, typing = () => {}, asking = null, agent = {} }) {
     const [program, ...args] = line
     const command = [...(harnesses[harness] ?? [program]), ...args, ...waitWords(harness)]
-    const { session } = await call({ op: 'session.spawn', command, cwd: dir, env: sessionEnv, title })
+    // CREW_AGENT: its dispatch follows the session, which its harness's tools
+    // wait for (hooks/crew-pi.mjs).
+    const { session } = await call({ op: 'session.spawn', command, cwd: dir, env: run ? { ...sessionEnv, CREW_AGENT: '1' } : sessionEnv, title })
     try {
       const { worker } = run ? await call({ op: 'run.worker', run, session: session.id, coordinator, ...agent }) : { worker: null }
       await ready(session.id, command, { harness, asking })
