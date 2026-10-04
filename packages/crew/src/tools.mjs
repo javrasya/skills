@@ -3,7 +3,12 @@
 // CLI line an agent runs instead while its session has no such tool. The
 // worker prompt's finishing section (lifecycle.mjs) and the doctor prompt's
 // mail instructions (doctor.mjs) take their command lines from here, so a tool
-// and the prompt naming it cannot drift apart.
+// and the prompt naming it cannot drift apart. The orchestrator's rows (#194)
+// are a `?` session's: what it reads of the run, and what it does to it as the
+// operator's p and r do (hooks/crew-tools.mjs); the `?` prompt
+// (orchestrator.mjs consultPrompt) names them from here. None has a CLI line:
+// an orchestrator without the tool reads the run's files, and the operator
+// acts in the run console.
 import { fileURLToPath } from 'node:url'
 
 export const SUBMIT = fileURLToPath(new URL('./submit.mjs', import.meta.url))
@@ -50,6 +55,42 @@ export const TOOLS = Object.freeze([
     who: ['doctor'],
     description: 'Ends your round without a note, saying why. The runner treats the patient as one no doctor could cure.',
     fallback: () => 'worker_done --outcome failed, with why in the body',
+  },
+  {
+    name: 'run_status',
+    who: ['orchestrator'],
+    description: 'Reads the run as the run console shows it: whether it is running, paused, halted, ended or without its runner; each held node with its reason and the questions it asked; every agent by phase with its state. It changes nothing.',
+    fallback: () => null,
+  },
+  {
+    name: 'agent_result',
+    who: ['orchestrator'],
+    description: 'Reads one agent of the run, named by its node, its title or its call number: the result it submitted, the decisions it asked for, or why it failed. It changes nothing.',
+    fallback: () => null,
+  },
+  {
+    name: 'runner_log',
+    who: ['orchestrator'],
+    description: "Reads the last lines of the runner's log, the run's own account of what it did. It changes nothing.",
+    fallback: () => null,
+  },
+  {
+    name: 'pause',
+    who: ['orchestrator'],
+    description: 'Pauses the run, as p in the run console does: no new agent starts, and every agent at work finishes. Use it only when the operator asks.',
+    fallback: () => null,
+  },
+  {
+    name: 'resume',
+    who: ['orchestrator'],
+    description: 'Resumes the run, as r in the run console does: lifts a pause, and carries one held node on, or every held node. A node held for decisions is better resumed with decide. Use it only when the operator asks.',
+    fallback: () => null,
+  },
+  {
+    name: 'decide',
+    who: ['orchestrator'],
+    description: "Answers the decisions a held node asked for and carries it on: its worker is told the answers and finishes with them. Give only answers the operator gave you, in the operator's words.",
+    fallback: () => null,
   },
 ])
 
