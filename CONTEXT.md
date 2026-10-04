@@ -74,6 +74,10 @@ and no child has no review fix PR; the fix goes in the PR, as it always did.
 
 The norm that every skill in this repo must be free of personal info (individual traits, language background), company/proprietary identifiers (internal service names, domain identifiers), and over-narrow framing (one tool/language when the skill is broader). Skills here are for a broad audience.
 
+### Preflight
+
+The attended pass over a spec and its tickets **before** an unattended run, so the run never stops to ask. Separates **facts** (the agent's to find, proved by a **drill** — a small, harmless, real execution) from **decisions** (the operator's, settled by grilling) and **blockers** (ADR-0021). Every ticket leaves with a **validation recipe** — the optimal format, lint, typecheck, test and e2e checks, each cut to the narrowest scope that proves the ticket — inside the **validation budget** of 7 minutes, with full suites left to review. Held by the [[preflight]] skill.
+
 ### Ralph (Wiggum) loop
 
 A brute-force agent pattern: feed **the same fixed prompt** to an agent CLI in a shell `while`-loop. The agent has **no memory between runs** — each iteration is a fresh context. All state lives in files the prompt points at. Produced by the [[ralph-goal]] skill as three artifacts: a **goal prompt** (the unchanging spec, kept under 4K chars — Claude Code's `-p` limit), a **progress file** (plan + append-only log, the only cross-iteration memory), and a **runner** (the loop). An iteration does **one verified slice** then exits. Two-tier verification: a cheap **slice-verify** ("done when" per plan item) proves the increment; a **DONE-CHECK** (full command, agent-run not human-judged) gates the **sentinel** file (`RALPH_DONE`) that stops the loop. Convergence is not assumed — the runner has a `MAX` cap, a `STALL` no-progress backstop, and an attempt counter per slice that trips `RALPH_STUCK` for a human.
