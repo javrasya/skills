@@ -654,6 +654,50 @@ test('daemon: a run it is recovering takes no other runner while its old runner 
   }
 })
 
+test('daemon: a ? session, titled orchestrator/console and of no dispatch (#168), is parked once quiet past parkAfterMs, or at once by session.park, and when its harness ends, so Enter resumes it; it comes back parked after a restart, where a session of no dispatch and no such title does not', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const registry = join(dir, 'runs.jsonl')
+  const spawned = []
+  const quiet = new Map([['quiet', 5_000], ['tail', 5_000], ['fresh', 10], ['ending', 10]])
+  const spawnSession = quietSession(spawned, quiet)
+  const exits = []
+  await startDaemon({ paths, registry, spawnSession, parkAfterMs: 1_000, parkSweepMs: 20, exit: () => exits.push(1), log: () => {} })
+  const console = async (name) => (await request(paths, { op: 'session.spawn', command: ['claude', '--session-id', `uuid-${name}`, name], cwd: dir, title: 'orchestrator/console' })).session.id
+  const info = async (id) => (await request(paths, { op: 'session.list' })).sessions.find((s) => s.id === id)
+  const quietOne = await console('quiet')
+  const { session: tail } = await request(paths, { op: 'session.spawn', command: ['node', 'tail.mjs', 'tail'], cwd: dir, title: 'runner.log' })
+  await until('the quiet ? session to be parked', async () => (await info(quietOne)).parked)
+  assert.deepEqual([(await info(quietOne)).alive, (await info(tail.id)).alive, !!(await info(tail.id)).parked], [false, true, false], 'a log tail of no dispatch is never parked')
+
+  const fresh = await console('fresh')
+  const { session: parkedNow } = await request(paths, { op: 'session.park', id: fresh })
+  assert.deepEqual([parkedNow.alive, parkedNow.parked], [false, true], 'session.park parks a ? session however recently it drew')
+
+  const ending = await console('ending')
+  spawned.find((s) => s.id === ending).session.kill()
+  await until('the ended ? session to be parked', async () => (await info(ending)).parked)
+  assert.equal((await info(ending)).alive, false)
+  ;(await enterSession(paths, { id: ending }, () => {})).socket.destroy()
+  const revived = spawned.filter((s) => s.id === ending).at(-1)
+  assert.deepEqual([revived.command, revived.title], [['claude', '--resume', 'uuid-ending', 'ending'], 'orchestrator/console'], 'entering it starts its harness again on its resume line')
+
+  await request(paths, { op: 'stop', force: true })
+  await until('the first daemon to stop', () => exits.length === 1)
+  spawned.length = 0
+  const second = await startDaemon({ paths, registry, spawnSession, parkAfterMs: 0, exit: () => {}, log: () => {} })
+  try {
+    const { sessions } = await request(paths, { op: 'session.list' })
+    assert.deepEqual(sessions.map((s) => s.id).sort(), [quietOne, fresh, ending].sort(), 'every ? session, never the log tail')
+    assert.deepEqual(sessions.map((s) => [s.title, s.parked, s.restored, s.alive]), sessions.map(() => ['orchestrator/console', true, true, false]))
+    ;(await enterSession(paths, { id: quietOne }, () => {})).socket.destroy()
+    assert.deepEqual([spawned[0].id, spawned[0].command, spawned[0].cwd], [quietOne, ['claude', '--resume', 'uuid-quiet', 'quiet'], dir])
+  } finally {
+    second.shutdown('test over')
+  }
+})
+
 test("daemon: an orchestrator question's Run is never live, and is dropped from runs.json once its session is closed, or by the next daemon", async () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
   const paths = crewPaths({ CREW_HOME: join(dir, 'home') })

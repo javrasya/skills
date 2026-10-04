@@ -151,7 +151,8 @@ export const crewPreflight = ({ paths, repoDir, harness, model }) => preflight({
 // The orchestrator's two console uses for runsView's runs, on the crew host,
 // in the run's project, on the run default its script was armed with and the
 // runner's permission mode: triage(run) asks about its halt, consult(run)
-// starts a `?` session and answers its id. close() gives up every triage
+// starts a `?` session, recorded in the run dir, and answers { terminal, n },
+// its session id and its number among the run's. close() gives up every triage
 // still asked, its session closed: a console calls it as it quits.
 export function runOrchestrator({ paths, host = (cwd) => crewHost({ paths, cwd }) }) {
   const asking = new Set()

@@ -48,7 +48,10 @@
 // its info says parked. Entering it starts the harness again in the same
 // session id, cwd and env on its resume line (resumedCommand), so a done
 // agent holds no process until someone looks at it. A write does not revive
-// it: text typed before the harness is ready would be lost.
+// it: text typed before the harness is ready would be lost. A `?` session
+// (orchestrator/console, of no dispatch; #168) is parked the same way once
+// quiet, nobody waiting on it, and as soon as its harness ends, so entering
+// it always resumes the conversation rather than finding a dead pty.
 //
 // Started after a daemon that died with runs live (a crash, a kill, a reboot,
 // a forced stop), it starts each such run's runner again, resuming the run
@@ -214,14 +217,21 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
     // A session a stopping daemon ends died with the daemon, as in a crash.
     // A parked one revived before its old program's exit came in is the new
     // session's id now: that late exit is not the new session ending.
-    session.onExit?.(() => stopping || sessions.get(id) !== session || book.ended(id))
+    session.onExit?.(() => {
+      if (stopping || sessions.get(id) !== session) return
+      book.ended(id)
+      // A `?` session's harness that ends on its own (the person's /exit, a
+      // crash) is parked, not left dead: Enter resumes it, and the next
+      // daemon brings it back.
+      if (book.console(id) && !parked.has(id) && resumedCommand(session.info().command)) park(id, session, 'its harness ended')
+    })
     return session
   }
 
-  // A done agent's harness, quiet past parkAfterMs, waiting on nobody, with
-  // nobody in it, that has a session to resume.
+  // A done agent's harness, or a `?` session's, quiet past parkAfterMs,
+  // waiting on nobody, with nobody in it, that has a session to resume.
   function parkable(id, session) {
-    if (parked.has(id) || entered.get(id) || !book.done(id)) return false
+    if (parked.has(id) || entered.get(id) || !(book.done(id) || book.console(id))) return false
     if (woken.has(id) && Date.now() - woken.get(id) < WAKE_HOLD_MS) return false
     const i = session.info()
     return i.alive && !i.waiting && i.quietMs !== null && i.quietMs >= parkAfterMs && !!resumedCommand(i.command)
@@ -365,7 +375,7 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
       const session = sessionOf(id)
       if (!parked.has(session.id)) {
         const i = session.info()
-        const why = !book.done(session.id) ? 'its agent is not done' : entered.get(session.id) ? 'someone has it entered' : !i.alive ? 'its program has ended' : !resumedCommand(i.command) ? 'it has no session to resume' : null
+        const why = !(book.done(session.id) || book.console(session.id)) ? 'its agent is not done' : entered.get(session.id) ? 'someone has it entered' : !i.alive ? 'its program has ended' : !resumedCommand(i.command) ? 'it has no session to resume' : null
         if (why) throw new Error(`session ${id} is not parked: ${why}`)
         park(session.id, session, 'asked to')
       }
@@ -460,10 +470,10 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
     })
   })
 
-  // Every agent session the last daemon held comes back parked, under its
-  // own id: entering it resumes its harness (#164). Its env was never kept,
-  // so it runs in this daemon's, with crew's own on top. One with no session
-  // to resume is forgotten.
+  // Every agent session the last daemon held, and every `?` session (#168),
+  // comes back parked, under its own id: entering it resumes its harness
+  // (#164). Its env was never kept, so it runs in this daemon's, with crew's
+  // own on top. One with no session to resume is forgotten.
   for (const { id, command, cwd, title } of book.restorable()) {
     if (!resumedCommand(command)) {
       book.closed(id)

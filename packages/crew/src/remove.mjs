@@ -14,6 +14,7 @@ import { agentsOf, reclaimAgent, reclaimChainAfter, reclaimRun } from './reclaim
 import { runnerAlive, runnerPid } from './run-view-model.mjs'
 import { worktreeUnpushed } from './git.mjs'
 import { runFolderOfStateDir } from './run-layout.mjs'
+import { consoleTitle, consultSessions } from './orchestrator.mjs'
 
 // finish()'s `left`, as the words that end a removal's message.
 export const leftOnDisk = (left) => (left.length ? `; left on disk: ${left.map((l) => `${l.worktree ?? l.title} (${l.reason})`).join('; ')}` : '')
@@ -43,6 +44,17 @@ export async function removeRun({ stateDir, runId, host, registry = null, unpush
       if (!s.settled && !s.gone && !s.exited) await host.workerStop({ dispatch: a.dispatchId })
     } catch (e) {
       out(`!! ${a.title}: its worker could not be stopped: ${e?.message ?? e}`)
+    }
+  }
+  // The run's `?` sessions go with it (#168): each still started is closed;
+  // one closed already, or never started, has no session to close. The
+  // record goes with the folder.
+  for (const s of consultSessions(stateDir)) {
+    if (s.state !== 'started') continue
+    try {
+      await host.terminalClose({ terminal: s.terminal })
+    } catch (e) {
+      out(`!! ${consoleTitle(s.n)}: its session could not be closed: ${e?.message ?? e}`)
     }
   }
   const kept = (await reclaimRun(agents, { host, unpushed, registry, runId, chain, journaled: agents, out })).kept.map((k) => ({ ...k, worktree: k.agent.chain ? chain.worktree : k.agent.worktree }))

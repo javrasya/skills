@@ -41,15 +41,19 @@
 // place (crew), where Enter on an agent enters its session rather than
 // terminalSwitch bringing its tab to the front.
 //
-// Two methods are crew's only, outside the interface, and no runner or view
-// calls them on a host it was handed: sessionStart({ title, prompt, harness,
+// Some methods are crew's only, outside the interface, and no runner calls
+// them on a host it was handed: sessionStart({ title, prompt, harness,
 // model, effort, permissionMode, sessionId, dir }) → { terminal }, a harness
 // session of no Run (the orchestrator's `?`, orchestrator.mjs, always asked
-// of a crew host: arm.mjs runOrchestrator), and mailSend, a worker's `crew
+// of a crew host: arm.mjs runOrchestrator); mailSend, a worker's `crew
 // orchestration send` (bin/crew.mjs; on Orca a worker sends with Orca's own
-// CLI, and fake-orca.mjs has one only to play a worker in the suite). The
-// contract suite checks the crew host has both.
-export const CREW_ONLY = Object.freeze(['sessionStart', 'mailSend', 'terminalsParked', 'terminalPark'])
+// CLI, and fake-orca.mjs has one only to play a worker in the suite); and
+// the parking ones the run tree calls only when the host has them:
+// terminalsParked, terminalPark (ADR-0024) and terminalsInfo, every session
+// as { terminal, alive, parked, waiting, exit }, which the tree
+// reads a `?` session's state from (#168). The contract suite checks the
+// crew host has them all.
+export const CREW_ONLY = Object.freeze(['sessionStart', 'mailSend', 'terminalsParked', 'terminalPark', 'terminalsInfo'])
 
 export const SESSION_HOST = Object.freeze([
   'unreachable', 'probe', 'guardWith',

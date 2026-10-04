@@ -433,6 +433,12 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     async terminalsParked() {
       return (await sessions()).filter((s) => s.parked).map((s) => s.id)
     },
+    // Every session the daemon holds, as the run tree reads a `?` session's
+    // state (#168): alive, parked, what its harness waits on the person for,
+    // and how its program ended. Crew's own, beyond the interface.
+    async terminalsInfo() {
+      return (await sessions()).map((s) => ({ terminal: s.id, alive: !!s.alive, parked: !!s.parked, waiting: s.waiting ?? null, exit: s.exit ?? null }))
+    },
     // A done agent's session parked now (the run tree's Ctrl+P); the daemon
     // refuses any other, naming why. Crew's own, beyond the interface.
     async terminalPark({ terminal }) {
