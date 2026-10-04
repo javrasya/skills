@@ -431,7 +431,7 @@ test("daemon: after a restart every agent session comes back under its old id, p
     assert.deepEqual([of(done).title, of(done).cwd, of(done).command, of(done).alive, of(done).parked], ['done, renamed', join(dir, 'done'), ['claude', '--session-id', 'uuid-done', '--model', 'opus'], false, true])
     assert.equal(spawned.length, 0, 'no harness started until someone enters')
     const show = async (id) => (await request(paths, { op: 'worker.show', id })).worker
-    assert.deepEqual(await show(working), { settled: false, outcome: null, submissions: 0, gone: true, exited: false, waiting: null, terminal: working, hostDied: true })
+    assert.deepEqual(await show(working), { settled: false, outcome: null, submissions: 0, note: null, needsYou: null, gone: true, exited: false, waiting: null, terminal: working, hostDied: true })
     assert.deepEqual([(await show(done)).settled, (await show(done)).gone, (await show(failed)).outcome], [true, false, 'failed'])
 
     for (const id of [done, working]) (await enterSession(paths, { id }, () => {})).socket.destroy()
@@ -578,6 +578,70 @@ test("daemon: a session submits and mails by its id alone, its result checked ag
   }
 })
 
+test("daemon: a session's note and needs-you reason are kept on its dispatch, for worker.show and the next daemon; needs-you clears on its next note, submit or mail, a CLI send included; a session of no dispatch is refused (#175)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const registry = join(dir, 'runs.jsonl')
+  const spawnSession = quietSession([], new Map())
+  const exits = []
+  await startDaemon({ paths, registry, spawnSession, parkAfterMs: 60_000, exit: () => exits.push(1), log: () => {} })
+  const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c', runner: null })
+  const spawn = async (title) => (await request(paths, { op: 'session.spawn', command: ['claude', '--session-id', `uuid-${title}`], cwd: dir, title })).session.id
+  const [worker, doctor, released, bare] = [await spawn('worker'), await spawn('doctor'), await spawn('released'), await spawn('bare')]
+  const { worker: w } = await request(paths, { op: 'run.worker', run: run.id, session: worker, coordinator: 'c' })
+  await request(paths, { op: 'run.worker', run: run.id, session: doctor, coordinator: 'c', role: 'doctor' })
+  await request(paths, { op: 'run.worker', run: run.id, session: released, coordinator: 'c' })
+  await request(paths, { op: 'worker.release', id: released })
+  const status = async (id, note) => (await request(paths, { op: 'worker.status', id, note })).note
+  const needsYou = async (id, reason) => (await request(paths, { op: 'worker.needsYou', id, reason })).needsYou
+  const kept = async (id) => {
+    const { note, needsYou } = (await request(paths, { op: 'worker.show', id })).worker
+    return { note, needsYou }
+  }
+
+  assert.deepEqual(await kept(worker), { note: null, needsYou: null })
+  assert.equal(await status(worker, '  reading the code  '), 'reading the code')
+  assert.equal(await needsYou(worker, 'log in to npm'), 'log in to npm')
+  assert.deepEqual(await kept(worker), { note: 'reading the code', needsYou: 'log in to npm' })
+  // A later note replaces the last, cut to 200 characters, and clears needs-you.
+  assert.equal(await status(worker, 'x'.repeat(250)), 'x'.repeat(200))
+  assert.deepEqual(await kept(worker), { note: 'x'.repeat(200), needsYou: null })
+  await needsYou(worker, 'again')
+  await request(paths, { op: 'worker.mail', id: worker, type: 'escalation', body: 'stuck' })
+  assert.equal((await kept(worker)).needsYou, null, 'mail clears it')
+  await needsYou(worker, 'again')
+  await request(paths, { op: 'mail.send', taskId: w.taskId, dispatchId: worker, capability: w.capability, type: 'handoff', body: 'from the CLI' })
+  assert.equal((await kept(worker)).needsYou, null, '`crew orchestration send` clears it')
+  await needsYou(worker, 'again')
+  await request(paths, { op: 'worker.submit', id: worker, payload: 'done' })
+  assert.equal((await kept(worker)).needsYou, null, 'a submit clears it')
+  await status(doctor, 'reading the log')
+  await needsYou(worker, 'kept')
+
+  await assert.rejects(needsYou(worker, '  '), /not a reason/)
+  await assert.rejects(status(worker, 3), /not a note: 3/)
+  await assert.rejects(status(bare, 'hi'), new RegExp(`no dispatch for session ${bare}: crew takes notes only from a session it started for an agent`))
+  await assert.rejects(needsYou('nope', 'hi'), /no dispatch for session nope/)
+  await assert.rejects(status(released, 'hi'), /dispatch was released/)
+  await assert.rejects(needsYou(doctor, 'hi'), new RegExp(`session ${doctor} is a doctor's: a doctor that needs the person says so with an escalation`))
+
+  await request(paths, { op: 'stop', force: true })
+  await until('the first daemon to stop', () => exits.length === 1)
+  const second = await startDaemon({ paths, registry, spawnSession, parkAfterMs: 60_000, exit: () => {}, log: () => {} })
+  try {
+    assert.deepEqual(
+      [await kept(worker), await kept(doctor)],
+      [
+        { note: 'x'.repeat(200), needsYou: 'kept' },
+        { note: 'reading the log', needsYou: null },
+      ],
+    )
+  } finally {
+    second.shutdown('test over')
+  }
+})
+
 test("daemon: session.revive starts a parked session's harness again in place and holds it unparked until written to; a live one is left as it is", async () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
   const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
@@ -691,7 +755,7 @@ test('daemon: one that died with a run live is followed by one that starts its r
     assert.deepEqual(again.command.slice(2), [script, '--host', 'crew', '--state-dir', runDir, '--resume'])
     assert.deepEqual([again.cwd, again.title], [project, 'crew run workflow.js'])
     const show = async (id) => (await request(paths, { op: 'worker.show', id })).worker
-    assert.deepEqual(await show(lost), { settled: false, outcome: null, submissions: 0, gone: true, exited: false, waiting: null, terminal: lost, hostDied: true })
+    assert.deepEqual(await show(lost), { settled: false, outcome: null, submissions: 0, note: null, needsYou: null, gone: true, exited: false, waiting: null, terminal: lost, hostDied: true })
     assert.equal((await show(ended)).hostDied, undefined, 'it had ended before the daemon went')
     assert.deepEqual((await request(paths, { op: 'run.use', id: run.id, coordinator: 'c3', runner: again.id })).run, { id: run.id, coordinator: 'c3' })
     await assert.rejects(request(paths, { op: 'stop' }), (e) => e.message.includes(`live: ${run.id} (the-spec)`))

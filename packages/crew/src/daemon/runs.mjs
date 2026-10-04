@@ -31,6 +31,13 @@
 // session of no dispatch, or of one released; a doctor submits nothing, and
 // a worker's result goes only through submit.
 //
+// A session may also set a note, what it is doing now, cut to NOTE_MAX
+// (worker.status), and say it needs the person, and why (worker.needsYou), both
+// kept on its dispatch for worker.show (#175). Crew acts on nothing in a note.
+// Needs-you holds until the session's next note or message, any mail.send
+// for its dispatch included (`crew orchestration send`). A doctor's needs-you
+// is its escalation, sent as mail, so worker.needsYou refuses a doctor.
+//
 // A Run whose objective is an orchestrator question's title (orchestrator.mjs)
 // is flagged `orchestrator` at its creation: it is crew's own question, no
 // workflow run, so it is never live, and it is dropped from the book, its
@@ -47,13 +54,15 @@
 //   run.create { objective, coordinator, runner } → { run: { id, coordinator } }
 //   run.use { id, coordinator, runner }         → { run: { id, coordinator } }
 //   run.worker { run, session, coordinator, role, schema, resultPath } → { worker: { taskId, capability } }
-//   worker.show { id }                          → { worker: { settled, outcome, submissions, gone, exited, waiting, terminal, hostDied? } }
+//   worker.show { id }                          → { worker: { settled, outcome, submissions, note, needsYou, gone, exited, waiting, terminal, hostDied? } }
 //   worker.result { id }                        → { result, outcome, submissions }: its last worker_done's
 //   worker.stop { id }                          → { worker }: its program ended, unsettled ones cancelled
 //   worker.release { id }                       → { worker }
 //   worker.schema { id }                        → { agent: { role, schema } | null }: session id's, null for one of no dispatch or a released one
 //   worker.submit { id, payload }               → { id, resultPath }: session id's result, sent as its worker_done
 //   worker.mail { id, type, subject, body, outcome } → { id }: as mail.send, from session id
+//   worker.status { id, note }                  → { note }: session id's note, as kept
+//   worker.needsYou { id, reason }              → { needsYou }: session id's reason
 //   mail.send { from, capability, taskId, dispatchId, type, subject, body, outcome, result } → { id }
 //   mail.check { coordinator, ack }             → { deliveryId, acknowledged, replayed, messages }
 //   worktree.status { path, status }            → { path, status }
@@ -65,6 +74,7 @@ import { readRegistry } from '../registry.mjs'
 import { DEFAULT_HOST } from '../hosts.mjs'
 import { isOrchestratorTitle } from '../orchestrator.mjs'
 import { validate } from '../schema.mjs'
+import { NOTE_MAX } from '../tools.mjs'
 import { writeJsonAtomic } from '../fsutil.mjs'
 
 // The runner every launch of one starts: `crew run`, `crew start`, crew's own
@@ -177,6 +187,7 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
       createdAt: now(),
     }
     runOf(d.run).pending.push(m)
+    d.needsYou = null
     if (type === 'worker_done') Object.assign(d, { settled: true, outcome: m.outcome, submissions: (d.submissions ?? 0) + 1, result })
     return { id: m.id }
   }
@@ -207,7 +218,7 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
   const show = (d) => {
     const s = sessions.get(d.id)?.info() ?? null
     const lost = !s || (!!s.restored && !s.alive && !d.settled)
-    return { settled: d.settled, outcome: d.outcome, submissions: d.submissions ?? 0, gone: lost, exited: !lost && !s.alive, waiting: s?.waiting ?? null, terminal: d.id, ...(lost && !d.settled && died.has(d.id) && { hostDied: true }) }
+    return { settled: d.settled, outcome: d.outcome, submissions: d.submissions ?? 0, note: d.note ?? null, needsYou: d.needsYou ?? null, gone: lost, exited: !lost && !s.alive, waiting: s?.waiting ?? null, terminal: d.id, ...(lost && !d.settled && died.has(d.id) && { hostDied: true }) }
   }
 
   const ops = {
@@ -295,6 +306,18 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
       const d = sessionDispatch(id, 'mail')
       if (type === 'worker_done' && d.role !== 'doctor') throw new Error(`session ${id} is a worker's: its result goes through submit, which checks it against its schema, never as mail`)
       return post(d, { type, subject, body, outcome })
+    },
+    'worker.status': ({ id, note }) => {
+      const d = sessionDispatch(id, 'notes')
+      if (typeof note !== 'string') throw new Error(`not a note: ${JSON.stringify(note)?.slice(0, 80)}`)
+      Object.assign(d, { note: note.trim().slice(0, NOTE_MAX) || null, needsYou: null })
+      return { note: d.note }
+    },
+    'worker.needsYou': ({ id, reason }) => {
+      const d = sessionDispatch(id, 'needs-you')
+      if (d.role === 'doctor') throw new Error(`session ${id} is a doctor's: a doctor that needs the person says so with an escalation, as mail`)
+      d.needsYou = word(typeof reason === 'string' ? reason.trim() : reason, 'reason')
+      return { needsYou: d.needsYou }
     },
     'mail.check': ({ coordinator, ack = null }) => {
       const r = [...runs.values()].reverse().find((x) => x.coordinator === coordinator) ?? null

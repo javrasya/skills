@@ -31,7 +31,7 @@ export const TOOLS = Object.freeze([
   },
   {
     name: 'needs_you',
-    who: ['doctor'],
+    who: ['worker', 'doctor'],
     description: 'Tells the operator that only a human can clear what blocks you, and what they must do or decide. Wait for them after it, for as long as they take.',
     fallback: () => 'orchestration send --type escalation --subject "Blocked: <what>" --body "<what the human must do or decide>"',
   },
@@ -48,6 +48,9 @@ export const TOOLS = Object.freeze([
     fallback: () => 'worker_done --outcome failed, with why in the body',
   },
 ])
+
+// The longest status note crew keeps; a longer one is cut.
+export const NOTE_MAX = 200
 
 export const tool = (name) => {
   const t = TOOLS.find((t) => t.name === name)

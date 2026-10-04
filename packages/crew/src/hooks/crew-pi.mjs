@@ -4,11 +4,13 @@
 // longer does (waiting.mjs). A worker's session it also gives crew's `submit`
 // tool (tools.mjs, ADR-0027), its parameters its result's schema as the
 // daemon holds it on the session's dispatch, so pi itself rejects a payload
-// that does not match, in the turn. A session of no agent, a doctor's, or
-// one outside crew gets no tool. Nothing else of pi's is changed.
+// that does not match, in the turn. A worker's or a doctor's session gets
+// `status` and `needs_you` (#175); a doctor's needs_you is its escalation,
+// sent as mail. A session of no agent, or one outside crew, gets no tool.
+// Nothing else of pi's is changed.
 import { request, daemonGone } from '../daemon/client.mjs'
 import { crewPaths } from '../daemon/transport.mjs'
-import { SUBMIT, submitShape, tool } from '../tools.mjs'
+import { NOTE_MAX, SUBMIT, submitShape, tool } from '../tools.mjs'
 import { sleep } from '../util.mjs'
 import { piWaiting } from '../waiting.mjs'
 import { tell } from './tell.mjs'
@@ -50,8 +52,42 @@ export default function crewPi(pi, env = process.env) {
   const equip = async () => {
     if (equipped) return
     const agent = await agentOf()
-    if (agent?.role !== 'worker') return
+    if (!agent) return
     equipped = true
+    // One daemon op by the session's id; a daemon gone is named, with what
+    // the agent does instead.
+    const ask = async (said, instead) => {
+      try {
+        return await request(crewPaths(env), { ...said, id: env.CREW_SESSION })
+      } catch (e) {
+        if (!daemonGone(e)) throw e
+        throw new Error(`crew's daemon is not reachable (${e.message}). ${instead}`)
+      }
+    }
+    const text = (t) => ({ content: [{ type: 'text', text: t }], details: undefined })
+    pi.registerTool({
+      name: 'status',
+      label: 'Status',
+      description: tool('status').description,
+      parameters: { type: 'object', required: ['note'], properties: { note: { type: 'string', description: `One line, at most ${NOTE_MAX} characters.` } } },
+      async execute(_toolCallId, { note }) {
+        const said = await ask({ op: 'worker.status', note }, 'Your note was not posted: carry on with your task.')
+        return text(said.note ? `Posted: the operator sees "${said.note}" on your row.` : 'Cleared your note.')
+      },
+    })
+    pi.registerTool({
+      name: 'needs_you',
+      label: 'Needs you',
+      description: tool('needs_you').description,
+      parameters: { type: 'object', required: ['reason'], properties: { reason: { type: 'string', description: 'What the human must do or decide.' } } },
+      async execute(_toolCallId, { reason }) {
+        const instead = `The operator was not told. Run this instead, with the IDs your instructions give: ${tool('needs_you').fallback()}`
+        if (agent.role === 'doctor') await ask({ op: 'worker.mail', type: 'escalation', subject: 'needs you', body: reason }, instead)
+        else await ask({ op: 'worker.needsYou', reason }, instead)
+        return text('The operator is told you need them, and why. Wait for them in this session, for as long as they take.')
+      },
+    })
+    if (agent.role !== 'worker') return
     const shape = submitShape(agent.schema)
     pi.registerTool({
       name: 'submit',

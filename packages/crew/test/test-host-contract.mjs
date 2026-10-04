@@ -762,7 +762,7 @@ function stubPi(env) {
   return { tools, start: () => on.get('session_start')({ type: 'session_start', reason: 'startup' }, {}) }
 }
 
-test("crew host: crew's pi extension gives a worker's session `submit`, the table's description and its schema as parameters, which submits by session; a doctor's, one of no dispatch and an operator's own pi get none; a daemon gone is named (#174)", async () => {
+test("crew host: crew's pi extension gives a worker's session `status`, `needs_you` and `submit`, the table's descriptions and its schema as parameters, which submits by session; a doctor's gets `status` and `needs_you`, one of no dispatch and an operator's own pi none; a daemon gone is named (#174, #175)", async () => {
   const h = crewKind.open()
   const schema = { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } }
   const resultPath = join(scratchDir(), 'result.json')
@@ -771,27 +771,47 @@ test("crew host: crew's pi extension gives a worker's session `submit`, the tabl
   const pi = stubPi(env)
   await pi.start()
   assert.deepEqual(
-    pi.tools.map((t) => [t.name, t.description, t.parameters]),
-    [['submit', tool('submit').description, schema]],
+    pi.tools.map((t) => [t.name, t.description]),
+    ['status', 'needs_you', 'submit'].map((name) => [name, tool(name).description]),
   )
-  const said = await pi.tools[0].execute('call_1', { ok: true })
+  const [status, needsYou, submit] = pi.tools
+  assert.deepEqual(submit.parameters, schema)
+  const kept = async (a) => {
+    const { note, needsYou } = await h.host.workerShow({ dispatch: a.dispatchId })
+    return { note, needsYou }
+  }
+  assert.match((await status.execute('call_0', { note: 'reading the code' })).content[0].text, /^Posted: the operator sees "reading the code" on your row\.$/)
+  await needsYou.execute('call_0', { reason: 'log in to npm' })
+  assert.deepEqual(await kept(w), { note: 'reading the code', needsYou: 'log in to npm' })
+  const said = await submit.execute('call_1', { ok: true })
+  assert.equal((await kept(w)).needsYou, null)
   assert.match(said.content[0].text, /^Submitted: the workflow has your result\. It is recorded at .*result\.json\. Nothing remains for this task: stop and idle\.$/)
   assert.deepEqual(JSON.parse(readFileSync(resultPath, 'utf8')), { ok: true })
   assert.deepEqual(await h.host.workerResult({ dispatch: w.dispatchId }), { result: { ok: true }, outcome: 'succeeded', submissions: 1 })
   // The daemon checks it again, and says why it refuses.
-  await assert.rejects(pi.tools[0].execute('call_2', { ok: 'yes' }), /submit rejected: 1 validation error\(s\)/)
+  await assert.rejects(submit.execute('call_2', { ok: 'yes' }), /submit rejected: 1 validation error\(s\)/)
   env.CREW_HOME = join(crewScratch().root, 'no-daemon-here')
-  await assert.rejects(pi.tools[0].execute('call_3', { ok: true }), (e) => /^crew's daemon is not reachable \(.*\), so your result was not submitted\. Submit it with the command line in your instructions instead \(node ".*submit\.mjs" …\)/.test(e.message))
+  await assert.rejects(status.execute('call_3', { note: 'x' }), /^Error: crew's daemon is not reachable \(.*\)\. Your note was not posted: carry on with your task\.$/)
+  await assert.rejects(submit.execute('call_3', { ok: true }), (e) => /^crew's daemon is not reachable \(.*\), so your result was not submitted\. Submit it with the command line in your instructions instead \(node ".*submit\.mjs" …\)/.test(e.message))
 
   const text = await start(h, 'stub pi text', { prompt: 'Contract prompt for stub pi text. [turn 600000]', role: 'worker' })
   const textPi = stubPi({ CREW_HOME: h.paths.home, CREW_SESSION: text.terminal })
   await textPi.start()
-  assert.deepEqual(textPi.tools[0].parameters.required, ['text'])
-  await textPi.tools[0].execute('call_1', { text: 'plain words' })
+  assert.deepEqual(textPi.tools[2].parameters.required, ['text'])
+  await textPi.tools[2].execute('call_1', { text: 'plain words' })
   assert.equal((await h.host.workerResult({ dispatch: text.dispatchId })).result, 'plain words')
 
   const doctor = await start(h, 'stub pi doctor', { prompt: 'Contract prompt for stub pi doctor. [turn 600000]', role: 'doctor' })
-  for (const none of [{ CREW_HOME: h.paths.home, CREW_SESSION: doctor.terminal }, { CREW_HOME: h.paths.home, CREW_SESSION: 'no-such-session' }, { CREW_HOME: h.paths.home }]) {
+  const doctorPi = stubPi({ CREW_HOME: h.paths.home, CREW_SESSION: doctor.terminal })
+  await doctorPi.start()
+  assert.deepEqual(
+    doctorPi.tools.map((t) => t.name),
+    ['status', 'needs_you'],
+  )
+  // A doctor's needs_you is its escalation, as mail; its row's needs-you is the runner's.
+  await doctorPi.tools[1].execute('call_1', { reason: 'grant the sandbox' })
+  assert.equal((await kept(doctor)).needsYou, null)
+  for (const none of [{ CREW_HOME: h.paths.home, CREW_SESSION: 'no-such-session' }, { CREW_HOME: h.paths.home }]) {
     const other = stubPi(none)
     // Its ready is pi's to report, for a session the daemon does not hold.
     await other.start().catch((e) => assert.match(e.message, /^no session no-such-session$/))
