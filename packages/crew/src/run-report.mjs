@@ -54,7 +54,11 @@ export function runReport(stateDir, { alive = runnerAlive } = {}) {
   const isAlive = alive(stateDir)
   const ended = runEnded({ run: null, alive: isAlive, stateDir })
   const notice = haltNoticeOf(stateDir)
-  const halted = notice ? { since: notice.at, nodes: notice.nodes.map((n) => ({ node: n.node, title: n.title ?? null, reason: n.reason ?? null, questions: Array.isArray(n.questions) ? n.questions : null })) } : fold.halted ? { since: fold.halted.since, nodes: fold.halted.nodes.map((node) => ({ node, title: fold.nodes.get(node)?.title ?? null, reason: fold.nodes.get(node)?.reason ?? null, questions: null })) } : null
+  const halted = notice
+    ? { since: notice.at, nodes: notice.nodes.map((n) => ({ node: n.node, title: n.title ?? null, reason: n.reason ?? null, questions: Array.isArray(n.questions) ? n.questions : null })) }
+    : fold.halted
+      ? { since: fold.halted.since, nodes: fold.halted.nodes.map((node) => ({ node, title: fold.nodes.get(node)?.title ?? null, reason: fold.nodes.get(node)?.reason ?? null, questions: null })) }
+      : null
   const paused = pausedAt(stateDir) ? { since: pausedSince(stateDir) } : null
   const outcome = isAlive === true ? null : outcomeOf(stateDir)
   const state = ended === true && existsSync(join(stateDir, 'summary.json')) ? 'ended' : isAlive === false ? 'runner gone' : halted ? 'halted' : paused ? 'paused' : fold.outage ? 'outage' : 'running'

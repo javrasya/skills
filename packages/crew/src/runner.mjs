@@ -170,7 +170,7 @@ export function runnerLog(stateDir, print, clock = realClock) {
 // outage, and resume({ node }), the attached view's r: resumeHost while an
 // outage is on, else the halted run's node, or with none every held node.
 // onHalt({ node, nodes }): told each time a node is held and the run halts.
-/** @typedef {{ resumeHost?: () => Promise<unknown>, resume?: (r?: { node?: string | null }) => Promise<unknown> }} RunControl */
+/** @typedef {{ resumeHost?: () => Promise<unknown>, resume?: (r?: { node?: string | null, decisions?: Array<{ question: string, answer: string }> | null }) => Promise<unknown> }} RunControl */
 export async function runScript(
   text,
   {
@@ -306,10 +306,12 @@ export async function runScript(
   const pause = runPause({ stateDir, journal, out, sleep: (ms) => clock.sleep(ms), pollMs: limits.pollMs, queue: holds })
   pause.on()
   // { resumed: [node…], unpaused }: unpaused whether r lifted a pause.
-  control.resume = async ({ node = null } = {}) => {
+  // decisions: the operator's answers for a node held for decisions (#194),
+  // handed to its session as it is carried on.
+  control.resume = async ({ node = null, decisions = null } = {}) => {
     if (outage.state()) return control.resumeHost()
     const unpaused = pause.lift()
-    return { ...(unpaused && !halt.on() ? { resumed: [] } : halt.resume(node)), unpaused }
+    return { ...(unpaused && !halt.on() ? { resumed: [] } : halt.resume(node, decisions)), unpaused }
   }
   // How many calls with each key this run has made.
   const seen = new Map()
@@ -526,7 +528,7 @@ export async function runScript(
       const stop = watchResubmit(call, e, !!questions)
       const how = await halt.hold({ node: call.node, title: call.title, needsDecision: !!questions, reason, ...(questions && { questions }) })
       const submissions = stop()
-      v = await resumeNode(call, readJournal(journalPath).nodes.get(call.node) ?? {}, { resubmitted: how === 'resubmit', submissions })
+      v = await resumeNode(call, readJournal(journalPath).nodes.get(call.node) ?? {}, { resubmitted: how === 'resubmit', submissions, decisions: how?.decisions ?? null })
     }
     if (wasHeld) {
       // The worktree its failure retained is its agent's own again, reported.
@@ -593,8 +595,10 @@ export async function runScript(
   // and tab (carryHalted); else, if its worker never started, a fresh start.
   // A worker still out is taken up as a resume takes one up. resubmitted: its
   // worker submitted again while it was held (watchResubmit), not r;
-  // submissions, the worker_done count last seen while it was held.
-  async function resumeNode(call, e, { resubmitted = false, submissions = null } = {}) {
+  // submissions, the worker_done count last seen while it was held;
+  // decisions, the operator's answers r carried for a node held for them
+  // (#194), which its continued session is handed.
+  async function resumeNode(call, e, { resubmitted = false, submissions = null, decisions = null } = {}) {
     const { key, n, node, title, schema } = call
     if (e.worker) {
       aside.delete(e.worker.worktree)
@@ -611,7 +615,7 @@ export async function runScript(
         return got.value
       }
     }
-    if (last?.sessionId && last.dispatchId) return life({ ...call, adopt: last, halted: { needsDecision: !!e.needsDecision } })
+    if (last?.sessionId && last.dispatchId) return life({ ...call, adopt: last, halted: { needsDecision: !!e.needsDecision, decisions } })
     out(`>> ${title}: resuming node ${node}: its worker never started, so it starts now`)
     return life({ ...call, startAgain: { made: [], dispatched: false, baseline: null } })
   }
@@ -771,7 +775,10 @@ export function attachView({ spawnView, tab, log, tail = () => [], clock = realC
 // The tree's r reaches the runner as a file: the run console's tree is no
 // child of the runner's, so it writes RESUME_REQUEST in the state dir
 // ({ node }, node null for every held one) and the runner, polling, takes it
-// (deletes it) and resumes as the attached view's IPC r does.
+// (deletes it) and resumes as the attached view's IPC r does. The
+// orchestrator's decide (#194) writes one with `decisions`, [{ question,
+// answer }], the operator's answers for the node: passed on as given, an
+// entry that is not a question and its answer dropped, none as null.
 export function watchResumeRequests({ stateDir, resume, log = /** @type {(line: string) => unknown} */ (() => {}), pollMs = 1_000 }) {
   const file = join(stateDir, RESUME_REQUEST)
   const take = () => {
@@ -783,12 +790,17 @@ export function watchResumeRequests({ stateDir, resume, log = /** @type {(line: 
     }
     rmSync(file, { force: true })
     let node = null
+    let decisions = null
     try {
       const m = JSON.parse(text)
       node = typeof m?.node === 'string' ? m.node : null
-    } catch {}
+      const given = Array.isArray(m?.decisions) ? m.decisions.filter((d) => d && typeof d.question === 'string' && typeof d.answer === 'string' && d.answer.trim()).map(({ question, answer }) => ({ question, answer })) : []
+      decisions = given.length ? given : null
+    } catch (e) {
+      log(`!! r: the resume request could not be read, so every held node is resumed: ${e?.message ?? e}`)
+    }
     Promise.resolve()
-      .then(() => resume({ node }))
+      .then(() => resume({ node, decisions }))
       .catch((e) => log(`!! r: could not resume: ${e?.message ?? e}`))
   }
   const timer = setInterval(take, pollMs)

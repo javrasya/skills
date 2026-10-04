@@ -22,15 +22,21 @@ import { holdQueue } from './hold.mjs'
 //   hold(node)       holds a node: { node, title, needsDecision, reason,
 //                    questions? };
 //                    resolves once r resumes it, which the caller then does,
-//                    or with 'resubmit' once wake() does
+//                    with { decisions } when the resume carried the
+//                    operator's answers (#194), or with 'resubmit' once
+//                    wake() does
 //   wake(node)       its worker submitted again (#173): the node is resumed
 //                    as r would, unless r already is; whichever comes first
 //                    acts, and the other finds it being resumed. Whether it
 //                    woke it
 //   settle(node)     a held node succeeded: the run leaves halted once none
 //                    is left, and every held call no other gate holds goes on
-//   resume(node)     r: resumes that held node, or with none every one not
-//                    already being resumed; { resumed: [node…] }
+//   resume(node, decisions)
+//                    r: resumes that held node, or with none every one not
+//                    already being resumed; { resumed: [node…] }. decisions,
+//                    [{ question, answer }] or null, are the operator's
+//                    answers for a node held for decisions (the
+//                    orchestrator's decide, #194), handed to its resumer
 //   nodes()          every held node's name, in the order they were held
 // }
 /** @param {{ journal: (entry: object) => unknown, out: (line: string) => unknown, record?: (what: string, entry: object) => unknown, runId?: () => string | null, onHalt?: (halt: { node: string, nodes: string[] }) => unknown, onChange?: (held: object[]) => unknown, queue?: ReturnType<typeof holdQueue> }} options */
@@ -76,7 +82,7 @@ export function runHalt({ journal, out, record = () => {}, runId = () => null, o
     queue.release()
   }
 
-  function resume(node = null) {
+  function resume(node = null, decisions = null) {
     if (!on) {
       out('>> r: the run is not halted: nothing to resume')
       return { resumed: [] }
@@ -84,10 +90,11 @@ export function runHalt({ journal, out, record = () => {}, runId = () => null, o
     const targets = node ? [held.get(node)].filter(Boolean) : [...held.values()]
     const ready = targets.filter((t) => !t.resuming)
     if (!ready.length) out(node && !held.has(node) ? `>> r: ${node} is not held: nothing to resume` : '>> r: every held node is already being resumed')
+    const answers = Array.isArray(decisions) && decisions.length ? decisions : null
     for (const t of ready) {
       t.resuming = true
-      out(`>> r: resuming ${t.node}`)
-      t.go()
+      out(`>> r: resuming ${t.node}${answers ? `, with ${answers.length} decision${answers.length === 1 ? '' : 's'} from the operator` : ''}`)
+      t.go(answers ? { decisions: answers } : undefined)
     }
     return { resumed: ready.map((t) => t.node) }
   }
@@ -105,5 +112,6 @@ export function runHalt({ journal, out, record = () => {}, runId = () => null, o
 }
 
 // The file the tree's r writes in a run's state dir for its runner to take
-// (runner.mjs watchResumeRequests): { node }, null for every held node.
+// (runner.mjs watchResumeRequests): { node }, null for every held node; the
+// orchestrator's decide (#194) adds decisions, [{ question, answer }].
 export const RESUME_REQUEST = 'resume-request.json'

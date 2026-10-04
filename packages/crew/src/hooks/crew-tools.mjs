@@ -183,7 +183,15 @@ function orchestratorTools(stateDir) {
         if (node !== null && !held.some((n) => n.node === node)) throw new Error(`${node} is not held: ${held.length ? `the held nodes are ${named(held)}` : 'the run is not halted'}. Nothing was asked of the runner.`)
         ask({ node })
         const did = [paused && 'lift the pause', held.length && (node ? `carry node ${node} on` : `carry every held node on (${held.map((n) => n.node).join(', ')})`)].filter(Boolean)
-        const then = !held.length ? '' : node ? (heldFor(held.find((n) => n.node === node)) === 'needs decisions' ? ' Its worker is told the operator answered its questions on the ticket: use decide to hand it the answers instead.' : ' Its worker is told the run was halted here and to finish.') : held.some((n) => heldFor(n) === 'needs decisions') ? ' A node that needs decisions is told the operator answered them on the ticket: use decide to hand its worker the answers instead.' : ' Each worker is told the run was halted here and to finish.'
+        const then = !held.length
+          ? ''
+          : node
+            ? heldFor(held.find((n) => n.node === node)) === 'needs decisions'
+              ? ' Its worker is told the operator answered its questions on the ticket: use decide to hand it the answers instead.'
+              : ' Its worker is told the run was halted here and to finish.'
+            : held.some((n) => heldFor(n) === 'needs decisions')
+              ? ' A node that needs decisions is told the operator answered them on the ticket: use decide to hand its worker the answers instead.'
+              : ' Each worker is told the run was halted here and to finish.'
         return `Asked the runner to ${did.join(' and to ')}, as r in the run console does.${then}`
       },
     },
@@ -195,7 +203,12 @@ function orchestratorTools(stateDir) {
         required: ['node', 'decisions'],
         properties: {
           node: { type: 'string', description: 'The held node that asked, as run_status names it under halted.' },
-          decisions: { type: 'array', minItems: 1, items: { type: 'object', required: ['question', 'answer'], properties: { question: { type: 'string', description: 'The question, as the node asked it.' }, answer: { type: 'string', description: "The operator's answer, in their words." } } }, description: 'Every question the node asked, each with its answer.' },
+          decisions: {
+            type: 'array',
+            minItems: 1,
+            items: { type: 'object', required: ['question', 'answer'], properties: { question: { type: 'string', description: 'The question, as the node asked it.' }, answer: { type: 'string', description: "The operator's answer, in their words." } } },
+            description: 'Every question the node asked, each with its answer.',
+          },
         },
       },
       async call({ node, decisions }) {
