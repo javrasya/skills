@@ -16,7 +16,7 @@ import { startDaemon } from '../src/daemon/daemon.mjs'
 import { resolveCommand } from '../src/command.mjs'
 import { runRegistry } from '../src/registry.mjs'
 import { crewHost, crewMcpConfig } from '../src/crew-host.mjs'
-import { tool } from '../src/tools.mjs'
+import { MCP_SERVER, tool } from '../src/tools.mjs'
 import { runsView } from '../src/run-view-model.mjs'
 
 const CREW = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url))
@@ -503,12 +503,12 @@ test("daemon: a session submits and mails by its id alone, its result checked ag
   const resultPath = join(dir, 'result.json')
   const [worker, text, doctor, released, bare] = [await spawn('worker'), await spawn('text'), await spawn('doctor'), await spawn('released'), await spawn('bare')]
   const dispatch = (session, extra) => request(paths, { op: 'run.worker', run: run.id, session, coordinator: 'c', ...extra })
-  await assert.rejects(dispatch(worker, { role: 'boss' }), /not an agent role: "boss"; one of worker, doctor/)
-  await assert.rejects(dispatch(worker, { schema: ['x'] }), /not a result schema/)
-  await dispatch(worker, { role: 'worker', schema, resultPath })
+  await assert.rejects(dispatch(worker, { agent: { role: 'boss' } }), /not an agent role: "boss"; one of worker, doctor/)
+  await assert.rejects(dispatch(worker, { agent: { schema: ['x'] } }), /not a result schema/)
+  await dispatch(worker, { agent: { role: 'worker', schema, resultPath } })
   await dispatch(text, {})
-  await dispatch(doctor, { role: 'doctor' })
-  await dispatch(released, { schema })
+  await dispatch(doctor, { agent: { role: 'doctor' } })
+  await dispatch(released, { agent: { schema } })
   await request(paths, { op: 'worker.release', id: released })
   const submit = (id, payload) => request(paths, { op: 'worker.submit', id, payload })
   const mail = (id, m) => request(paths, { op: 'worker.mail', id, ...m })
@@ -518,7 +518,7 @@ test("daemon: a session submits and mails by its id alone, its result checked ag
   }
   // What its harness equips each session with: a session of no agent, or of
   // one released, is told it has none, not refused.
-  const agents = async () => Promise.all([worker, text, doctor, released, bare, 'nope'].map(async (id) => (await request(paths, { op: 'worker.schema', id })).agent))
+  const agents = async () => Promise.all([worker, text, doctor, released, bare, 'nope'].map(async (id) => (await request(paths, { op: 'worker.agent', id })).agent))
   const AGENTS = [{ role: 'worker', schema }, { role: 'worker', schema: null }, { role: 'doctor', schema: null }, null, null, null]
   assert.deepEqual(await agents(), AGENTS)
 
@@ -582,15 +582,17 @@ test("daemon: a session submits and mails by its id alone, its result checked ag
 // Claude's side of crew's MCP server: started as crew's --mcp-config says,
 // its env's ${VAR} expanded from the session's `env` as Claude does.
 function mcpClient(env) {
-  const { crew } = JSON.parse(crewMcpConfig()).mcpServers
+  const crew = JSON.parse(crewMcpConfig()).mcpServers[MCP_SERVER]
   const expanded = Object.fromEntries(Object.entries(crew.env).map(([k, v]) => [k, v.replace(/\$\{(\w+)(?::-([^}]*))?\}/g, (_, name, otherwise = '') => env[name] ?? otherwise)]))
   const child = spawn(crew.command, crew.args, { env: { PATH: process.env.PATH, ...expanded }, stdio: ['pipe', 'pipe', 'inherit'] })
   const waiting = new Map()
+  // The notifications it sent, by method.
+  const notified = []
   let next = 0
   child.stdout.setEncoding('utf8')
   child.stdout.on(
     'data',
-    lineDecoder((m) => waiting.get(m.id)?.(m)),
+    lineDecoder((m) => (m.id == null ? notified.push(m.method) : waiting.get(m.id)?.(m))),
   )
   const rpc = (method, params) =>
     new Promise((answer) => {
@@ -600,7 +602,7 @@ function mcpClient(env) {
     })
   const names = async () => (await rpc('tools/list')).result.tools.map((t) => t.name)
   const call = async (name, args) => (await rpc('tools/call', { name, arguments: args })).result
-  return { rpc, names, call, close: () => child.stdin.end() }
+  return { rpc, names, call, notified, close: () => child.stdin.end() }
 }
 
 test("daemon: crew's MCP server answers initialize, lists a session's tools by its agent's role with the table's descriptions, and makes each call one daemon op; a refusal, and a daemon gone, come back as error content naming it (#177)", async () => {
@@ -614,8 +616,8 @@ test("daemon: crew's MCP server answers initialize, lists a session's tools by i
   const schema = { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } }
   const resultPath = join(dir, 'result.json')
   const [worker, doctor, bare] = [await spawn_('worker'), await spawn_('doctor'), await spawn_('bare')]
-  await request(paths, { op: 'run.worker', run: run.id, session: worker, coordinator: 'c', role: 'worker', schema, resultPath })
-  await request(paths, { op: 'run.worker', run: run.id, session: doctor, coordinator: 'c', role: 'doctor' })
+  await request(paths, { op: 'run.worker', run: run.id, session: worker, coordinator: 'c', agent: { role: 'worker', schema, resultPath } })
+  await request(paths, { op: 'run.worker', run: run.id, session: doctor, coordinator: 'c', agent: { role: 'doctor' } })
   const clients = []
   const client = (env) => {
     const c = mcpClient({ CREW_HOME: paths.home, ...env })
@@ -626,7 +628,7 @@ test("daemon: crew's MCP server answers initialize, lists a session's tools by i
   try {
     const w = client({ CREW_SESSION: worker, CREW_AGENT: '1' })
     const init = await w.rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'claude-code', version: '2.1.289' } })
-    assert.deepEqual(init.result, { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'crew', version: '1' } })
+    assert.deepEqual(init.result, { protocolVersion: '2025-06-18', capabilities: { tools: { listChanged: true } }, serverInfo: { name: MCP_SERVER, version: '1' } })
     const { tools } = (await w.rpc('tools/list')).result
     assert.deepEqual(
       tools.map((t) => [t.name, t.description]),
@@ -664,9 +666,30 @@ test("daemon: crew's MCP server answers initialize, lists a session's tools by i
     const gone = await w.call('status', { note: 'still here' })
     assert.equal(gone.isError, true)
     assert.match(gone.content[0].text, /^crew's daemon is not reachable \(.*\)\. Your note was not posted: carry on with your task\.$/)
-    assert.match((await w.call('submit', { ok: true })).content[0].text, /^crew's daemon is not reachable \(.*\), so your result was not submitted\. Submit it with the command line in your instructions instead/)
+    assert.match((await w.call('submit', { ok: true })).content[0].text, /^crew's daemon is not reachable \(.*\)\. Your result was not submitted: submit it with the command line in your instructions instead, as they say\.$/)
   } finally {
     for (const c of clients) c.close()
+  }
+})
+
+test("daemon: crew's MCP server in an agent's session whose dispatch comes after its first tools/list lists none, goes on looking, and tells Claude its list changed once its agent is found (#171)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  await startDaemon({ paths, registry: join(dir, 'runs.jsonl'), spawnSession: quietSession([], new Map()), parkAfterMs: 60_000, exit: () => {}, log: () => {} })
+  const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c', runner: null })
+  const late = (await request(paths, { op: 'session.spawn', command: ['claude', '--session-id', 'uuid-late'], cwd: dir, title: 'late' })).session.id
+  const c = mcpClient({ CREW_HOME: paths.home, CREW_SESSION: late, CREW_AGENT: '1' })
+  try {
+    await c.rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'claude-code', version: '2.1.289' } })
+    assert.deepEqual(await c.names(), [])
+    assert.deepEqual(c.notified, [])
+    await request(paths, { op: 'run.worker', run: run.id, session: late, coordinator: 'c', agent: { role: 'worker' } })
+    await until('its list changed', () => c.notified.includes('notifications/tools/list_changed'))
+    assert.deepEqual(await c.names(), ['status', 'needs_you', 'submit'])
+  } finally {
+    c.close()
+    await request(paths, { op: 'stop', force: true })
   }
 })
 
@@ -682,7 +705,7 @@ test("daemon: a session's note and needs-you reason are kept on its dispatch, fo
   const spawn = async (title) => (await request(paths, { op: 'session.spawn', command: ['claude', '--session-id', `uuid-${title}`], cwd: dir, title })).session.id
   const [worker, doctor, released, bare] = [await spawn('worker'), await spawn('doctor'), await spawn('released'), await spawn('bare')]
   const { worker: w } = await request(paths, { op: 'run.worker', run: run.id, session: worker, coordinator: 'c' })
-  await request(paths, { op: 'run.worker', run: run.id, session: doctor, coordinator: 'c', role: 'doctor' })
+  await request(paths, { op: 'run.worker', run: run.id, session: doctor, coordinator: 'c', agent: { role: 'doctor' } })
   await request(paths, { op: 'run.worker', run: run.id, session: released, coordinator: 'c' })
   await request(paths, { op: 'worker.release', id: released })
   const status = async (id, note) => (await request(paths, { op: 'worker.status', id, note })).note
@@ -750,7 +773,7 @@ test("daemon: a doctor's session hands off its note as a handoff then its worker
       [worker, 'worker'],
       [released, 'doctor'],
     ])
-      await request(paths, { op: 'run.worker', run: run.id, session, coordinator: 'c', role })
+      await request(paths, { op: 'run.worker', run: run.id, session, coordinator: 'c', agent: { role } })
     await request(paths, { op: 'worker.release', id: released })
     const handoff = (id, note) => request(paths, { op: 'worker.handoff', id, note })
     const giveUp = (id, reason) => request(paths, { op: 'worker.giveUp', id, reason })

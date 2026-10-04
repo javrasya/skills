@@ -83,7 +83,7 @@ Report with crew's tools, when your session has them:
 
 Without those tools, or if one says crew's daemon is not reachable, report over Run mail to your Run's mailbox instead, with the IDs from your session host's preamble:
 - the note: ${tool('handoff').fallback()}, only once you are done, as above;
-- a human is needed: ${tool('needs_you').fallback()}, then wait as above, and escalate again if something is still needed once the human did their part;
+- a human is needed: ${tool('needs_you').fallback({ role: 'doctor' })}, then wait as above, and escalate again if something is still needed once the human did their part;
 - you give up: ${tool('give_up').fallback()}.
 
 ## The patient

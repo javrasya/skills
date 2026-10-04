@@ -5,7 +5,7 @@
 // daemon gone throws them named, with what the agent does instead.
 import { request, daemonGone } from '../daemon/client.mjs'
 import { crewPaths } from '../daemon/transport.mjs'
-import { NOTE_MAX, SUBMIT, submitShape, tool } from '../tools.mjs'
+import { NOTE_MAX, submitShape, tool } from '../tools.mjs'
 import { sleep } from '../util.mjs'
 
 // How long a session crew started for an agent (CREW_AGENT) waits for its
@@ -14,13 +14,13 @@ const DISPATCH_MS = 5_000
 
 // The agent the session's dispatch runs ({ role, schema }), or null: none, or
 // no daemon to ask, leaves the session without tools, its prompt's CLI line
-// its way.
-export async function agentOf(env = process.env) {
+// its way. The runner's side of it is lifecycle.mjs's dispatchAgent.
+export async function sessionAgent(env = process.env) {
   if (!env.CREW_SESSION) return null
   const until = Date.now() + DISPATCH_MS
   try {
     for (;;) {
-      const { agent } = await request(crewPaths(env), { op: 'worker.schema', id: env.CREW_SESSION }, { timeoutMs: 2_000 })
+      const { agent } = await request(crewPaths(env), { op: 'worker.agent', id: env.CREW_SESSION }, { timeoutMs: 2_000 })
       if (agent || env.CREW_AGENT !== '1' || Date.now() > until) return agent
       await sleep(50)
     }
@@ -58,7 +58,8 @@ export function crewTools(agent, env = process.env) {
       label: 'Needs you',
       parameters: { type: 'object', required: ['reason'], properties: { reason: { type: 'string', description: 'What the human must do or decide.' } } },
       async call({ reason }) {
-        const instead = `The operator was not told. Run this instead, with the IDs your instructions give: ${tool('needs_you').fallback()}`
+        const line = tool('needs_you').fallback({ role: agent.role })
+        const instead = line ? `The operator was not told. Run this instead, with the IDs your instructions give: ${line}` : 'The operator was not told, and no command line tells them for you. Wait in this session, and say in your final message what blocks you and what the human must do or decide.'
         // A doctor's needs_you is its escalation, sent as mail.
         if (agent.role === 'doctor') await ask({ op: 'worker.mail', type: 'escalation', subject: 'needs you', body: reason }, instead)
         else await ask({ op: 'worker.needsYou', reason }, instead)
@@ -88,13 +89,9 @@ export function crewTools(agent, env = process.env) {
       label: 'Submit',
       parameters: shape.parameters,
       async call(args) {
-        let said
-        try {
-          said = await request(crewPaths(env), { op: 'worker.submit', id: env.CREW_SESSION, payload: shape.payload(args) })
-        } catch (e) {
-          if (!daemonGone(e)) throw e
-          throw new Error(`crew's daemon is not reachable (${e.message}), so your result was not submitted. Submit it with the command line in your instructions instead (node "${SUBMIT}" …), as they say.`)
-        }
+        // Its CLI line (the table's) needs the worker's files, which its
+        // prompt names and this session does not hold.
+        const said = await ask({ op: 'worker.submit', payload: shape.payload(args) }, 'Your result was not submitted: submit it with the command line in your instructions instead, as they say.')
         const where = said.resultPath ? ` It is recorded at ${said.resultPath}.` : ''
         return `Submitted: the workflow has your result.${where} Nothing remains for this task: stop and idle.`
       },

@@ -25,7 +25,7 @@
 //
 // A dispatch also knows its agent's role (a worker, or a doctor), the schema
 // its result is checked against, null for a text result, and the file its
-// runner reads that result from: what the runner's run.worker named, so a
+// runner reads that result from: the agent the runner's run.worker named, so a
 // session can submit by its id alone (worker.submit), checked again here as
 // submit checks it, and send its mail (worker.mail). Either is refused a
 // session of no dispatch, or of one released; a doctor submits nothing, and
@@ -57,12 +57,12 @@
 //
 //   run.create { objective, coordinator, runner } → { run: { id, coordinator } }
 //   run.use { id, coordinator, runner }         → { run: { id, coordinator } }
-//   run.worker { run, session, coordinator, role, schema, resultPath } → { worker: { taskId, capability } }
+//   run.worker { run, session, coordinator, agent: { role, schema, resultPath } } → { worker: { taskId, capability } }
 //   worker.show { id }                          → { worker: { settled, outcome, submissions, note, needsYou, gone, exited, waiting, terminal, hostDied? } }
 //   worker.result { id }                        → { result, outcome, submissions }: its last worker_done's
 //   worker.stop { id }                          → { worker }: its program ended, unsettled ones cancelled
 //   worker.release { id }                       → { worker }
-//   worker.schema { id }                        → { agent: { role, schema } | null }: session id's, null for one of no dispatch or a released one
+//   worker.agent { id }                         → { agent: { role, schema } | null }: session id's, null for one of no dispatch or a released one
 //   worker.submit { id, payload }               → { id, resultPath }: session id's result, sent as its worker_done
 //   worker.mail { id, type, subject, body, outcome } → { id }: as mail.send, from session id
 //   worker.handoff { id, note }                 → { id }: a doctor's note, as a handoff and its worker_done; id the handoff's
@@ -252,7 +252,8 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
       }
       return { run: shown(r) }
     },
-    'run.worker': ({ run, session, coordinator, role = 'worker', schema = null, resultPath = null }) => {
+    'run.worker': ({ run, session, coordinator, agent = null }) => {
+      const { role = 'worker', schema = null, resultPath = null } = agent ?? {}
       const r = runOf(run)
       if (!ROLES.includes(role)) throw new Error(`not an agent role: ${JSON.stringify(role)}; one of ${ROLES.join(', ')}`)
       if (schema !== null && (typeof schema !== 'object' || Array.isArray(schema))) throw new Error(`not a result schema: ${JSON.stringify(schema)?.slice(0, 80)}`)
@@ -289,7 +290,7 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
     },
     // What a session's harness equips it with (hooks/crew-pi.mjs): asked as
     // it starts, so a session crew started for no agent is told so, not refused.
-    'worker.schema': ({ id }) => {
+    'worker.agent': ({ id }) => {
       const d = dispatches.get(String(id))
       return { agent: d && !d.released ? { role: d.role ?? 'worker', schema: d.schema ?? null } : null }
     },
@@ -361,7 +362,7 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
   }
 
   for (const [name, op] of Object.entries(ops)) {
-    if (name === 'worker.show' || name === 'worker.result' || name === 'worker.schema' || name === 'worktree.statuses') continue
+    if (name === 'worker.show' || name === 'worker.result' || name === 'worker.agent' || name === 'worktree.statuses') continue
     // Reflect.apply, since the ops differ in arity and this wraps them all alike.
     ops[name] = (...args) => {
       const reply = Reflect.apply(op, null, args)

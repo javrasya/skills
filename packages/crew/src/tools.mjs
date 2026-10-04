@@ -11,9 +11,10 @@ export const SUBMIT = fileURLToPath(new URL('./submit.mjs', import.meta.url))
 // The IDs an Orca host's preamble names, as a worker copies them into submit.
 const ID_PLACEHOLDERS = '--from <worker_handle> --dispatch-capability <capability> --task-id <task_id> --dispatch-id <dispatch_id>'
 
-// `fallback(paths)`: the CLI line, given the worker's files (submit only); a
-// doctor's lines leave the command and IDs to its session host's preamble.
-/** @type {ReadonlyArray<{ name: string, who: string[], description: string, fallback: (paths?: { schemaPath?: string, resultPath?: string, payloadPath?: string }) => string | null }>} */
+// `fallback(given)`: the CLI line, given the worker's files (submit only) or
+// the agent's role (needs_you only); a doctor's lines leave the command and
+// IDs to its session host's preamble.
+/** @type {ReadonlyArray<{ name: string, who: string[], description: string, fallback: (given?: { schemaPath?: string, resultPath?: string, payloadPath?: string, role?: string }) => string | null }>} */
 export const TOOLS = Object.freeze([
   {
     name: 'submit',
@@ -33,7 +34,10 @@ export const TOOLS = Object.freeze([
     name: 'needs_you',
     who: ['worker', 'doctor'],
     description: 'Tells the operator that only a human can clear what blocks you, and what they must do or decide. Wait for them after it, for as long as they take.',
-    fallback: () => 'orchestration send --type escalation --subject "Blocked: <what>" --body "<what the human must do or decide>"',
+    // A doctor's only: the runner acts on no worker's escalation, and any
+    // mail clears the worker's needs-you, so a worker sending one would be
+    // told the operator heard while nobody did.
+    fallback: (given) => (given?.role === 'doctor' ? 'orchestration send --type escalation --subject "Blocked: <what>" --body "<what the human must do or decide>"' : null),
   },
   {
     name: 'handoff',
@@ -48,6 +52,12 @@ export const TOOLS = Object.freeze([
     fallback: () => 'worker_done --outcome failed, with why in the body',
   },
 ])
+
+// The key of crew's MCP server in a Claude session's --mcp-config, and so the
+// middle of its tools' names (mcp__<key>__submit): crew keeps the repo's own
+// servers, so a key such as `crew` could clash with one of them, and crew's
+// settings would allow that server's tools too.
+export const MCP_SERVER = 'crew-agent-tools'
 
 // The longest status note crew keeps; a longer one is cut.
 export const NOTE_MAX = 200

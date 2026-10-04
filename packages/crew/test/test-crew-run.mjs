@@ -95,7 +95,7 @@ function toolResults({ harness, sessionId, worktree }) {
     lines
       .flatMap((m) => (Array.isArray(m?.content) ? m.content : []))
       .filter((c) => c.type === 'tool_use')
-      .map((c) => [c.id, c.name.replace(/^mcp__crew__/, '')]),
+      .map((c) => [c.id, c.name.replace(/^mcp__crew-agent-tools__/, '')]),
   )
   return lines
     .flatMap((m) => (m?.role === 'user' && Array.isArray(m.content) ? m.content : []))

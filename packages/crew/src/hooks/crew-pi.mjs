@@ -11,7 +11,7 @@
 // The tools themselves are crew-tools.mjs's, shared with Claude's MCP server.
 // Nothing else of pi's is changed.
 import { piWaiting } from '../waiting.mjs'
-import { agentOf, crewTools } from './crew-tools.mjs'
+import { sessionAgent, crewTools } from './crew-tools.mjs'
 import { tell } from './tell.mjs'
 
 export default function crewPi(pi, env = process.env) {
@@ -30,7 +30,7 @@ export default function crewPi(pi, env = process.env) {
   let equipped = false
   const equip = async () => {
     if (equipped) return
-    const agent = await agentOf(env)
+    const agent = await sessionAgent(env)
     if (!agent) return
     equipped = true
     for (const { call, ...t } of crewTools(agent, env)) {

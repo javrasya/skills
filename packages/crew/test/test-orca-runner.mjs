@@ -3330,7 +3330,7 @@ test("doctor: its prompt names crew's tools first, from the tool table, and the 
     return i
   }
   const tools = ['handoff', 'needs_you', 'give_up'].map((name) => at(`call \`${name}\``))
-  const fallbacks = ['handoff', 'needs_you', 'give_up'].map((name) => at(tool(name).fallback()))
+  const fallbacks = ['handoff', 'needs_you', 'give_up'].map((name) => at(tool(name).fallback({ role: 'doctor' })))
   assert.ok(Math.max(...tools) < at('Without those tools') && at('Without those tools') < Math.min(...fallbacks), p)
 })
 

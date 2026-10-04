@@ -20,6 +20,7 @@ import { daemonGone, ensureDaemon, request } from './daemon/client.mjs'
 import { runnerCommand } from './daemon/runs.mjs'
 import { crewSessionEnv, launchedSession, launchWords, resumeWords } from './harness.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
+import { MCP_SERVER, TOOLS } from './tools.mjs'
 import { SCREENS, readScreen, readsReady, tellsReady } from './screens.mjs'
 import { CLAUDE_HOOK_EVENTS } from './waiting.mjs'
 import { sessionTranscripts } from './transcript.mjs'
@@ -38,16 +39,16 @@ export const CREW_BIN = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url
 // takes crew's hooks as settings of that session alone, beside the person's
 // own. Neither changes what the harness does or shows. Both also give the
 // session crew's tools (ADR-0027): pi's extension registers them, and Claude
-// starts crew's MCP server, after the hooks, which its settings allow
-// without a prompt per call. No --strict-mcp-config: the repo's own servers
-// stay.
+// starts crew's MCP server, after the hooks, whose tools its settings allow
+// without a prompt per call, by their exact names and none other. No
+// --strict-mcp-config: the repo's own servers stay.
 export const PI_EXTENSION = fileURLToPath(new URL('./hooks/crew-pi.mjs', import.meta.url))
 export const CLAUDE_HOOK = fileURLToPath(new URL('./hooks/claude-hook.mjs', import.meta.url))
 export const CREW_MCP = fileURLToPath(new URL('./hooks/crew-mcp.mjs', import.meta.url))
 export const claudeSettings = (node = process.execPath) =>
   JSON.stringify({
     hooks: Object.fromEntries(CLAUDE_HOOK_EVENTS.map((event) => [event, [{ hooks: [{ type: 'command', command: `"${node}" "${CLAUDE_HOOK}"`, timeout: 10 }] }]])),
-    permissions: { allow: ['mcp__crew__*'] },
+    permissions: { allow: TOOLS.map((t) => `mcp__${MCP_SERVER}__${t.name}`) },
   })
 // The session's id is the daemon's to give once the line is spawned, so the
 // env names the session's own: Claude expands ${VAR} in a --mcp-config (its
@@ -55,7 +56,7 @@ export const claudeSettings = (node = process.execPath) =>
 // CREW_AGENT is set on an agent's session only, hence its empty default.
 export const crewMcpConfig = (node = process.execPath) =>
   JSON.stringify({
-    mcpServers: { crew: { type: 'stdio', command: node, args: [CREW_MCP], env: { CREW_SESSION: '${CREW_SESSION}', CREW_HOME: '${CREW_HOME}', CREW_AGENT: '${CREW_AGENT:-}' } } },
+    mcpServers: { [MCP_SERVER]: { type: 'stdio', command: node, args: [CREW_MCP], env: { CREW_SESSION: '${CREW_SESSION}', CREW_HOME: '${CREW_HOME}', CREW_AGENT: '${CREW_AGENT:-}' } } },
   })
 export const waitWords = (harness) => (harness === 'pi' ? ['-e', PI_EXTENSION] : harness === 'claude' ? ['--settings', claudeSettings(), '--mcp-config', crewMcpConfig()] : [])
 
@@ -280,14 +281,14 @@ export function crewHost({
   // `asking` is ready's: who hears of a dialog the person must answer first.
   // `agent` is what its dispatch knows of its agent, for a submit by session
   // (runs.mjs): { role, schema, resultPath }.
-  async function launch(line, { harness, dir, title, prompt, run, typing = () => {}, asking = null, agent = {} }) {
+  async function launch(line, { harness, dir, title, prompt, run, typing = () => {}, asking = null, agent = null }) {
     const [program, ...args] = line
     const command = [...(harnesses[harness] ?? [program]), ...args, ...waitWords(harness)]
     // CREW_AGENT: its dispatch follows the session, which its harness's tools
     // wait for (hooks/crew-pi.mjs).
     const { session } = await call({ op: 'session.spawn', command, cwd: dir, env: run ? { ...sessionEnv, CREW_AGENT: '1' } : sessionEnv, title })
     try {
-      const { worker } = run ? await call({ op: 'run.worker', run, session: session.id, coordinator, ...agent }) : { worker: null }
+      const { worker } = run ? await call({ op: 'run.worker', run, session: session.id, coordinator, agent }) : { worker: null }
       await ready(session.id, command, { harness, asking })
       typing()
       await terminalSend({ terminal: session.id, text: (worker ? crewPreamble({ terminal: session.id, ...worker }) : '') + prompt })
@@ -388,8 +389,8 @@ export function crewHost({
     // (ready above), as workerContinue's does; the start waits it out.
     // With `chain`, chainWorktree's path, the worker runs in the run's chain
     // worktree, which is never this start's to make or name on its error.
-    // `role`, `schema` and `resultPath` go on its dispatch, as a continue's do.
-    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null, chain = null, asking = null, role, schema, resultPath }) {
+    // `agent` goes on its dispatch, as a continue's does.
+    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null, chain = null, asking = null, agent = null }) {
       if (!sessionId) throw new Error(`workerStart: ${title} has no session id; the runner assigns one to every worker`)
       const warnings = []
       let worktree = chain ?? cwd
@@ -409,7 +410,7 @@ export function crewHost({
           prompt: text,
           run,
           asking,
-          agent: { role, schema, resultPath },
+          agent,
           typing: () => {
             dispatched = true
           },
@@ -437,7 +438,7 @@ export function crewHost({
     // one session id would both write its transcript), is closed once the new
     // one has its prompt. A pty whose program ended cannot take another, and a
     // harness run straight in its pty has no shell to type a resume line into.
-    async workerContinue({ run, dispatch, terminal = dispatch, worktree = null, title, prompt, harness = 'claude', model, effort, permissionMode, sessionId, asking = null, role, schema, resultPath }) {
+    async workerContinue({ run, dispatch, terminal = dispatch, worktree = null, title, prompt, harness = 'claude', model, effort, permissionMode, sessionId, asking = null, agent = null }) {
       const line = resumeWords({ harness, model, effort, permissionMode, sessionId })
       const old = await sessionOf(terminal)
       if (old?.alive) {
@@ -449,7 +450,7 @@ export function crewHost({
         }
       }
       const dir = old?.cwd ?? worktree ?? cwd
-      const w = await launch(line, { harness, dir, title: old?.title ?? title, prompt, run, asking, agent: { role, schema, resultPath } })
+      const w = await launch(line, { harness, dir, title: old?.title ?? title, prompt, run, asking, agent })
       if (old) await call({ op: 'session.close', id: old.id }).catch(() => {})
       return { dispatchId: w.terminal, taskId: w.taskId, terminal: w.terminal, worktree: dir, reopened: true }
     },
