@@ -28,7 +28,7 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { fakeOrca, fakeOrcaCli } from '../src/fake-orca.mjs'
 import { orcaCli } from '../src/orca-cli.mjs'
-import { PI_EXTENSION, claudeSettings, crewHost, crewWorktrees } from '../src/crew-host.mjs'
+import { CLAUDE_HOOK, CREW_MCP, PI_EXTENSION, claudeSettings, crewHost, crewMcpConfig, crewWorktrees } from '../src/crew-host.mjs'
 import { repoConfig } from '../src/crew-config.mjs'
 import { CREW_ONLY, RUN_METHODS, SESSION_METHODS, hostUnreachable } from '../src/session-host.mjs'
 import { reclaimAgent } from '../src/reclaim.mjs'
@@ -548,10 +548,26 @@ test("crew host: the harness starts from the runner's launch line word for word,
   const w = await start(h, 'launch line', launch)
   const [, ...words] = launchCommand({ ...launch, sessionId: w.sessionId }).split(' ')
   const s = await h.info(w)
-  assert.deepEqual(s.command, [process.execPath, FAKE_HARNESS, ...words, '--settings', claudeSettings()])
+  assert.deepEqual(s.command, [process.execPath, FAKE_HARNESS, ...words, '--settings', claudeSettings(), '--mcp-config', crewMcpConfig()])
   assert.equal(s.cwd, crewScratch().cwd)
   assert.equal(w.worktree, crewScratch().cwd)
   assert.equal(s.title, 'launch line')
+})
+
+test("crew host: a Claude session's settings allow crew's tools without a prompt per call, beside its hooks, and its MCP config starts crew's server with the session's own ids; the repo's servers stay (#177)", () => {
+  const settings = JSON.parse(claudeSettings())
+  assert.deepEqual(settings.permissions, { allow: ['mcp__crew__*'] })
+  assert.equal(settings.hooks.PreToolUse?.[0].hooks[0].command, `"${process.execPath}" "${CLAUDE_HOOK}"`)
+  assert.deepEqual(JSON.parse(crewMcpConfig()), {
+    mcpServers: { crew: { type: 'stdio', command: process.execPath, args: [CREW_MCP], env: { CREW_SESSION: '${CREW_SESSION}', CREW_HOME: '${CREW_HOME}', CREW_AGENT: '${CREW_AGENT:-}' } } },
+  })
+  // The harness's own line, as an operator runs it, carries none of crew's words: crew adds them to its sessions alone.
+  assert.deepEqual(
+    launchCommand({ harness: 'claude', sessionId: randomUUID() })
+      .split(' ')
+      .filter((w) => /^--(settings|mcp-config|strict-mcp-config)$/.test(w)),
+    [],
+  )
 })
 
 test("crew host: the fake harness is a TUI on the alternate screen that echoes each prompt, crew's preamble first", async () => {
@@ -711,7 +727,7 @@ test("crew host: a continued session runs the runner's resume line word for word
   const { w, next } = await died(h, 'resume line')
   const [, ...words] = resumeCommand({ harness: 'claude', sessionId: w.sessionId }).split(' ')
   const s = await h.info(next)
-  assert.deepEqual(s.command, [process.execPath, FAKE_HARNESS, ...words, '--settings', claudeSettings()])
+  assert.deepEqual(s.command, [process.execPath, FAKE_HARNESS, ...words, '--settings', claudeSettings(), '--mcp-config', crewMcpConfig()])
   assert.equal(s.cwd, crewScratch().cwd)
   assert.equal(next.worktree, crewScratch().cwd)
   assert.equal(s.title, 'resume line')

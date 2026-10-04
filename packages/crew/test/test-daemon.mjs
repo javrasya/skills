@@ -15,7 +15,8 @@ import { daemonHello, enterSession, request, stopDaemon } from '../src/daemon/cl
 import { startDaemon } from '../src/daemon/daemon.mjs'
 import { resolveCommand } from '../src/command.mjs'
 import { runRegistry } from '../src/registry.mjs'
-import { crewHost } from '../src/crew-host.mjs'
+import { crewHost, crewMcpConfig } from '../src/crew-host.mjs'
+import { tool } from '../src/tools.mjs'
 import { runsView } from '../src/run-view-model.mjs'
 
 const CREW = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url))
@@ -575,6 +576,97 @@ test("daemon: a session submits and mails by its id alone, its result checked ag
     await assert.rejects(submit(released, { ok: true }), /was released/)
   } finally {
     second.shutdown('test over')
+  }
+})
+
+// Claude's side of crew's MCP server: started as crew's --mcp-config says,
+// its env's ${VAR} expanded from the session's `env` as Claude does.
+function mcpClient(env) {
+  const { crew } = JSON.parse(crewMcpConfig()).mcpServers
+  const expanded = Object.fromEntries(Object.entries(crew.env).map(([k, v]) => [k, v.replace(/\$\{(\w+)(?::-([^}]*))?\}/g, (_, name, otherwise = '') => env[name] ?? otherwise)]))
+  const child = spawn(crew.command, crew.args, { env: { PATH: process.env.PATH, ...expanded }, stdio: ['pipe', 'pipe', 'inherit'] })
+  const waiting = new Map()
+  let next = 0
+  child.stdout.setEncoding('utf8')
+  child.stdout.on(
+    'data',
+    lineDecoder((m) => waiting.get(m.id)?.(m)),
+  )
+  const rpc = (method, params) =>
+    new Promise((answer) => {
+      const id = ++next
+      waiting.set(id, answer)
+      child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
+    })
+  const names = async () => (await rpc('tools/list')).result.tools.map((t) => t.name)
+  const call = async (name, args) => (await rpc('tools/call', { name, arguments: args })).result
+  return { rpc, names, call, close: () => child.stdin.end() }
+}
+
+test("daemon: crew's MCP server answers initialize, lists a session's tools by its agent's role with the table's descriptions, and makes each call one daemon op; a refusal, and a daemon gone, come back as error content naming it (#177)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const exits = []
+  await startDaemon({ paths, registry: join(dir, 'runs.jsonl'), spawnSession: quietSession([], new Map()), parkAfterMs: 60_000, exit: () => exits.push(1), log: () => {} })
+  const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c', runner: null })
+  const spawn_ = async (title) => (await request(paths, { op: 'session.spawn', command: ['claude', '--session-id', `uuid-${title}`], cwd: dir, title })).session.id
+  const schema = { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } }
+  const resultPath = join(dir, 'result.json')
+  const [worker, doctor, bare] = [await spawn_('worker'), await spawn_('doctor'), await spawn_('bare')]
+  await request(paths, { op: 'run.worker', run: run.id, session: worker, coordinator: 'c', role: 'worker', schema, resultPath })
+  await request(paths, { op: 'run.worker', run: run.id, session: doctor, coordinator: 'c', role: 'doctor' })
+  const clients = []
+  const client = (env) => {
+    const c = mcpClient({ CREW_HOME: paths.home, ...env })
+    clients.push(c)
+    return c
+  }
+  const show = async (id) => (await request(paths, { op: 'worker.show', id })).worker
+  try {
+    const w = client({ CREW_SESSION: worker, CREW_AGENT: '1' })
+    const init = await w.rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'claude-code', version: '2.1.289' } })
+    assert.deepEqual(init.result, { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'crew', version: '1' } })
+    const { tools } = (await w.rpc('tools/list')).result
+    assert.deepEqual(
+      tools.map((t) => [t.name, t.description]),
+      ['status', 'needs_you', 'submit'].map((name) => [name, tool(name).description]),
+    )
+    assert.deepEqual(tools[2].inputSchema, schema)
+    assert.deepEqual(await w.call('status', { note: 'reading the code' }), { content: [{ type: 'text', text: 'Posted: the operator sees "reading the code" on your row.' }] })
+    await w.call('needs_you', { reason: 'log in to npm' })
+    assert.deepEqual([(await show(worker)).note, (await show(worker)).needsYou], ['reading the code', 'log in to npm'])
+    // The daemon's refusal is error content, Claude's to show its agent.
+    const refused = await w.call('submit', { ok: 'yes' })
+    assert.equal(refused.isError, true)
+    assert.match(refused.content[0].text, /submit rejected: 1 validation error\(s\)[\s\S]*\$\.ok: expected boolean, got string/)
+    assert.equal((await show(worker)).settled, false)
+    assert.match((await w.call('submit', { ok: true })).content[0].text, /^Submitted: the workflow has your result\. It is recorded at .*result\.json\./)
+    assert.deepEqual(JSON.parse(readFileSync(resultPath, 'utf8')), { ok: true })
+    assert.deepEqual([(await show(worker)).settled, (await request(paths, { op: 'worker.result', id: worker })).submissions], [true, 1])
+    assert.equal((await w.call('handoff', { note: 'x' })).isError, true)
+    assert.equal((await w.rpc('resources/list')).error.code, -32601)
+
+    const d = client({ CREW_SESSION: doctor, CREW_AGENT: '1' })
+    assert.deepEqual(await d.names(), ['status', 'needs_you', 'handoff', 'give_up'])
+    assert.match((await d.call('handoff', { note: 'read the lockfile first' })).content[0].text, /^Handed off: /)
+    assert.deepEqual([(await show(doctor)).settled, (await show(doctor)).outcome], [true, 'succeeded'])
+
+    // A session of no agent, and a claude outside crew, list none.
+    for (const env of [{ CREW_SESSION: bare }, {}]) {
+      const none = client(env)
+      assert.deepEqual(await none.names(), [], JSON.stringify(env))
+      assert.equal((await none.call('status', { note: 'x' })).isError, true)
+    }
+
+    await request(paths, { op: 'stop', force: true })
+    await until('the daemon to stop', () => exits.length === 1)
+    const gone = await w.call('status', { note: 'still here' })
+    assert.equal(gone.isError, true)
+    assert.match(gone.content[0].text, /^crew's daemon is not reachable \(.*\)\. Your note was not posted: carry on with your task\.$/)
+    assert.match((await w.call('submit', { ok: true })).content[0].text, /^crew's daemon is not reachable \(.*\), so your result was not submitted\. Submit it with the command line in your instructions instead/)
+  } finally {
+    for (const c of clients) c.close()
   }
 })
 

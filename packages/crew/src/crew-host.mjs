@@ -36,14 +36,28 @@ export const CREW_BIN = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url
 // (ADR-0022): a way for the harness to tell the daemon, from its own events,
 // when it waits on the person (waiting.mjs). pi loads crew's extension; Claude
 // takes crew's hooks as settings of that session alone, beside the person's
-// own. Neither changes what the harness does or shows.
+// own. Neither changes what the harness does or shows. Both also give the
+// session crew's tools (ADR-0027): pi's extension registers them, and Claude
+// starts crew's MCP server, after the hooks, which its settings allow
+// without a prompt per call. No --strict-mcp-config: the repo's own servers
+// stay.
 export const PI_EXTENSION = fileURLToPath(new URL('./hooks/crew-pi.mjs', import.meta.url))
 export const CLAUDE_HOOK = fileURLToPath(new URL('./hooks/claude-hook.mjs', import.meta.url))
+export const CREW_MCP = fileURLToPath(new URL('./hooks/crew-mcp.mjs', import.meta.url))
 export const claudeSettings = (node = process.execPath) =>
   JSON.stringify({
     hooks: Object.fromEntries(CLAUDE_HOOK_EVENTS.map((event) => [event, [{ hooks: [{ type: 'command', command: `"${node}" "${CLAUDE_HOOK}"`, timeout: 10 }] }]])),
+    permissions: { allow: ['mcp__crew__*'] },
   })
-export const waitWords = (harness) => (harness === 'pi' ? ['-e', PI_EXTENSION] : harness === 'claude' ? ['--settings', claudeSettings()] : [])
+// The session's id is the daemon's to give once the line is spawned, so the
+// env names the session's own: Claude expands ${VAR} in a --mcp-config (its
+// "dynamic" scope) from its environment, which crew sets (crewSessionEnv).
+// CREW_AGENT is set on an agent's session only, hence its empty default.
+export const crewMcpConfig = (node = process.execPath) =>
+  JSON.stringify({
+    mcpServers: { crew: { type: 'stdio', command: node, args: [CREW_MCP], env: { CREW_SESSION: '${CREW_SESSION}', CREW_HOME: '${CREW_HOME}', CREW_AGENT: '${CREW_AGENT:-}' } } },
+  })
+export const waitWords = (harness) => (harness === 'pi' ? ['-e', PI_EXTENSION] : harness === 'claude' ? ['--settings', claudeSettings(), '--mcp-config', crewMcpConfig()] : [])
 
 // The rows of a session's screen read for what it shows.
 const SCREEN_ROWS = 500
