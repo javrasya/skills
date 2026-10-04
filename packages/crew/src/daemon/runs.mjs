@@ -17,7 +17,11 @@
 // and capability are crew's, typed to the worker in its preamble, and a
 // message sent as that dispatch must name its task id, and its session and
 // capability when it names them at all (a prompt typed again carries no
-// capability). A worker_done settles its dispatch.
+// capability). A worker_done settles its dispatch, and every one it sends,
+// settled or not, is counted (`submissions`) and taken as its outcome and its
+// last result: an agent of a node its runner holds may submit again (#173).
+// The result is the value submit validated, sent along with the worker_done;
+// null for one that sent none (`crew orchestration send`).
 //
 // A Run whose objective is an orchestrator question's title (orchestrator.mjs)
 // is flagged `orchestrator` at its creation: it is crew's own question, no
@@ -35,10 +39,11 @@
 //   run.create { objective, coordinator, runner } → { run: { id, coordinator } }
 //   run.use { id, coordinator, runner }         → { run: { id, coordinator } }
 //   run.worker { run, session, coordinator }    → { worker: { taskId, capability } }
-//   worker.show { id }                          → { worker: { settled, outcome, gone, exited, waiting, terminal, hostDied? } }
+//   worker.show { id }                          → { worker: { settled, outcome, submissions, gone, exited, waiting, terminal, hostDied? } }
+//   worker.result { id }                        → { result, outcome, submissions }: its last worker_done's
 //   worker.stop { id }                          → { worker }: its program ended, unsettled ones cancelled
 //   worker.release { id }                       → { worker }
-//   mail.send { from, capability, taskId, dispatchId, type, subject, body, outcome } → { id }
+//   mail.send { from, capability, taskId, dispatchId, type, subject, body, outcome, result } → { id }
 //   mail.check { coordinator, ack }             → { deliveryId, acknowledged, replayed, messages }
 //   worktree.status { path, status }            → { path, status }
 //   worktree.statuses                           → { statuses: { <path>: <status> } }
@@ -140,7 +145,7 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
   const show = (d) => {
     const s = sessions.get(d.id)?.info() ?? null
     const lost = !s || (!!s.restored && !s.alive && !d.settled)
-    return { settled: d.settled, outcome: d.outcome, gone: lost, exited: !lost && !s.alive, waiting: s?.waiting ?? null, terminal: d.id, ...(lost && !d.settled && died.has(d.id) && { hostDied: true }) }
+    return { settled: d.settled, outcome: d.outcome, submissions: d.submissions ?? 0, gone: lost, exited: !lost && !s.alive, waiting: s?.waiting ?? null, terminal: d.id, ...(lost && !d.settled && died.has(d.id) && { hostDied: true }) }
   }
 
   const ops = {
@@ -173,11 +178,15 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
       if (r.coordinator !== coordinator) throw new Error(`consumer_fenced: this coordinator is no longer bound to run ${r.id}`)
       if (!sessions.has(String(session))) throw new Error(`no session ${session}`)
       if (dispatches.has(String(session))) throw new Error(`session ${session} already runs a dispatch`)
-      const d = { id: String(session), run: r.id, taskId: `task_${hex(6)}`, capability: `cap_${hex(12)}`, settled: false, outcome: null, released: false }
+      const d = { id: String(session), run: r.id, taskId: `task_${hex(6)}`, capability: `cap_${hex(12)}`, settled: false, outcome: null, released: false, submissions: 0, result: null }
       dispatches.set(d.id, d)
       return { worker: { taskId: d.taskId, capability: d.capability } }
     },
     'worker.show': ({ id }) => ({ worker: show(dispatchOf(id)) }),
+    'worker.result': ({ id }) => {
+      const d = dispatchOf(id)
+      return { result: d.result ?? null, outcome: d.outcome, submissions: d.submissions ?? 0 }
+    },
     'worker.stop': ({ id }) => {
       const d = dispatchOf(id)
       sessions.get(d.id)?.kill()
@@ -189,7 +198,7 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
       d.released = true
       return { worker: show(d) }
     },
-    'mail.send': ({ from = null, capability = null, taskId, dispatchId, type, subject = '', body = '', outcome = null }) => {
+    'mail.send': ({ from = null, capability = null, taskId, dispatchId, type, subject = '', body = '', outcome = null, result = null }) => {
       const d = dispatchOf(dispatchId)
       if (d.taskId !== taskId || (from != null && from !== d.id) || (capability != null && capability !== d.capability)) {
         throw new Error(`consumer_fenced: a message from ${dispatchId} does not match its preamble`)
@@ -208,7 +217,7 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
         createdAt: now(),
       }
       runOf(d.run).pending.push(m)
-      if (type === 'worker_done' && !d.settled) Object.assign(d, { settled: true, outcome: m.outcome })
+      if (type === 'worker_done') Object.assign(d, { settled: true, outcome: m.outcome, submissions: (d.submissions ?? 0) + 1, result })
       return { id: m.id }
     },
     'mail.check': ({ coordinator, ack = null }) => {
@@ -234,7 +243,7 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
   }
 
   for (const [name, op] of Object.entries(ops)) {
-    if (name === 'worker.show' || name === 'worktree.statuses') continue
+    if (name === 'worker.show' || name === 'worker.result' || name === 'worktree.statuses') continue
     // Reflect.apply, since the ops differ in arity and this wraps them all alike.
     ops[name] = (...args) => {
       const reply = Reflect.apply(op, null, args)

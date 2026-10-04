@@ -105,6 +105,7 @@ export async function submit(argv, { host, stdout = (s) => process.stdout.write(
       dispatchId: a.dispatchId,
       subject: 'result submitted',
       body: `Submitted a result that is valid against its schema. It is recorded at ${a.result}. Nothing remains for this task.`,
+      result: value,
     })
   } catch (e) {
     stderr(`submit: the result is recorded at ${a.result}, but worker_done failed: ${e.message}`)

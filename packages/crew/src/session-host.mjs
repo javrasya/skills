@@ -51,9 +51,12 @@
 // the parking ones the run tree calls only when the host has them:
 // terminalsParked, terminalPark (ADR-0024) and terminalsInfo, every session
 // as { terminal, alive, parked, waiting, exit }, which the tree
-// reads a `?` session's state from (#168). The contract suite checks the
+// reads a `?` session's state from (#168); and workerResult({ dispatch })
+// → { result, outcome, submissions }, the last result a worker submitted
+// and how many times it did, which a runner asks only of a host that has it
+// (#173). The contract suite checks the
 // crew host has them all.
-export const CREW_ONLY = Object.freeze(['sessionStart', 'mailSend', 'terminalsParked', 'terminalPark', 'terminalsInfo'])
+export const CREW_ONLY = Object.freeze(['sessionStart', 'mailSend', 'terminalsParked', 'terminalPark', 'terminalsInfo', 'workerResult'])
 
 export const SESSION_HOST = Object.freeze([
   'unreachable',

@@ -446,6 +446,13 @@ export function crewHost({
     async workerStop({ dispatch }) {
       await call({ op: 'worker.stop', id: dispatch })
     },
+    // Crew's own (session-host.mjs CREW_ONLY): the last result its worker
+    // submitted, with the count of every worker_done it sent, so a runner
+    // holding its node can tell a submit again from the one it took.
+    async workerResult({ dispatch }) {
+      const { result, outcome, submissions } = await call({ op: 'worker.result', id: dispatch })
+      return { result, outcome, submissions }
+    },
     async workerRelease({ dispatch }) {
       await call({ op: 'worker.release', id: dispatch })
     },
@@ -558,8 +565,8 @@ export function crewHost({
 
     // A worker's own calls, from its session (submit, and `crew orchestration
     // send`): the IDs its preamble gave it.
-    async workerDone({ from, capability, taskId, dispatchId, subject, body }) {
-      await call({ op: 'mail.send', from, capability, taskId, dispatchId, type: 'worker_done', outcome: 'succeeded', subject, body })
+    async workerDone({ from, capability, taskId, dispatchId, subject, body, result = null }) {
+      await call({ op: 'mail.send', from, capability, taskId, dispatchId, type: 'worker_done', outcome: 'succeeded', subject, body, result })
     },
     async mailSend({ from, capability, taskId, dispatchId, type, subject, body, outcome = null }) {
       return { id: (await call({ op: 'mail.send', from, capability, taskId, dispatchId, type, subject, body, outcome })).id }

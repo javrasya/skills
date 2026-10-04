@@ -431,7 +431,7 @@ test("daemon: after a restart every agent session comes back under its old id, p
     assert.deepEqual([of(done).title, of(done).cwd, of(done).command, of(done).alive, of(done).parked], ['done, renamed', join(dir, 'done'), ['claude', '--session-id', 'uuid-done', '--model', 'opus'], false, true])
     assert.equal(spawned.length, 0, 'no harness started until someone enters')
     const show = async (id) => (await request(paths, { op: 'worker.show', id })).worker
-    assert.deepEqual(await show(working), { settled: false, outcome: null, gone: true, exited: false, waiting: null, terminal: working, hostDied: true })
+    assert.deepEqual(await show(working), { settled: false, outcome: null, submissions: 0, gone: true, exited: false, waiting: null, terminal: working, hostDied: true })
     assert.deepEqual([(await show(done)).settled, (await show(done)).gone, (await show(failed)).outcome], [true, false, 'failed'])
 
     for (const id of [done, working]) (await enterSession(paths, { id }, () => {})).socket.destroy()
@@ -441,6 +441,48 @@ test("daemon: after a restart every agent session comes back under its old id, p
     assert.equal(b.id, working)
     // Revived, a working agent is a live session again: its runner watches it, nothing to continue.
     assert.deepEqual([(await show(working)).gone, (await show(working)).hostDied], [false, undefined])
+  } finally {
+    second.shutdown('test over')
+  }
+})
+
+test('daemon: every worker_done a dispatch sends is counted and taken as its outcome and last result, settled or not, and the next daemon keeps them (#173)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const registry = join(dir, 'runs.jsonl')
+  const spawnSession = quietSession([], new Map())
+  const exits = []
+  await startDaemon({ paths, registry, spawnSession, parkAfterMs: 60_000, exit: () => exits.push(1), log: () => {} })
+  const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c', runner: null })
+  const { session } = await request(paths, { op: 'session.spawn', command: ['claude', '--session-id', 'uuid-r'], cwd: dir, title: 'held' })
+  const id = session.id
+  const { worker: w } = await request(paths, { op: 'run.worker', run: run.id, session: id, coordinator: 'c' })
+  const show = async () => (await request(paths, { op: 'worker.show', id })).worker
+  const result = () => request(paths, { op: 'worker.result', id })
+  const done = (outcome, value) => request(paths, { op: 'mail.send', taskId: w.taskId, dispatchId: id, capability: w.capability, type: 'worker_done', outcome, ...(value !== undefined && { result: value }) })
+  const shape = ({ result, outcome, submissions }) => ({ result, outcome, submissions })
+
+  assert.deepEqual([(await show()).submissions, shape(await result())], [0, { result: null, outcome: null, submissions: 0 }])
+  await done('succeeded', { decisions_needed: ['which?'] })
+  assert.deepEqual([(await show()).settled, (await show()).submissions], [true, 1])
+  await done('failed', { decisions_needed: [] })
+  assert.deepEqual([(await show()).settled, (await show()).outcome, (await show()).submissions], [true, 'failed', 2])
+  assert.deepEqual(shape(await result()), { result: { decisions_needed: [] }, outcome: 'failed', submissions: 2 })
+  // A worker_done with no result (`crew orchestration send`) still counts, its result none.
+  await done('succeeded')
+  assert.deepEqual(shape(await result()), { result: null, outcome: 'succeeded', submissions: 3 })
+  await done('succeeded', 'plain text')
+  // The crew host hands it back as the daemon does.
+  const host = crewHost({ paths, harnesses: {}, start: async () => {} })
+  assert.deepEqual(await host.workerResult({ dispatch: id }), { result: 'plain text', outcome: 'succeeded', submissions: 4 })
+  await assert.rejects(request(paths, { op: 'worker.result', id: 'nope' }), /dispatch_not_found/)
+
+  await request(paths, { op: 'stop', force: true })
+  await until('the first daemon to stop', () => exits.length === 1)
+  const second = await startDaemon({ paths, registry, spawnSession, parkAfterMs: 60_000, exit: () => {}, log: () => {} })
+  try {
+    assert.deepEqual([(await show()).submissions, shape(await result())], [4, { result: 'plain text', outcome: 'succeeded', submissions: 4 }])
   } finally {
     second.shutdown('test over')
   }
@@ -559,7 +601,7 @@ test('daemon: one that died with a run live is followed by one that starts its r
     assert.deepEqual(again.command.slice(2), [script, '--host', 'crew', '--state-dir', runDir, '--resume'])
     assert.deepEqual([again.cwd, again.title], [project, 'crew run workflow.js'])
     const show = async (id) => (await request(paths, { op: 'worker.show', id })).worker
-    assert.deepEqual(await show(lost), { settled: false, outcome: null, gone: true, exited: false, waiting: null, terminal: lost, hostDied: true })
+    assert.deepEqual(await show(lost), { settled: false, outcome: null, submissions: 0, gone: true, exited: false, waiting: null, terminal: lost, hostDied: true })
     assert.equal((await show(ended)).hostDied, undefined, 'it had ended before the daemon went')
     assert.deepEqual((await request(paths, { op: 'run.use', id: run.id, coordinator: 'c3', runner: again.id })).run, { id: run.id, coordinator: 'c3' })
     await assert.rejects(request(paths, { op: 'stop' }), (e) => e.message.includes(`live: ${run.id} (the-spec)`))
