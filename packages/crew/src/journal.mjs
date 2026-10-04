@@ -113,10 +113,13 @@ import { unionLines } from './git.mjs'
 // gives it (opts.node), when it names one: starting, started, reattached,
 // outstanding, continued, result, failed and held. A node's result that needs
 // the operator (a non-empty `decisions_needed`) carries `needsDecision: true`:
-// it was held, never handed to the script. A resume carries each failed or
-// needs-decision node forward as its failed or result line, with `carried:
-// true`, `origin` and `worker`, the worker it last ran, so the next resume
-// still carries it on. halted: the run halted on `node`, failed or needing
+// it was held, never handed to the script; on a host that counts a
+// worker's submissions (crew's, #173), it and a node's failed line that left
+// its worker running carry `submissions`, the worker_done count its host
+// showed then, so a submit above it while held is a resubmit. A resume
+// carries each failed or needs-decision node forward as its failed or result
+// line, with `carried: true`, `origin`, `submissions` and `worker`, the
+// worker it last ran, so the next resume still carries it on. halted: the run halted on `node`, failed or needing
 // decisions, with its `reason`; unhalted: no failed or needs-decision node is
 // left, and every held call goes on. held: a new call made while the run was
 // halted, not started until it is released. halted and unhalted have no n.
@@ -295,7 +298,8 @@ export function chainEntry({ runId, worktree, baseline, leftovers = [] }) {
 // nodes (ADR-0016): node -> its call's entry as `calls` holds it, the latest
 // call to name that node winning, with `key`, `node`, `n` and `title`; a failed
 // one also `reason`, and a settled one `last`, the worker it last ran, in a
-// call's worker's shape. A needs-decision result also has `needsDecision`. A
+// call's worker's shape. A needs-decision result also has `needsDecision`,
+// and a settled one its line's `submissions` when the line has them. A
 // call's `starting`, `started` or `reattached` after its failed line makes it
 // live again: a halted node resumed in the same run. halted: the run's halt
 // under way at the journal's end, or null: { since, node, reason, nodes }, nodes
@@ -585,12 +589,13 @@ export function foldJournal(entries) {
     if (typeof e.key !== 'string') continue
     if (!numbered && e.type !== 'result' && e.type !== 'failed') continue
     const callId = numbered ? e.n : `line ${i}`
-    if (!byCall.has(callId)) byCall.set(callId, { key: e.key, n: numbered ? e.n : null, order: numbered ? e.n : i, carried: false, worker: null, settled: null, origin: null, node: null, title: null, reason: null, workerLeft: false })
+    if (!byCall.has(callId)) byCall.set(callId, { key: e.key, n: numbered ? e.n : null, order: numbered ? e.n : i, carried: false, worker: null, settled: null, origin: null, node: null, title: null, reason: null, workerLeft: false, submissions: null })
     const c = byCall.get(callId)
     if (typeof e.node === 'string') c.node = e.node
     if (typeof e.title === 'string') c.title = e.title
     // A carried failed or needs-decision node names the worker it last ran.
     if ((e.type === 'result' || e.type === 'failed') && e.worker && typeof e.worker === 'object' && typeof e.worker.dispatchId === 'string') c.worker ??= { ...e.worker }
+    if (e.type === 'result' || e.type === 'failed') c.submissions = Number.isInteger(e.submissions) ? e.submissions : null
     if (e.type === 'result') {
       c.settled = { result: e.result, ...(e.needsDecision === true && { needsDecision: true }) }
       if (Number.isInteger(e.origin)) c.origin = e.origin
@@ -664,6 +669,7 @@ export function foldJournal(entries) {
         ...(settled?.failed && { reason: c.reason }),
         ...(settled?.failed && c.workerLeft && { workerLeft: true }),
         ...(settled && c.worker && { last: c.worker }),
+        ...(settled && Number.isInteger(c.submissions) && { submissions: c.submissions }),
       })
     }
   }

@@ -175,12 +175,16 @@ const resendPrompt = (
 ---
 ${prompt}`
 
-const NUDGE = 'The workflow has not received your result: your final message is not read. Finish the task, then run the submit command from your instructions until it exits 0.'
+// How a worker resumed or nudged finishes, from the tool table as its
+// prompt's finishing section is: the tool first, the CLI line without it.
+const SUBMIT_THEN = `finish with \`${tool('submit').name}\` if your session has it, else run the submit command from your instructions, until it is accepted`
+const NEW_IDS = "If a session host's preamble came with this message, take the four IDs for the submit command from it, not from an earlier one."
+
+const NUDGE = `The workflow has not received your result: your final message is not read. Finish the task, then ${SUBMIT_THEN}.`
 
 // Typed after the resume, or handed as the spec of the dispatch that adopts a
 // new terminal, whose preamble then carries new IDs.
-const continuePrompt = (why) =>
-  `You were interrupted: the workflow runner stopped this session and resumed it (${why}). Carry on where you left off and finish the task, then run the submit command from your instructions until it exits 0. If a session host's preamble came with this message, take the four IDs for submit from it, not from an earlier one.`
+const continuePrompt = (why) => `You were interrupted: the workflow runner stopped this session and resumed it (${why}). Carry on where you left off and finish the task, then ${SUBMIT_THEN}. ${NEW_IDS}`
 
 // A node resumed after the run halted on it (ADR-0016): its session carried
 // on, told why. One that needed decisions is told the operator has answered,
@@ -194,9 +198,7 @@ export const haltedPrompt = (needsDecision, remade = null, attended = false) =>
       : needsDecision
         ? 'The workflow run was halted here: your result named decisions only the operator can make, and the operator has answered them. Re-read the ticket, its body and its comments, for the answers, then finish the task'
         : 'The workflow run was halted here, and the operator has resumed it. Carry on from where you are and finish the task'
-  }, then run the submit command from your instructions until it exits 0. If a session host's preamble came with this message, take the four IDs for submit from it, not from an earlier one.${
-    remade ? ` Your worktree was reclaimed while the run was halted and has been made again, its setup hook run again: anything you left uncommitted in it is gone, and it is no longer on the ref you were on, so switch back to your work's ref first.${baselineSection(remade)}` : ''
-  }`
+  }, then ${SUBMIT_THEN}. ${NEW_IDS}${remade ? ` Your worktree was reclaimed while the run was halted and has been made again, its setup hook run again: anything you left uncommitted in it is gone, and it is no longer on the ref you were on, so switch back to your work's ref first.${baselineSection(remade)}` : ''}`
 
 // The convention a result needs the operator by (ADR-0016): a non-empty
 // `decisions_needed` array, its questions. Null for any other value.
@@ -294,14 +296,30 @@ export function agentLifecycle({
   // its worker is still out, so the call stays unsettled for the next resume,
   // which takes that worker up again. workerLeft: its worker's process was
   // left running (kept, ADR-0012), so only a reclaim that stops it first
-  // removes it (reclaim.mjs). mark and said: the log line's prefix, and what
+  // removes it (reclaim.mjs); submissions, the worker_done count its host
+  // showed then, so a held node counts a submit above it as a resubmit. mark and said: the log line's prefix, and what
   // it adds after `agent() returns null`. A doctor's failed line names its
   // patient, and fails no agent() call: the runner does not count it, and its
   // log line says its round is spent, naming the patient (patientTitle).
   // A call with a node (ADR-0016) is held rather than handed its null: the
   // runner halts the run on it, so its line says so.
-  const failAgent = ({ key, n, title, node = null, patient = null, patientTitle = null }, { reason, retained = null, alsoRetained = [], attempts = 1, continuations = 0, run = null, workerOut = false, workerLeft = false }, { mark = '!!', said = '' } = {}) => {
-    journal({ type: 'failed', key, n, ...(node && patient == null && { node }), title, reason, attempts, ...(patient != null && { patient }), ...(run && { run }), ...(continuations && { continuations }), ...(retained && { retained }), ...(workerOut && { workerOut }), ...(workerLeft && { workerLeft }) })
+  const failAgent = ({ key, n, title, node = null, patient = null, patientTitle = null }, { reason, retained = null, alsoRetained = [], attempts = 1, continuations = 0, run = null, workerOut = false, workerLeft = false, submissions = null }, { mark = '!!', said = '' } = {}) => {
+    journal({
+      type: 'failed',
+      key,
+      n,
+      ...(node && patient == null && { node }),
+      title,
+      reason,
+      attempts,
+      ...(patient != null && { patient }),
+      ...(run && { run }),
+      ...(continuations && { continuations }),
+      ...(retained && { retained }),
+      ...(workerOut && { workerOut }),
+      ...(workerLeft && { workerLeft }),
+      ...(workerLeft && Number.isInteger(submissions) && { submissions }),
+    })
     for (const also of alsoRetained) journal({ type: 'retained', retained: also })
     out(patient != null ? `${mark} ${title}: ${reason}; its doctor round for ${patientTitle ?? `agent ${patient}`} is spent` : node ? `${mark} ${title}: ${reason}; its node ${node} is held and the run halts${said}` : `${mark} ${title}: ${reason}; agent() returns null${said}`)
     return null
@@ -421,6 +439,8 @@ export function agentLifecycle({
   // next message. noted(note) journals the note its agent posts (#175) as it
   // changes, never movement, and needs(reason) its agent's own needs-you,
   // null once it clears: while set, it is held as above, as a doctor is.
+  // counted(submissions) is told every worker_done count its host shows
+  // (crew's, #173), so a node held on this call knows a resubmit.
   // told, { note, asked }, is what was last journaled of them, kept across
   // the watches of one call so a continuation journals neither again.
   // attended: an attended agent's session that exits is dead, to be
@@ -440,6 +460,7 @@ export function agentLifecycle({
       unblocked = () => {},
       noted = /** @type {(note: string | null) => unknown} */ (() => {}),
       needs = /** @type {(reason: string | null) => unknown} */ (() => {}),
+      counted = /** @type {(submissions: number) => unknown} */ (() => {}),
       told = { note: null, asked: null },
       mail = null,
       held = () => false,
@@ -511,6 +532,7 @@ export function agentLifecycle({
         continue
       }
       skipOutages()
+      if (Number.isInteger(s.submissions)) counted(s.submissions)
       // Read before a settle, so a note its agent posted just before
       // submitting is still journaled. The note first: a needs-you seen
       // beside a new note came after it, since a note clears needs-you.
@@ -801,6 +823,9 @@ export function agentLifecycle({
 
     let delivered = false
     const told = { note: null, asked: null }
+    // The worker_done count its host last showed (crew's): a node held on
+    // what this call ends with counts a submit above it as a resubmit.
+    let submissions = null
     // A patient handed to its doctors: its worktree is retained only if
     // their rounds end in null.
     let sick = false
@@ -818,6 +843,7 @@ export function agentLifecycle({
           unblocked: () => journal({ type: 'unblocked', key, n, title, dispatchId: w.dispatchId }),
           noted: (note) => journal({ type: 'note', key, n, title, dispatchId: w.dispatchId, note }),
           needs: (reason) => journal(reason === null ? { type: 'needsYouCleared', key, n, title, dispatchId: w.dispatchId } : { type: 'needsYou', key, n, title, dispatchId: w.dispatchId, terminal: w.terminal, reason }),
+          counted: (k) => (submissions = k),
           told,
           mail,
           held: () => !!call.attended || box?.needsYou != null,
@@ -874,7 +900,7 @@ export function agentLifecycle({
       if (result.error) {
         const reason = end.dead ? `${end.dead}, with no result` : `${result.error} (outcome ${end.outcome})`
         if (kept) out(`!! ${title}: its tab ${w.terminal} is kept open`)
-        const failure = { reason, attempts, continuations: continued, run: runId, workerLeft: kept }
+        const failure = { reason, attempts, continuations: continued, run: runId, workerLeft: kept, submissions }
         // A doctor is never itself doctored: its failure spends its round.
         if (kept && patient == null) {
           sick = true
@@ -885,7 +911,7 @@ export function agentLifecycle({
       // A node's result that needs the operator is held by the runner (ADR-0016).
       const questions = call.node ? decisionsNeeded(result.value) : null
       if (questions) setAside(resultPath)
-      journal({ type: 'result', key, n, ...nodeOf(call), title, result: result.value, ...(questions && { needsDecision: true }) })
+      journal({ type: 'result', key, n, ...nodeOf(call), title, result: result.value, ...(questions && { needsDecision: true }), ...(questions && Number.isInteger(submissions) && { submissions }) })
       out(questions ? `?? ${title}: result received; it needs decisions only the operator can make: ${questions.join(' · ')}` : `<< ${title}: result received`)
       delivered = true
       if (isolation === 'worktree' && w.worktree && published(result.value)) await setStatus(call, w.worktree, 'completed')

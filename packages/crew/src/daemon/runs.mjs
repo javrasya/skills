@@ -20,8 +20,9 @@
 // capability). A worker_done settles its dispatch, and every one it sends,
 // settled or not, is counted (`submissions`) and taken as its outcome and its
 // last result: an agent of a node its runner holds may submit again (#173).
-// The result is the value submit validated, sent along with the worker_done;
-// null for one that sent none (`crew orchestration send`).
+// The result is the value submit validated, sent along with the worker_done,
+// and checked here again against its dispatch's schema (accept.mjs); null for
+// one that sent none (`crew orchestration send`).
 //
 // A dispatch also knows its agent's role (a worker, or a doctor), the schema
 // its result is checked against, null for a text result, and the file its
@@ -79,7 +80,7 @@ import { fileURLToPath } from 'node:url'
 import { readRegistry } from '../registry.mjs'
 import { DEFAULT_HOST } from '../hosts.mjs'
 import { isOrchestratorTitle } from '../orchestrator.mjs'
-import { validate } from '../schema.mjs'
+import { acceptResult, acceptedMail } from '../accept.mjs'
 import { NOTE_MAX } from '../tools.mjs'
 import { writeJsonAtomic } from '../fsutil.mjs'
 
@@ -198,24 +199,12 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
     return { id: m.id }
   }
 
-  // The payload as its dispatch's result: a value valid against its schema
-  // (JSON text parsed first), or text when it has none.
+  // The payload as its dispatch's result (accept.mjs), checked against its
+  // schema, or text when it has none.
   const resultOf = (d, payload) => {
-    if (d.schema == null) {
-      if (typeof payload !== 'string') throw new Error(`submit rejected: this agent's result is text, not ${JSON.stringify(payload)?.slice(0, 80)}`)
-      return payload
-    }
-    let value = payload
-    if (typeof payload === 'string') {
-      try {
-        value = JSON.parse(payload)
-      } catch (e) {
-        throw new Error(`submit rejected: payload is not valid JSON: ${e.message}\nFix the payload and submit again.`)
-      }
-    }
-    const errors = validate(d.schema, value)
-    if (errors.length) throw new Error([`submit rejected: ${errors.length} validation error(s) against its schema`, ...errors.map((e) => `  ${e}`), 'Fix the payload and submit again.'].join('\n'))
-    return value
+    const accepted = acceptResult(d.schema ?? null, payload)
+    if (accepted.errors) throw new Error(accepted.errors.join('\n'))
+    return accepted.value
   }
 
   // An unsettled agent's session restored from an earlier daemon and not yet
@@ -286,7 +275,9 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
       if (d.taskId !== taskId || (from != null && from !== d.id) || (capability != null && capability !== d.capability)) {
         throw new Error(`consumer_fenced: a message from ${dispatchId} does not match its preamble`)
       }
-      return post(d, { type, subject, body, outcome, result })
+      // A result sent as mail (the CLI submit's) is checked as worker.submit
+      // checks one, when its dispatch knows its schema.
+      return post(d, { type, subject, body, outcome, result: result != null && d.schema != null ? resultOf(d, result) : result })
     },
     // What a session's harness equips it with (hooks/crew-pi.mjs): asked as
     // it starts, so a session crew started for no agent is told so, not refused.
@@ -301,12 +292,7 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
       // Written before it settles, whole or not at all: the runner reads this
       // file once it sees the worker settle.
       if (d.resultPath) writeJsonAtomic(d.resultPath, result)
-      const { id: message } = post(d, {
-        type: 'worker_done',
-        subject: 'result submitted',
-        body: d.resultPath ? `Submitted a result that is valid against its schema. It is recorded at ${d.resultPath}. Nothing remains for this task.` : 'Submitted a result that is valid against its schema. Nothing remains for this task.',
-        result,
-      })
+      const { id: message } = post(d, { ...acceptedMail(d.resultPath ?? null), result })
       return { id: message, resultPath: d.resultPath ?? null }
     },
     'worker.mail': ({ id, type, subject = '', body = '', outcome = null }) => {

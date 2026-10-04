@@ -36,4 +36,4 @@ Two ADRs carry 0026: `0026-a-harness-tells-crew-when-it-takes-a-prompt.md` and `
 
 - An agent of a crew run finishes by calling a tool, and its prompt still names the CLI line, rendered from the same row, for a session without it.
 - A new tool, or a changed fallback, is one row of the table; the prompts follow it.
-- The nudges, continuations and the doctor's `REPORT` still say "the submit command from your instructions" in their own words; moving them onto the table is later work.
+- The nudges, continuations and halted-node resumes (`lifecycle.mjs`) and the doctor's `REPORT` take the tool's name from the table: they name the tool first and the CLI line from the instructions without it, so an agent nudged or resumed, as a held node's is, is steered to `submit` as its prompt steers it.

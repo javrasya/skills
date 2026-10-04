@@ -28,7 +28,10 @@
 //                 tool run, and the call and its result go in pi's
 //                 transcript. A turn that calls a tool submits nothing else.
 //                 Claude calls the tools of the MCP servers its --mcp-config
-//                 names instead, <tool> its name on the server
+//                 names instead, <tool> its name on the server. With
+//                 [decide <question>], a submit call's arguments go with
+//                 decisions_needed: [<question>], and [resubmit <ms>] calls
+//                 submit again with them alone, as below
 //
 // As Claude, it starts each server its --mcp-config names (inline JSON or a
 // file), as Claude starts a stdio one: its command, with its env, ${VAR} and
@@ -350,24 +353,33 @@ async function tui() {
     const ask = /\[ask ([^\]]+)\]/.exec(prompt)?.[1]
     if (ask) await waitOn(ask)
     if (/\[call /.test(prompt)) {
-      await calls(prompt, recorded)
+      const submitted = await calls(prompt, recorded)
+      if (submitted) await resubmit(prompt, () => call('submit', submitted, recorded))
       return reply(prompt, recorded)
     }
     const decide = /\[decide ([^\]]*)\]/.exec(prompt)?.[1]
     const answer = /\[answer ([^\]]*)\]/.exec(prompt)?.[1]
     submit(decide && answer ? JSON.stringify({ ...JSON.parse(answer), decisions_needed: [decide] }) : null)
-    const again = /\[resubmit (\d+)\]/.exec(prompt)?.[1]
-    const aside = latest(/--result "([^"]+)\.json"/)?.[1]
-    if (again && aside) {
-      while (!existsSync(`${aside}.needs-decision.json`)) await sleep(50)
-      await sleep(Number(again))
-      submit()
-    }
+    await resubmit(prompt, () => submit())
     reply(prompt, recorded)
   }
 
+  // [resubmit <ms>]: that long after the runner set its result aside as
+  // result.needs-decision.json, it submits again.
+  async function resubmit(prompt, again) {
+    const ms = /\[resubmit (\d+)\]/.exec(prompt)?.[1]
+    const aside = latest(/--result "([^"]+)\.json"/)?.[1]
+    if (!ms || !aside) return
+    while (!existsSync(`${aside}.needs-decision.json`)) await sleep(50)
+    await sleep(Number(ms))
+    await again()
+  }
+
+  // Returns the arguments of its last submit call, before [decide] added to them.
   async function calls(prompt, recorded) {
     await mcpReady
+    const decide = /\[decide ([^\]]*)\]/.exec(prompt)?.[1]
+    let submitted = null
     for (const [, name, json] of prompt.matchAll(/\[call (\S+) ([^\]]*)\]/g)) {
       let args
       try {
@@ -375,8 +387,10 @@ async function tui() {
       } catch {
         args = json
       }
-      await call(name, args, recorded)
+      if (name === 'submit') submitted = args
+      await call(name, decide && name === 'submit' && args && typeof args === 'object' ? { ...args, decisions_needed: [decide] } : args, recorded)
     }
+    return submitted
   }
 
   async function call(name, args, recorded) {

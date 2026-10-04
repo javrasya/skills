@@ -9381,6 +9381,50 @@ test('resubmit: a held needs-decision node whose worker submits a result without
   assert.deepEqual(JSON.parse(readFileSync(join(rig.stateDir, ofType(j, 'started')[0].dir, 'result.json'), 'utf8')), ANSWERED, 'the runner wrote it to its result file')
 })
 
+test('resubmit: one that lands after the settle but before the hold is watched is taken too, with no r: the count the runner took the result at is its baseline, and a resume carries it forward', async () => {
+  const kept = keepsWorker(ASKS)
+  const rig = nodeRig({ 'Do a.': kept.play }, { crew: true })
+  // The runner's first look once the result is journaled is the resubmit
+  // watch's: the worker submits again just before it, as submit does, its
+  // file written first.
+  const record = rig.orca.calls.push.bind(rig.orca.calls)
+  let early = false
+  rig.orca.calls.push = (c) => {
+    if (!early && c.verb === 'workerShow' && ofType(rig.journal(), 'result').length) {
+      early = true
+      const p = kept.w.preamble
+      const argv = submitArgvIn(kept.w.prompt, p)
+      writeFileSync(argv[argv.indexOf('--result') + 1], JSON.stringify(ANSWERED))
+      void kept.w.orca.workerDone({ from: p.handle, capability: p.capability, taskId: p.taskId, dispatchId: p.dispatchId, subject: 'result submitted', body: '', result: ANSWERED })
+    }
+    return record(c)
+  }
+  const run = rig.go(`return await ${nodeCall('a')}`)
+  assert.deepEqual(await run.p, ANSWERED)
+  assert.ok(early, 'it submitted again before the watch looked')
+  const j = rig.journal()
+  assert.deepEqual(
+    ofType(j, 'result').map((e) => [!!e.needsDecision, !!e.resubmitted, e.submissions]),
+    [
+      [true, false, 1],
+      [false, true, undefined],
+    ],
+  )
+  assert.deepEqual(
+    rig.orca.calls.filter((c) => ['workerStart', 'workerContinue'].includes(c.verb)).map((c) => c.verb),
+    ['workerStart'],
+  )
+
+  // A resume carries the count forward with the node it halted on.
+  const held = nodeRig({ 'Do a.': submitsValue(ASKS) }, { crew: true })
+  held.go(`return await ${nodeCall('a')}`)
+  await until(() => held.halts.length, 'the halt')
+  assert.equal(foldJournal(held.journal()).nodes.get('n/a').submissions, 1)
+  held.go('return 1', { resume: true })
+  await until(() => ofType(held.journal(), 'result').some((e) => e.carried), 'the carried line')
+  assert.equal(ofType(held.journal(), 'result').find((e) => e.carried).submissions, 1)
+})
+
 test('resubmit: one still naming decisions holds the node again, its row showing the new questions', async () => {
   const kept = keepsWorker(ASKS)
   const rig = nodeRig({ 'Do a.': kept.play }, { crew: true })

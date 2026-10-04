@@ -505,7 +505,7 @@ test("daemon: a session submits and mails by its id alone, its result checked ag
   const dispatch = (session, extra) => request(paths, { op: 'run.worker', run: run.id, session, coordinator: 'c', ...extra })
   await assert.rejects(dispatch(worker, { agent: { role: 'boss' } }), /not an agent role: "boss"; one of worker, doctor/)
   await assert.rejects(dispatch(worker, { agent: { schema: ['x'] } }), /not a result schema/)
-  await dispatch(worker, { agent: { role: 'worker', schema, resultPath } })
+  const { worker: workerTask } = await dispatch(worker, { agent: { role: 'worker', schema, resultPath } })
   await dispatch(text, {})
   await dispatch(doctor, { agent: { role: 'doctor' } })
   await dispatch(released, { agent: { schema } })
@@ -564,6 +564,13 @@ test("daemon: a session submits and mails by its id alone, its result checked ag
     ],
   )
 
+  // A result sent as mail, as the CLI submit sends it, is checked the same way.
+  const send = (r) => request(paths, { op: 'mail.send', taskId: workerTask.taskId, dispatchId: worker, type: 'worker_done', result: r })
+  await assert.rejects(send({ ok: 'yes' }), /submit rejected: 1 validation error\(s\) against its schema\n {2}\$\.ok: expected boolean, got string\nFix the payload and submit again\./)
+  assert.equal((await result(worker)).submissions, 2)
+  await send({ ok: true })
+  assert.deepEqual(await result(worker), { result: { ok: true }, outcome: 'succeeded', submissions: 3 })
+
   await request(paths, { op: 'stop', force: true })
   await until('the first daemon to stop', () => exits.length === 1)
   const second = await startDaemon({ paths, registry, spawnSession, parkAfterMs: 60_000, exit: () => {}, log: () => {} })
@@ -571,7 +578,7 @@ test("daemon: a session submits and mails by its id alone, its result checked ag
     assert.deepEqual(await agents(), AGENTS)
     await assert.rejects(submit(worker, { ok: 'no' }), /expected boolean, got string/)
     await submit(worker, { ok: true })
-    assert.deepEqual(await result(worker), { result: { ok: true }, outcome: 'succeeded', submissions: 3 })
+    assert.deepEqual(await result(worker), { result: { ok: true }, outcome: 'succeeded', submissions: 4 })
     await assert.rejects(submit(doctor, 'done'), /is a doctor's/)
     await assert.rejects(submit(released, { ok: true }), /was released/)
   } finally {

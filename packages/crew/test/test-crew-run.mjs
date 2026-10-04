@@ -346,6 +346,60 @@ test('a resubmit on the crew host: a node whose result needs decisions is held, 
   assert.equal(entries.filter((e) => e.type === 'unhalted').length, 1)
 })
 
+test("a resubmit on the crew host through crew's submit tool: a held node's pi agent calls submit again, the daemon records its result, and the script gets the value with no resume request (#173, #174)", async () => {
+  const cwd = join(root, 'resubmit-tool-repo')
+  mkdirSync(cwd)
+  const host = sessionHost(crewHost({ paths, env, cwd, harnesses: { pi: [process.execPath, FAKE_HARNESS] }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
+  const stateDir = join(root, 'resubmit-tool-state')
+  const said = []
+  const halts = []
+  const result = await runScript(fixture('resubmit-tool.workflow.js'), { host, stateDir, out: (s) => said.push(s), settings: FAST, transcripts: sessionTranscripts({ env }), project: cwd, onHalt: (h) => halts.push(h) })
+  const log = said.join('\n')
+  assert.deepEqual(result, { word: 'carried' }, log)
+  assert.deepEqual(
+    halts.map((h) => h.node),
+    ['decide'],
+    log,
+  )
+  assert.ok(!existsSync(join(stateDir, 'resume-request.json')), 'no resume request was written')
+  const entries = readFileSync(join(stateDir, 'journal.jsonl'), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l))
+  assert.deepEqual(
+    entries.filter((e) => e.type === 'result').map((e) => [!!e.needsDecision, !!e.resubmitted, e.submissions]),
+    [
+      [true, false, 1],
+      [false, true, undefined],
+    ],
+    log,
+  )
+  // Both through the tool, each accepted: no CLI submit, and the file the
+  // runner took is the one the daemon's worker.submit wrote.
+  const [started] = entries.filter((e) => e.type === 'started')
+  const toolResults = readFileSync(transcriptPath({ harness: 'pi', sessionId: started.sessionId, worktree: started.worktree, env }), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l).message)
+    .filter((m) => m?.role === 'toolResult')
+    .map((m) => [m.toolName, m.isError])
+  assert.deepEqual(
+    toolResults,
+    [
+      ['submit', false],
+      ['submit', false],
+    ],
+    log,
+  )
+  assert.deepEqual(JSON.parse(readFileSync(join(stateDir, started.dir, 'result.json'), 'utf8')), { word: 'carried' })
+  assert.deepEqual(
+    entries.filter((e) => ['continued', 'remedy'].includes(e.type)),
+    [],
+    'its session was never continued',
+  )
+  assert.equal(entries.filter((e) => e.type === 'unhalted').length, 1)
+})
+
 // pi's tools from crew's extension, Claude's from crew's MCP server. Claude
 // checks no arguments, so its bad submit is the daemon's to reject, as error
 // content its agent repairs.
