@@ -18,7 +18,7 @@ import { sessionTranscripts } from './transcript.mjs'
 import { agentId, extraLines, porcelainPaths, unionLines } from './git.mjs'
 import { chainEntry } from './journal.mjs'
 import { DOCTOR_NUDGE, doctorContinuePrompt, notePrompt, runMailbox, doctorRounds } from './doctor.mjs'
-import { submitShape, tool } from './tools.mjs'
+import { NOTE_MAX, submitShape, tool } from './tools.mjs'
 
 export { doctorPrompt, notePrompt } from './doctor.mjs'
 export { SUBMIT } from './tools.mjs'
@@ -418,11 +418,36 @@ export function agentLifecycle({
   // held(), a doctor's or an attended agent's, is whether it needs you: while
   // it does, it waits on a human for as long as it takes, so no idle,
   // stillness or blocked limit counts against it; each counts afresh from its
-  // next message. attended: an attended agent's session that exits is dead,
-  // to be continued, since a held one is otherwise never read as dead. nudgeText:
+  // next message. noted(note) journals the note its agent posts (#175) as it
+  // changes, never movement, and needs(reason) its agent's own needs-you,
+  // null once it clears: while set, it is held as above, as a doctor is.
+  // told, { note, asked }, is what was last journaled of them, kept across
+  // the watches of one call so a continuation journals neither again.
+  // attended: an attended agent's session that exits is dead, to be
+  // continued, since a held one is otherwise never read as dead, as is one
+  // whose agent said it needs you. nudgeText:
   // what a nudge types, a doctor's its own, and owes what an idle death
   // says it went without, a doctor's its report.
-  async function watch(w, { title, harness, sessionId, nudged, moving = () => {}, blocked = /** @type {(waiting: string) => unknown} */ (() => {}), unblocked = () => {}, mail = null, held = () => false, attended = false, nudgeText = NUDGE, owes = 'submitting' }) {
+  async function watch(
+    w,
+    {
+      title,
+      harness,
+      sessionId,
+      nudged,
+      moving = () => {},
+      blocked = /** @type {(waiting: string) => unknown} */ (() => {}),
+      unblocked = () => {},
+      noted = /** @type {(note: string | null) => unknown} */ (() => {}),
+      needs = /** @type {(reason: string | null) => unknown} */ (() => {}),
+      told = { note: null, asked: null },
+      mail = null,
+      held = () => false,
+      attended = false,
+      nudgeText = NUDGE,
+      owes = 'submitting',
+    },
+  ) {
     const start = clock.now()
     let errors = 0
     let nudges = 0
@@ -472,7 +497,6 @@ export function agentLifecycle({
           out(`!! ${title}: could not read the Run's mailbox: ${e.message}`)
         }
       }
-      const hold = held()
       let s
       let idle = null
       try {
@@ -487,6 +511,23 @@ export function agentLifecycle({
         continue
       }
       skipOutages()
+      // Read before a settle, so a note its agent posted just before
+      // submitting is still journaled. The note first: a needs-you seen
+      // beside a new note came after it, since a note clears needs-you.
+      const nowNote = typeof s.note === 'string' && s.note ? s.note.slice(0, NOTE_MAX) : null
+      if (nowNote !== told.note) {
+        told.note = nowNote
+        if (nowNote) out(`>> ${title} notes: ${nowNote}`)
+        noted(nowNote)
+      }
+      const nowAsked = typeof s.needsYou === 'string' && s.needsYou ? s.needsYou : null
+      if (nowAsked !== told.asked) {
+        told.asked = nowAsked
+        if (nowAsked) out(`!!!!!!!! ${title} NEEDS YOU in terminal ${w.terminal}: ${nowAsked}`)
+        else out(`>> ${title}: no longer needs you`)
+        needs(nowAsked)
+      }
+      const hold = held() || told.asked !== null
       if (s.settled) return { outcome: s.outcome }
       if (s.gone) return s.hostDied ? HOST_DIED : { dead: 'its terminal is gone', gone: true }
 
@@ -533,7 +574,7 @@ export function agentLifecycle({
         blockedAt = null
         stillFrom = graceFrom = now
       }
-      if (hold && attended && s.exited) return { dead: 'its session exited' }
+      if (hold && (attended || told.asked !== null) && s.exited) return { dead: 'its session exited' }
       if (hold) {
         stillFrom = graceFrom = now
         stuckNudged = false
@@ -759,6 +800,7 @@ export function agentLifecycle({
     const mail = box ? mailbox.ends(box) : null
 
     let delivered = false
+    const told = { note: null, asked: null }
     // A patient handed to its doctors: its worktree is retained only if
     // their rounds end in null.
     let sick = false
@@ -774,6 +816,9 @@ export function agentLifecycle({
           moving: () => journal({ type: 'moving', key, n, title, dispatchId: w.dispatchId }),
           blocked: (waiting) => journal({ type: 'blocked', key, n, title, dispatchId: w.dispatchId, terminal: w.terminal, waiting: String(waiting) }),
           unblocked: () => journal({ type: 'unblocked', key, n, title, dispatchId: w.dispatchId }),
+          noted: (note) => journal({ type: 'note', key, n, title, dispatchId: w.dispatchId, note }),
+          needs: (reason) => journal(reason === null ? { type: 'needsYouCleared', key, n, title, dispatchId: w.dispatchId } : { type: 'needsYou', key, n, title, dispatchId: w.dispatchId, terminal: w.terminal, reason }),
+          told,
           mail,
           held: () => !!call.attended || box?.needsYou != null,
           attended: !!call.attended,

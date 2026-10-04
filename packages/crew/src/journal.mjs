@@ -34,7 +34,11 @@ import { unionLines } from './git.mjs'
 // needs you meanwhile. dialogClosed: the dialog is gone, and the prompt goes
 // in once the harness is ready. moving: a worker nudged since it last moved
 // moves again, past its nudge's echo, so it is no longer stuck. warning: something that went wrong without
-// failing the call. A nudge's
+// failing the call. note (#175): its agent posted `note`, what it is doing
+// now, cut to NOTE_MAX, null once it cleared it; a later one replaces it,
+// and the runner acts on nothing in it. needsYou: its agent said it needs
+// the person, `reason` why, in `terminal`; needsYouCleared: its next submit,
+// note or mail cleared that. A nudge's
 // `attempt` is its number since the session started or was last continued; a
 // continuation's is its number, up to the cap; one with `hostDied`, the session
 // lost with its host, leaves the number as it was. `origin` names an agent across
@@ -142,6 +146,9 @@ export const JOURNAL_ENTRIES = Object.freeze({
   dialog: ['at', 'key', 'n', 'title', 'terminal', 'dialog', 'ask'],
   dialogClosed: ['at', 'key', 'n', 'title'],
   moving: ['at', 'key', 'n', 'title', 'dispatchId'],
+  note: ['at', 'key', 'n', 'title', 'dispatchId', 'note'],
+  needsYou: ['at', 'key', 'n', 'title', 'dispatchId', 'terminal', 'reason'],
+  needsYouCleared: ['at', 'key', 'n', 'title', 'dispatchId'],
   continued: ['at', 'key', 'n', 'title', 'dispatchId', 'sessionId', 'terminal', 'reason', 'attempt', 'reopened'],
   reattached: ['at', 'key', 'n', 'title', 'run', 'dispatchId', 'harness', 'sessionId', 'terminal', 'worktree', 'dir', 'origin'],
   outstanding: ['at', 'key', 'n', 'title', 'run', 'dispatchId', 'harness', 'sessionId', 'terminal', 'worktree', 'dir', 'origin'],
@@ -245,7 +252,7 @@ export function chainEntry({ runId, worktree, baseline, leftovers = [] }) {
 // latest line: { origin, n, title, state, reason, continuations, replayed,
 // launched, runId, dispatchId, harness, sessionId, worktree, terminal, from,
 // to, waiting, nextAt, workerLeft, baseline, patient, round, doctors, rounds, failures,
-// attempt }, and originGuessed: true when only a take-up written before
+// attempt, note, asked }, and originGuessed: true when only a take-up written before
 // take-ups carried their origin names it, so origin is that call's n. patient: a
 // doctor's patient, by origin, or null; round: a patient's latest doctor
 // round, or 0; doctors: the origins of its doctors, in round order; rounds:
@@ -268,11 +275,13 @@ export function chainEntry({ runId, worktree, baseline, leftovers = [] }) {
 // running once started, carried or taken up, blocked while it waits on a human
 // (waiting: on what), needs you once a doctor escalated, until its next
 // handoff, escalation or worker_done (reason: what the human must do; a
-// second escalation replaces it), stuck once nudged, continued after a continuation, done
+// second escalation replaces it), or while its own agent says it needs you
+// (asked: its reason, kept through a block until needsYouCleared), stuck once nudged, continued after a continuation, done
 // or failed once settled. An agent stays stuck until its worker moves again
 // (`moving`: running, or continued once it has continuations or a remedy, as
 // unblocked picks), or its next continuation or settlement; blocked lasts
-// until unblocked or settled. workerLeft: it failed with its worker's process left running.
+// until unblocked or settled. note: its agent's latest note while it works,
+// null once it settles or fails. workerLeft: it failed with its worker's process left running.
 // baseline: the porcelain lines its worktree was made with, or null. launched: a worker was started for it,
 // whatever its dispatch now reads. from and to are when it began and settled
 // here, or null: a replayed result or a carried agent launched nothing here.
@@ -339,7 +348,8 @@ export function foldJournal(entries) {
   const carriedOn = (a) => (a.continuations || a.rounds.at(-1)?.outcome === 'remedy' ? 'continued' : 'running')
 
   // The lines that leave a dialog the agent is held at as it is.
-  const DIALOG_KEEPS = ['dialog', 'dialogClosed', 'warning', 'baseline', 'nudge', 'moving']
+  const DIALOG_KEEPS = ['dialog', 'dialogClosed', 'warning', 'baseline', 'nudge', 'moving', 'note']
+  const AT_WORK = ['running', 'continued', 'stuck']
 
   // Folds one line into its agent's record, and returns that agent's origin.
   function agent(e) {
@@ -381,6 +391,8 @@ export function foldJournal(entries) {
         attempt: 1,
         dialog: null,
         beforeDialog: null,
+        note: null,
+        asked: null,
       }
       if (guessed) a.originGuessed = true
       agents.set(id, a)
@@ -416,6 +428,7 @@ export function foldJournal(entries) {
         Object.assign(a, {
           state: continuations ? 'continued' : 'running',
           continuations,
+          asked: null,
           launched: true,
           reason: null,
           waiting: null,
@@ -455,12 +468,24 @@ export function foldJournal(entries) {
         if (a.state === 'running' || a.state === 'continued' || a.state === 'stuck') Object.assign(a, { state: 'stuck', reason: e.reason ?? null })
         break
       case 'blocked':
-        if (a.state === 'running' || a.state === 'continued' || a.state === 'stuck') {
+        // A dialog's wait is more pressing than the needs-you its agent said.
+        if (AT_WORK.includes(a.state) || (a.state === 'needs you' && a.asked && !a.dialog)) {
           Object.assign(a, { state: 'blocked', waiting: e.waiting ?? null, reason: `blocked on a human: ${e.waiting ?? 'no question given'}`, terminal: e.terminal ?? a.terminal })
         }
         break
       case 'unblocked':
-        if (a.state === 'blocked') Object.assign(a, { state: carriedOn(a), waiting: null, reason: null })
+        if (a.state === 'blocked') Object.assign(a, a.asked ? { state: 'needs you', waiting: null, reason: a.asked } : { state: carriedOn(a), waiting: null, reason: null })
+        break
+      case 'note':
+        a.note = typeof e.note === 'string' && e.note ? e.note : null
+        break
+      case 'needsYou':
+        a.asked = typeof e.reason === 'string' && e.reason ? e.reason : 'no reason given'
+        if (AT_WORK.includes(a.state) || (a.state === 'needs you' && !a.dialog)) Object.assign(a, { state: 'needs you', reason: a.asked, terminal: e.terminal ?? a.terminal })
+        break
+      case 'needsYouCleared':
+        if (a.asked && a.state === 'needs you' && !a.dialog) Object.assign(a, { state: carriedOn(a), reason: null })
+        a.asked = null
         break
       case 'dialog':
         // Its state before the first dialog of a run of them is what it goes back to.
@@ -489,6 +514,7 @@ export function foldJournal(entries) {
           state: 'continued',
           reason: null,
           waiting: null,
+          asked: null,
           continuations: e.type === 'remedy' ? 0 : (e.attempt ?? a.continuations + 1),
           dispatchId: e.dispatchId ?? a.dispatchId,
           terminal: e.terminal ?? a.terminal,
@@ -532,6 +558,7 @@ export function foldJournal(entries) {
         })
         break
     }
+    if (['result', 'failed', 'settled', 'doctor'].includes(e.type)) Object.assign(a, { note: null, asked: null })
     // An attended agent (ADR-0021) needs you for as long as it is at work.
     if (typeof e.attended === 'string') a.attended = e.attended
     if (a.attended && ['running', 'continued', 'stuck'].includes(a.state)) Object.assign(a, { state: 'needs you', reason: a.attended })

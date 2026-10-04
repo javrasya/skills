@@ -388,11 +388,11 @@ const NO_DOCTOR = { doctorRounds: 0 }
 
 // Runs a script (one agent() by default) on the default settings table, each
 // worker played by `worker`.
-async function runOne(worker, { script = ONE, orcaPatch = {}, permissionMode = null, faults = {}, settings = {}, setupLeaves = [], promptLoss } = {}) {
+async function runOne(worker, { script = ONE, orcaPatch = {}, permissionMode = null, faults = {}, settings = {}, setupLeaves = [], promptLoss, crew = false } = {}) {
   const clock = fakeClock()
   const lines = []
   const stateDir = tmp()
-  const made = fakeOrca({ worker: (w) => worker({ ...w, clock }), clock, faults, setupLeaves, promptLoss })
+  const made = fakeOrca({ worker: (w) => worker({ ...w, clock }), clock, faults, setupLeaves, promptLoss, crew })
   const orca = Object.assign(made, typeof orcaPatch === 'function' ? orcaPatch(made) : orcaPatch)
   const result = await runScript(script, { host: orca, stateDir, out: (s) => lines.push(s), clock, permissionMode, settings, transcripts: fakeTranscripts(orca) })
   const of = (verb) => orca.calls.filter((c) => c.verb === verb)
@@ -409,6 +409,7 @@ async function runOne(worker, { script = ONE, orcaPatch = {}, permissionMode = n
     orca,
     journal: journalOf(stateDir),
     log,
+    stateDir,
   }
 }
 
@@ -1002,6 +1003,121 @@ test('attended: an unattended agent that idles is still nudged and never needs y
   assert.ok(r.nudges.length > 0)
   assert.equal(ofType(r.journal, 'started')[0].attended, undefined)
   assert.ok(!r.lines.some((l) => l.includes('NEEDS YOU')), r.lines.join('\n'))
+})
+
+// --- an agent's own note and needs-you (#175) --------------------------------
+
+test('note: each note its agent posts is journaled, a later one replacing it and one over 200 characters cut; it is no movement, so an idle agent is still nudged', async () => {
+  const long = 'x'.repeat(250)
+  const r = await runOne(
+    async (w) => {
+      w.state.idle = true
+      w.state.note = 'reading the spec'
+      w.clock.at(2 * MIN, () => (w.state.note = long))
+      w.clock.at(10 * MIN, () => submitGood(w))
+    },
+    { settings: NO_DOCTOR, crew: true },
+  )
+  assert.deepEqual(r.result, GOOD)
+  assertEntries(r.journal)
+  const notes = ofType(r.journal, 'note')
+  assert.deepEqual(
+    notes.map((e) => e.note),
+    ['reading the spec', 'x'.repeat(200)],
+  )
+  const upTo = (e) => foldJournal(r.journal.slice(0, r.journal.indexOf(e) + 1)).agents[0]
+  assert.equal(upTo(notes[0]).note, 'reading the spec')
+  assert.equal(upTo(notes[1]).note, 'x'.repeat(200), 'the later note replaces it')
+  assert.equal(foldJournal(r.journal).agents[0].note, null, 'a settled agent shows no note')
+  assert.ok(r.nudges.length > 0, 'a note is no movement')
+  assert.ok(
+    r.lines.some((l) => l.endsWith('notes: reading the spec')),
+    r.lines.join('\n'),
+  )
+})
+
+for (const how of ['idle', 'waiting']) {
+  test(`needs you: an agent that says it needs you (then ${how}) shows needs you with its reason, is never nudged, continued or failed by the blocked limit, and its submit clears it`, async () => {
+    const r = await runOne(
+      async (w) => {
+        w.state.needsYou = ASK
+        if (how === 'idle') w.state.idle = true
+        else w.state.waiting = '{"evidence":"prompt-text","text":"Allow this command?"}'
+        w.clock.at(4 * 60 * MIN, () => submitGood(w))
+      },
+      { settings: NO_DOCTOR, crew: true },
+    )
+    assert.deepEqual(r.result, GOOD)
+    assertEntries(r.journal)
+    assert.deepEqual(r.nudges, [], 'never nudged')
+    assert.deepEqual(r.continues, [], 'never continued')
+    assert.deepEqual(ofType(r.journal, 'failed'), [])
+    const [asked] = ofType(r.journal, 'needsYou')
+    assert.deepEqual([asked.reason, asked.terminal], [ASK, ofType(r.journal, 'started')[0].terminal])
+    const upTo = (e) => foldJournal(r.journal.slice(0, r.journal.indexOf(e) + 1)).agents[0]
+    assert.deepEqual([upTo(asked).state, upTo(asked).reason], ['needs you', ASK])
+    // Its submit cleared it, before its result.
+    const cleared = ofType(r.journal, 'needsYouCleared')
+    assert.equal(cleared.length, 1)
+    assert.ok(r.journal.indexOf(cleared[0]) < r.journal.indexOf(ofType(r.journal, 'result')[0]))
+    if (how === 'waiting') {
+      const blocked = ofType(r.journal, 'blocked')[0]
+      assert.equal(upTo(blocked).state, 'blocked')
+      assert.ok(!r.lines.some((l) => l.includes('if nobody answers within')), r.lines.join('\n'))
+    }
+    assert.ok(
+      r.lines.some((l) => l.includes(`NEEDS YOU in terminal ${asked.terminal}: ${ASK}`)),
+      r.lines.join('\n'),
+    )
+  })
+}
+
+test('needs you: its next mail clears it, and an idle agent is nudged again only after', async () => {
+  const r = await runOne(
+    async (w) => {
+      w.state.needsYou = ASK
+      w.state.idle = true
+      w.clock.at(60 * MIN, () => w.orca.mailSend({ ...idsOf(w.preamble), type: 'handoff', subject: 'progress', body: 'logged in, carrying on' }))
+      w.clock.at(120 * MIN, () => submitGood(w))
+    },
+    { settings: NO_DOCTOR, crew: true },
+  )
+  assert.deepEqual(r.result, GOOD)
+  const [cleared] = ofType(r.journal, 'needsYouCleared')
+  assert.ok(cleared, JSON.stringify(r.journal))
+  assert.ok(Date.parse(cleared.at) >= 60 * MIN)
+  const nudges = ofType(r.journal, 'nudge')
+  assert.ok(nudges.length > 0)
+  assert.ok(nudges.every((e) => r.journal.indexOf(e) > r.journal.indexOf(cleared)))
+  assert.equal(foldJournal(r.journal.slice(0, r.journal.indexOf(cleared) + 1)).agents[0].state, 'running')
+})
+
+test("needs you: a doctor's needs_you is its escalation, journaled as such, and it waits as a doctor's escalation does", async () => {
+  const doctor = async (w) => {
+    await w.orca.mailSend({ ...idsOf(w.preamble), type: 'escalation', subject: 'needs you', body: ASK })
+    w.state.idle = true
+    w.clock.at(w.clock.now() + 180 * MIN, () => handsOff(NOTE)(w))
+  }
+  const r = await runOne(withDoctor(curedBy(NOTE, 'gone'), doctor), { script: ISOLATED, crew: true })
+  assert.deepEqual(r.result, GOOD)
+  assertEntries(r.journal)
+  const d = doctorOf(r.journal)
+  assert.deepEqual(
+    ofType(r.journal, 'mail')
+      .filter((e) => e.doctor === d.n)
+      .map((e) => [e.kind, e.action]),
+    [
+      ['escalation', 'needsYou'],
+      ['handoff', 'remedy'],
+      ['worker_done', 'ended'],
+    ],
+  )
+  assert.equal(ofType(r.journal, 'mail').find((e) => e.doctor === d.n).body, ASK)
+  assert.deepEqual(ofType(r.journal, 'needsYou'), [], 'no needs-you of its own: its escalation is')
+  assert.deepEqual(
+    r.journal.filter((e) => e.n === d.n && ['nudge', 'continued', 'failed'].includes(e.type)),
+    [],
+  )
 })
 
 test('liveness: a worker Orca cannot start, or cannot be watched, is null', async () => {
@@ -9813,4 +9929,42 @@ test('crew: after a continuation for crew dying, an ordinary death still spends 
   const [failed] = ofType(capped.journal, 'failed')
   assert.match(failed.reason, /^its terminal is gone, and its session was already continued 1 times, the cap of 1/)
   assert.equal(failed.continuations, 1)
+})
+
+test("run view: an agent's note ends its row, cut to the screen's width, and its own needs-you shows needs you with its reason", async () => {
+  const clock = fakeClock()
+  const orca = fakeOrca({ worker: () => new Promise(() => {}), clock })
+  for (let n = 1; n <= 2; n++) await orca.workerStart({ run: 'run_fake1', prompt: 'p', title: `t${n}`, sessionId: SID, child: { name: `run_fake1-${n}`, displayName: `t${n}` } })
+  const stateDir = tmp()
+  const journalPath = join(stateDir, 'journal.jsonl')
+  const note = `reading the spec, then ${'the tests '.repeat(15)}`.trim()
+  appendFileSync(
+    journalPath,
+    [
+      { type: 'run', at: at(0), runId: 'run_fake1', terminal: 'term_runner' },
+      startedJ(1, '[Implement] impl:a', 0, 'claude', 'sid-1'),
+      J('note', 1, '[Implement] impl:a', 1, { dispatchId: 'ctx_fake1', note: 'first' }),
+      J('note', 1, '[Implement] impl:a', 2, { dispatchId: 'ctx_fake1', note }),
+      startedJ(2, '[Implement] impl:b', 0, 'claude', 'sid-2'),
+      J('needsYou', 2, '[Implement] impl:b', 3, { dispatchId: 'ctx_fake2', terminal: 'term_fake2', reason: 'Log in to npm' }),
+    ]
+      .map((e) => JSON.stringify(e) + '\n')
+      .join(''),
+  )
+  clock.t = 4 * MIN
+  const view = runView({ stateDir, host: orca, clock, transcripts: sessionTranscripts({ home: tmp(), env: {} }) })
+  await view.refresh()
+  const W = 160
+  const rows = draw(view.model, { width: W, height: 30, alert: view.model.alert }).lines.map(strip)
+  const a = rows.find((l) => /^ +1 +impl:a +● running /.test(l))
+  assert.ok(a, rows.join('\n'))
+  assert.equal(a.length, W)
+  assert.match(a, / {3}reading the spec, then the tests/)
+  assert.ok(!a.includes('first'), 'the later note replaced it')
+  assert.ok(!a.endsWith(note), 'cut to the width')
+  assert.ok(
+    rows.some((l) => /^ +2 +impl:b +\? needs you /.test(l)),
+    rows.join('\n'),
+  )
+  assert.equal(view.model.alert, 'NEEDS YOU: [Implement] impl:b in tab term_fake2: Log in to npm')
 })

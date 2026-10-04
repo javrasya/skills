@@ -16,6 +16,8 @@ import { crewHost, crewWorktrees } from '../src/crew-host.mjs'
 import { sessionHost } from '../src/session-host.mjs'
 import { sessionTranscripts, transcriptPath } from '../src/transcript.mjs'
 import { readJournal } from '../src/journal.mjs'
+import { runView } from '../src/run-view-model.mjs'
+import { draw, strip } from '../src/run-view/draw.mjs'
 import { crewPaths } from '../src/daemon/transport.mjs'
 import { stopDaemon } from '../src/daemon/client.mjs'
 
@@ -246,4 +248,58 @@ test('a resubmit on the crew host: a node whose result needs decisions is held, 
     'its session was never continued',
   )
   assert.equal(entries.filter((e) => e.type === 'unhalted').length, 1)
+})
+
+test("a pi agent's note and needs-you on the crew host: journaled, drawn on its row, never nudged while it needs you, and cleared by its submit (#175)", async () => {
+  const cwd = join(root, 'needs-you-repo')
+  mkdirSync(cwd)
+  const host = sessionHost(crewHost({ paths, env, cwd, harnesses: { pi: [process.execPath, FAKE_HARNESS] }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
+  const stateDir = join(root, 'needs-you-state')
+  const journal = join(stateDir, 'journal.jsonl')
+  const said = []
+  // Without its needs-you, an agent idle this long is nudged within a second.
+  const running = runScript(fixture('needs-you.workflow.js'), { host, stateDir, out: (s) => said.push(s), settings: { ...FAST, idleNudges: 1 }, transcripts: sessionTranscripts({ env }), project: cwd })
+  const asker = () => {
+    try {
+      return readJournal(journal).agents[0] ?? null
+    } catch {
+      return null
+    }
+  }
+  for (const until = Date.now() + 20_000; asker()?.state !== 'needs you'; await new Promise((done) => setTimeout(done, 50))) {
+    if (Date.now() > until) assert.fail(`the agent never needed you: ${JSON.stringify(asker())}\n${said.join('\n')}`)
+  }
+  const view = runView({ stateDir, host, transcripts: sessionTranscripts({ env }) })
+  await view.refresh()
+  const W = 200
+  const row = draw(view.model, { width: W, height: 30 })
+    .lines.map(strip)
+    .find((l) => /^ +1 +asker +\? needs you /.test(l))
+  assert.ok(row, said.join('\n'))
+  assert.equal(row.length, W)
+  assert.match(row, / {3}reading the spec +$/)
+  assert.equal(view.model.alert, `NEEDS YOU: [Ask] asker in tab ${asker().terminal}: Log in to the registry`)
+  // Idle past the nudge grace, it is never nudged; the person then answers it in its session.
+  await new Promise((done) => setTimeout(done, 3000))
+  assert.equal(asker().state, 'needs you', said.join('\n'))
+  const { request } = await import('../src/daemon/client.mjs')
+  await request(paths, { op: 'session.write', id: asker().terminal, data: 'Logged in. [call submit {"word":"answered"}]' })
+  await request(paths, { op: 'session.write', id: asker().terminal, data: '\r' })
+
+  assert.deepEqual(await running, { word: 'answered' }, said.join('\n'))
+  const entries = readFileSync(journal, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l))
+  assert.deepEqual(
+    entries.filter((e) => ['note', 'needsYou', 'needsYouCleared', 'nudge', 'continued', 'result'].includes(e.type)).map((e) => [e.type, e.note ?? e.reason ?? null]),
+    [
+      ['note', 'reading the spec'],
+      ['needsYou', 'Log in to the registry'],
+      ['needsYouCleared', null],
+      ['result', null],
+    ],
+    said.join('\n'),
+  )
+  assert.equal(readJournal(journal).agents[0].state, 'done')
 })

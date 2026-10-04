@@ -71,7 +71,9 @@
 //
 // crew: true lends it what only crew's host has of a worker's submissions
 // (#173): workerShow's `submissions`, how many worker_done a dispatch sent,
-// settled or not, and workerResult, the last result one carried.
+// settled or not, and workerResult, the last result one carried; and its
+// `note` and `needsYou` (#175), which a test sets on a worker's state as its
+// agent's tools would, any message it sends clearing needsYou.
 import { existsSync } from 'node:fs'
 import { OrcaError, orcaUnreachable, afterCreateTimeout, resumeRunnerCommand, tailCommand, workerStartArgs, withTimeout, workerStatus } from './orca-cli.mjs'
 import { reuseWorktree } from './worktree.mjs'
@@ -274,6 +276,7 @@ export function fakeOrca({
   function post(d, { type, subject = '', body = '', outcome = null, result = null }) {
     const m = { id: `msg_fake${++messages}`, type, from: d.handle, subject, body, taskId: d.taskId, dispatchId: d.dispatchId, outcome, createdAt: clock ? clock.now() : null }
     mailOf(d.run).pending.push(m)
+    d.needsYou = null
     if (type === 'worker_done' && !d.settled) Object.assign(d, { settled: true, outcome: outcome ?? 'succeeded' })
     if (type === 'worker_done') Object.assign(d, { submissions: (d.submissions ?? 0) + 1, result })
     return m
@@ -472,7 +475,9 @@ export function fakeOrca({
       if (away()) await reach()
       const s = show(dispatch(id, 'orchestration worker-show'))
       record({ verb: 'workerShow', dispatchId: id, settled: s.settled })
-      return crew ? { ...s, submissions: dispatch(id, 'orchestration worker-show').submissions ?? 0 } : s
+      if (!crew) return s
+      const d = dispatch(id, 'orchestration worker-show')
+      return { ...s, submissions: d.submissions ?? 0, note: d.note ?? null, needsYou: d.needsYou ?? null }
     },
 
     ...(crew && {

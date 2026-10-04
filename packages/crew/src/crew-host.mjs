@@ -442,8 +442,8 @@ export function crewHost({
 
     // From crew's own records: settled once its worker_done came (or it was
     // stopped), gone once its session is closed, exited once its program
-    // ended, and waiting on what its harness's own events say it waits on the
-    // person for (waitWords).
+    // ended, waiting on what its harness's own events say it waits on the
+    // person for (waitWords), and its agent's note and needs-you (#175).
     async workerShow({ dispatch }) {
       return (await call({ op: 'worker.show', id: dispatch })).worker
     },

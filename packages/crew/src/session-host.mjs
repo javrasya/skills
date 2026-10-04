@@ -14,6 +14,8 @@
 //   worker   workerStart, workerShow, workerStop, workerContinue, workerRelease
 //            (workerShow's `hostDied`, where a host can tell: the session was
 //            lost with the host itself, which is continued uncounted)
+//            (workerShow's `note` and `needsYou`, where a host keeps them: its
+//            agent's status note and why it needs you, #175)
 //            (workerStart's and workerContinue's `role`, `schema` and
 //            `resultPath`: its agent's, which a host whose agents submit by
 //            session keeps on the dispatch, and another ignores)
