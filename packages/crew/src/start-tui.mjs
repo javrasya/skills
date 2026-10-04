@@ -43,12 +43,12 @@ const optionText = (o) => `${o.label}${o.disabled ? ' (unavailable)' : ''}${o.no
 export function drawStartForm(form, focus, heading = '', query = '') {
   const rows = form.rows()
   const width = Math.max(...rows.map((r) => r.label.length))
-  const valueOf = (r) => r.options.find((o) => o.value === r.value)?.label ?? r.value ?? '(none)'
-  const valueWidth = Math.min(40, Math.max(...rows.map((r) => valueOf(r).length)))
+  const labelOf = (r) => r.options.find((o) => o.value === r.value)?.label ?? r.value ?? '(none)'
+  const valueWidth = Math.min(40, Math.max(...rows.map((r) => labelOf(r).length)))
   const indent = ' '.repeat(width + 3)
   const lines = heading ? [BOLD(heading), ''] : []
   rows.forEach((r, i) => {
-    const value = valueOf(r)
+    const value = labelOf(r)
     const focused = i === focus
     const shownValue = focused ? INVERSE(` ${value} `) + ' '.repeat(Math.max(0, valueWidth - value.length)) : ` ${value.padEnd(valueWidth)} `
     lines.push(`${focused ? CYAN('›') : ' '} ${focused ? BOLD(r.label.padEnd(width)) : r.label.padEnd(width)}  ${shownValue}  ${DIM(r.flag)}`)

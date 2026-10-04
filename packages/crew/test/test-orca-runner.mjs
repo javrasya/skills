@@ -11,7 +11,7 @@ import { join, dirname } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { submit } from '../src/submit.mjs'
-import { runScript, journalKey, failureSummary, finish, SUBMIT, SETTINGS, realClock, JOURNAL_ENTRIES, readJournal, attachView, runnerLog, watchResumeRequests } from '../src/runner.mjs'
+import { runScript, journalKey, failureSummary, finish, SUBMIT, SETTINGS, JOURNAL_ENTRIES, readJournal, attachView, runnerLog, watchResumeRequests } from '../src/runner.mjs'
 import { agentLifecycle, notePrompt, workerPrompt, doctorPrompt, NO_ASK, NO_WORKFLOW, ATTENDED as ATTENDED_TEXT } from '../src/lifecycle.mjs'
 import { mergeMcpAnswers, copyMcpAnswers } from '../src/mcp-answers.mjs'
 import { foldJournal } from '../src/journal.mjs'
@@ -6367,7 +6367,7 @@ test('sequential run: Ctrl+R on the runs list closes a run whose runner is dead 
   const held = await reclaimableChainRun(null, { alive: () => false })
   held.orca.dispatches.get('ctx_fake3').settled = true
   held.chain.unpushed = 1
-  let runs = runsView({ host: held.orca, ...held.rest })
+  const runs = runsView({ host: held.orca, ...held.rest })
   await runs.refresh()
   let r = await runs.reclaim('run_fake1')
   assert.deepEqual([r.reclaimed.map((a) => a.n), r.kept.map((k) => [k.agent.title, k.unpushed])], [[1, 2, 3], [['run_fake1-chain', 1]]])
@@ -6523,7 +6523,7 @@ test("run console: a crew run's tree is its phases and agents, no runner row; En
 })
 
 test('run console: arrows walk list → tree → session: Right opens a run and enters an agent, Right unfolds a folded phase, Left goes back from the tree to the list', async () => {
-  const { view, rowOf } = await viewedRun('console', { crew: true })
+  const { view } = await viewedRun('console', { crew: true })
   const runs = listOf.get(view)
   // Left in the tree goes back to the list, whatever row is selected.
   await runs.key('LEFT')
@@ -6882,8 +6882,8 @@ viewTest('reclaim dialog: the choice alone never stops a worker left running nor
   // impl:a's worker first: drawn over the tree, which takes no click.
   assert.deepEqual(view.model.dialog.kind, 'confirm')
   assert.equal(view.model.dialog.title, 'Reclaim [Implement] impl:a?')
-  let screen = draw(view.model, { width: 140, height: 30 })
-  let text = screen.lines.map(strip)
+  const screen = draw(view.model, { width: 140, height: 30 })
+  const text = screen.lines.map(strip)
   assert.ok(text.some((l) => l.includes('Reclaim [Implement] impl:a?')))
   assert.ok(text.some((l) => l.includes('f = stop its worker, then reclaim it · any other key cancels')))
   assert.deepEqual(
@@ -9558,7 +9558,7 @@ test("resume: inFlight is no part of a call's key", () => {
 // The fake Orca played as crew (ADR-0017): its daemon not answering is crew's
 // outage, and a crew that dies takes every session it holds with it, which
 // the next daemon shows as lost with its host (`hostDied`).
-const CREW_GONE = Object.assign(new Error('connect ENOENT \\.\pipe\crew-test'), { code: 'ENOENT' })
+const CREW_GONE = Object.assign(new Error('connect ENOENT \\\\.\\pipe\\crew-test'), { code: 'ENOENT' })
 
 async function crewDiesRun({ settings = {}, backAt = 15 * MIN, afterContinue }) {
   const clock = fakeClock()

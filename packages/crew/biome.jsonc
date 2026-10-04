@@ -22,7 +22,33 @@
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true
+      "preset": "recommended",
+      "complexity": {
+        // Terse arrows sequence two effects with a comma on purpose.
+        "noCommaOperator": "off",
+        // Test regexes match screen rows, whose column gaps are literal runs of spaces.
+        "noAdjacentSpacesInRegex": "off"
+      },
+      "correctness": {
+        // Callbacks name every positional parameter, the skipped ones too, so the signature reads as the caller's.
+        "noUnusedFunctionParameters": "off"
+      },
+      "style": {
+        // Concatenation stays where it reads better than a template.
+        "useTemplate": "off"
+      },
+      "suspicious": {
+        // `x ??= ...` inside an expression is how a shared promise is made once, lazily.
+        "noAssignInExpressions": "off",
+        // A catch normalises a thrown non-Error into one, in place.
+        "noCatchAssign": "off",
+        // Terminal input and output is parsed with regexes over escape bytes.
+        "noControlCharactersInRegex": "off",
+        // The one deliberate fall-through (journal.mjs) carries a `// falls through` comment Biome does not read.
+        "noFallthroughSwitchClause": "off",
+        // Strings that mention `${` are messages and fixtures about interpolation, not templates.
+        "noTemplateCurlyInString": "off"
+      }
     }
   }
 }

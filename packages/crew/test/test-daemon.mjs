@@ -415,7 +415,7 @@ test("daemon: after a restart every agent session comes back under its old id, p
   const failed = await worker('failed', 'failed')
   const working = await worker('working', null)
   const closed = await worker('closed', 'succeeded')
-  const { session: plain } = await request(paths, { op: 'session.spawn', command: ['node', 'tail.mjs'], cwd: dir })
+  await request(paths, { op: 'session.spawn', command: ['node', 'tail.mjs'], cwd: dir })
   await request(paths, { op: 'session.rename', id: done, title: 'done, renamed' })
   await request(paths, { op: 'session.close', id: closed })
   await request(paths, { op: 'stop', force: true })

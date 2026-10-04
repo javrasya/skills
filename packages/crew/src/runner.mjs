@@ -652,14 +652,12 @@ export function finish({ stateDir, summary, out }) {
 export function attachView({ spawnView, tab, log, tail = () => [], clock = realClock, limits = SETTINGS, restore = () => {}, guard = () => {}, resume = () => {} }) {
   let attached = true
   let crashes = 0
-  let child = null
   let close
   const closed = new Promise((r) => {
     close = r
   })
   function fallBack(why) {
     attached = false
-    child = null
     guard(false)
     for (const line of tail()) tab(line)
     log(`!! ${why}; the runner prints its log in this tab again`)
@@ -673,13 +671,11 @@ export function attachView({ spawnView, tab, log, tail = () => [], clock = realC
     } catch (e) {
       return fallBack(`the run view could not start: ${e?.message ?? e}`)
     }
-    child = c
     let over = false
     let detached = false
     const ended = (code, signal) => {
       if (over) return
       over = true
-      child = null
       restore()
       if (detached || code === VIEW_EXIT.quit) return fallBack('the run view was closed')
       if (code === VIEW_EXIT.unavailable) return fallBack('the run view cannot run in this tab (see runner.log)')

@@ -227,7 +227,7 @@ async function tui() {
     }
     const shown = said.slice(-(rows - 7)).map((l) => l.slice(0, cols - 1))
     process.stdout.write(`\x1b[2J\x1b[H\x1b[1mfake ${harness} ${sessionId}${process.env.CLAUDE_CODE_DISABLE_AGENT_VIEW === '1' ? ' · no agent view' : ''}\x1b[0m`)
-    shown.forEach((l, i) => process.stdout.write(`\x1b[${i + 3};1H${l}`))
+    for (const [i, l] of shown.entries()) process.stdout.write(`\x1b[${i + 3};1H${l}`)
     if (status) process.stdout.write(`\x1b[${rows - 3};1H${status.slice(0, cols - 1)}`)
     // Claude's input box: a `❯` row between two rules.
     const rule = '─'.repeat(cols - 1)

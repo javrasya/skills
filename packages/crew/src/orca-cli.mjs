@@ -6,7 +6,7 @@ import { execFile } from 'node:child_process'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { gitProbes, prepareChainWorktree, prepareWorktree, reuseWorktree, worktreeLines } from './worktree.mjs'
 import { sessionTranscripts } from './transcript.mjs'
-import { bounded, chainName, execGit, gitIn, realTimer, worktreeName } from './git.mjs'
+import { bounded, chainName, execGit, realTimer, worktreeName } from './git.mjs'
 import { launchCommand, resumeCommand, SHELL_WORD } from './harness.mjs'
 import { runnerArgs } from './daemon/runs.mjs'
 

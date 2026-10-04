@@ -8,7 +8,6 @@
 // reclaim goes through reclaim.mjs, so the view keeps its rules.
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { sessionTranscripts } from './transcript.mjs'
 import { pathKey, samePath } from './paths.mjs'
 import { agentName, agentsOf, chainAgent, reclaimAgent, reclaimChainAfter, reclaimRun, runWorktree } from './reclaim.mjs'
