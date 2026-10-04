@@ -13,7 +13,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { crewPaths } from '../src/daemon/transport.mjs'
 import { request, stopDaemon } from '../src/daemon/client.mjs'
-import { crewHost } from '../src/crew-host.mjs'
+import { crewHost, waitWords } from '../src/crew-host.mjs'
 import { OrchestratorError, orchestrator } from '../src/orchestrator.mjs'
 import { execProgram } from '../src/git.mjs'
 import { STACKS_DOCS, rememberAnswers, rememberedAnswers, startForm } from '../src/start-form.mjs'
@@ -558,7 +558,7 @@ test('crew start arms with a [1m] model, and a worker starts on it: the crew hos
   const started = await host.workerStart({ run: runId, prompt: 'hello', title: 'impl', ...impl, permissionMode: 'auto', sessionId })
   const { sessions } = await request(w.paths, { op: 'session.list' })
   const worker = sessions.find((s) => s.id === started.terminal)
-  assert.deepEqual(worker.command.slice(2, -2), ['--session-id', sessionId, '--permission-mode', 'auto', '--model', 'sonnet[1m]'])
+  assert.deepEqual(worker.command.slice(2, -waitWords('claude').length), ['--session-id', sessionId, '--permission-mode', 'auto', '--model', 'sonnet[1m]'])
   assert.equal(launchCommand({ ...impl, sessionId }), `claude --session-id ${sessionId} --model 'sonnet[1m]'`, 'a host that types it into a shell quotes it')
 })
 
