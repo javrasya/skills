@@ -44,9 +44,10 @@ function repo(name = 'repo') {
   return cwd
 }
 
-test('a doctor round on the crew host: the patient dies, its doctor hands off a note, and the patient carries on with it', async () => {
+test("a doctor round on the crew host: the patient dies, its doctor, without crew's tools, hands off a note over Run mail, and the patient carries on with it", async () => {
   const cwd = repo()
-  const host = sessionHost(crewHost({ paths, env, cwd, harnesses: { claude: [process.execPath, FAKE_HARNESS] }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
+  // CREW_FAKE_MCP=0: its Claude starts no MCP server, so it reports by the CLI its prompt falls back to.
+  const host = sessionHost(crewHost({ paths, env: { ...env, CREW_FAKE_MCP: '0' }, cwd, harnesses: { claude: [process.execPath, FAKE_HARNESS] }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
   const stateDir = join(root, 'state')
   const said = []
   const result = await runScript(fixture('doctor-round.workflow.js'), { host, stateDir, out: (s) => said.push(s), settings: FAST, transcripts: sessionTranscripts({ env }), project: cwd })
@@ -80,9 +81,31 @@ test('a doctor round on the crew host: the patient dies, its doctor hands off a 
   assert.equal(fold.agents.find((a) => a.n === doctor.n)?.state, 'done', JSON.stringify(fold.agents))
 })
 
-// A run whose doctor is a pi (the recover role's harness), journal and the
-// doctor's tool results from its pi transcript.
-async function piDoctorRun(name, script) {
+// The [name, isError, first line] of each tool result in a session's
+// transcript, as its harness writes them; a Claude tool its name on crew's
+// MCP server.
+function toolResults({ harness, sessionId, worktree }) {
+  const lines = readFileSync(transcriptPath({ harness, sessionId, worktree, env }), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l).message)
+  const first = (content) => content[0].text.split('\n')[0]
+  if (harness === 'pi') return lines.filter((m) => m?.role === 'toolResult').map((m) => [m.toolName, m.isError, first(m.content)])
+  const uses = new Map(
+    lines
+      .flatMap((m) => (Array.isArray(m?.content) ? m.content : []))
+      .filter((c) => c.type === 'tool_use')
+      .map((c) => [c.id, c.name.replace(/^mcp__crew__/, '')]),
+  )
+  return lines
+    .flatMap((m) => (m?.role === 'user' && Array.isArray(m.content) ? m.content : []))
+    .filter((c) => c.type === 'tool_result')
+    .map((c) => [uses.get(c.tool_use_id), c.is_error, first(c.content)])
+}
+
+// A run whose doctor is the recover role's harness, journal and the doctor's
+// tool results from its transcript.
+async function doctorRun(name, script) {
   const cwd = repo(`${name}-repo`)
   const host = sessionHost(crewHost({ paths, env, cwd, harnesses: { claude: [process.execPath, FAKE_HARNESS], pi: [process.execPath, FAKE_HARNESS] }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
   const stateDir = join(root, `${name}-state`)
@@ -95,62 +118,63 @@ async function piDoctorRun(name, script) {
   const of = (type) => entries.filter((e) => e.type === type)
   const [doctor] = of('doctor')
   const doctorStart = of('started').find((e) => e.n === doctor?.doctor)
-  const toolCalls = doctorStart
-    ? readFileSync(transcriptPath({ harness: 'pi', sessionId: doctorStart.sessionId, worktree: doctorStart.worktree, env }), 'utf8')
-        .split('\n')
-        .filter(Boolean)
-        .map((l) => JSON.parse(l).message)
-        .filter((m) => m?.role === 'toolResult')
-        .map((m) => [m.toolName, m.isError])
-    : []
+  const toolCalls = doctorStart ? toolResults(doctorStart).map(([name, isError]) => [name, isError]) : []
   return { result, of, doctor, doctorStart, toolCalls, log: said.join('\n') }
 }
 
-test("a pi doctor ends its round with crew's handoff tool: its note is the remedy and its patient carries on with it; a second handoff acts on nothing (#176)", async () => {
-  const { result, of, doctorStart, toolCalls, log } = await piDoctorRun('handoff-tool', 'doctor-handoff-tool.workflow.js')
-  assert.deepEqual(result, { patient: 'the note carried it on' }, log)
-  assert.equal(doctorStart?.harness, 'pi', log)
-  assert.deepEqual(toolCalls[0], ['handoff', false], log)
-  const remedies = of('mail').filter((m) => m.action === 'remedy')
-  assert.deepEqual(
-    remedies.map((m) => m.body),
-    ['the note carried it on'],
-    log,
-  )
-  const [remedy] = of('remedy')
-  assert.equal(remedy?.how, 'continue', log)
-  assert.equal(remedy.messageId, remedies[0].messageId)
-  assert.equal(of('remedy').length, 1)
-  // The second note, if the daemon took it before the runner let its doctor go, acted on nothing.
-  assert.deepEqual(
-    of('mail')
-      .filter((m) => m.kind === 'handoff' && m.action !== 'remedy')
-      .map((m) => m.action)
-      .filter((a) => a !== 'none'),
-    [],
-    log,
-  )
-  assert.equal(of('gaveUp').length, 0, log)
-})
+// pi's tools from crew's extension, Claude's from crew's MCP server: the
+// same doctor rounds on each.
+for (const [harness, prefix, ticket] of [
+  ['pi', '', '#176'],
+  ['claude', 'claude-', '#177'],
+]) {
+  test(`a ${harness} doctor ends its round with crew's handoff tool: its note is the remedy and its patient carries on with it; a second handoff acts on nothing (${ticket})`, async () => {
+    const { result, of, doctorStart, toolCalls, log } = await doctorRun(`${harness}-handoff-tool`, `${prefix}doctor-handoff-tool.workflow.js`)
+    assert.deepEqual(result, { patient: 'the note carried it on' }, log)
+    assert.equal(doctorStart?.harness, harness, log)
+    assert.deepEqual(toolCalls[0], ['handoff', false], log)
+    const remedies = of('mail').filter((m) => m.action === 'remedy')
+    assert.deepEqual(
+      remedies.map((m) => m.body),
+      ['the note carried it on'],
+      log,
+    )
+    const [remedy] = of('remedy')
+    assert.equal(remedy?.how, 'continue', log)
+    assert.equal(remedy.messageId, remedies[0].messageId)
+    assert.equal(of('remedy').length, 1)
+    // The second note, if the daemon took it before the runner let its doctor go, acted on nothing.
+    assert.deepEqual(
+      of('mail')
+        .filter((m) => m.kind === 'handoff' && m.action !== 'remedy')
+        .map((m) => m.action)
+        .filter((a) => a !== 'none'),
+      [],
+      log,
+    )
+    assert.equal(of('gaveUp').length, 0, log)
+  })
 
-test("a pi doctor ends its round with crew's give_up tool: no remedy, the reason journaled, and its patient's agent() fails once its rounds are spent (#176)", async () => {
-  const { result, of, doctor, toolCalls, log } = await piDoctorRun('give-up-tool', 'doctor-give-up-tool.workflow.js')
-  assert.deepEqual(result, { patient: null }, log)
-  assert.deepEqual(toolCalls, [['give_up', false]], log)
-  const gaveUp = of('mail').filter((m) => m.action === 'gaveUp')
-  assert.deepEqual(
-    gaveUp.map((m) => [m.kind, m.outcome, m.body]),
-    [['worker_done', 'failed', 'only a human can fix this']],
-    log,
-  )
-  assert.deepEqual(
-    of('gaveUp').map((e) => [e.round, e.doctor, e.reason]),
-    [[1, doctor.doctor, 'it gave up: only a human can fix this']],
-    log,
-  )
-  assert.equal(of('remedy').length, 0, log)
-  assert.equal(of('mail').filter((m) => m.action === 'remedy').length, 0, log)
-})
+  test(`a ${harness} doctor ends its round with crew's give_up tool: no remedy, the reason journaled, and its patient's agent() fails once its rounds are spent (${ticket})`, async () => {
+    const { result, of, doctor, doctorStart, toolCalls, log } = await doctorRun(`${harness}-give-up-tool`, `${prefix}doctor-give-up-tool.workflow.js`)
+    assert.equal(doctorStart?.harness, harness, log)
+    assert.deepEqual(result, { patient: null }, log)
+    assert.deepEqual(toolCalls, [['give_up', false]], log)
+    const gaveUp = of('mail').filter((m) => m.action === 'gaveUp')
+    assert.deepEqual(
+      gaveUp.map((m) => [m.kind, m.outcome, m.body]),
+      [['worker_done', 'failed', 'only a human can fix this']],
+      log,
+    )
+    assert.deepEqual(
+      of('gaveUp').map((e) => [e.round, e.doctor, e.reason]),
+      [[1, doctor.doctor, 'it gave up: only a human can fix this']],
+      log,
+    )
+    assert.equal(of('remedy').length, 0, log)
+    assert.equal(of('mail').filter((m) => m.action === 'remedy').length, 0, log)
+  })
+}
 
 test('a sequential run on the crew host: its code agents one after another in <runId>-chain, its setup hook run once, and a doctor in a <runId>-<n> of its own, setup skipped', async () => {
   const cwd = repo('chain-repo')
@@ -322,56 +346,96 @@ test('a resubmit on the crew host: a node whose result needs decisions is held, 
   assert.equal(entries.filter((e) => e.type === 'unhalted').length, 1)
 })
 
-test("a pi agent's note and needs-you on the crew host: journaled, drawn on its row, never nudged while it needs you, and cleared by its submit (#175)", async () => {
-  const cwd = join(root, 'needs-you-repo')
-  mkdirSync(cwd)
-  const host = sessionHost(crewHost({ paths, env, cwd, harnesses: { pi: [process.execPath, FAKE_HARNESS] }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
-  const stateDir = join(root, 'needs-you-state')
-  const journal = join(stateDir, 'journal.jsonl')
-  const said = []
-  // Without its needs-you, an agent idle this long is nudged within a second.
-  const running = runScript(fixture('needs-you.workflow.js'), { host, stateDir, out: (s) => said.push(s), settings: { ...FAST, idleNudges: 1 }, transcripts: sessionTranscripts({ env }), project: cwd })
-  const asker = () => {
-    try {
-      return readJournal(journal).agents[0] ?? null
-    } catch {
-      return null
-    }
-  }
-  for (const until = Date.now() + 20_000; asker()?.state !== 'needs you'; await new Promise((done) => setTimeout(done, 50))) {
-    if (Date.now() > until) assert.fail(`the agent never needed you: ${JSON.stringify(asker())}\n${said.join('\n')}`)
-  }
-  const view = runView({ stateDir, host, transcripts: sessionTranscripts({ env }) })
-  await view.refresh()
-  const W = 200
-  const row = draw(view.model, { width: W, height: 30 })
-    .lines.map(strip)
-    .find((l) => /^ +1 +asker +\? needs you /.test(l))
-  assert.ok(row, said.join('\n'))
-  assert.equal(row.length, W)
-  assert.match(row, / {3}reading the spec +$/)
-  assert.equal(view.model.alert, `NEEDS YOU: [Ask] asker in tab ${asker().terminal}: Log in to the registry`)
-  // Idle past the nudge grace, it is never nudged; the person then answers it in its session.
-  await new Promise((done) => setTimeout(done, 3000))
-  assert.equal(asker().state, 'needs you', said.join('\n'))
-  const { request } = await import('../src/daemon/client.mjs')
-  await request(paths, { op: 'session.write', id: asker().terminal, data: 'Logged in. [call submit {"word":"answered"}]' })
-  await request(paths, { op: 'session.write', id: asker().terminal, data: '\r' })
-
-  assert.deepEqual(await running, { word: 'answered' }, said.join('\n'))
-  const entries = readFileSync(journal, 'utf8')
-    .split('\n')
-    .filter(Boolean)
-    .map((l) => JSON.parse(l))
-  assert.deepEqual(
-    entries.filter((e) => ['note', 'needsYou', 'needsYouCleared', 'nudge', 'continued', 'result'].includes(e.type)).map((e) => [e.type, e.note ?? e.reason ?? null]),
+// pi's tools from crew's extension, Claude's from crew's MCP server. Claude
+// checks no arguments, so its bad submit is the daemon's to reject, as error
+// content its agent repairs.
+for (const [harness, prefix, ticket, answer, calls] of [
+  [
+    'pi',
+    '',
+    '#175',
+    '[call submit {"word":"answered"}]',
     [
-      ['note', 'reading the spec'],
-      ['needsYou', 'Log in to the registry'],
-      ['needsYouCleared', null],
-      ['result', null],
+      ['status', false],
+      ['needs_you', false],
+      ['submit', false],
     ],
-    said.join('\n'),
-  )
-  assert.equal(readJournal(journal).agents[0].state, 'done')
-})
+  ],
+  [
+    'claude',
+    'claude-',
+    '#177',
+    '[call submit {"wrd":"oops"}] [call submit {"word":"answered"}]',
+    [
+      ['status', false],
+      ['needs_you', false],
+      ['submit', true],
+      ['submit', false],
+    ],
+  ],
+]) {
+  test(`a ${harness} agent's note and needs-you on the crew host, from crew's tools: journaled, drawn on its row, never nudged while it needs you, and cleared by its submit (${ticket})`, async () => {
+    const cwd = join(root, `${harness}-needs-you-repo`)
+    mkdirSync(cwd)
+    const host = sessionHost(crewHost({ paths, env, cwd, harnesses: { [harness]: [process.execPath, FAKE_HARNESS] }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
+    const stateDir = join(root, `${harness}-needs-you-state`)
+    const journal = join(stateDir, 'journal.jsonl')
+    const said = []
+    // Without its needs-you, an agent idle this long is nudged within a second.
+    const running = runScript(fixture(`${prefix}needs-you.workflow.js`), { host, stateDir, out: (s) => said.push(s), settings: { ...FAST, idleNudges: 1 }, transcripts: sessionTranscripts({ env }), project: cwd })
+    const asker = () => {
+      try {
+        return readJournal(journal).agents[0] ?? null
+      } catch {
+        return null
+      }
+    }
+    for (const until = Date.now() + 20_000; asker()?.state !== 'needs you'; await new Promise((done) => setTimeout(done, 50))) {
+      if (Date.now() > until) assert.fail(`the agent never needed you: ${JSON.stringify(asker())}\n${said.join('\n')}`)
+    }
+    const view = runView({ stateDir, host, transcripts: sessionTranscripts({ env }) })
+    await view.refresh()
+    const W = 200
+    const row = draw(view.model, { width: W, height: 30 })
+      .lines.map(strip)
+      .find((l) => /^ +1 +asker +\? needs you /.test(l))
+    assert.ok(row, said.join('\n'))
+    assert.equal(row.length, W)
+    assert.match(row, / {3}reading the spec +$/)
+    assert.equal(view.model.alert, `NEEDS YOU: [Ask] asker in tab ${asker().terminal}: Log in to the registry`)
+    // Idle past the nudge grace, it is never nudged; the person then answers it in its session.
+    await new Promise((done) => setTimeout(done, 3000))
+    assert.equal(asker().state, 'needs you', said.join('\n'))
+    const { request } = await import('../src/daemon/client.mjs')
+    await request(paths, { op: 'session.write', id: asker().terminal, data: `Logged in. ${answer}` })
+    await request(paths, { op: 'session.write', id: asker().terminal, data: '\r' })
+
+    assert.deepEqual(await running, { word: 'answered' }, said.join('\n'))
+    const entries = readFileSync(journal, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l))
+    assert.deepEqual(
+      entries.filter((e) => ['note', 'needsYou', 'needsYouCleared', 'nudge', 'continued', 'result'].includes(e.type)).map((e) => [e.type, e.note ?? e.reason ?? null]),
+      [
+        ['note', 'reading the spec'],
+        ['needsYou', 'Log in to the registry'],
+        ['needsYouCleared', null],
+        ['result', null],
+      ],
+      said.join('\n'),
+    )
+    assert.equal(readJournal(journal).agents[0].state, 'done')
+    const [started] = entries.filter((e) => e.type === 'started')
+    assert.equal(started.harness, harness)
+    assert.deepEqual(
+      toolResults(started).map(([name, isError]) => [name, isError]),
+      calls,
+      said.join('\n'),
+    )
+    // The tool is named first, the CLI line its fallback.
+    const prompt = readFileSync(transcriptPath({ harness, sessionId: started.sessionId, worktree: started.worktree, env }), 'utf8')
+    const tool = prompt.indexOf('If your session has a tool named `submit`, finish with it')
+    assert.ok(tool !== -1 && tool < prompt.indexOf('submit.mjs'), 'the prompt names the tool before the CLI line')
+  })
+}

@@ -87,7 +87,7 @@ export const NO_WORKFLOW = 'You may use subagents, in the foreground or the back
 // `schema`: the one at schemaPath, which shapes the submit tool's arguments;
 // one not given is taken for an object's.
 // The tool comes first (ADR-0027); the CLI line is for a session without it,
-// as every one but a crew host's pi worker is, and for a daemon gone.
+// as every one but a crew host's pi or Claude worker is, and for a daemon gone.
 export function workerPrompt(prompt, { schema = null, schemaPath, resultPath, payloadPath, baseline = null, leftovers = [], note = null, attended = null }) {
   const what = schemaPath ? `Write your result to ${payloadPath} as one JSON object that matches the JSON Schema in ${schemaPath}.` : `Write your answer to ${payloadPath} as plain text.`
   const command = tool('submit').fallback({ schemaPath, resultPath, payloadPath })

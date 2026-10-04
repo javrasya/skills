@@ -26,7 +26,16 @@
 //                 each such word in order: as pi does, arguments that fail
 //                 the tool's parameters are an error result without the
 //                 tool run, and the call and its result go in pi's
-//                 transcript. A turn that calls a tool submits nothing else
+//                 transcript. A turn that calls a tool submits nothing else.
+//                 Claude calls the tools of the MCP servers its --mcp-config
+//                 names instead, <tool> its name on the server
+//
+// As Claude, it starts each server its --mcp-config names (inline JSON or a
+// file), as Claude starts a stdio one: its command, with its env, ${VAR} and
+// ${VAR:-default} filled from the harness's own, and asks it over JSON-RPC
+// for its tools (initialize, tools/list) once, at start; a call is a
+// tools/call, its call and result in Claude's transcript as Claude writes
+// them. CREW_FAKE_MCP=0 starts none, as a Claude whose server failed to.
 //
 // As pi, it emits session_start to those extensions once its input is drawn,
 // as pi does once its editor submits; CREW_FAKE_MUTE=1 keeps it from saying
@@ -46,13 +55,15 @@
 // [cure <text>] as its handoff, `no note` without one, then its worker_done,
 // with the `orchestration send` its preamble names; with the patient's
 // [give up <why>] it sends only its worker_done failed, why its body. A pi
-// doctor crew's extension gave `handoff` and `give_up` calls them instead,
-// handoff once for each [cure], in order. Asked by crew's
+// doctor crew's extension gave `handoff` and `give_up`, or a Claude doctor
+// crew's MCP server gave them, calls them instead, handoff once for each
+// [cure], in order. Asked by crew's
 // orchestrator to draft a validation list, it answers FIXED_DRAFT, reading
 // nothing.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { createInterface } from 'node:readline'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -111,6 +122,46 @@ async function tui() {
     const ext = await import(pathToFileURL(argv[i + 1]).href)
     ext.default({ on: (type, fn) => handlers.set(type, [...(handlers.get(type) ?? []), fn]), registerTool: (t) => tools.set(t.name, t) })
   }
+  // Claude's MCP servers, each tool as a registered one would be, `server`
+  // naming it: Claude neither checks arguments against inputSchema here, nor
+  // lists tools a server finds later.
+  const mcp = harness === 'claude' && process.env.CREW_FAKE_MCP !== '0' ? after('--mcp-config') : null
+  const mcpReady = mcp ? startMcp(JSON.parse(mcp.trim().startsWith('{') ? mcp : readFileSync(mcp, 'utf8')).mcpServers ?? {}) : null
+  async function startMcp(servers) {
+    const fill = (v) => v.replace(/\$\{(\w+)(?::-([^}]*))?\}/g, (_, name, dflt) => process.env[name] || (dflt ?? ''))
+    for (const [server, c] of Object.entries(servers)) {
+      const child = spawn(fill(c.command), (c.args ?? []).map(fill), { env: { ...process.env, ...Object.fromEntries(Object.entries(c.env ?? {}).map(([k, v]) => [k, fill(v)])) }, stdio: ['pipe', 'pipe', 'inherit'] })
+      const waiting = new Map()
+      let next = 0
+      createInterface({ input: child.stdout }).on('line', (line) => {
+        const m = JSON.parse(line)
+        waiting.get(m.id)?.(m)
+        waiting.delete(m.id)
+      })
+      const rpc = (method, params) =>
+        new Promise((done, fail) => {
+          const id = ++next
+          waiting.set(id, (m) => (m.error ? fail(new Error(m.error.message)) : done(m.result)))
+          child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
+        })
+      try {
+        await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'fake-claude', version: '1' } })
+        child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`)
+        for (const t of (await rpc('tools/list', {})).tools) {
+          tools.set(t.name, {
+            server,
+            async execute(_id, args) {
+              const r = await rpc('tools/call', { name: t.name, arguments: args })
+              if (r.isError) throw new Error(r.content.map((c) => c.text ?? '').join(''))
+              return r
+            },
+          })
+        }
+      } catch (e) {
+        process.stderr.write(`fake claude: MCP server ${server} failed: ${e?.message ?? e}\n`)
+      }
+    }
+  }
   // As pi's runner does: each handler awaited in turn, one that rejects
   // reported and the rest still run, the harness never failed by it.
   const emit = async (event) => {
@@ -165,6 +216,7 @@ async function tui() {
   }
 
   async function doctor(prompt, recorded) {
+    await mcpReady
     const why = /\[give up ([^\]]*)\]/.exec(prompt)?.[1]
     const cures = [...prompt.matchAll(/\[cure ([^\]]*)\]/g)].map((m) => m[1])
     if (tools.has('handoff') && tools.has('give_up')) {
@@ -315,6 +367,7 @@ async function tui() {
   }
 
   async function calls(prompt, recorded) {
+    await mcpReady
     for (const [, name, json] of prompt.matchAll(/\[call (\S+) ([^\]]*)\]/g)) {
       let args
       try {
@@ -331,7 +384,7 @@ async function tui() {
     const id = `call_${randomUUID().slice(0, 8)}`
     let text
     let isError = true
-    const errors = t ? validate(t.parameters, args) : []
+    const errors = t?.parameters ? validate(t.parameters, args) : []
     if (!t) text = `Tool ${name} not found`
     else if (errors.length) text = `Validation failed for tool "${name}":\n${errors.map((e) => `  - ${e}`).join('\n')}`
     else {
@@ -346,6 +399,13 @@ async function tui() {
     if (harness === 'pi' && recorded) {
       piMessage({ role: 'assistant', content: [{ type: 'toolCall', id, name, arguments: args }], stopReason: 'toolUse', usage: PI_USAGE })
       piMessage({ role: 'toolResult', toolCallId: id, toolName: name, content: [{ type: 'text', text }], isError })
+    }
+    if (harness === 'claude' && recorded) {
+      const use = randomUUID()
+      const timestamp = new Date().toISOString()
+      write({ type: 'assistant', uuid: use, parentUuid: parent, sessionId, cwd, timestamp, message: { id: `msg_${use}`, role: 'assistant', content: [{ type: 'tool_use', id, name: `mcp__${t?.server ?? 'unknown'}__${name}`, input: args }], stop_reason: 'tool_use', usage: { input_tokens: 10, output_tokens: 5 } } })
+      parent = randomUUID()
+      write({ type: 'user', uuid: parent, parentUuid: use, sessionId, cwd, timestamp, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: [{ type: 'text', text }], is_error: isError }] } })
     }
   }
 
