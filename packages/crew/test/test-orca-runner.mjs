@@ -7448,13 +7448,19 @@ async function standaloneRuns() {
 
   const dir = tmp().replace(/\\/g, '/')
   const began = (run, n, label, s) => J('started', n, `[Implement] ${label}`, n, { run, dispatchId: s.dispatchId, harness: 'claude', sessionId: `sid-${n}`, worktree: s.worktree, terminal: s.terminal })
-  const put = (name, entries) => {
+  const put = (name, entries, summary = null) => {
     mkdirSync(join(dir, name, 'orca-run'), { recursive: true })
     writeFileSync(join(dir, name, 'orca-run', 'journal.jsonl'), entries.map((e) => JSON.stringify(e) + '\n').join(''))
+    if (summary) writeFileSync(join(dir, name, 'orca-run', 'summary.json'), JSON.stringify(summary))
   }
-  put('controlayer-783', [began('run_a1', 1, 'impl:a', a1[0]), began('run_a1', 2, 'impl:b', a1[1]), began('run_a1', 3, 'check', a1[2]), J('result', 1, '[Implement] impl:a', 5, { result: GOOD }), J('failed', 2, '[Implement] impl:b', 6, { reason: 'it died' }), J('result', 3, '[Implement] check', 7, { result: GOOD })])
+  // The two ended runs' runners wrote their summary.json, as a runner does at its end.
+  put('controlayer-783', [began('run_a1', 1, 'impl:a', a1[0]), began('run_a1', 2, 'impl:b', a1[1]), began('run_a1', 3, 'check', a1[2]), J('result', 1, '[Implement] impl:a', 5, { result: GOOD }), J('failed', 2, '[Implement] impl:b', 6, { reason: 'it died' }), J('result', 3, '[Implement] check', 7, { result: GOOD })], {
+    runner: 'session',
+    ok: true,
+    result: { halted: false, state: 'one ticket failed' },
+  })
   put('controlayer-790', [began('run_a2', 1, 'impl:a', a2[0])])
-  put('skills-43', [began('run_b1', 1, 'impl:a', b1[0]), J('result', 1, '[Implement] impl:a', 5, { result: GOOD })])
+  put('skills-43', [began('run_b1', 1, 'impl:a', b1[0]), J('result', 1, '[Implement] impl:a', 5, { result: GOOD })], { runner: 'session', ok: true, result: { halted: false, state: 'ready for review' } })
   const registry = registryIn()
   writeFileSync(registry, readFileSync(fixture('orca-runs.jsonl'), 'utf8').replaceAll('@RUNS@', dir))
 
@@ -7473,7 +7479,7 @@ async function standaloneRuns() {
 }
 const screenOf = (model) => drawRuns(model, { width: 140, height: 30 }).lines.map(strip)
 
-test('standalone: runs from a registry fixture are listed by project, with outcome, runner alive or dead, kept count and age', async () => {
+test('standalone: runs from a registry fixture are listed by project, with outcome, runner alive, ended or dead, kept count and age', async () => {
   const { runs, run, clock, orca, runners } = await standaloneRuns()
   assert.deepEqual(
     runs.model.projects.map((p) => [p.name, p.path, p.runs.map((r) => r.runId)]),
@@ -7482,22 +7488,33 @@ test('standalone: runs from a registry fixture are listed by project, with outco
       ['skills', 'C:/repos/skills', ['run_b1']],
     ],
   )
-  const facts = () => ['run_a2', 'run_a1', 'run_b1'].map((id) => [run(id).spec, run(id).outcome, run(id).alive, run(id).kept, run(id).ageMs, run(id).reclaimed])
+  const facts = () => ['run_a2', 'run_a1', 'run_b1'].map((id) => [run(id).spec, run(id).outcome, run(id).alive, run(id).end, run(id).kept, run(id).ageMs, run(id).reclaimed])
   assert.deepEqual(facts(), [
-    ['#790', null, true, 1, 30 * MIN, false],
-    ['#783', 'partial', false, 2, 120 * MIN, false],
-    ['#43', 'ok', false, 0, 180 * MIN, true],
+    ['#790', null, true, null, 1, 30 * MIN, false],
+    ['#783', 'partial', false, { kind: 'complete', detail: 'one ticket failed' }, 2, 120 * MIN, false],
+    ['#43', 'ok', false, { kind: 'complete', detail: 'ready for review' }, 0, 180 * MIN, true],
   ])
   assert.equal(runs.model.rows[runs.model.selected].key, 'run:run_a2', 'the latest run is selected first')
 
   const lines = screenOf(runs.model)
   assert.match(lines[0], /^ Orca runs · 3 runs · 2 projects/)
-  assert.match(lines[1], /● 1 alive {2}○ 2 dead {2}1 reclaimed/)
+  // A run that ended is not a dead runner (#157): the RUNNER column reads how
+  // it ended from its summary.json, as the attached header does. Only a runner
+  // gone with no summary is dead.
+  assert.match(lines[1], /● 1 alive {2}2 ended {2}○ 0 dead {2}1 reclaimed/)
   assert.match(lines[4], /^ ▾ controlayer {2}C:\/repos\/controlayer {2}2 runs/)
   assert.match(lines[5], /^ +run_a2 +#790 +running +● alive +1 +30m/)
-  assert.match(lines[6], /^ +run_a1 +#783 +partial +○ dead +2 +2h00m/)
+  assert.match(lines[6], /^ +run_a1 +#783 +partial +✓ complete +2 +2h00m/)
   assert.match(lines[7], /^ ▾ skills/)
-  assert.match(lines[8], /^ +run_b1 +#43 +ok +○ dead +0 +3h00m +reclaimed/)
+  assert.match(lines[8], /^ +run_b1 +#43 +ok +✓ complete +0 +3h00m +reclaimed/)
+  assert.doesNotMatch(lines.join('\n'), /○ dead/)
+  // The pane carries the end's detail.
+  assert.match(lines.slice(-6, -2).join('\n'), /run_a2 .* running/)
+  await (async () => {
+    while (runs.model.rows[runs.model.selected].key !== 'run:run_b1') await runs.key('DOWN')
+  })()
+  assert.match(screenOf(runs.model).slice(-6, -2).join('\n'), /run_b1 .* ok .* ✓ complete — ready for review/)
+  while (runs.model.rows[runs.model.selected].key !== 'run:run_a2') await runs.key('UP')
 
   // Age runs on the clock.
   clock.t += 25 * 60 * MIN
@@ -7515,7 +7532,9 @@ test('standalone: runs from a registry fixture are listed by project, with outco
   // nothing; a runner.pid nobody can read: nobody can say, so nothing is resumable.
   runners.live.clear()
   await runs.refresh()
-  assert.deepEqual([run('run_a2').alive, run('run_a2').resumable, run('run_a2').closable], [false, true, true])
+  assert.deepEqual([run('run_a2').alive, run('run_a2').end, run('run_a2').resumable, run('run_a2').closable], [false, null, true, true])
+  assert.match(screenOf(runs.model)[1], /● 0 alive {2}2 ended {2}○ 1 dead {2}1 reclaimed/)
+  assert.match(screenOf(runs.model)[5], /^ +run_a2 +#790 +unfinished +○ dead +1/)
   assert.ok((await orca.terminalList()).includes('term_runA2'))
   await runs.key('ENTER')
   assert.equal(runs.opened().model.header.alive, false)
@@ -7783,10 +7802,11 @@ test("standalone: r on a run whose runner is dead opens one terminal in the run'
   assert.match((await runs.key('r')).message, /runner is alive, in tab term_runA2: nothing to resume/)
   assert.deepEqual(resumes(), [])
 
-  // run_a1's is dead: the runner as the skill launched it, with --resume.
+  // run_a1's ended: the runner as the skill launched it, with --resume.
   await select('run:run_a1')
   assert.equal(run('run_a1').resumable, true)
-  assert.match(pane(), /r resumes it: its runner is dead/)
+  assert.match(pane(), /r resumes it: its runner ended/)
+  assert.doesNotMatch(pane(), /dead/)
   const r = await runs.key('r')
   const stateDir = `${dir}/controlayer-783/orca-run`
   assert.deepEqual(
@@ -9755,6 +9775,68 @@ test("run view: on a halted run the header says so; r on a failed or needs-you n
   views.last().emit('message', { type: 'resume' })
   await turns()
   assert.deepEqual(got, [{ node: 'n/a' }, { node: null }])
+})
+
+test("standalone: an ended run's RUNNER column reads its summary.json as the header does: complete, halted with r, or failed; a halted run whose runner died with no summary is dead; a runner alive after its end is alive", async () => {
+  const clock = fakeClock()
+  clock.t = RUNS_AT
+  const registry = registryIn()
+  const w = runRegistry(registry, clock)
+  const dir = tmp()
+  const live = new Set()
+  const arm = (id, n, summary, { ended = null, halted = false } = {}) => {
+    mkdirSync(join(dir, id), { recursive: true })
+    writeFileSync(join(dir, id, 'journal.jsonl'), '')
+    if (summary) writeFileSync(join(dir, id, 'summary.json'), JSON.stringify(summary))
+    w.armed({ runId: id, project: PROJECT, runDir: join(dir, id), spec: `implement-spec-${n}` })
+    w.runner({ runId: id, terminal: `term_${id}` })
+    if (halted) w.halted({ runId: id, node: 'n/x', reason: 'it died' })
+    if (ended) w.ended({ runId: id, outcome: ended })
+  }
+  // A script halt: the registry says ok, the summary says halted (#157's own case).
+  arm('run_script_halt', 901, { runner: 'session', ok: true, result: { halted: true, reason: '#143 failed: not published' } }, { ended: 'ok' })
+  arm('run_failed', 902, { runner: 'session', ok: false, error: 'the script threw: boom' }, { ended: 'failed' })
+  arm('run_halted_dead', 903, null, { halted: true })
+  arm('run_done_alive', 904, { runner: 'session', ok: true, result: { halted: false, state: 'ready' } }, { ended: 'ok' })
+  live.add(join(dir, 'run_done_alive'))
+  const runs = runsView({ host: fakeOrca({ clock, runWorktree: PROJECT }), clock, registry, transcripts: { usage: () => null }, alive: (d) => live.has(d) })
+  await runs.refresh()
+  const lineOf = (id) => screenOf(runs.model).find((l) => l.includes(id))
+  const runOf = (id) => runs.model.projects.flatMap((p) => p.runs).find((r) => r.runId === id)
+  assert.match(lineOf('run_script_halt'), /run_script_halt +#901 +ok +⏸ halted +0/)
+  assert.deepEqual(runOf('run_script_halt').end, { kind: 'halted', detail: '#143 failed: not published' })
+  assert.match(lineOf('run_failed'), /run_failed +#902 +failed +✗ failed +0/)
+  assert.match(lineOf('run_halted_dead'), /run_halted_dead +#903 +halted +○ dead +0/)
+  assert.match(lineOf('run_done_alive'), /run_done_alive +#904 +ok +● alive +0/)
+  assert.equal(runOf('run_done_alive').end, null, 'a live runner is alive, whatever it wrote')
+  assert.match(screenOf(runs.model)[1], /● 1 alive {2}2 ended {2}○ 1 dead {2}0 reclaimed/)
+  // The pane: the end with its detail, and r's reason.
+  const select = async (key) => {
+    while (runs.model.rows[runs.model.selected].key !== key) await runs.key('DOWN')
+  }
+  const pane = () => screenOf(runs.model).slice(-6, -2).join('\n')
+  await select('run:run_script_halt')
+  assert.match(pane(), /⏸ halted — #143 failed: not published/)
+  assert.match(pane(), /r resumes it: it halted/)
+  await select('run:run_failed')
+  assert.match(pane(), /✗ failed — the script threw: boom/)
+  assert.match(pane(), /r resumes it: its runner ended/)
+  await select('run:run_halted_dead')
+  assert.match(pane(), /r resumes it: its runner is dead/)
+  // crew ls says the same.
+  const ls = listRuns(runs.model)
+  assert.match(
+    ls.find((l) => l.includes('run_script_halt')),
+    /runner ⏸ halted/,
+  )
+  assert.match(
+    ls.find((l) => l.includes('run_failed')),
+    /runner ✗ failed/,
+  )
+  assert.match(
+    ls.find((l) => l.includes('run_halted_dead')),
+    /runner ○ dead/,
+  )
 })
 
 test('standalone: a halted run is listed halted, is not ended while its runner lives, and r points at its tab', async () => {
