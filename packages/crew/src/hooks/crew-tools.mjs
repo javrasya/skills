@@ -10,8 +10,8 @@ import { join } from 'node:path'
 import { request, daemonGone } from '../daemon/client.mjs'
 import { crewPaths } from '../daemon/transport.mjs'
 import { writeJsonAtomic } from '../fsutil.mjs'
-import { RESUME_REQUEST } from '../halt.mjs'
-import { pauseRun, pausedAt } from '../pause.mjs'
+import { RESUME_REQUEST, decisionsOf } from '../halt.mjs'
+import { pauseRun, pausedAt, unpauseRun } from '../pause.mjs'
 import { agentReport, runReport, runnerLogTail } from '../run-report.mjs'
 import { runnerAlive } from '../run-view-model.mjs'
 import { NOTE_MAX, submitShape, tool } from '../tools.mjs'
@@ -126,16 +126,18 @@ const heldFor = (n) => (Array.isArray(n.questions) && n.questions.length ? 'need
 const named = (nodes) => nodes.map((n) => `${n.node} (${heldFor(n)})`).join(', ')
 
 // The orchestrator's tools, on the run in `stateDir`: what a `?` session
-// reads and does. `resume` and `decide` ask the runner through the file its
-// watchResumeRequests takes (runner.mjs), as the tree's r does, so a pause is
-// lifted and a node carried on by the runner itself, in its journal; neither
-// writes it for a runner that is not there to take it.
+// reads and does. `resume` does what the tree's r does (run-view-model.mjs):
+// a pause it lifts itself, removing paused.json, which the runner journals as
+// it finds the file gone; a halt it asks the runner about, through the file
+// its watchResumeRequests takes (runner.mjs), so a node is carried on by the
+// runner itself. `decide` asks the same way. Neither writes the file for a
+// runner that is not there to take it.
 function orchestratorTools(stateDir) {
-  // The runner the request is for, refused when none is there to take it.
+  // The runner a request is for, refused when none is there to take it.
   const runner = () => {
     const report = runReport(stateDir, { alive: runnerAlive })
     if (report.alive === false) throw new Error(`the run's runner is not running, so nothing would take the request. The operator resumes it with r in \`crew view ${report.runId ?? '<run id>'}\`, which starts a runner again.`)
-    return { ask: (request) => writeJsonAtomic(join(stateDir, RESUME_REQUEST), request) }
+    return { send: (request) => writeJsonAtomic(join(stateDir, RESUME_REQUEST), request) }
   }
   return [
     {
@@ -176,23 +178,24 @@ function orchestratorTools(stateDir) {
       label: 'Resume',
       parameters: { type: 'object', properties: { node: { type: 'string', description: 'One held node to carry on, as run_status names it under halted. Every held node when not given.' } } },
       async call({ node = null } = {}) {
-        const { ask } = runner()
         const held = heldNodes(stateDir)
         const paused = pausedAt(stateDir)
         if (!held.length && !paused) return 'Nothing to resume: the run is neither paused nor halted.'
         if (node !== null && !held.some((n) => n.node === node)) throw new Error(`${node} is not held: ${held.length ? `the held nodes are ${named(held)}` : 'the run is not halted'}. Nothing was asked of the runner.`)
-        ask({ node })
-        const did = [paused && 'lift the pause', held.length && (node ? `carry node ${node} on` : `carry every held node on (${held.map((n) => n.node).join(', ')})`)].filter(Boolean)
-        const then = !held.length
-          ? ''
-          : node
-            ? heldFor(held.find((n) => n.node === node)) === 'needs decisions'
-              ? ' Its worker is told the operator answered its questions on the ticket: use decide to hand it the answers instead.'
-              : ' Its worker is told the run was halted here and to finish.'
-            : held.some((n) => heldFor(n) === 'needs decisions')
-              ? ' A node that needs decisions is told the operator answered them on the ticket: use decide to hand its worker the answers instead.'
-              : ' Each worker is told the run was halted here and to finish.'
-        return `Asked the runner to ${did.join(' and to ')}, as r in the run console does.${then}`
+        // A halt is the runner's to carry on: refused before anything is done when it is gone.
+        const { send } = held.length ? runner() : { send: null }
+        if (paused) unpauseRun(stateDir)
+        if (send) send({ node })
+        const lifted = paused ? 'Lifted the pause, as r in the run console does: the agents it held start.' : ''
+        if (!held.length) return lifted
+        const then = node
+          ? heldFor(held.find((n) => n.node === node)) === 'needs decisions'
+            ? ' Its worker is told the operator answered its questions on the ticket: use decide to hand it the answers instead.'
+            : ' Its worker is told the run was halted here and to finish.'
+          : held.some((n) => heldFor(n) === 'needs decisions')
+            ? ' A node that needs decisions is told the operator answered them on the ticket: use decide to hand its worker the answers instead.'
+            : ' Each worker is told the run was halted here and to finish.'
+        return `${lifted ? `${lifted} ` : ''}Asked the runner to carry ${node ? `node ${node}` : `every held node (${held.map((n) => n.node).join(', ')})`} on, as r in the run console does.${then}`
       },
     },
     {
@@ -212,15 +215,15 @@ function orchestratorTools(stateDir) {
         },
       },
       async call({ node, decisions }) {
-        const given = Array.isArray(decisions) ? decisions.filter((d) => d && typeof d.question === 'string' && d.question.trim() && typeof d.answer === 'string' && d.answer.trim()) : []
-        if (!given.length || given.length !== decisions.length) throw new Error('decide needs at least one decision, each a question and its answer.')
-        const { ask } = runner()
+        const given = decisionsOf(decisions)
+        if (!given || given.length !== decisions.length) throw new Error('decide needs at least one decision, each a question and its answer.')
+        const { send } = runner()
         const held = heldNodes(stateDir)
         const asking = held.filter((n) => heldFor(n) === 'needs decisions')
         const it = held.find((n) => n.node === node)
         if (!it) throw new Error(`${node} is not held: ${held.length ? `the held nodes are ${named(held)}` : 'the run is not halted'}. Nothing was asked of the runner.`)
         if (heldFor(it) !== 'needs decisions') throw new Error(`${node} is held because it failed, not for decisions: resume carries it on. ${asking.length ? `The nodes that need decisions are ${asking.map((n) => n.node).join(', ')}.` : 'No node needs decisions.'}`)
-        ask({ node, decisions: given.map(({ question, answer }) => ({ question, answer })) })
+        send({ node, decisions: given })
         return `Answered ${given.length} decision${given.length === 1 ? '' : 's'} for node ${node} and asked the runner to carry it on: its worker is told your answers and finishes with them.`
       },
     },

@@ -6,9 +6,10 @@
 // and the prompt naming it cannot drift apart. The orchestrator's rows (#194)
 // are a `?` session's: what it reads of the run, and what it does to it as the
 // operator's p and r do (hooks/crew-tools.mjs); the `?` prompt
-// (orchestrator.mjs consultPrompt) names them from here. None has a CLI line:
-// an orchestrator without the tool reads the run's files, and the operator
-// acts in the run console.
+// (orchestrator.mjs consultPrompt) names them from here, the readers apart
+// from the ones that act on the run (`acts`), which it says to use on the
+// operator's word alone. None has a CLI line: an orchestrator without the
+// tool reads the run's files, and the operator acts in the run console.
 import { fileURLToPath } from 'node:url'
 
 export const SUBMIT = fileURLToPath(new URL('./submit.mjs', import.meta.url))
@@ -19,7 +20,7 @@ const ID_PLACEHOLDERS = '--from <worker_handle> --dispatch-capability <capabilit
 // `fallback(given)`: the CLI line, given the worker's files (submit only) or
 // the agent's role (needs_you only); a doctor's lines leave the command and
 // IDs to its session host's preamble.
-/** @type {ReadonlyArray<{ name: string, who: string[], description: string, fallback: (given?: { schemaPath?: string, resultPath?: string, payloadPath?: string, role?: string }) => string | null }>} */
+/** @type {ReadonlyArray<{ name: string, who: string[], description: string, acts?: boolean, fallback: (given?: { schemaPath?: string, resultPath?: string, payloadPath?: string, role?: string }) => string | null }>} */
 export const TOOLS = Object.freeze([
   {
     name: 'submit',
@@ -77,18 +78,21 @@ export const TOOLS = Object.freeze([
   {
     name: 'pause',
     who: ['orchestrator'],
+    acts: true,
     description: 'Pauses the run, as p in the run console does: no new agent starts, and every agent at work finishes. Use it only when the operator asks.',
     fallback: () => null,
   },
   {
     name: 'resume',
     who: ['orchestrator'],
+    acts: true,
     description: 'Resumes the run, as r in the run console does: lifts a pause, and carries one held node on, or every held node. A node held for decisions is better resumed with decide. Use it only when the operator asks.',
     fallback: () => null,
   },
   {
     name: 'decide',
     who: ['orchestrator'],
+    acts: true,
     description: "Answers the decisions a held node asked for and carries it on: its worker is told the answers and finishes with them. Give only answers the operator gave you, in the operator's words.",
     fallback: () => null,
   },

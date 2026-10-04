@@ -937,12 +937,21 @@ test("crew host: crew's pi extension gives a `?` session the orchestrator's tool
   assert.equal(await call('pause'), 'Already paused: resume lifts it.')
   const requested = () => JSON.parse(readFileSync(join(stateDir, RESUME_REQUEST), 'utf8'))
   await assert.rejects(call('resume', { node: 'impl_c' }), /^Error: impl_c is not held: the held nodes are impl_a \(needs decisions\), impl_b \(failed\)\. Nothing was asked of the runner\.$/)
-  assert.equal(await call('resume', { node: 'impl_b' }), 'Asked the runner to lift the pause and to carry node impl_b on, as r in the run console does. Its worker is told the run was halted here and to finish.')
-  assert.deepEqual(requested(), { node: 'impl_b' })
-  assert.equal(await call('resume'), 'Asked the runner to lift the pause and to carry every held node on (impl_a, impl_b), as r in the run console does. A node that needs decisions is told the operator answered them on the ticket: use decide to hand its worker the answers instead.')
+  assert.ok(existsSync(join(stateDir, PAUSE_FILE)), 'a refused resume lifts nothing')
+  // As the tree's r: the pause is lifted here, the halt is the runner's.
+  assert.equal(await call('resume', { node: 'impl_b' }), 'Lifted the pause, as r in the run console does: the agents it held start. Asked the runner to carry node impl_b on, as r in the run console does. Its worker is told the run was halted here and to finish.')
+  assert.deepEqual([requested(), existsSync(join(stateDir, PAUSE_FILE))], [{ node: 'impl_b' }, false])
+  assert.equal(await call('resume'), 'Asked the runner to carry every held node (impl_a, impl_b) on, as r in the run console does. A node that needs decisions is told the operator answered them on the ticket: use decide to hand its worker the answers instead.')
   assert.deepEqual(requested(), { node: null })
   rmSync(join(stateDir, RESUME_REQUEST))
-  rmSync(join(stateDir, PAUSE_FILE))
+  // A paused run alone, its runner dead: r lifts the pause with no runner, and so does resume.
+  rmSync(join(stateDir, 'halted.json'))
+  await call('pause')
+  writeFileSync(join(stateDir, 'runner.pid'), '999999')
+  assert.equal(await call('resume'), 'Lifted the pause, as r in the run console does: the agents it held start.')
+  assert.deepEqual([existsSync(join(stateDir, PAUSE_FILE)), existsSync(join(stateDir, RESUME_REQUEST))], [false, false])
+  writeFileSync(join(stateDir, 'halted.json'), JSON.stringify({ at: at(12), runId: 'run_fake9', terminal: 'term_runner', nodes: held }))
+  writeFileSync(join(stateDir, 'runner.pid'), String(process.pid))
 
   await assert.rejects(call('decide', { node: 'impl_b', decisions: [{ question: 'q', answer: 'a' }] }), /^Error: impl_b is held because it failed, not for decisions: resume carries it on\. The nodes that need decisions are impl_a\.$/)
   await assert.rejects(call('decide', { node: 'impl_a', decisions: [] }), /^Error: decide needs at least one decision, each a question and its answer\.$/)
@@ -950,13 +959,17 @@ test("crew host: crew's pi extension gives a `?` session the orchestrator's tool
   assert.deepEqual(requested(), { node: 'impl_a', decisions: [{ question: 'which database?', answer: 'Postgres, as the other services use' }] })
   rmSync(join(stateDir, RESUME_REQUEST))
 
-  // Nothing to resume on a run neither paused nor halted, and no runner to ask on a dead one.
+  // A halt is the runner's to carry on: with the runner dead, resume and decide refuse and write nothing.
+  writeFileSync(join(stateDir, 'runner.pid'), '999999')
+  const noRunner = /^Error: the run's runner is not running, so nothing would take the request\. The operator resumes it with r in `crew view run_fake9`, which starts a runner again\.$/
+  await assert.rejects(call('resume', { node: 'impl_b' }), noRunner)
+  await assert.rejects(call('decide', { node: 'impl_a', decisions: [{ question: 'which database?', answer: 'Postgres' }] }), noRunner)
+  assert.equal(existsSync(join(stateDir, RESUME_REQUEST)), false)
+  assert.deepEqual([(await json('run_status')).state, (await json('run_status')).alive], ['runner gone', false])
+  // Nothing to resume on a run neither paused nor halted.
   rmSync(join(stateDir, 'halted.json'))
   assert.equal(await call('resume'), 'Nothing to resume: the run is neither paused nor halted.')
   assert.equal(existsSync(join(stateDir, RESUME_REQUEST)), false)
-  writeFileSync(join(stateDir, 'runner.pid'), '999999')
-  await assert.rejects(call('resume'), /^Error: the run's runner is not running, so nothing would take the request\. The operator resumes it with r in `crew view run_fake9`, which starts a runner again\.$/)
-  assert.deepEqual([(await json('run_status')).state, (await json('run_status')).alive], ['runner gone', false])
 
   // A `?` session about no run has no tools.
   const none = await h.host.sessionStart({ title: 'orchestrator/console', prompt: 'hello', harness: 'claude', sessionId: randomUUID(), dir: crewScratch().cwd })

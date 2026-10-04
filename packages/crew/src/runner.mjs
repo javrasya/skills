@@ -72,7 +72,7 @@ import { HOST_NAMES, LEGACY_HOST, openHost } from './hosts.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { agentLifecycle, readResult, decisionsNeeded, setAside } from './lifecycle.mjs'
 import { hostOutage } from './outage.mjs'
-import { RESUME_REQUEST, runHalt } from './halt.mjs'
+import { RESUME_REQUEST, decisionsOf, runHalt } from './halt.mjs'
 import { runPause } from './pause.mjs'
 import { holdQueue } from './hold.mjs'
 import { JOURNAL_ENTRIES, readJournal, madeByRun, journalLines, chainEntry } from './journal.mjs'
@@ -777,8 +777,8 @@ export function attachView({ spawnView, tab, log, tail = () => [], clock = realC
 // ({ node }, node null for every held one) and the runner, polling, takes it
 // (deletes it) and resumes as the attached view's IPC r does. The
 // orchestrator's decide (#194) writes one with `decisions`, [{ question,
-// answer }], the operator's answers for the node: passed on as given, an
-// entry that is not a question and its answer dropped, none as null.
+// answer }], the operator's answers for the node: passed on as decisionsOf
+// reads them (halt.mjs), none as null.
 export function watchResumeRequests({ stateDir, resume, log = /** @type {(line: string) => unknown} */ (() => {}), pollMs = 1_000 }) {
   const file = join(stateDir, RESUME_REQUEST)
   const take = () => {
@@ -794,8 +794,7 @@ export function watchResumeRequests({ stateDir, resume, log = /** @type {(line: 
     try {
       const m = JSON.parse(text)
       node = typeof m?.node === 'string' ? m.node : null
-      const given = Array.isArray(m?.decisions) ? m.decisions.filter((d) => d && typeof d.question === 'string' && typeof d.answer === 'string' && d.answer.trim()).map(({ question, answer }) => ({ question, answer })) : []
-      decisions = given.length ? given : null
+      decisions = decisionsOf(m?.decisions)
     } catch (e) {
       log(`!! r: the resume request could not be read, so every held node is resumed: ${e?.message ?? e}`)
     }

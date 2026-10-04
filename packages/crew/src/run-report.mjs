@@ -8,32 +8,23 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { foldJournal, journalLines } from './journal.mjs'
-import { pausedAt } from './pause.mjs'
-import { outcomeOf, runEnded, runnerAlive } from './run-view-model.mjs'
+import { pausedAt, pausedSince } from './pause.mjs'
+import { agentsIn, outcomeOf, phaseGroups, runEnded, runnerAlive } from './run-view-model.mjs'
 import { haltNoticeOf } from './triage.mjs'
-import { isOrchestratorTitle } from './orchestrator.mjs'
 
-const TITLE = /^\[([^\]]*)\] ([\s\S]*)$/
 const iso = (ms) => (Number.isFinite(ms) ? new Date(ms).toISOString() : null)
 
 // One agent as the report lists it, from the fold's record.
 const agentRow = (a) => ({ n: a.n, title: a.title, node: a.node ?? null, state: a.state, reason: a.reason ?? null, note: a.note ?? null, worktree: a.worktree ?? null, terminal: a.terminal ?? null, from: iso(a.from), to: iso(a.to) })
 
-// Every agent of the run but the orchestrator's sessions and a node's
-// superseded attempts (journal.mjs), each with its phase from its title.
-const agentsOf = (fold) =>
-  fold.agents
-    .filter((a) => !isOrchestratorTitle(a.title) && !a.superseded)
-    .map((a) => {
-      const [, phase, label] = TITLE.exec(a.title ?? '') ?? [null, 'Run', a.title ?? `agent-${a.n}`]
-      return { ...a, phase, label }
-    })
+// The agents the tree draws (run-view-model.mjs agentsIn), less a node's
+// superseded attempts (journal.mjs), which the tree draws as no row either.
+const agentsOf = (fold) => agentsIn(fold).filter((a) => !a.superseded)
 
 // The run in `stateDir`: { runId, stateDir, state, alive, ended, outcome,
-// paused, halted, outage, phases }. `state` is one word, the first that
-// holds: ended (its runner wrote summary.json, or the registry closed it),
-// 'runner gone' (no live runner, and no summary), halted, paused, outage,
-// running. `halted` is halted.json's notice while there is one, { since,
+// paused, halted, outage, phases }. `state` is one of, the first that holds:
+// 'ended' (its runner wrote summary.json), 'runner gone' (no live runner, and
+// no summary), 'halted', 'paused', 'outage', 'running'. `halted` is halted.json's notice while there is one, { since,
 // nodes: [{ node, title, reason, questions }] }, questions null for a node
 // held because it failed; `paused` { since } from paused.json; `outage` the
 // fold's. `phases` are the script's declared phases first, then any the
@@ -42,14 +33,7 @@ const agentsOf = (fold) =>
 export function runReport(stateDir, { alive = runnerAlive } = {}) {
   const fold = foldJournal(journalLines(join(stateDir, 'journal.jsonl')))
   const agents = agentsOf(fold)
-  const byPhase = new Map()
-  for (const a of [...agents].sort((x, y) => x.n - y.n)) {
-    if (!byPhase.has(a.phase)) byPhase.set(a.phase, [])
-    byPhase.get(a.phase).push(agentRow(a))
-  }
-  const declared = fold.phases ?? []
-  const rank = (name) => (declared.includes(name) ? declared.indexOf(name) : declared.length)
-  const phases = [...byPhase].sort(([x], [y]) => rank(x) - rank(y)).map(([name, list]) => ({ name, agents: list }))
+  const phases = phaseGroups(agents, fold.phases ?? []).map(([name, list]) => ({ name, agents: list.map(agentRow) }))
 
   const isAlive = alive(stateDir)
   const ended = runEnded({ run: null, alive: isAlive, stateDir })
@@ -63,15 +47,6 @@ export function runReport(stateDir, { alive = runnerAlive } = {}) {
   const outcome = isAlive === true ? null : outcomeOf(stateDir)
   const state = ended === true && existsSync(join(stateDir, 'summary.json')) ? 'ended' : isAlive === false ? 'runner gone' : halted ? 'halted' : paused ? 'paused' : fold.outage ? 'outage' : 'running'
   return { runId: fold.run?.runId ?? [...agents].reverse().find((a) => a.runId)?.runId ?? null, stateDir, state, alive: isAlive, ended, outcome, paused, halted, outage: fold.outage, phases }
-}
-
-const pausedSince = (stateDir) => {
-  try {
-    const at = JSON.parse(readFileSync(join(stateDir, 'paused.json'), 'utf8'))?.at
-    return typeof at === 'string' ? at : null
-  } catch {
-    return null
-  }
 }
 
 // How the run names its agents, for a tool told one it has not: `discover

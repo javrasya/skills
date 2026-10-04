@@ -169,14 +169,14 @@ Answer with a short "summary" of the halt, and one entry per held node, in the o
 // (#194, tools.mjs's orchestrator rows): the readers first, the acts only on
 // the operator's word, since they do to the run what the operator's own keys
 // do.
-const ORCHESTRATOR_TOOLS = TOOLS.filter((t) => t.who.includes('orchestrator')).map((t) => t.name)
-const list = (names) =>
-  names
-    .map((n) => `\`${n}\``)
+const ORCHESTRATOR_TOOLS = TOOLS.filter((t) => t.who.includes('orchestrator'))
+const list = (tools) =>
+  tools
+    .map((t) => `\`${t.name}\``)
     .join(', ')
     .replace(/, (`[^`]+`)$/, ' and $1')
 export const consultPrompt = (stateDir) =>
-  `You are crew's orchestrator, opened from the run console for a conversation with the operator about one workflow run. The run's state is ${runFiles(stateDir)}. Your session has crew's tools for this run: ${list(ORCHESTRATOR_TOOLS.slice(0, 3))} read it, and ${list(ORCHESTRATOR_TOOLS.slice(3))} act on it as the operator's p and r do in the run console. Start with run_status, read what else you need of the files, then wait for the operator's questions. Use pause, resume and decide only when the operator asks, and give decide only the answers they gave. Change nothing else unless the operator asks you to.`
+  `You are crew's orchestrator, opened from the run console for a conversation with the operator about one workflow run. The run's state is ${runFiles(stateDir)}. Your session has crew's tools for this run: ${list(ORCHESTRATOR_TOOLS.filter((t) => !t.acts))} read it, and ${list(ORCHESTRATOR_TOOLS.filter((t) => t.acts))} act on it as the operator's p and r do in the run console. Start with run_status, read what else you need of the files, then wait for the operator's questions. Use pause, resume and decide only when the operator asks, and give decide only the answers they gave. Change nothing else unless the operator asks you to.`
 
 // The `?` sessions of a run, one JSON line each in its state dir, appended by
 // the console that opens one (never by the runner, whose journal a resume

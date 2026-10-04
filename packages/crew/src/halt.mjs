@@ -115,3 +115,13 @@ export function runHalt({ journal, out, record = () => {}, runId = () => null, o
 // (runner.mjs watchResumeRequests): { node }, null for every held node; the
 // orchestrator's decide (#194) adds decisions, [{ question, answer }].
 export const RESUME_REQUEST = 'resume-request.json'
+
+// The decisions of a resume request, as its writer (hooks/crew-tools.mjs
+// decide) and its reader (runner.mjs watchResumeRequests) both take them:
+// each a question and its answer, both non-empty strings, in the order
+// given; anything else dropped; null for none.
+export function decisionsOf(given) {
+  const text = (s) => typeof s === 'string' && s.trim() !== ''
+  const kept = Array.isArray(given) ? given.filter((d) => d && text(d.question) && text(d.answer)).map(({ question, answer }) => ({ question, answer })) : []
+  return kept.length ? kept : null
+}
