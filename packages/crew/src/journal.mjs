@@ -347,17 +347,40 @@ export function foldJournal(entries) {
     // A take-up written before take-ups carried their origin, of a worker no
     // earlier line names: its origin is only this call's n.
     const guessed = worker && e.type !== 'started' && !Number.isInteger(e.origin) && !(e.dispatchId && byDispatch.has(e.dispatchId))
-    const id = Number.isInteger(e.origin) ? e.origin
-      : worker && e.dispatchId && byDispatch.has(e.dispatchId) ? byDispatch.get(e.dispatchId)
-      : worker ? e.n : agentOfCall.get(e.n) ?? e.n
+    const id = Number.isInteger(e.origin) ? e.origin : worker && e.dispatchId && byDispatch.has(e.dispatchId) ? byDispatch.get(e.dispatchId) : worker ? e.n : (agentOfCall.get(e.n) ?? e.n)
     agentOfCall.set(e.n, id)
     if (e.dispatchId) byDispatch.set(e.dispatchId, id)
     let a = agents.get(id)
     if (!a) {
       a = {
-        origin: id, n: e.n, title: null, state: 'queued', continuations: 0, reason: null, replayed: false, launched: false,
-        runId: null, dispatchId: null, harness: null, sessionId: null, worktree: null, terminal: null, from: null, to: null,
-        waiting: null, nextAt: null, workerLeft: false, baseline: null, patient: null, round: 0, doctors: [], rounds: [], failures: 0, attempt: 1, dialog: null, beforeDialog: null,
+        origin: id,
+        n: e.n,
+        title: null,
+        state: 'queued',
+        continuations: 0,
+        reason: null,
+        replayed: false,
+        launched: false,
+        runId: null,
+        dispatchId: null,
+        harness: null,
+        sessionId: null,
+        worktree: null,
+        terminal: null,
+        from: null,
+        to: null,
+        waiting: null,
+        nextAt: null,
+        workerLeft: false,
+        baseline: null,
+        patient: null,
+        round: 0,
+        doctors: [],
+        rounds: [],
+        failures: 0,
+        attempt: 1,
+        dialog: null,
+        beforeDialog: null,
       }
       if (guessed) a.originGuessed = true
       agents.set(id, a)
@@ -391,8 +414,18 @@ export function foldJournal(entries) {
         if (e.type !== 'outstanding') a.from ??= at
         const continuations = e.continuations ?? a.continuations
         Object.assign(a, {
-          state: continuations ? 'continued' : 'running', continuations, launched: true, reason: null, waiting: null, nextAt: null, runId: e.run ?? a.runId, dispatchId: e.dispatchId ?? a.dispatchId,
-          harness: e.harness ?? a.harness, sessionId: e.sessionId ?? a.sessionId, worktree: e.worktree ?? a.worktree, terminal: e.terminal ?? a.terminal,
+          state: continuations ? 'continued' : 'running',
+          continuations,
+          launched: true,
+          reason: null,
+          waiting: null,
+          nextAt: null,
+          runId: e.run ?? a.runId,
+          dispatchId: e.dispatchId ?? a.dispatchId,
+          harness: e.harness ?? a.harness,
+          sessionId: e.sessionId ?? a.sessionId,
+          worktree: e.worktree ?? a.worktree,
+          terminal: e.terminal ?? a.terminal,
         })
         if (typeof e.needsYou === 'string') Object.assign(a, { state: 'needs you', reason: e.needsYou })
         carryRounds(a, e)
@@ -403,9 +436,17 @@ export function foldJournal(entries) {
       }
       case 'earlier':
         Object.assign(a, {
-          state: typeof e.state === 'string' ? e.state : a.state, reason: e.reason ?? null, continuations: e.continuations ?? a.continuations, workerLeft: e.workerLeft === true || a.workerLeft,
-          launched: a.launched || !!e.dispatchId, runId: e.run ?? a.runId, dispatchId: e.dispatchId ?? a.dispatchId, harness: e.harness ?? a.harness,
-          sessionId: e.sessionId ?? a.sessionId, worktree: e.worktree ?? a.worktree, terminal: e.terminal ?? a.terminal,
+          state: typeof e.state === 'string' ? e.state : a.state,
+          reason: e.reason ?? null,
+          continuations: e.continuations ?? a.continuations,
+          workerLeft: e.workerLeft === true || a.workerLeft,
+          launched: a.launched || !!e.dispatchId,
+          runId: e.run ?? a.runId,
+          dispatchId: e.dispatchId ?? a.dispatchId,
+          harness: e.harness ?? a.harness,
+          sessionId: e.sessionId ?? a.sessionId,
+          worktree: e.worktree ?? a.worktree,
+          terminal: e.terminal ?? a.terminal,
         })
         if (e.patient != null) a.patient = e.patient
         carryRounds(a, e)
@@ -428,7 +469,7 @@ export function foldJournal(entries) {
         }
         break
       case 'dialogClosed':
-        if (a.dialog) Object.assign(a, { state: a.state === 'needs you' ? a.beforeDialog ?? 'starting' : a.state, reason: a.state === 'needs you' ? null : a.reason, dialog: null, beforeDialog: null })
+        if (a.dialog) Object.assign(a, { state: a.state === 'needs you' ? (a.beforeDialog ?? 'starting') : a.state, reason: a.state === 'needs you' ? null : a.reason, dialog: null, beforeDialog: null })
         break
       case 'moving':
         if (a.state === 'stuck') Object.assign(a, { state: carriedOn(a), reason: null })
@@ -445,8 +486,13 @@ export function foldJournal(entries) {
         // is the worker a reclaim releases and the tab it closes. A remedy
         // starts a fresh count against the cap.
         Object.assign(a, {
-          state: 'continued', reason: null, waiting: null, continuations: e.type === 'remedy' ? 0 : e.attempt ?? a.continuations + 1,
-          dispatchId: e.dispatchId ?? a.dispatchId, terminal: e.terminal ?? a.terminal, sessionId: e.sessionId ?? a.sessionId,
+          state: 'continued',
+          reason: null,
+          waiting: null,
+          continuations: e.type === 'remedy' ? 0 : (e.attempt ?? a.continuations + 1),
+          dispatchId: e.dispatchId ?? a.dispatchId,
+          terminal: e.terminal ?? a.terminal,
+          sessionId: e.sessionId ?? a.sessionId,
         })
         if (e.type === 'remedy') Object.assign(roundOf(a, e), { outcome: 'remedy', note: mail.get(e.messageId)?.body ?? null })
         break
@@ -475,7 +521,13 @@ export function foldJournal(entries) {
       case 'failed':
         a.from ??= at
         Object.assign(a, {
-          state: 'failed', reason: e.reason ?? null, waiting: null, workerLeft: e.workerLeft === true, to: at, runId: a.runId ?? e.run ?? null, worktree: a.worktree ?? e.retained?.path ?? null,
+          state: 'failed',
+          reason: e.reason ?? null,
+          waiting: null,
+          workerLeft: e.workerLeft === true,
+          to: at,
+          runId: a.runId ?? e.run ?? null,
+          worktree: a.worktree ?? e.retained?.path ?? null,
           continuations: e.continuations ?? a.continuations,
         })
         break
@@ -527,8 +579,17 @@ export function foldJournal(entries) {
       const dir = typeof e.dir === 'string' ? e.dir : agentDir(e.n, title?.replace(/^\[[^\]]*\] /, '') || `agent-${e.n}`)
       c.origin = id
       c.worker = {
-        n: e.n, title, dir, run: e.run ?? run?.runId ?? null, dispatchId: e.dispatchId, harness: e.harness ?? null, sessionId: e.sessionId,
-        terminal: e.terminal ?? null, worktree: e.worktree ?? null, continuations: e.continuations ?? 0, origin: id,
+        n: e.n,
+        title,
+        dir,
+        run: e.run ?? run?.runId ?? null,
+        dispatchId: e.dispatchId,
+        harness: e.harness ?? null,
+        sessionId: e.sessionId,
+        terminal: e.terminal ?? null,
+        worktree: e.worktree ?? null,
+        continuations: e.continuations ?? 0,
+        origin: id,
       }
       if (e.type === 'outstanding') {
         c.carried = true
@@ -566,8 +627,14 @@ export function foldJournal(entries) {
     calls.get(c.key).push(c.node ? { ...entry, node: c.node } : entry)
     if (c.node) {
       nodes.set(c.node, {
-        ...entry, key: c.key, node: c.node, n: c.n, title: c.title, ...(c.origin !== null && { origin: c.origin }),
-        ...(settled?.failed && { reason: c.reason }), ...(settled && c.worker && { last: c.worker }),
+        ...entry,
+        key: c.key,
+        node: c.node,
+        n: c.n,
+        title: c.title,
+        ...(c.origin !== null && { origin: c.origin }),
+        ...(settled?.failed && { reason: c.reason }),
+        ...(settled && c.worker && { last: c.worker }),
       })
     }
   }

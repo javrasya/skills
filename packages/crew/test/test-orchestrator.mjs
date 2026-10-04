@@ -38,7 +38,7 @@ function standIn(answer = () => ({ n: 1 })) {
 const ask = (run, over = {}) => orchestrator({ run, harness: 'pi', model: 'lm/qwen', cwd: 'C:/repo', ...over })
 const answering = (value) => standIn(() => value).run
 
-test('ask: one headless run on the given harness and model, in the project, with the question\'s prompt and schema; its answer is returned', async () => {
+test("ask: one headless run on the given harness and model, in the project, with the question's prompt and schema; its answer is returned", async () => {
   const { run, calls } = standIn(() => ({ n: 7 }))
   assert.deepEqual(await ask(run, { permissionMode: 'acceptEdits', program: ['node', 'fake.mjs'] }).ask({ name: 'count', prompt: 'How many?', schema: SCHEMA, dirs: ['C:/state'] }), { n: 7 })
   const [c] = calls
@@ -64,7 +64,15 @@ test('ask: close() ends every run still asked, which is given up as stopped, and
 })
 
 test('draft: the checks as validation.md, each under its source; none is an empty list, said to be empty; a command of two lines is no answer', async () => {
-  assert.equal(validationText({ checks: [{ command: 'npm test', source: 'package.json' }, { command: ' make lint ', source: 'Makefile\nlint' }] }), '# package.json\nnpm test\n# Makefile lint\nmake lint\n')
+  assert.equal(
+    validationText({
+      checks: [
+        { command: 'npm test', source: 'package.json' },
+        { command: ' make lint ', source: 'Makefile\nlint' },
+      ],
+    }),
+    '# package.json\nnpm test\n# Makefile lint\nmake lint\n',
+  )
   const none = standIn(() => ({ checks: [] }))
   assert.deepEqual(await draftValidation(ask(none.run), { repoDir: 'C:/repo' }), { text: '', empty: true })
   const { prompt } = none.calls[0]
@@ -75,8 +83,26 @@ test('draft: the checks as validation.md, each under its source; none is an empt
 })
 
 test("draft: a command the workflow's String.raw list cannot hold (backtick, ${, trailing backslash) is no answer; a source holding one is only a comment, so it is cleaned", async () => {
-  for (const [command, why] of [['echo `date`', /holds a backtick/], ['npm test -- --shard=${{ matrix.shard }}', /holds \$\{/], ['make \\', /ends in a backslash/]]) {
-    await assert.rejects(draftValidation(ask(answering({ checks: [{ command: 'npm test', source: 'package.json' }, { command, source: 'ci.yml' }] })), { repoDir: 'C:/repo' }), (e) => e instanceof OrchestratorError && why.test(e.message) && e.message.includes(JSON.stringify(command)), command)
+  for (const [command, why] of [
+    ['echo `date`', /holds a backtick/],
+    ['npm test -- --shard=${{ matrix.shard }}', /holds \$\{/],
+    ['make \\', /ends in a backslash/],
+  ]) {
+    await assert.rejects(
+      draftValidation(
+        ask(
+          answering({
+            checks: [
+              { command: 'npm test', source: 'package.json' },
+              { command, source: 'ci.yml' },
+            ],
+          }),
+        ),
+        { repoDir: 'C:/repo' },
+      ),
+      (e) => e instanceof OrchestratorError && why.test(e.message) && e.message.includes(JSON.stringify(command)),
+      command,
+    )
   }
   assert.equal(validationText({ checks: [{ command: 'npm test', source: 'ci.yml `test` ${{ matrix.os }} \\' }] }), "# ci.yml 'test' $ {{ matrix.os }}\nnpm test\n")
   const prompt = standIn(() => ({ checks: [] }))
@@ -84,7 +110,7 @@ test("draft: a command the workflow's String.raw list cannot hold (backtick, ${,
   assert.match(prompt.calls[0].prompt, /resolve every CI expression \(a GitHub Actions \$\{\{ matrix\.x \}\}.*no command holding a backtick, a \$\{ or a trailing backslash/)
 })
 
-test("graph: a journal naming an orchestrator session shows no row for it, in any phase", async () => {
+test('graph: a journal naming an orchestrator session shows no row for it, in any phase', async () => {
   const stateDir = scratch('run')
   const started = (n, title) => ({ type: 'started', n, title, at: new Date(0).toISOString(), run: 'run_1', dispatchId: `ctx_${n}`, harness: 'claude', sessionId: `sid-${n}`, worktree: null, terminal: `term_${n}` })
   writeFileSync(join(stateDir, 'journal.jsonl'), [started(1, '[Implement] impl:a'), started(2, 'orchestrator/validation-list'), started(3, '[Implement] orchestrator/x')].map((e) => `${JSON.stringify(e)}\n`).join(''))
@@ -112,13 +138,12 @@ function runWithConsults(consults) {
 const consult = (n, terminal, ...more) => [{ type: 'starting', n, harness: 'claude', model: 'opus', dir: 'C:/repo' }, ...(terminal ? [{ type: 'started', n, terminal, sessionId: `sid-${terminal}` }] : []), ...more]
 
 test('graph: the ? sessions the run dir records are the rows of an Orchestrator phase drawn first (#168), each in the state crew has its session in, none counted as an agent; Enter enters one; a closed one is no row', async () => {
-  const { stateDir, at } = runWithConsults([
-    ...consult(1, 'c1'), ...consult(2, 'c2'), ...consult(3, 'c3'), ...consult(4, 'c4', { type: 'closed', n: 4 }), ...consult(5, null),
-    ...consult(6, null, { type: 'failed', n: 6, reason: 'crew: agent_not_ready' }), ...consult(7, 'c7'),
-  ])
+  const { stateDir, at } = runWithConsults([...consult(1, 'c1'), ...consult(2, 'c2'), ...consult(3, 'c3'), ...consult(4, 'c4', { type: 'closed', n: 4 }), ...consult(5, null), ...consult(6, null, { type: 'failed', n: 6, reason: 'crew: agent_not_ready' }), ...consult(7, 'c7')])
   const infos = [
-    { terminal: 'c1', alive: true, parked: false, waiting: null }, { terminal: 'c2', alive: true, parked: false, waiting: 'a permission dialog' },
-    { terminal: 'c3', alive: false, parked: true, waiting: null }, { terminal: 'term_1', alive: true, parked: false, waiting: null },
+    { terminal: 'c1', alive: true, parked: false, waiting: null },
+    { terminal: 'c2', alive: true, parked: false, waiting: 'a permission dialog' },
+    { terminal: 'c3', alive: false, parked: true, waiting: null },
+    { terminal: 'term_1', alive: true, parked: false, waiting: null },
   ]
   const host = { inPlace: true, terminalList: async () => infos.map((i) => i.terminal), terminalsParked: async () => ['c3'], terminalsInfo: async () => infos }
   const now = Date.parse(at) + 90_000
@@ -126,22 +151,31 @@ test('graph: the ? sessions the run dir records are the rows of an Orchestrator 
   const view = runView({ stateDir, host, registry: null, transcripts: { usage }, alive: () => true, clock: { now: () => now }, enter: true })
   await view.refresh()
   const { model } = view
-  assert.deepEqual(model.phases.map((p) => p.name), ['Orchestrator', 'Implement'])
-  assert.deepEqual(model.rows.map((r) => r.key), ['phase:Orchestrator', 'console:1', 'console:2', 'console:3', 'console:5', 'console:6', 'console:7', 'phase:Implement', 'agent:1'])
+  assert.deepEqual(
+    model.phases.map((p) => p.name),
+    ['Orchestrator', 'Implement'],
+  )
+  assert.deepEqual(
+    model.rows.map((r) => r.key),
+    ['phase:Orchestrator', 'console:1', 'console:2', 'console:3', 'console:5', 'console:6', 'console:7', 'phase:Implement', 'agent:1'],
+  )
   const rows = model.rows.filter((r) => r.key.startsWith('console:')).map((r) => r.agent)
-  assert.deepEqual(rows.map((a) => [a.n, a.state, a.reason, a.parked, a.tabOpen, a.terminal]), [
-    [1, 'running', null, false, true, 'c1'],
-    [2, 'needs you', 'a permission dialog', false, true, 'c2'],
-    [3, 'done', null, true, true, 'c3'],
-    [5, 'starting', null, false, null, null],
-    [6, 'failed', 'crew: agent_not_ready', false, null, null],
-    [7, 'failed', 'its crew session is gone', false, false, 'c7'],
-  ])
+  assert.deepEqual(
+    rows.map((a) => [a.n, a.state, a.reason, a.parked, a.tabOpen, a.terminal]),
+    [
+      [1, 'running', null, false, true, 'c1'],
+      [2, 'needs you', 'a permission dialog', false, true, 'c2'],
+      [3, 'done', null, true, true, 'c3'],
+      [5, 'starting', null, false, null, null],
+      [6, 'failed', 'crew: agent_not_ready', false, null, null],
+      [7, 'failed', 'its crew session is gone', false, false, 'c7'],
+    ],
+  )
   const [one] = rows
   assert.deepEqual([one.label, one.title, one.phase, one.console, one.worktree, one.harness, one.sessionId, one.context, one.tokens, one.transcript, one.elapsedMs], ['console 1', '[Orchestrator] console 1', 'Orchestrator', true, null, 'claude', 'sid-c1', 1_000, 5_000, 'C:/t/c1.jsonl', 90_000])
   const orch = model.phases[0]
   assert.deepEqual([orch.console, orch.total, orch.folded, orch.mix.running, orch.mix['needs you'], orch.mix.done, orch.mix.starting, orch.mix.failed], [true, 6, false, 1, 1, 1, 1, 2])
-  assert.deepEqual(model.header.counts, { ...Object.fromEntries(STATES.map((s) => [s, 0])), running: 1 }, 'the header counts the run\'s agents only')
+  assert.deepEqual(model.header.counts, { ...Object.fromEntries(STATES.map((s) => [s, 0])), running: 1 }, "the header counts the run's agents only")
   const screen = draw(model, { width: 140, height: 30 }).lines.map(strip)
   assert.match(screen[4], /^ ▾ Orchestrator 6 sessions\s+\?1 ◌1 ●1 ✗2 ✓1\s*$/, 'the phase row counts sessions, not done ones')
   assert.match(screen[5], /^\s+1   console 1\s+● running/)
@@ -154,28 +188,59 @@ test('graph: the ? sessions the run dir records are the rows of an Orchestrator 
 
   // Every ? session parked folds the phase, as a phase of done agents folds.
   const parked = runWithConsults([...consult(1, 'c1')])
-  const quiet = runView({ stateDir: parked.stateDir, host: { inPlace: true, terminalList: async () => ['c1'], terminalsParked: async () => ['c1'], terminalsInfo: async () => [{ terminal: 'c1', alive: false, parked: true, waiting: null }] }, registry: null, transcripts: { usage: () => null }, alive: () => true, clock: { now: () => now } })
+  const quiet = runView({
+    stateDir: parked.stateDir,
+    host: { inPlace: true, terminalList: async () => ['c1'], terminalsParked: async () => ['c1'], terminalsInfo: async () => [{ terminal: 'c1', alive: false, parked: true, waiting: null }] },
+    registry: null,
+    transcripts: { usage: () => null },
+    alive: () => true,
+    clock: { now: () => now },
+  })
   await quiet.refresh()
-  assert.deepEqual(quiet.model.rows.map((r) => r.key), ['phase:Orchestrator', 'phase:Implement', 'agent:1'])
+  assert.deepEqual(
+    quiet.model.rows.map((r) => r.key),
+    ['phase:Orchestrator', 'phase:Implement', 'agent:1'],
+  )
   // Crew's sessions not readable: a started one stays running, saying so.
-  const unread = runView({ stateDir: parked.stateDir, host: { inPlace: true, terminalList: async () => ['c1'], terminalsParked: async () => [], terminalsInfo: async () => { throw new Error('crew: ECONNREFUSED') } }, registry: null, transcripts: { usage: () => null }, alive: () => true, clock: { now: () => now } })
+  const unread = runView({
+    stateDir: parked.stateDir,
+    host: {
+      inPlace: true,
+      terminalList: async () => ['c1'],
+      terminalsParked: async () => [],
+      terminalsInfo: async () => {
+        throw new Error('crew: ECONNREFUSED')
+      },
+    },
+    registry: null,
+    transcripts: { usage: () => null },
+    alive: () => true,
+    clock: { now: () => now },
+  })
   await unread.refresh()
   assert.deepEqual([unread.model.rows[1].agent.state, unread.model.rows[1].agent.reason], ['running', "crew's sessions could not be read: crew: ECONNREFUSED"])
   // A run with no ? session has no Orchestrator phase.
   const none = runWithConsults([])
   const plain = runView({ stateDir: none.stateDir, host: { terminalList: async () => [] }, registry: null, transcripts: { usage: () => null }, alive: () => true, clock: { now: () => now } })
   await plain.refresh()
-  assert.deepEqual(plain.model.rows.map((r) => r.key), ['phase:Implement', 'agent:1'])
+  assert.deepEqual(
+    plain.model.rows.map((r) => r.key),
+    ['phase:Implement', 'agent:1'],
+  )
 })
 
-test('tree: Ctrl+R on a ? session\'s row closes its session and drops the row (#168), on the Orchestrator row or Reclaim All every one; Ctrl+P parks a running one at once', async () => {
+test("tree: Ctrl+R on a ? session's row closes its session and drops the row (#168), on the Orchestrator row or Reclaim All every one; Ctrl+P parks a running one at once", async () => {
   const { stateDir, at } = runWithConsults([...consult(1, 'c1'), ...consult(2, 'c2'), ...consult(3, null, { type: 'failed', n: 3, reason: 'crew: agent_not_ready' }), ...consult(4, 'c4')])
   const closed = []
   const parked = new Set()
   const infos = () => ['c1', 'c2', 'c4'].filter((t) => !closed.includes(t)).map((terminal) => ({ terminal, alive: !parked.has(terminal), parked: parked.has(terminal), waiting: null }))
   const host = {
-    inPlace: true, terminalList: async () => infos().map((i) => i.terminal), terminalsParked: async () => [...parked], terminalsInfo: async () => infos(),
-    terminalClose: async ({ terminal }) => closed.push(terminal), terminalPark: async ({ terminal }) => parked.add(terminal),
+    inPlace: true,
+    terminalList: async () => infos().map((i) => i.terminal),
+    terminalsParked: async () => [...parked],
+    terminalsInfo: async () => infos(),
+    terminalClose: async ({ terminal }) => closed.push(terminal),
+    terminalPark: async ({ terminal }) => parked.add(terminal),
   }
   const view = runView({ stateDir, host, registry: null, transcripts: { usage: () => null }, alive: () => false, clock: { now: () => Date.parse(at) + 1000 }, enter: true })
   await view.refresh()
@@ -187,7 +252,10 @@ test('tree: Ctrl+R on a ? session\'s row closes its session and drops the row (#
   assert.deepEqual(view.model.dialog.options[0], { id: 'selected', label: 'Reclaim Selected', detail: 'console 1: closes its session', disabled: false, reason: null })
   assert.match((await view.key('ENTER')).message, /^closed \[Orchestrator\] console 1$/)
   assert.deepEqual([closed, keys()], [['c1'], ['phase:Orchestrator', 'console:2', 'console:3', 'console:4', 'phase:Implement', 'agent:1']])
-  assert.deepEqual(consultSessions(stateDir).map((s) => s.state), ['closed', 'started', 'failed', 'started'])
+  assert.deepEqual(
+    consultSessions(stateDir).map((s) => s.state),
+    ['closed', 'started', 'failed', 'started'],
+  )
 
   // Ctrl+P: Park Selected on a running one; a parked one is refused with why.
   await view.key('CTRL_P')
@@ -212,7 +280,13 @@ test('tree: Ctrl+R on a ? session\'s row closes its session and drops the row (#
   assert.equal(view.model.dialog.options[view.model.dialog.highlight].id, 'all')
   const all = await view.key('ENTER')
   assert.match(all.message, /closed 2 orchestrator sessions/)
-  assert.deepEqual([closed, keys()], [['c1', 'c2', 'c4'], ['phase:Implement', 'agent:1']])
+  assert.deepEqual(
+    [closed, keys()],
+    [
+      ['c1', 'c2', 'c4'],
+      ['phase:Implement', 'agent:1'],
+    ],
+  )
 })
 
 // The crew host, and the fake harness run headless, in a scratch crew home
@@ -239,7 +313,7 @@ test('headless: the fake-harness orchestrator answers in the project, drafts its
   const { paths, repo, orch } = crewScratch()
   assert.deepEqual(await orch.ask({ name: 'count', prompt: 'How many? [answer {"n":7}]', schema: SCHEMA }), { n: 7 })
   assert.deepEqual(await draftValidation(orch, { repoDir: repo }), { text: '# package.json scripts.test\nnpm test\n# .github/workflows/ci.yml job lint\nnpm run lint\n', empty: false })
-  assert.equal((await request(paths, { op: 'session.list' }).catch(() => null)), null, 'no daemon was started: no session was needed')
+  assert.equal(await request(paths, { op: 'session.list' }).catch(() => null), null, 'no daemon was started: no session was needed')
 })
 
 test('headless: an answer that fails its schema, an error result, and a run past its time are each reported', async () => {
@@ -270,19 +344,42 @@ test('?: consultSession records each session in the run dir (#168), starting the
   const host = { sessionStart: async (s) => (starts.push(s), { terminal: String(starts.length) }) }
   assert.deepEqual(await consultSession({ host, stateDir, harness: 'claude', model: 'opus', dir: 'C:/repo' }), { terminal: '1', n: 1 })
   assert.deepEqual(await consultSession({ host, stateDir, harness: 'pi', dir: 'C:/repo' }), { terminal: '2', n: 2 })
-  const failing = { sessionStart: async () => { throw new Error('crew: agent_not_ready') } }
+  const failing = {
+    sessionStart: async () => {
+      throw new Error('crew: agent_not_ready')
+    },
+  }
   await assert.rejects(consultSession({ host: failing, stateDir, dir: 'C:/repo' }), /agent_not_ready/)
-  const lines = readFileSync(join(stateDir, CONSULT_FILE), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
-  assert.deepEqual(lines.map((l) => [l.type, l.n]), [['starting', 1], ['started', 1], ['starting', 2], ['started', 2], ['starting', 3], ['failed', 3]])
+  const lines = readFileSync(join(stateDir, CONSULT_FILE), 'utf8')
+    .trim()
+    .split('\n')
+    .map((l) => JSON.parse(l))
+  assert.deepEqual(
+    lines.map((l) => [l.type, l.n]),
+    [
+      ['starting', 1],
+      ['started', 1],
+      ['starting', 2],
+      ['started', 2],
+      ['starting', 3],
+      ['failed', 3],
+    ],
+  )
   const sessions = consultSessions(stateDir)
-  assert.deepEqual(sessions.map((s) => [s.n, s.state, s.terminal, s.harness, s.model, s.sessionId, s.dir, s.reason]), [
-    [1, 'started', '1', 'claude', 'opus', starts[0].sessionId, 'C:/repo', null],
-    [2, 'started', '2', 'pi', null, starts[1].sessionId, 'C:/repo', null],
-    [3, 'failed', null, 'claude', null, null, 'C:/repo', 'crew: agent_not_ready'],
-  ])
+  assert.deepEqual(
+    sessions.map((s) => [s.n, s.state, s.terminal, s.harness, s.model, s.sessionId, s.dir, s.reason]),
+    [
+      [1, 'started', '1', 'claude', 'opus', starts[0].sessionId, 'C:/repo', null],
+      [2, 'started', '2', 'pi', null, starts[1].sessionId, 'C:/repo', null],
+      [3, 'failed', null, 'claude', null, null, 'C:/repo', 'crew: agent_not_ready'],
+    ],
+  )
   assert.ok(sessions.every((s) => typeof s.at === 'string' && !Number.isNaN(Date.parse(s.at))))
   closeConsult(stateDir, 1)
-  assert.deepEqual(consultSessions(stateDir).map((s) => s.state), ['closed', 'started', 'failed'])
+  assert.deepEqual(
+    consultSessions(stateDir).map((s) => s.state),
+    ['closed', 'started', 'failed'],
+  )
   assert.deepEqual(consultSessions(scratch('none')), [])
 
   // A console that died between starting and started leaves a starting line: shown so until stale, then failed.
@@ -321,7 +418,11 @@ function heldAnswer() {
 }
 const settle = () => new Promise((done) => setImmediate(done))
 // The panel's column of the body lines, at 140 wide: right of the 97-wide rows.
-const panelOf = (view) => draw(view.model, { width: 140, height: 30 }).lines.map(strip).slice(4, 23).map((l) => l.slice(97))
+const panelOf = (view) =>
+  draw(view.model, { width: 140, height: 30 })
+    .lines.map(strip)
+    .slice(4, 23)
+    .map((l) => l.slice(97))
 
 test('triage: a new halted.json at is asked exactly once, however often and by however many it is triggered; a new at is a new question', async () => {
   const stateDir = haltedRun()
@@ -366,16 +467,10 @@ test('triage: the run view asks once per at it sees, shows the question asking a
   await view.refresh()
   assert.equal(view.model.halt.triage.state, 'answered')
   panel = panelOf(view)
-  assert.deepEqual(panel.slice(0, 8).map((l) => l.trimEnd()), [
-    '│ ⏸ halt triage · 10:00:00',
-    '│ impl:a failed its tests',
-    '│',
-    '│ impl:a',
-    '│   why: its tests fail on Windows',
-    '│   ? keep the new API?',
-    '│   decide: whether to keep the new API or',
-    '│   revert it',
-  ])
+  assert.deepEqual(
+    panel.slice(0, 8).map((l) => l.trimEnd()),
+    ['│ ⏸ halt triage · 10:00:00', '│ impl:a failed its tests', '│', '│ impl:a', '│   why: its tests fail on Windows', '│   ? keep the new API?', '│   decide: whether to keep the new API or', '│   revert it'],
+  )
   const screen = draw(view.model, { width: 140, height: 30 }).lines.map(strip)
   const row = screen.findIndex((l, i) => i >= 4 && l.slice(0, 97).includes('impl:a'))
   assert.ok(row >= 4 && row < 23, 'the halted node is drawn left of the panel')
@@ -389,7 +484,11 @@ test('triage: the run view asks once per at it sees, shows the question asking a
   rmSync(join(stateDir, 'halted.json'))
   await view.refresh()
   assert.equal(view.model.halt, null)
-  assert.ok(!draw(view.model, { width: 140, height: 30 }).lines.map(strip).some((l) => l.includes('halt triage')))
+  assert.ok(
+    !draw(view.model, { width: 140, height: 30 })
+      .lines.map(strip)
+      .some((l) => l.includes('halt triage')),
+  )
 })
 
 test('halt panel: any width, however narrow, draws every triage state in its height at once; a terminal too narrow for rows beside it draws the rows alone', async () => {
@@ -413,13 +512,23 @@ test('halt panel: any width, however narrow, draws every triage state in its hei
   assert.ok(view.model.halt)
   for (const width of [20, 4, 1]) {
     const screen = draw(view.model, { width, height: 30 }).lines.map(strip)
-    assert.ok(screen.every((l) => l.length === width), `${width} wide`)
+    assert.ok(
+      screen.every((l) => l.length === width),
+      `${width} wide`,
+    )
     assert.ok(!screen.some((l) => l.includes('│ ⏸')), `no panel at ${width} wide`)
   }
   const narrow = draw(view.model, { width: 20, height: 30 }).lines.map(strip)
-  assert.ok(narrow.slice(4).some((l) => l.includes('impl:a')), "the halted node's row is still drawn")
+  assert.ok(
+    narrow.slice(4).some((l) => l.includes('impl:a')),
+    "the halted node's row is still drawn",
+  )
   // Wide enough for the rows beside it, the panel is drawn as before.
-  assert.ok(draw(view.model, { width: 70, height: 30 }).lines.map(strip).some((l) => l.includes('⏸ halt triage')))
+  assert.ok(
+    draw(view.model, { width: 70, height: 30 })
+      .lines.map(strip)
+      .some((l) => l.includes('⏸ halt triage')),
+  )
 })
 
 test('triage: a question that fails says so in the panel, and r resumes the run all the same, while it is asked and after it failed', async () => {
@@ -446,7 +555,15 @@ test('triage: a question that fails says so in the panel, and r resumes the run 
 
   // An orchestrator that cannot even be made fails the question the same way.
   const other = haltedRun()
-  assert.deepEqual(await triageHalt({ stateDir: other, orchestrate: () => { throw new Error('no harness to run it on') } }), { asked: true, state: 'failed' })
+  assert.deepEqual(
+    await triageHalt({
+      stateDir: other,
+      orchestrate: () => {
+        throw new Error('no harness to run it on')
+      },
+    }),
+    { asked: true, state: 'failed' },
+  )
   assert.match(readTriage(other, AT).error, /no harness to run it on/)
   // A question left asking by an asker that went away is failed once stale.
   const stale = haltedRun()
@@ -475,7 +592,7 @@ test('?: on an opened run, a fresh orchestrator session seeded with its run dire
   const keys = () => runs.opened().model.rows.map((r) => r.key)
   const rows = keys()
   await runs.refresh()
-  assert.deepEqual(triaged, [stateDir], 'the opened run\'s halt, once')
+  assert.deepEqual(triaged, [stateDir], "the opened run's halt, once")
   open.push('sess_1')
   assert.deepEqual(await runs.key('?'), { enter: { session: 'sess_1', title: '[Orchestrator] console 1' } }, 'entered, and never closed on leaving')
   assert.deepEqual(keys(), ['phase:Orchestrator', 'console:1', ...rows], 'its row is there as the session is entered')
@@ -496,7 +613,7 @@ test('?: on an opened run, a fresh orchestrator session seeded with its run dire
   assert.match((await plain.key('?')).message, /crew view only/)
 })
 
-test('run default: the orchestrator of an armed run runs on the harness and model its script\'s RUN_DEFAULT names, in its project, with the runner\'s permission mode', async () => {
+test("run default: the orchestrator of an armed run runs on the harness and model its script's RUN_DEFAULT names, in its project, with the runner's permission mode", async () => {
   assert.deepEqual(runDefaultOf("x\r\nconst RUN_DEFAULT = { harness: 'claude', model: 'opus' }\r\n"), { harness: 'claude', model: 'opus' })
   assert.deepEqual(runDefaultOf("const RUN_DEFAULT = { harness: 'pi', piModel: 'lm/q\\'wen', model: 'sonnet' }"), { harness: 'pi', model: "lm/q'wen" })
   assert.equal(runDefaultOf('no table here'), null)
@@ -525,12 +642,24 @@ test('crew host: ? starts the fake harness in a session of no run, titled orches
   const { terminal: id } = await consultSession({ host, stateDir, harness: 'claude', model: 'opus', dir: repo })
   const s = (await request(paths, { op: 'session.list' })).sessions.find((x) => x.id === id)
   assert.deepEqual([s.title, s.alive, realpathSync(s.cwd)], ['orchestrator/console', true, repo])
-  assert.deepEqual((await host.terminalsInfo()).find((i) => i.terminal === id), { terminal: id, alive: true, parked: false, waiting: null, exit: null }, 'what the tree reads its state from')
+  assert.deepEqual(
+    (await host.terminalsInfo()).find((i) => i.terminal === id),
+    { terminal: id, alive: true, parked: false, waiting: null, exit: null },
+    'what the tree reads its state from',
+  )
   await assert.rejects(request(paths, { op: 'worker.show', id }), /dispatch_not_found/, 'no dispatch of any run: never a node')
-  const transcripts = () => (existsSync(join(root, 'claude')) ? readdirSync(join(root, 'claude'), { recursive: true }).filter((f) => f.endsWith('.jsonl')).map((f) => readFileSync(join(root, 'claude', f), 'utf8')) : [])
-  for (const until = Date.now() + 10_000; !transcripts().length && Date.now() < until;) await new Promise((done) => setTimeout(done, 50))
+  const transcripts = () =>
+    existsSync(join(root, 'claude'))
+      ? readdirSync(join(root, 'claude'), { recursive: true })
+          .filter((f) => f.endsWith('.jsonl'))
+          .map((f) => readFileSync(join(root, 'claude', f), 'utf8'))
+      : []
+  for (const until = Date.now() + 10_000; !transcripts().length && Date.now() < until; ) await new Promise((done) => setTimeout(done, 50))
   const told = transcripts()
-  assert.ok(told.some((t) => t.includes('opened from the run console') && t.includes(stateDir)), 'its first prompt names the run directory')
+  assert.ok(
+    told.some((t) => t.includes('opened from the run console') && t.includes(stateDir)),
+    'its first prompt names the run directory',
+  )
   assert.ok(!told.some((t) => t.includes("Your session host's preamble")), 'no worker preamble')
   await request(paths, { op: 'session.close', id })
 })

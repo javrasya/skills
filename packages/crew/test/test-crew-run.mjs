@@ -51,7 +51,10 @@ test('a doctor round on the crew host: the patient dies, its doctor hands off a 
   const log = said.join('\n')
   assert.deepEqual(result, { patient: 'the note carried it on' }, log)
 
-  const entries = readFileSync(join(stateDir, 'journal.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+  const entries = readFileSync(join(stateDir, 'journal.jsonl'), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l))
   const of = (type) => entries.filter((e) => e.type === type)
   assert.equal(of('doctor').length, 1, log)
   const [doctor] = of('doctor')
@@ -91,12 +94,26 @@ test('a sequential run on the crew host: its code agents one after another in <r
   const fold = readJournal(join(stateDir, 'journal.jsonl'))
   const chain = join(crewWorktrees(cwd), `${fold.run.runId}-chain`)
   assert.equal(fold.chain?.worktree, chain, log)
-  const entries = readFileSync(join(stateDir, 'journal.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+  const entries = readFileSync(join(stateDir, 'journal.jsonl'), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l))
   const [doctor] = entries.filter((e) => e.type === 'doctor')
   const started = entries.filter((e) => e.type === 'started')
-  assert.deepEqual(started.filter((e) => e.n !== doctor.doctor).map((e) => e.worktree), [chain, chain], JSON.stringify(started))
+  assert.deepEqual(
+    started.filter((e) => e.n !== doctor.doctor).map((e) => e.worktree),
+    [chain, chain],
+    JSON.stringify(started),
+  )
   assert.equal(started.find((e) => e.n === doctor.doctor)?.worktree, join(crewWorktrees(cwd), `${fold.run.runId}-${doctor.doctor}`))
-  assert.deepEqual(readFileSync(setupLog, 'utf8').trim().split('\n').map((p) => realpathSync(p)), [realpathSync(chain)], 'the setup hook ran once, in the chain worktree, never in the doctor\'s')
+  assert.deepEqual(
+    readFileSync(setupLog, 'utf8')
+      .trim()
+      .split('\n')
+      .map((p) => realpathSync(p)),
+    [realpathSync(chain)],
+    "the setup hook ran once, in the chain worktree, never in the doctor's",
+  )
   assert.ok(existsSync(chain))
 })
 
@@ -120,7 +137,10 @@ test('a harness dialog before the prompt: the agent needs you in the session sho
   }
   const a = asker()
   assert.match(a.reason, /Claude asks whether to trust this folder: enter the session and answer it/)
-  assert.ok(said.some((l) => l.startsWith('?? [Trust] asker: Claude asks whether to trust this folder')), said.join('\n'))
+  assert.ok(
+    said.some((l) => l.startsWith('?? [Trust] asker: Claude asks whether to trust this folder')),
+    said.join('\n'),
+  )
   const { request } = await import('../src/daemon/client.mjs')
   const { sessions } = await request(paths, { op: 'session.list' })
   const session = sessions.find((s) => s.id === a.terminal)
@@ -129,7 +149,13 @@ test('a harness dialog before the prompt: the agent needs you in the session sho
   await request(paths, { op: 'session.write', id: a.terminal, data: '\x1b[B' })
   await request(paths, { op: 'session.write', id: a.terminal, data: '\r' })
   assert.deepEqual(await running, { word: 'trusted' }, said.join('\n'))
-  const types = readFileSync(journal, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l).type)
-  assert.deepEqual(types.filter((t) => ['starting', 'dialog', 'dialogClosed', 'started'].includes(t)), ['starting', 'dialog', 'dialogClosed', 'started'])
+  const types = readFileSync(journal, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l).type)
+  assert.deepEqual(
+    types.filter((t) => ['starting', 'dialog', 'dialogClosed', 'started'].includes(t)),
+    ['starting', 'dialog', 'dialogClosed', 'started'],
+  )
   assert.equal(readJournal(journal).agents[0].state, 'done')
 })

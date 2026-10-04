@@ -23,7 +23,10 @@
 // A screen's rows as one text, its runs of spaces closed up, so a match does
 // not depend on how a TUI positions its words.
 const textOf = (lines) => lines.map((l) => l.replace(/\s+/g, ' ').trim()).join('\n')
-const any = (...patterns) => (text) => patterns.some((p) => p.test(text))
+const any =
+  (...patterns) =>
+  (text) =>
+    patterns.some((p) => p.test(text))
 
 // A horizontal rule as Claude draws its input box's edges.
 const RULE = /^[─━]{20,}$/

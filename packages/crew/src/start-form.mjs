@@ -115,7 +115,9 @@ export function startForm(facts, { remembered = {}, flags = {} } = {}) {
     if (row === 'startRef') {
       return [
         { value: noPriorWork(values.base), label: `None — the stack starts on ${values.base}`, disabled: false },
-        ...unique([...facts.branches, values.startRef]).filter((b) => b !== values.base).map((b) => ({ value: b, label: b, disabled: false, ...(INTEGRATION_BRANCH.test(b) && { note: "an earlier run's whole-stack review fixes, not a ticket's work" }) })),
+        ...unique([...facts.branches, values.startRef])
+          .filter((b) => b !== values.base)
+          .map((b) => ({ value: b, label: b, disabled: false, ...(INTEGRATION_BRANCH.test(b) && { note: "an earlier run's whole-stack review fixes, not a ticket's work" }) })),
       ]
     }
     if (row === 'stackMode') return stacks
@@ -127,7 +129,7 @@ export function startForm(facts, { remembered = {}, flags = {} } = {}) {
 
   values.harness = HARNESSES.includes(remembered.harness) ? remembered.harness : HARNESSES[0]
   values.model = modelFor(values.harness)
-  values.base = facts.branches.includes(remembered.base) ? remembered.base : facts.branch ?? facts.branches[0] ?? null
+  values.base = facts.branches.includes(remembered.base) ? remembered.base : (facts.branch ?? facts.branches[0] ?? null)
   values.startRef = noPriorWork(values.base)
   values.stackMode = usable('stackMode', remembered.stackMode) ? remembered.stackMode : stacks.find((o) => o.value === 'native' && !o.disabled) ? 'native' : 'chain'
   values.runOrder = Object.hasOwn(RUN_ORDERS, remembered.runOrder) ? remembered.runOrder : 'parallel'
@@ -147,7 +149,13 @@ export function startForm(facts, { remembered = {}, flags = {} } = {}) {
       }
       const option = options(row).find((o) => o.value === value)
       if ((row === 'base' || row === 'startRef') && !option) throw new Error(`${flag}: no branch ${value}`)
-      if (!option) throw new Error(`${flag}: ${value} is not one of ${options(row).filter((o) => !o.disabled).map((o) => o.value).join(', ')}`)
+      if (!option)
+        throw new Error(
+          `${flag}: ${value} is not one of ${options(row)
+            .filter((o) => !o.disabled)
+            .map((o) => o.value)
+            .join(', ')}`,
+        )
       if (option.disabled) throw new Error(`${flag}: ${option.label} cannot be used, ${option.note}`)
       if (row === 'harness' && value !== values.harness) values.model = modelFor(value)
       // Prior work "none" is the base itself, so it follows a base that moves;
@@ -214,7 +222,10 @@ const answersIn = (all, key) => {
 // The answers last given in the repo, {} when none were.
 export function rememberedAnswers(paths, repo) {
   const all = readAnswers(paths)
-  return answersIn(all, Object.keys(all).find((k) => samePath(k, repo)))
+  return answersIn(
+    all,
+    Object.keys(all).find((k) => samePath(k, repo)),
+  )
 }
 
 export function rememberAnswers(paths, repo, answers) {

@@ -7,7 +7,10 @@
 // Every alternate-screen variant is replayed as ?1049: it clears the alternate
 // screen and saves the cursor, which is what a clean terminal needs.
 const ALT = 1049
-const ALIASES = new Map([[47, ALT], [1047, ALT]])
+const ALIASES = new Map([
+  [47, ALT],
+  [1047, ALT],
+])
 // Cursor keys, mouse protocols and encodings, focus reports, bracketed paste,
 // cursor visibility and blink. ?9001 (conpty's win32-input-mode) is kept out
 // on purpose: see stripHostModes.
@@ -16,7 +19,10 @@ export const TRACKED = new Set([1, 9, 12, 25, 1000, 1002, 1003, 1004, 1005, 1006
 // A clean, home-positioned terminal with every tracked mode off.
 export const RESET =
   '\x1b[?1049l' +
-  [...TRACKED].filter((m) => m !== ALT && m !== 25).map((m) => `\x1b[?${m}l`).join('') +
+  [...TRACKED]
+    .filter((m) => m !== ALT && m !== 25)
+    .map((m) => `\x1b[?${m}l`)
+    .join('') +
   '\x1b[?25h\x1b>\x1b[0m\x1b[2J\x1b[H'
 
 // Records each tracked mode's switches as the emulator parses them, in the

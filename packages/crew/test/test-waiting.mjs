@@ -9,9 +9,13 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'fs'
 import { claudeWaiting, piWaiting } from '../src/waiting.mjs'
 
-const events = (name) => readFileSync(new URL(`./fixtures/hooks/${name}.jsonl`, import.meta.url), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+const events = (name) =>
+  readFileSync(new URL(`./fixtures/hooks/${name}.jsonl`, import.meta.url), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l))
 
-test('claude: a permission prompt is waited on from its request, its notification keeps the request\'s words, and the tool running clears it', () => {
+test("claude: a permission prompt is waited on from its request, its notification keeps the request's words, and the tool running clears it", () => {
   const said = events('claude-permission').map((p) => [p.hook_event_name, claudeWaiting(p)])
   assert.deepEqual(said, [
     ['SessionStart', null],

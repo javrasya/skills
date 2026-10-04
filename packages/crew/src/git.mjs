@@ -9,7 +9,9 @@ import { RUNNER_SETTINGS } from './settings.mjs'
 // clock carries one, so a test's clock decides when a call has taken too long.
 export function realTimer(ms) {
   let id
-  const promise = new Promise((r) => { id = setTimeout(r, ms) })
+  const promise = new Promise((r) => {
+    id = setTimeout(r, ms)
+  })
   return { promise, cancel: () => clearTimeout(id) }
 }
 
@@ -18,7 +20,12 @@ export function realTimer(ms) {
 export async function bounded(clock, ms, p, timeout) {
   const t = clock.timer(ms)
   try {
-    return await Promise.race([p, t.promise.then(() => { throw timeout() })])
+    return await Promise.race([
+      p,
+      t.promise.then(() => {
+        throw timeout()
+      }),
+    ])
   } finally {
     t.cancel()
   }
@@ -26,8 +33,7 @@ export async function bounded(clock, ms, p, timeout) {
 
 export function execGit(cwd, args, timeoutMs) {
   return new Promise((resolve, reject) => {
-    execFile('git', ['-C', cwd, ...args], { windowsHide: true, timeout: timeoutMs }, (err, stdout, stderr) =>
-      err ? reject(new Error(`git ${args[0]} in ${cwd}: ${String(stderr || err.message).trim()}`)) : resolve(String(stdout)))
+    execFile('git', ['-C', cwd, ...args], { windowsHide: true, timeout: timeoutMs }, (err, stdout, stderr) => (err ? reject(new Error(`git ${args[0]} in ${cwd}: ${String(stderr || err.message).trim()}`)) : resolve(String(stdout))))
   })
 }
 
@@ -47,7 +53,11 @@ export async function repoOf(dir, bound) {
 
 // `git status --porcelain` as its lines, each kept whole: a line's leading
 // space is its index column, so the output is never trimmed.
-export const porcelainLines = (text) => String(text ?? '').split('\n').map((l) => l.replace(/\r$/, '')).filter(Boolean)
+export const porcelainLines = (text) =>
+  String(text ?? '')
+    .split('\n')
+    .map((l) => l.replace(/\r$/, ''))
+    .filter(Boolean)
 
 // Whether a worktree's porcelain lines are its baseline's, in any order.
 export const sameLines = (lines, baseline) => lines.length === baseline.length && [...lines].sort().join('\n') === [...baseline].sort().join('\n')
@@ -97,8 +107,7 @@ export const chainName = (runId) => `${runId}-chain`
 // makes take one of these, so a test hands them its own.
 export function execProgram(program, args, { cwd, timeoutMs = RUNNER_SETTINGS.hostCallMs } = {}) {
   return new Promise((resolve) => {
-    execFile(program, args, { cwd, windowsHide: true, timeout: timeoutMs }, (err, stdout, stderr) =>
-      resolve({ code: err ? (typeof err.code === 'number' ? err.code : null) : 0, stdout: String(stdout ?? ''), stderr: String(stderr ?? err?.message ?? '') }))
+    execFile(program, args, { cwd, windowsHide: true, timeout: timeoutMs }, (err, stdout, stderr) => resolve({ code: err ? (typeof err.code === 'number' ? err.code : null) : 0, stdout: String(stdout ?? ''), stderr: String(stderr ?? err?.message ?? '') }))
   })
 }
 
@@ -114,7 +123,15 @@ export async function currentBranch(cwd, run = execProgram) {
 export async function branchNames(cwd, run = execProgram) {
   const r = await run('git', ['-C', cwd, 'for-each-ref', '--format=%(refname)', 'refs/heads', 'refs/remotes/origin'])
   if (r.code !== 0) throw new Error(`git for-each-ref in ${cwd}: ${r.stderr.trim()}`)
-  const names = r.stdout.split('\n').map((l) => l.trim().replace(/^refs\/heads\//, '').replace(/^refs\/remotes\/origin\//, '')).filter((n) => n && n !== 'HEAD')
+  const names = r.stdout
+    .split('\n')
+    .map((l) =>
+      l
+        .trim()
+        .replace(/^refs\/heads\//, '')
+        .replace(/^refs\/remotes\/origin\//, ''),
+    )
+    .filter((n) => n && n !== 'HEAD')
   return [...new Set(names)]
 }
 

@@ -41,11 +41,23 @@ import { samePath } from './paths.mjs'
 // agent only if Orca made it a worktree, and then has no dispatch or tab. A
 // call replayed from the journal is the agent that first returned its value.
 export function agentsOf(journalPath) {
-  return readJournal(journalPath).agents.filter(madeByRun).map((a) => ({
-    runId: a.runId, n: a.n, origin: a.origin, name: agentName(a), title: a.title, launched: a.launched, dispatchId: a.dispatchId,
-    terminal: a.terminal, worktree: a.worktree, harness: a.harness, state: a.state === 'done' ? 'ok' : a.state === 'failed' ? 'failed' : 'running', reason: a.reason,
-    workerLeft: a.workerLeft === true,
-  }))
+  return readJournal(journalPath)
+    .agents.filter(madeByRun)
+    .map((a) => ({
+      runId: a.runId,
+      n: a.n,
+      origin: a.origin,
+      name: agentName(a),
+      title: a.title,
+      launched: a.launched,
+      dispatchId: a.dispatchId,
+      terminal: a.terminal,
+      worktree: a.worktree,
+      harness: a.harness,
+      state: a.state === 'done' ? 'ok' : a.state === 'failed' ? 'failed' : 'running',
+      reason: a.reason,
+      workerLeft: a.workerLeft === true,
+    }))
 }
 
 // The worktree the run view may show: one the run created, by its name.
@@ -252,12 +264,17 @@ export async function reclaimRun(agents, { host, unpushed = worktreeUnpushed, fo
   }
   if (chain && closeRun) {
     const agent = chainAgent(chain)
-    const r = await reclaimChainAfter(kept.filter((k) => k.agent.runId === chain.runId), chain, { host, journaled, unpushed, force, registry })
+    const r = await reclaimChainAfter(
+      kept.filter((k) => k.agent.runId === chain.runId),
+      chain,
+      { host, journaled, unpushed, force, registry },
+    )
     if (r.reclaimed) for (const note of r.notes) out(`!! ${agent.title}: ${note}`)
     else kept.push({ agent, reason: r.reason, ...(r.unreachable && { unreachable: true }), ...(r.unpushed && { unpushed: r.unpushed }) })
   }
-  if (closeRun) for (const id of new Set([...agents.map((a) => a.runId), ...(chain ? [chain.runId] : []), ...(runId ? [runId] : [])])) {
-    if (!kept.some((k) => k.agent.runId === id)) record({ runId: id })
-  }
+  if (closeRun)
+    for (const id of new Set([...agents.map((a) => a.runId), ...(chain ? [chain.runId] : []), ...(runId ? [runId] : [])])) {
+      if (!kept.some((k) => k.agent.runId === id)) record({ runId: id })
+    }
   return { reclaimed, kept }
 }

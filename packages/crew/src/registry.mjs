@@ -68,8 +68,7 @@ export function runRegistry(path = REGISTRY_PATH, clock = { now: () => Date.now(
   }
   return {
     path,
-    armed: ({ runId, project, runDir, spec, script = null, permissionMode = null, host = null }) =>
-      append({ type: 'armed', runId, project, runDir, spec, ...(script && { script }), ...(permissionMode && { permissionMode }), ...(host && { host }) }),
+    armed: ({ runId, project, runDir, spec, script = null, permissionMode = null, host = null }) => append({ type: 'armed', runId, project, runDir, spec, ...(script && { script }), ...(permissionMode && { permissionMode }), ...(host && { host }) }),
     runner: ({ runId, terminal, host = null }) => append({ type: 'runner', runId, terminal: terminal ?? null, ...(host && { host }) }),
     ended: ({ runId, outcome }) => {
       if (!OUTCOMES.includes(outcome)) throw new Error(`run registry: unknown outcome "${outcome}": expected one of ${OUTCOMES.join(', ')}`)
@@ -122,9 +121,22 @@ export function readRegistry(path = REGISTRY_PATH) {
     if (e.type === 'armed') {
       if (!runs.has(e.runId)) {
         runs.set(e.runId, {
-          runId: e.runId, host: e.host ?? LEGACY_HOST, project: e.project ?? null, runDir: e.runDir ?? null, spec: e.spec ?? null,
-          script: e.script ?? null, permissionMode: e.permissionMode ?? null, armedAt: e.at ?? null,
-          state: 'running', endedAt: null, runner: null, paused: null, reclaimed: false, reclaimedAt: null, reclaimedAgents: [], chainReclaimed: false,
+          runId: e.runId,
+          host: e.host ?? LEGACY_HOST,
+          project: e.project ?? null,
+          runDir: e.runDir ?? null,
+          spec: e.spec ?? null,
+          script: e.script ?? null,
+          permissionMode: e.permissionMode ?? null,
+          armedAt: e.at ?? null,
+          state: 'running',
+          endedAt: null,
+          runner: null,
+          paused: null,
+          reclaimed: false,
+          reclaimedAt: null,
+          reclaimedAgents: [],
+          chainReclaimed: false,
         })
       }
       continue

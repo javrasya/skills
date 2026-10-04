@@ -77,7 +77,13 @@ const runDir = standalone ? null : resolve(option('--attached'))
 const logPath = standalone ? join(dirname(registry), 'orca-runs-view.log') : join(runDir, 'runner.log')
 const logLine = (s) => {
   try {
-    appendFileSync(logPath, String(s).split('\n').map((l) => `${new Date().toISOString()} ${l}\n`).join(''))
+    appendFileSync(
+      logPath,
+      String(s)
+        .split('\n')
+        .map((l) => `${new Date().toISOString()} ${l}\n`)
+        .join(''),
+    )
   } catch {}
 }
 if (!process.stdout.isTTY || !process.stdin.isTTY) {
@@ -187,10 +193,14 @@ function quit() {
 // as the last refresh left it, and the next refresh tries again.
 let busy = Promise.resolve()
 const act = (fn) => {
-  busy = busy.then(fn).catch((e) => {
-    logLine(`!! run view: ${e?.stack ?? e}`)
-    flash = `error: ${e?.message ?? e}`
-  }).then(render).catch(crash)
+  busy = busy
+    .then(fn)
+    .catch((e) => {
+      logLine(`!! run view: ${e?.stack ?? e}`)
+      flash = `error: ${e?.message ?? e}`
+    })
+    .then(render)
+    .catch(crash)
   return busy
 }
 // A refresh is queued only once the last one has finished, so a slow Orca

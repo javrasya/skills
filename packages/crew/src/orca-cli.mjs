@@ -97,8 +97,7 @@ export function resumeRunnerCommand({ runner, script, stateDir, permissionMode =
 
 // The one worker-start argv: it adopts a terminal the runner made, so it never
 // carries --agent. fake-orca.mjs builds its starts from this too.
-export const workerStartArgs = ({ run, prompt, title, place, terminal }) =>
-  ['orchestration', 'worker-start', '--run', run, '--spec', prompt, '--task-title', title, ...place, '--terminal', terminal]
+export const workerStartArgs = ({ run, prompt, title, place, terminal }) => ['orchestration', 'worker-start', '--run', run, '--spec', prompt, '--task-title', title, ...place, '--terminal', terminal]
 
 // A `worker-show` result as the runner reads it. fake-orca.mjs answers in
 // Orca's shape and reads it through this too.
@@ -197,10 +196,14 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
   async function earlierWorktree(name, dispatched, baseline) {
     const row = await findWorktree(name)
     if (!row) return null
-    return reuseWorktree(row.path, { dispatched, baseline }, {
-      held: async () => ((await orca(['terminal', 'list', '--worktree', `path:${row.path}`]))?.terminals ?? []).some((x) => x.agentIdentity && !x.orphaned),
-      ...gitProbes(row.path, row.branch, bound),
-    })
+    return reuseWorktree(
+      row.path,
+      { dispatched, baseline },
+      {
+        held: async () => ((await orca(['terminal', 'list', '--worktree', `path:${row.path}`]))?.terminals ?? []).some((x) => x.agentIdentity && !x.orphaned),
+        ...gitProbes(row.path, row.branch, bound),
+      },
+    )
   }
 
   // `worktree create` of `name` from the run's worktree: its path, and whether
@@ -555,7 +558,14 @@ function mailRow(row) {
   }
   if (!payload || typeof payload !== 'object') payload = {}
   return {
-    id: row?.id ?? null, type: row?.type ?? null, from: row?.from_handle ?? null, subject: row?.subject ?? null, body: row?.body ?? null,
-    taskId: payload.taskId ?? null, dispatchId: payload.dispatchId ?? null, outcome: payload.outcome ?? null, createdAt: row?.created_at ?? null,
+    id: row?.id ?? null,
+    type: row?.type ?? null,
+    from: row?.from_handle ?? null,
+    subject: row?.subject ?? null,
+    body: row?.body ?? null,
+    taskId: payload.taskId ?? null,
+    dispatchId: payload.dispatchId ?? null,
+    outcome: payload.outcome ?? null,
+    createdAt: row?.created_at ?? null,
   }
 }

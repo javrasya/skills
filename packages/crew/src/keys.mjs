@@ -1,10 +1,20 @@
 // Raw terminal input as key names, by a table of the sequences a screen takes.
 
 export const ARROW_KEYS = [
-  ['\x1b[A', 'up'], ['\x1bOA', 'up'], ['\x1b[B', 'down'], ['\x1bOB', 'down'],
-  ['\x1b[C', 'right'], ['\x1bOC', 'right'], ['\x1b[D', 'left'], ['\x1bOD', 'left'],
+  ['\x1b[A', 'up'],
+  ['\x1bOA', 'up'],
+  ['\x1b[B', 'down'],
+  ['\x1bOB', 'down'],
+  ['\x1b[C', 'right'],
+  ['\x1bOC', 'right'],
+  ['\x1b[D', 'left'],
+  ['\x1bOD', 'left'],
 ]
-export const ENTER_KEYS = [['\r\n', 'enter'], ['\r', 'enter'], ['\n', 'enter']]
+export const ENTER_KEYS = [
+  ['\r\n', 'enter'],
+  ['\r', 'enter'],
+  ['\n', 'enter'],
+]
 
 // The keys in one chunk of raw input, by `table` ([sequence, name] pairs, the
 // first match winning). An escape no sequence of the table starts is Esc
@@ -14,7 +24,7 @@ export const ENTER_KEYS = [['\r\n', 'enter'], ['\r', 'enter'], ['\n', 'enter']]
 // it answers nothing.
 export function decodeKeys(chunk, table, { char = () => null } = {}) {
   const keys = []
-  for (let i = 0; i < chunk.length;) {
+  for (let i = 0; i < chunk.length; ) {
     const hit = table.find(([seq]) => chunk.startsWith(seq, i))
     if (hit) {
       keys.push(hit[1])

@@ -112,7 +112,7 @@ test('crew config: the back key is Ctrl+Shift+Left unless ~/.crew/config.json na
   assert.throws(() => readCrewConfig(paths), /config\.json: not JSON/)
 })
 
-test('mode replay: a terminal in any state is put into the session\'s screen and private modes, SGR mouse and a hidden cursor included', async () => {
+test("mode replay: a terminal in any state is put into the session's screen and private modes, SGR mouse and a hidden cursor included", async () => {
   const session = emulator(40, 10)
   const modes = trackModes(session)
   await parsed(session, 'normal\r\n\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?25l\x1b[?1h\x1b=')
@@ -337,12 +337,21 @@ test('console: keys typed while the enter is in flight reach the session in orde
   await crew.done
 })
 
-test('run console keys: raw input as the run view\'s key names, and a left click as its row', () => {
+test("run console keys: raw input as the run view's key names, and a left click as its row", () => {
   assert.deepEqual(keyNames('\x1b[A\x1bOB\x1b[C\x1b[D\r\x1br R\x12\x03q'), ['UP', 'DOWN', 'RIGHT', 'LEFT', 'ENTER', 'ESCAPE', 'r', ' ', 'R', 'CTRL_R', 'CTRL_C', 'q'])
   assert.deepEqual(keyNames('\x1b[<0;12;7M\x1b[<0;12;7m\x1b[<2;3;4M\x1b[<35;1;1M'), [{ click: { x: 12, y: 7 } }], 'a press of the left button, and nothing else')
-  assert.deepEqual(keyNames('\x1b[<64;5;9M\x1b[<65;5;9M\x1b[<66;5;30M\x1b[<67;5;30M\x1b[<68;5;30M\x1b[<69;5;30M\x1b[<64;5;9m'), [
-    { wheel: 'up', x: 5, y: 9 }, { wheel: 'down', x: 5, y: 9 }, { wheel: 'left', x: 5, y: 30 }, { wheel: 'right', x: 5, y: 30 }, { wheel: 'left', x: 5, y: 30 }, { wheel: 'right', x: 5, y: 30 },
-  ], 'the wheel and its sideways scroll, where the pointer is; Shift + wheel is sideways')
+  assert.deepEqual(
+    keyNames('\x1b[<64;5;9M\x1b[<65;5;9M\x1b[<66;5;30M\x1b[<67;5;30M\x1b[<68;5;30M\x1b[<69;5;30M\x1b[<64;5;9m'),
+    [
+      { wheel: 'up', x: 5, y: 9 },
+      { wheel: 'down', x: 5, y: 9 },
+      { wheel: 'left', x: 5, y: 30 },
+      { wheel: 'right', x: 5, y: 30 },
+      { wheel: 'left', x: 5, y: 30 },
+      { wheel: 'right', x: 5, y: 30 },
+    ],
+    'the wheel and its sideways scroll, where the pointer is; Shift + wheel is sideways',
+  )
   assert.deepEqual(keyNames('\x1b[24~\x1b[1;5D'), ['LEFT'], 'a key the tree takes no name for is dropped, and a modified arrow is the arrow')
   assert.deepEqual(keyNames('\x1bOd\x1bOc\x1b[1;5C'), ['LEFT', 'RIGHT', 'RIGHT'], "rxvt's Ctrl+Left and Ctrl+Right, and xterm's Ctrl+Right")
   assert.deepEqual(keyNames('\x1b[1;5:3D\x1b[1;1:3A\x1b[1;5:2D'), ['LEFT'], 'a kitty release is no key; a repeat is the key')
@@ -381,7 +390,10 @@ test('crew view: the tree is phases and agents, no runner row; Enter on an agent
   const crew = runsConsole({ paths, stdin: term.stdin, stdout: term.stdout, runs, refreshMs: 100 })
   quitAfter(t, term, crew)
   await until('the tree', async () => (await term.screen()).lines.some((l) => l.includes('AGENT')))
-  assert.deepEqual(tree().rows.map((r) => r.key), ['phase:Work', 'agent:1'])
+  assert.deepEqual(
+    tree().rows.map((r) => r.key),
+    ['phase:Work', 'agent:1'],
+  )
   assert.ok(!(await term.screen()).lines.some((l) => l.includes('runner   crew session')), 'no runner row on screen')
 
   term.press('\x1b[B')
@@ -411,7 +423,7 @@ test('run console guard: Ctrl+C and Ctrl+D never reach a session, legacy or kitt
   assert.equal(blockKeys('\x1b[99;3u\x1b[99u\x1b[24~\x1b\x1b[A'), '\x1b[99;3u\x1b[99u\x1b[24~\x1b\x1b[A', 'Alt+C, a plain c, F12, Esc and Up pass')
 })
 
-test('crew view: Ctrl+C and Ctrl+D typed in an agent\'s session never reach it; the other keys do', async (t) => {
+test("crew view: Ctrl+C and Ctrl+D typed in an agent's session never reach it; the other keys do", async (t) => {
   const { paths, id, typed } = await scriptedSession(t)
   const { session: runner } = await request(paths, { op: 'session.spawn', command: [process.execPath, SCRIPTED], cwd: tmpdir(), cols: 80, rows: 24 })
   const registry = crewRun(id, runner.id)
@@ -479,7 +491,7 @@ test('crew view: ? on an opened run enters a fresh orchestrator session seeded w
 
   term.press('?')
   await until('the orchestrator session entered', async () => crew.mode() === 'entered' && (await term.screen()).lines[2] === '    ready')
-  assert.deepEqual(consulted, [runs.model.projects[0].runs[0].runDir], 'seeded with the opened run\'s directory')
+  assert.deepEqual(consulted, [runs.model.projects[0].runs[0].runDir], "seeded with the opened run's directory")
   const orch = (await request(paths, { op: 'session.list' })).sessions.find((s) => s.title === 'orchestrator/console')
   assert.equal(orch.alive, true)
   term.press(BACK)
@@ -499,7 +511,10 @@ test('crew view: ? on an opened run enters a fresh orchestrator session seeded w
   await until('entered again', async () => crew.mode() === 'entered' && (await term.screen()).lines[2] === '    ready')
   term.press(BACK)
   await until('the tree once more', async () => crew.mode() === 'list' && (await term.screen()).lines.some((l) => l.includes('AGENT')))
-  assert.ok((await request(paths, { op: 'session.list' })).sessions.some((s) => s.id === id && s.alive), 'the run\'s own sessions are left alone')
+  assert.ok(
+    (await request(paths, { op: 'session.list' })).sessions.some((s) => s.id === id && s.alive),
+    "the run's own sessions are left alone",
+  )
 
   // A failed start is said on the flash line, and the tree stays.
   orchestrator.consult = async () => {

@@ -63,9 +63,7 @@ export async function removeRun({ stateDir, runId, host, registry = null, unpush
   return {
     kept,
     async force(k) {
-      const r = k.agent.chain
-        ? await reclaimChainAfter([], chain, { host, journaled: agents, unpushed, force: true, registry })
-        : await reclaimAgent(k.agent, { host, unpushed, force: true })
+      const r = k.agent.chain ? await reclaimChainAfter([], chain, { host, journaled: agents, unpushed, force: true, registry }) : await reclaimAgent(k.agent, { host, unpushed, force: true })
       if (r.reclaimed) left.delete(k)
       else left.set(k, r.reason)
       return r

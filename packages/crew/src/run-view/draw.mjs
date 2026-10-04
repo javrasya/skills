@@ -70,7 +70,10 @@ function contextCell(a) {
   const full = Math.min(BAR, Math.round((a.context / BAR_FULL) * BAR))
   return banded(a, '█'.repeat(full)) + grey('░'.repeat(BAR - full)) + ' ' + banded(a, size(a.context).padStart(4))
 }
-const mixOf = (mix) => STATES.filter((s) => mix[s]).map((s) => c(COLOUR[s], `${GLYPH[s]}${mix[s]}`)).join(' ')
+const mixOf = (mix) =>
+  STATES.filter((s) => mix[s])
+    .map((s) => c(COLOUR[s], `${GLYPH[s]}${mix[s]}`))
+    .join(' ')
 
 // An ended run reads as how it ended, not as its runner gone (#157).
 const OUTCOME_GLYPH = { complete: ['32', '✓ complete'], halted: ['1;33', '⏸ halted'], failed: ['31', '✗ failed'] }
@@ -82,11 +85,10 @@ const outcomeLine = (o) => {
 function headerLines(h, W) {
   if (!h) return [fit('', W), fit('', W)]
   const dot = grey(' · ')
-  const run = [
-    h.name && bold(h.name), h.project, h.runId && grey(h.runId), h.spec && `spec ${h.spec}`,
-    h.outcome ? outcomeLine(h.outcome) : `runner ${h.alive === true ? c('32', '● alive') : h.alive === false ? c('31', '○ gone') : grey('? unknown')}`, duration(h.elapsedMs),
-  ].filter(Boolean).join(dot)
-  const counts = COUNTED.filter((s) => h.counts?.[s]).map((s) => c(COLOUR[s], `${GLYPH[s]} ${h.counts[s]} ${s}`)).join('  ')
+  const run = [h.name && bold(h.name), h.project, h.runId && grey(h.runId), h.spec && `spec ${h.spec}`, h.outcome ? outcomeLine(h.outcome) : `runner ${h.alive === true ? c('32', '● alive') : h.alive === false ? c('31', '○ gone') : grey('? unknown')}`, duration(h.elapsedMs)].filter(Boolean).join(dot)
+  const counts = COUNTED.filter((s) => h.counts?.[s])
+    .map((s) => c(COLOUR[s], `${GLYPH[s]} ${h.counts[s]} ${s}`))
+    .join('  ')
   const halted = h.halted ? c('1;33', `⏸ halted — ${h.halted.nodes.length} node${h.halted.nodes.length === 1 ? '' : 's'} need${h.halted.nodes.length === 1 ? 's' : ''} you · r to resume`) : null
   const paused = h.paused ? c('1;33', `⏸ paused${h.paused.finishing ? ` — ${h.paused.finishing} agent${h.paused.finishing === 1 ? '' : 's'} finishing` : ''} · r to resume`) : null
   const lead = [h.outage && outageOf(h.outage), paused, halted].filter(Boolean)
@@ -95,9 +97,7 @@ function headerLines(h, W) {
 
 // An Orca outage is the run's, not an agent's (ADR-0015): it heads the counts,
 // and every agent keeps its own state.
-const outageOf = (o) => c('1;33', o.phase === 'paused'
-  ? `⏸ paused: Orca outage past ${Math.round(RUNNER_SETTINGS.outageLimitMs / 60_000)}m — r to resume`
-  : `⚠ Orca unreachable — waiting ${duration(o.elapsedMs)} (probe ${o.probes})`)
+const outageOf = (o) => c('1;33', o.phase === 'paused' ? `⏸ paused: Orca outage past ${Math.round(RUNNER_SETTINGS.outageLimitMs / 60_000)}m — r to resume` : `⚠ Orca unreachable — waiting ${duration(o.elapsedMs)} (probe ${o.probes})`)
 
 // The Orchestrator phase (#168) counts its `?` sessions, none of them done
 // in any sense a run has.
@@ -140,8 +140,7 @@ function nameCell(a, depth, elapsed) {
   return { text: prefix + chars.slice(at, at + w).join(''), overflows: true }
 }
 
-const agentLine = (a, depth = 0, elapsed = null) =>
-  `  ${String(a.n).padStart(3)}   ${nameCell(a, depth, elapsed).text} ${fit(stateOf(a), STATE_W)} ${contextCell(a)}   ${grey(size(a.tokens).padStart(6))}   ${duration(a.elapsedMs).padStart(7)}${a.parked ? grey('   ⏾ parked') : ''}`
+const agentLine = (a, depth = 0, elapsed = null) => `  ${String(a.n).padStart(3)}   ${nameCell(a, depth, elapsed).text} ${fit(stateOf(a), STATE_W)} ${contextCell(a)}   ${grey(size(a.tokens).padStart(6))}   ${duration(a.elapsedMs).padStart(7)}${a.parked ? grey('   ⏾ parked') : ''}`
 
 const PANE = 4
 
@@ -240,10 +239,7 @@ function dialogBox(d, mw) {
   const plain = (l) => c('100', fit(' ' + l, mw))
   const head = c('7', fit(' ' + d.title, mw))
   if (d.kind === 'confirm') return { box: [head, ...d.lines.map(plain), plain('')], first: null }
-  const options = d.options.map((o, i) =>
-    o.disabled ? c('100;90', fit(`   ${o.label} — ${o.reason}`, mw))
-      : i === d.highlight ? c('7', fit(` ▸ ${o.label} — ${o.detail}`, mw))
-      : plain(`  ${o.label} — ${o.detail}`))
+  const options = d.options.map((o, i) => (o.disabled ? c('100;90', fit(`   ${o.label} — ${o.reason}`, mw)) : i === d.highlight ? c('7', fit(` ▸ ${o.label} — ${o.detail}`, mw)) : plain(`  ${o.label} — ${o.detail}`)))
   return { box: [head, ...options, plain(''), plain(`↑↓ or the mouse moves · Enter ${d.verb ?? 'reclaims'} · Esc closes`), plain('')], first: 1 }
 }
 
@@ -341,9 +337,7 @@ const RUNS_HELP = ' ↑↓ move · ⏎/→/click open a run · ←→ fold a pro
 // The key lines of `crew view`, which enters a crew run's sessions in place
 // and comes back from one with `backKey`; an Orca run's agent is its tab.
 // `?` is crew's orchestrator whatever the run's host.
-export const consoleTreeHelp = (host, backKey) => host === 'crew'
-  ? ` ↑↓ move · ⏎/→/click enter · ${backKeyLabel(backKey)} out of a session · ← runs · Ctrl+R reclaim · Ctrl+P park · l log · p pause · r resume · x remove · ? orchestrator`
-  : `${TREE_HELP} · ? orchestrator`
+export const consoleTreeHelp = (host, backKey) => (host === 'crew' ? ` ↑↓ move · ⏎/→/click enter · ${backKeyLabel(backKey)} out of a session · ← runs · Ctrl+R reclaim · Ctrl+P park · l log · p pause · r resume · x remove · ? orchestrator` : `${TREE_HELP} · ? orchestrator`)
 export const consoleRunsHelp = (backKey) => `${RUNS_HELP} · ${backKeyLabel(backKey)} leaves an entered session`
 
 export function age(ms) {
@@ -362,8 +356,7 @@ const outcomeOf = (r) => (r.outcome ? c(OUTCOME[r.outcome], r.outcome) : r.outag
 const runnerOf = (r) => (r.alive === true ? c('32', '● alive') : r.alive === false ? c('31', '○ dead') : grey('? unknown'))
 
 const projectLine = (p) => ` ${p.folded ? '▸' : '▾'} ${bold(p.name)}  ${grey(p.path ?? '')}  ${grey(`${p.runs.length} run${p.runs.length === 1 ? '' : 's'}`)}`
-const runLine = (r) =>
-  `   ${r.runId.padEnd(20)} ${(r.spec ?? r.name ?? '—').padEnd(8)} ${fit(outcomeOf(r), 20)} ${fit(runnerOf(r), 10)} ${String(r.kept).padStart(4)}   ${age(r.ageMs).padStart(7)}${r.reclaimed ? grey('   reclaimed') : ''}`
+const runLine = (r) => `   ${r.runId.padEnd(20)} ${(r.spec ?? r.name ?? '—').padEnd(8)} ${fit(outcomeOf(r), 20)} ${fit(runnerOf(r), 10)} ${String(r.kept).padStart(4)}   ${age(r.ageMs).padStart(7)}${r.reclaimed ? grey('   reclaimed') : ''}`
 
 function runPane(r) {
   // The tab outlives its runner, so whether it is open says nothing of the runner.
@@ -403,9 +396,7 @@ export function drawRuns(model, { width: W = 140, height: H = 40, flash = null, 
   while (lines.length < TOP + body) lines.push(fit('', W))
   lines.push(fit(grey('─'.repeat(W)), W))
   const row = rows[selected]
-  const paneLines = !row ? [grey(' the run registry holds no run yet')]
-    : row.kind === 'run' ? runPane(row.run)
-    : [` ${bold(row.project.name)}  ${grey(row.project.path ?? '')}`, grey(`   ${count(row.project.runs.length, 'run')} · ${row.project.folded ? '→ / Enter to unfold' : '← / Enter to fold'}`)]
+  const paneLines = !row ? [grey(' the run registry holds no run yet')] : row.kind === 'run' ? runPane(row.run) : [` ${bold(row.project.name)}  ${grey(row.project.path ?? '')}`, grey(`   ${count(row.project.runs.length, 'run')} · ${row.project.folded ? '→ / Enter to unfold' : '← / Enter to fold'}`)]
   for (let i = 0; i < PANE; i++) lines.push(fit(paneLines[i] ?? '', W))
   lines.push(fit(flash ? ' ' + c('1;36', flash) : '', W))
   const key = helpLine(help, W, helpOffset)

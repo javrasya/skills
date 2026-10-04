@@ -32,7 +32,7 @@ const fileNames = (lines) => porcelainPaths(lines).join(', ')
 const failureWorktree = ({ isolation }, w, made = [], chainPath = null) => {
   if (isolation === 'none') return null
   if (w) return w.worktree ?? null
-  return isolation === 'worktree' ? made[0] ?? null : chainPath
+  return isolation === 'worktree' ? (made[0] ?? null) : chainPath
 }
 
 // The files a worktree held before its agent, from its baseline's porcelain
@@ -40,14 +40,13 @@ const failureWorktree = ({ isolation }, w, made = [], chainPath = null) => {
 // (`leftovers`, #127): named for the agent so it never commits them, since it
 // cannot tell them from its own. None adds nothing.
 const baselineSection = (baseline, leftovers = []) => {
-  const told = [
-    baseline?.length && `These files were in your worktree before you, left by its setup: ${fileNames(baseline)}.`,
-    leftovers.length && `These files were left uncommitted in your worktree by an agent before you: ${fileNames(leftovers)}.`,
-  ].filter(Boolean)
-  return told.length ? `
+  const told = [baseline?.length && `These files were in your worktree before you, left by its setup: ${fileNames(baseline)}.`, leftovers.length && `These files were left uncommitted in your worktree by an agent before you: ${fileNames(leftovers)}.`].filter(Boolean)
+  return told.length
+    ? `
 
 ---
-${told.join(' ')} They are not your work, so never stage or commit them. Stage your own changes by path (\`git add <path>\`), never with \`git add -A\`, \`git add .\` or \`git commit -a\`.` : ''
+${told.join(' ')} They are not your work, so never stage or commit them. Stage your own changes by path (\`git add <path>\`), never with \`git add -A\`, \`git add .\` or \`git commit -a\`.`
+    : ''
 }
 
 // The one follow-up a chain agent gets when it returned leaving files
@@ -57,17 +56,21 @@ export const leftoverPrompt = (lines) => `Your result is in, but you left these 
 
 // A doctor's note for a patient whose worker never started: its start is
 // retried with the note after the prompt the worker receives.
-const noteSection = (note) => (note == null ? '' : `
+const noteSection = (note) =>
+  note == null
+    ? ''
+    : `
 
 ---
 An earlier start of this task failed before any worker ran, and a doctor, an agent that read what the workflow runner recorded of it, worked out why. Its note follows: keep it in mind as you work.
 
 ## The doctor's note
-${note}`)
+${note}`
 
 // Nobody answers a worker mid-task: a host's preamble may offer `orchestration
 // ask`, which blocks until the coordinator replies, and this runner never does.
-export const NO_ASK = "Never run any `orchestration ask` command, whatever your session host's preamble offers, and never wait on a reply from anyone: nobody will answer. Put a question only a human can answer in your result (in `decisions_needed`, where your schema has it), finish everything it does not block, then submit."
+export const NO_ASK =
+  "Never run any `orchestration ask` command, whatever your session host's preamble offers, and never wait on a reply from anyone: nobody will answer. Put a question only a human can answer in your result (in `decisions_needed`, where your schema has it), finish everything it does not block, then submit."
 
 // An attended worker (ADR-0021) is the one a person joins: it asks them, and
 // waits on them as long as they take.
@@ -83,11 +86,8 @@ export const NO_WORKFLOW = 'You may use subagents, in the foreground or the back
 // `note`: a doctor's note for a start retried after its retries were spent.
 // `attended`: a person joins it, so it is told to ask them, not that nobody answers.
 export function workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline = null, leftovers = [], note = null, attended = null }) {
-  const what = schemaPath
-    ? `Write your result to ${payloadPath} as one JSON object that matches the JSON Schema in ${schemaPath}.`
-    : `Write your answer to ${payloadPath} as plain text.`
-  const command = [`node "${SUBMIT}"`, schemaPath && `--schema "${schemaPath}"`, `--result "${resultPath}"`, `--payload "${payloadPath}"`,
-    '--from <worker_handle> --dispatch-capability <capability> --task-id <task_id> --dispatch-id <dispatch_id>'].filter(Boolean).join(' ')
+  const what = schemaPath ? `Write your result to ${payloadPath} as one JSON object that matches the JSON Schema in ${schemaPath}.` : `Write your answer to ${payloadPath} as plain text.`
+  const command = [`node "${SUBMIT}"`, schemaPath && `--schema "${schemaPath}"`, `--result "${resultPath}"`, `--payload "${payloadPath}"`, '--from <worker_handle> --dispatch-capability <capability> --task-id <task_id> --dispatch-id <dispatch_id>'].filter(Boolean).join(' ')
   return `${prompt}${baselineSection(baseline, leftovers)}
 
 ---
@@ -157,7 +157,10 @@ const PREAMBLE_LINES = 100
 // host's preamble also names, the worker's handle being its terminal's, and the
 // capability is left out: submit sends worker_done without one (submit.mjs),
 // from the worker's own pane, which the host settles a dispatch from.
-const resendPrompt = (w, prompt) => `The workflow runner typed this message again: the one worker-start sent did not reach you, and your session host's preamble it began with did not either. Your IDs, for submit and for any Run mail: worker handle ${w.terminal}, task id ${w.taskId}, dispatch id ${w.dispatchId}. Leave out --dispatch-capability: you have none.
+const resendPrompt = (
+  w,
+  prompt,
+) => `The workflow runner typed this message again: the one worker-start sent did not reach you, and your session host's preamble it began with did not either. Your IDs, for submit and for any Run mail: worker handle ${w.terminal}, task id ${w.taskId}, dispatch id ${w.dispatchId}. Leave out --dispatch-capability: you have none.
 
 ---
 ${prompt}`
@@ -166,20 +169,24 @@ const NUDGE = 'The workflow has not received your result: your final message is 
 
 // Typed after the resume, or handed as the spec of the dispatch that adopts a
 // new terminal, whose preamble then carries new IDs.
-const continuePrompt = (why) => `You were interrupted: the workflow runner stopped this session and resumed it (${why}). Carry on where you left off and finish the task, then run the submit command from your instructions until it exits 0. If a session host's preamble came with this message, take the four IDs for submit from it, not from an earlier one.`
+const continuePrompt = (why) =>
+  `You were interrupted: the workflow runner stopped this session and resumed it (${why}). Carry on where you left off and finish the task, then run the submit command from your instructions until it exits 0. If a session host's preamble came with this message, take the four IDs for submit from it, not from an earlier one.`
 
 // A node resumed after the run halted on it (ADR-0016): its session carried
 // on, told why. One that needed decisions is told the operator has answered,
 // on the ticket. `remade`: the baseline of the run's chain worktree, made
 // again because it was reclaimed while the run was halted (ADR-0020).
 // `attended`: a person joins it (ADR-0021), so its answers come from them.
-export const haltedPrompt = (needsDecision, remade = null, attended = false) => `${attended
-  ? 'The workflow run was halted here and has been resumed. The person is back in this session: pick up with them where you stopped, and finish the task'
-  : needsDecision
-  ? 'The workflow run was halted here: your result named decisions only the operator can make, and the operator has answered them. Re-read the ticket, its body and its comments, for the answers, then finish the task'
-  : 'The workflow run was halted here, and the operator has resumed it. Carry on from where you are and finish the task'}, then run the submit command from your instructions until it exits 0. If a session host's preamble came with this message, take the four IDs for submit from it, not from an earlier one.${remade
-  ? ` Your worktree was reclaimed while the run was halted and has been made again, its setup hook run again: anything you left uncommitted in it is gone, and it is no longer on the ref you were on, so switch back to your work's ref first.${baselineSection(remade)}`
-  : ''}`
+export const haltedPrompt = (needsDecision, remade = null, attended = false) =>
+  `${
+    attended
+      ? 'The workflow run was halted here and has been resumed. The person is back in this session: pick up with them where you stopped, and finish the task'
+      : needsDecision
+        ? 'The workflow run was halted here: your result named decisions only the operator can make, and the operator has answered them. Re-read the ticket, its body and its comments, for the answers, then finish the task'
+        : 'The workflow run was halted here, and the operator has resumed it. Carry on from where you are and finish the task'
+  }, then run the submit command from your instructions until it exits 0. If a session host's preamble came with this message, take the four IDs for submit from it, not from an earlier one.${
+    remade ? ` Your worktree was reclaimed while the run was halted and has been made again, its setup hook run again: anything you left uncommitted in it is gone, and it is no longer on the ref you were on, so switch back to your work's ref first.${baselineSection(remade)}` : ''
+  }`
 
 // The convention a result needs the operator by (ADR-0016): a non-empty
 // `decisions_needed` array, its questions. Null for any other value.
@@ -237,7 +244,26 @@ export function readResult(resultPath, schema) {
 // journal folds it, { runId, worktree, baseline, leftovers }, which a chain the host hands back as it is still holds, and lends its baseline to an unmade one at the same path. life.doctors() resolves once every doctor
 // still out has ended: a patient's agent() never waits on its doctor once its
 // own result is in, so the runner awaits them before it ends.
-export function agentLifecycle({ host, clock, limits, out, stateDir, objective, journal, retainWorktree, onRun = () => {}, takeOver = null, transcripts = sessionTranscripts(), nextN, doctorLaunch = () => ({ harness: 'claude' }), history = () => ({ entries: [], log: [] }), mailHandled = [], mailPending = [], outage = { lost: () => 0, sleep: (ms) => clock.sleep(ms) }, chainBefore = null }) {
+export function agentLifecycle({
+  host,
+  clock,
+  limits,
+  out,
+  stateDir,
+  objective,
+  journal,
+  retainWorktree,
+  onRun = () => {},
+  takeOver = null,
+  transcripts = sessionTranscripts(),
+  nextN,
+  doctorLaunch = () => ({ harness: 'claude' }),
+  history = () => ({ entries: [], log: [] }),
+  mailHandled = [],
+  mailPending = [],
+  outage = { lost: () => 0, sleep: (ms) => clock.sleep(ms) },
+  chainBefore = null,
+}) {
   const live = slots(limits.MAX_LIVE)
   // One Run per workflow run: every agent's worker is dispatched into it.
   let run = null
@@ -289,9 +315,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
   // The worktree a dead agent leaves, retained, or null. A doctor's never is:
   // it changes nothing, so its worktree holds no work, and it stays
   // reclaimable through the journal and the run view.
-  const keep = ({ isolation, title, patient = null }, w) => (isolation === 'worktree' && w?.worktree && patient == null
-    ? retainWorktree({ path: w.worktree, reason: `retained because its agent (${title}) died before reporting its path: it may hold the only copy of that agent's work` })
-    : null)
+  const keep = ({ isolation, title, patient = null }, w) => (isolation === 'worktree' && w?.worktree && patient == null ? retainWorktree({ path: w.worktree, reason: `retained because its agent (${title}) died before reporting its path: it may hold the only copy of that agent's work` }) : null)
 
   // The worktrees a start that never started a worker made, retained: the
   // failed line carries the first; a `retained` line names each other one.
@@ -429,7 +453,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
       }
     }
 
-    for (;; await clock.sleep(limits.pollMs)) {
+    for (; ; await clock.sleep(limits.pollMs)) {
       if (mail) {
         try {
           const ended = await mail()
@@ -595,11 +619,13 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
   // prompt waits on a dialog only the person can answer (the crew host's
   // ready): its row needs you, entered at `terminal`, until the dialog is
   // gone, `null`, and the prompt goes in.
-  const asking = ({ key, n, title }) => (seen) => {
-    if (!seen) return void journal({ type: 'dialogClosed', key, n, title })
-    out(`?? ${title}: ${seen.ask}${seen.detail ? ` (its screen: ${seen.detail})` : ''}: crew session ${seen.terminal}`)
-    journal({ type: 'dialog', key, n, title, terminal: seen.terminal, dialog: seen.dialog, ask: seen.ask })
-  }
+  const asking =
+    ({ key, n, title }) =>
+    (seen) => {
+      if (!seen) return void journal({ type: 'dialogClosed', key, n, title })
+      out(`?? ${title}: ${seen.ask}${seen.detail ? ` (its screen: ${seen.detail})` : ''}: crew session ${seen.terminal}`)
+      journal({ type: 'dialog', key, n, title, terminal: seen.terminal, dialog: seen.dialog, ask: seen.ask })
+    }
 
   // Starts the call's worker, retried as the settings table says. Once it
   // has failed for good, the call's null, or, for an agent() call, its
@@ -648,7 +674,7 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
           const w = await host.workerStart({
             run: runId,
             asking: asking(call),
-            prompt: patient != null ? prompt : (baseline) => (sent = workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline: baseline ?? (chain ? chainState?.baseline ?? null : null), leftovers: chain ? chainState?.leftovers ?? [] : [], note: again?.note ?? null, attended: call.attended ?? null })),
+            prompt: patient != null ? prompt : (baseline) => (sent = workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline: baseline ?? (chain ? (chainState?.baseline ?? null) : null), leftovers: chain ? (chainState?.leftovers ?? []) : [], note: again?.note ?? null, attended: call.attended ?? null })),
             title,
             ...launch,
             sessionId,
@@ -727,7 +753,9 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
     try {
       for (;;) {
         end ??= await watch(w, {
-          title, harness: launch.harness, sessionId,
+          title,
+          harness: launch.harness,
+          sessionId,
           nudged: (reason, attempt) => journal({ type: 'nudge', key, n, title, dispatchId: w.dispatchId, reason, attempt }),
           moving: () => journal({ type: 'moving', key, n, title, dispatchId: w.dispatchId }),
           blocked: (waiting) => journal({ type: 'blocked', key, n, title, dispatchId: w.dispatchId, terminal: w.terminal, waiting: String(waiting) }),
@@ -735,7 +763,8 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
           mail,
           held: () => !!call.attended || box?.needsYou != null,
           attended: !!call.attended,
-          nudgeText: patient != null ? DOCTOR_NUDGE : NUDGE, owes: patient != null ? 'reporting' : 'submitting',
+          nudgeText: patient != null ? DOCTOR_NUDGE : NUDGE,
+          owes: patient != null ? 'reporting' : 'submitting',
         })
         // A dead session is continued in its own session (ADR-0013), unless
         // it waits on a human, the host cannot see it, or it already submitted.
@@ -835,9 +864,23 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
     // agent it is, never as a new one with no worker.
     if (adopt) {
       journal({
-        type: 'reattached', key, n, ...nodeOf(call), title, run: adopt.run ?? takeOver, dispatchId: adopt.dispatchId, harness: adopt.harness ?? call.launch?.harness ?? null,
-        sessionId: adopt.sessionId, terminal: adopt.terminal, worktree: adopt.worktree, dir: rel, origin: adopt.origin ?? n, ...(adopt.continuations && { continuations: adopt.continuations }),
-        ...(call.patient != null && { patient: call.patient, round: call.round }), ...(call.box?.needsYou != null && { needsYou: call.box.needsYou }), ...(call.attended && { attended: call.attended }),
+        type: 'reattached',
+        key,
+        n,
+        ...nodeOf(call),
+        title,
+        run: adopt.run ?? takeOver,
+        dispatchId: adopt.dispatchId,
+        harness: adopt.harness ?? call.launch?.harness ?? null,
+        sessionId: adopt.sessionId,
+        terminal: adopt.terminal,
+        worktree: adopt.worktree,
+        dir: rel,
+        origin: adopt.origin ?? n,
+        ...(adopt.continuations && { continuations: adopt.continuations }),
+        ...(call.patient != null && { patient: call.patient, round: call.round }),
+        ...(call.box?.needsYou != null && { needsYou: call.box.needsYou }),
+        ...(call.attended && { attended: call.attended }),
       })
     }
     mkdirSync(dir, { recursive: true })
@@ -915,19 +958,34 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
       const made = held.restart?.made ?? []
       // A chained patient made none: it was to start in the run's chain, as
       // journaled; never asked of the host, which may make it again.
-      const chainPath = isolation === 'chain' ? chainState?.worktree ?? null : null
+      const chainPath = isolation === 'chain' ? (chainState?.worktree ?? null) : null
       // Its worker may have run in that worktree before its start failed: a
       // retry judges it against its baseline.
       return {
-        reason: held.reason, attempts: 0, run: runId, harness: launch.harness, sessionId: null, worktree: failureWorktree(call, null, made, chainPath),
-        keep: () => keepMade(call, made), restart: { made, dispatched: true, baseline: held.restart?.baseline ?? null },
+        reason: held.reason,
+        attempts: 0,
+        run: runId,
+        harness: launch.harness,
+        sessionId: null,
+        worktree: failureWorktree(call, null, made, chainPath),
+        keep: () => keepMade(call, made),
+        restart: { made, dispatched: true, baseline: held.restart?.baseline ?? null },
       }
     }
     const w = { dispatchId: adopt.dispatchId, terminal: adopt.terminal, worktree: adopt.worktree }
     const end = await lookBack(w)
     return {
-      reason: held.reason, attempts: 0, continuations: adopt.continuations, run: adopt.run ?? runId, workerLeft: true, harness: adopt.harness ?? launch.harness,
-      sessionId: adopt.sessionId, worktree: failureWorktree(call, w), w, gone: !!end?.gone, keep: () => ({ retained: keep(call, w) }),
+      reason: held.reason,
+      attempts: 0,
+      continuations: adopt.continuations,
+      run: adopt.run ?? runId,
+      workerLeft: true,
+      harness: adopt.harness ?? launch.harness,
+      sessionId: adopt.sessionId,
+      worktree: failureWorktree(call, w),
+      w,
+      gone: !!end?.gone,
+      keep: () => ({ retained: keep(call, w) }),
     }
   }
 
@@ -962,7 +1020,18 @@ export function agentLifecycle({ host, clock, limits, out, stateDir, objective, 
     out(`>> ${title}: resuming node ${call.node}: continuing session ${adopt.sessionId} ${gone ? `in a new terminal in ${w.worktree ?? 'its worktree'}` : `in terminal ${w.terminal}`}`)
     let next
     try {
-      next = await host.workerContinue({ run: runId, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: haltedPrompt(!!halted.needsDecision, chain?.made ? chain.baseline ?? [] : null, !!call.attended), ...launch, sessionId: adopt.sessionId, reopen: gone || !!chain?.made, asking: asking(call) })
+      next = await host.workerContinue({
+        run: runId,
+        dispatch: w.dispatchId,
+        terminal: w.terminal,
+        worktree: w.worktree,
+        title,
+        prompt: haltedPrompt(!!halted.needsDecision, chain?.made ? (chain.baseline ?? []) : null, !!call.attended),
+        ...launch,
+        sessionId: adopt.sessionId,
+        reopen: gone || !!chain?.made,
+        asking: asking(call),
+      })
     } catch (e) {
       return failAgent(call, { reason: `resuming its session failed: ${e?.message ?? e}`, attempts: 0, run: runId, retained: keep(call, w) })
     }

@@ -30,7 +30,10 @@ export function matching(row, query = '') {
 
 // The slice of `matches` to list: WINDOW of them, holding the current value.
 export function windowOf(matches, value, size = WINDOW) {
-  const at = Math.max(0, matches.findIndex((o) => o.value === value))
+  const at = Math.max(
+    0,
+    matches.findIndex((o) => o.value === value),
+  )
   const start = Math.max(0, Math.min(at - Math.floor(size / 2), matches.length - size))
   return { start, shown: matches.slice(start, start + size) }
 }
@@ -158,11 +161,7 @@ export function runStartForm({ form, stdin, stdout, heading = '' }) {
 // The form's last step when the spec has no validation list (#102): the
 // orchestrator's draft, as text to edit. Ctrl+S confirms it; Esc or Ctrl+C
 // cancels, and then nothing is written.
-const EDIT_KEYS = [
-  ...ARROW_KEYS,
-  ['\x1b[H', 'home'], ['\x1bOH', 'home'], ['\x1b[1~', 'home'], ['\x1b[F', 'end'], ['\x1bOF', 'end'], ['\x1b[4~', 'end'], ['\x1b[3~', 'delete'],
-  ...ENTER_KEYS, ['\x7f', 'backspace'], ['\b', 'backspace'], ['\x13', 'confirm'], ['\x03', 'cancel'],
-]
+const EDIT_KEYS = [...ARROW_KEYS, ['\x1b[H', 'home'], ['\x1bOH', 'home'], ['\x1b[1~', 'home'], ['\x1b[F', 'end'], ['\x1bOF', 'end'], ['\x1b[4~', 'end'], ['\x1b[3~', 'delete'], ...ENTER_KEYS, ['\x7f', 'backspace'], ['\b', 'backspace'], ['\x13', 'confirm'], ['\x03', 'cancel']]
 
 // The keys in one chunk of raw input to the draft: each a name, or { char }
 // for a character typed. A tab is typed as a space.

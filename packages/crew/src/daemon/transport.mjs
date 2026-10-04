@@ -10,7 +10,10 @@ export function crewPaths(env = process.env) {
   const home = resolve(env.CREW_HOME || join(homedir(), '.crew'))
   // Named pipes are machine-global, so the name is keyed on the home: each
   // user, and each test's scratch home, gets its own daemon.
-  const key = createHash('sha256').update(process.platform === 'win32' ? home.toLowerCase() : home).digest('hex').slice(0, 16)
+  const key = createHash('sha256')
+    .update(process.platform === 'win32' ? home.toLowerCase() : home)
+    .digest('hex')
+    .slice(0, 16)
   const endpoint = process.platform === 'win32' ? `\\\\.\\pipe\\crew-${key}` : join(home, 'crew.sock')
   return { home, endpoint, log: join(home, 'daemon.log'), config: join(home, 'config.json'), runs: join(home, 'runs.json') }
 }

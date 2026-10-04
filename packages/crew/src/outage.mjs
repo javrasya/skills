@@ -54,9 +54,16 @@ export function hostOutage({ clock, limits, probe, unreachable, on = () => {} })
 
   // True unless the probe found Orca still gone: an Orca that answers with
   // an error, or not in time, is there, and the call it held meets that itself.
-  const ask = () => (probing ??= Promise.resolve().then(probe).then(() => true, (e) => !unreachable(e)).finally(() => {
-    probing = null
-  }))
+  const ask = () =>
+    (probing ??= Promise.resolve()
+      .then(probe)
+      .then(
+        () => true,
+        (e) => !unreachable(e),
+      )
+      .finally(() => {
+        probing = null
+      }))
 
   const lost = () => ended + (current ? clock.now() - current.since : 0)
 

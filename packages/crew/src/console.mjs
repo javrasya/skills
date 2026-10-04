@@ -77,7 +77,7 @@ export function backKeyFilter({ sequences, forward, back, holdMs = 50 }) {
 // modifyOtherKeys). Esc still reaches the session.
 const BLOCKED = /\x03|\x04|\x1b\[(?:99|100)(?::\d*)*;(\d+)(?::\d+)?u|\x1b\[27;(\d+);(?:99|100)~/g
 const ctrl = (mods) => ((Number(mods) - 1) & 4) !== 0
-export const blockKeys = (text) => text.replace(BLOCKED, (all, kitty, other) => (kitty === undefined && other === undefined) || ctrl(kitty ?? other) ? '' : all)
+export const blockKeys = (text) => text.replace(BLOCKED, (all, kitty, other) => ((kitty === undefined && other === undefined) || ctrl(kitty ?? other) ? '' : all))
 
 // The kitty keyboard protocol's flags set to none, and modifyOtherKeys off;
 // a terminal that knows neither ignores both.
@@ -93,7 +93,7 @@ const KEYBOARD_RESET = '\x1b[=0;1u\x1b[>4;0m'
 const CSI_KEYS = { A: 'UP', B: 'DOWN', C: 'RIGHT', D: 'LEFT', H: 'HOME', F: 'END', c: 'RIGHT', d: 'LEFT' }
 export function keyNames(text) {
   const keys = []
-  for (let i = 0; i < text.length;) {
+  for (let i = 0; i < text.length; ) {
     const rest = text.slice(i)
     const mouse = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])/.exec(rest)
     const csi = /^\x1b(?:\[([0-9;:]*)|O)([A-Za-z~])/.exec(rest)
@@ -153,10 +153,12 @@ function consoleOn({ paths, stdin, stdout, backKey = 'ctrl+shift+left', holdMs =
       e.socket = socket
       socket.on('close', () => entered === e && leave(`left session ${id}: its connection closed (the program ended, or the daemon stopped)`))
       if (!e.open) return socket.destroy()
-      const forward = guard ? (keys) => {
-        const text = blockKeys(bytes(keys))
-        if (text) socket.write(Buffer.from(text, 'latin1'))
-      } : (keys) => socket.write(keys)
+      const forward = guard
+        ? (keys) => {
+            const text = blockKeys(bytes(keys))
+            if (text) socket.write(Buffer.from(text, 'latin1'))
+          }
+        : (keys) => socket.write(keys)
       e.filter = backKeyFilter({ sequences, holdMs, forward, back: () => leave('') })
       mode = 'entered'
       // Keys typed while the enter was in flight go through the filter first, in order.
@@ -271,7 +273,11 @@ export function runConsole({ paths, stdin, stdout, backKey = 'ctrl+shift+left', 
   }
 
   return consoleOn({
-    paths, stdin, stdout, backKey, holdMs,
+    paths,
+    stdin,
+    stdout,
+    backKey,
+    holdMs,
     page: {
       show(why) {
         status = why
@@ -383,7 +389,12 @@ export function runsConsole({ paths, stdin, stdout, runs, backKey = 'ctrl+shift+
   }
 
   return consoleOn({
-    paths, stdin, stdout, backKey, holdMs, guard: true,
+    paths,
+    stdin,
+    stdout,
+    backKey,
+    holdMs,
+    guard: true,
     page: {
       show(why) {
         flash = why || null

@@ -10,8 +10,7 @@ import { parseFlags } from './args.mjs'
 import { writeJsonAtomic } from './fsutil.mjs'
 import { openHost, workerHost } from './hosts.mjs'
 
-export const USAGE =
-  'usage: node submit.mjs --result <file> --payload <file> [--schema <file>] --from <worker_handle> --dispatch-capability <capability> --task-id <task_id> --dispatch-id <dispatch_id>'
+export const USAGE = 'usage: node submit.mjs --result <file> --payload <file> [--schema <file>] --from <worker_handle> --dispatch-capability <capability> --task-id <task_id> --dispatch-id <dispatch_id>'
 
 const FLAGS = {
   '--schema': 'schema',
@@ -95,7 +94,7 @@ export async function submit(argv, { host, stdout = (s) => process.stdout.write(
   writeJsonAtomic(a.result, value)
 
   try {
-    await (host ?? await openHost(workerHost())).workerDone({
+    await (host ?? (await openHost(workerHost()))).workerDone({
       from: a.from,
       capability: a.capability,
       taskId: a.taskId,

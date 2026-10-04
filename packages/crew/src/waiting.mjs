@@ -8,7 +8,10 @@
 // nothing is waited on yet, so a vaguer event after a precise one, Claude's
 // permission notification after its permission request, keeps the precise one.
 
-const line = (s) => String(s ?? '').split('\n')[0].trim()
+const line = (s) =>
+  String(s ?? '')
+    .split('\n')[0]
+    .trim()
 
 // Claude's hooks (crew passes them to a worker's session with --settings):
 // a permission dialog, its question tool, and an MCP server asking for input

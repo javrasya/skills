@@ -85,7 +85,10 @@ function crewScratch() {
   git('-c', 'user.name=contract', '-c', 'user.email=contract@example.com', 'commit', '-q', '-m', 'init')
   const hook = join(root, 'setup-hook.mjs')
   const setupLog = join(root, 'setup-runs.log')
-  writeFileSync(hook, `import { appendFileSync, writeFileSync } from 'fs'\nif (process.env.FAIL_SETUP) { console.error('setup refused'); process.exit(4) }\nif (process.env.BREAK_STATUS) writeFileSync('.git', 'gitdir: /no/such/gitdir\\n')\nwriteFileSync('setup.out', \`\${process.env.CREW_REPO}\\n\${process.env.CREW_WORKTREE}\\n\`)\nappendFileSync(${JSON.stringify(setupLog)}, \`\${process.env.CREW_WORKTREE}\\n\`)\n`)
+  writeFileSync(
+    hook,
+    `import { appendFileSync, writeFileSync } from 'fs'\nif (process.env.FAIL_SETUP) { console.error('setup refused'); process.exit(4) }\nif (process.env.BREAK_STATUS) writeFileSync('.git', 'gitdir: /no/such/gitdir\\n')\nwriteFileSync('setup.out', \`\${process.env.CREW_REPO}\\n\${process.env.CREW_WORKTREE}\\n\`)\nappendFileSync(${JSON.stringify(setupLog)}, \`\${process.env.CREW_WORKTREE}\\n\`)\n`,
+  )
   mkdirSync(paths.home, { recursive: true })
   writeFileSync(paths.config, JSON.stringify({ repos: { [cwd]: { setup: hook } } }))
   // The agent-side commands' environment: crew's, with any Orca out of reach.
@@ -133,7 +136,10 @@ const HOSTS = [
       const orca = fakeOrca({ worker: fakeWorker, setupLeaves: SETUP_LEAVES })
       const d = (w) => orca.dispatches.get(w.dispatchId)
       return {
-        host: orca, stopped: async (w) => d(w)?.stopped === true, dead: async (w) => d(w)?.exited === true, title: async (w) => d(w)?.tabTitle,
+        host: orca,
+        stopped: async (w) => d(w)?.stopped === true,
+        dead: async (w) => d(w)?.exited === true,
+        title: async (w) => d(w)?.tabTitle,
         ids: async (w) => ({ from: d(w).handle, capability: d(w).capability, taskId: d(w).taskId, dispatchId: d(w).dispatchId }),
         send: (ids, m) => orca.mailSend({ ...ids, ...m }),
         submit: (ids, f) => submit(submitArgs(ids, f), { host: orca, stdout: () => {}, stderr: () => {} }),
@@ -162,7 +168,13 @@ const HOSTS = [
       }
       const run = (args) => spawnSync(process.execPath, args, { encoding: 'utf8', env: agentEnv })
       return {
-        host: make(), paths, stopped: ended, dead: ended, title: async (w) => (await info(w))?.title, info, ids,
+        host: make(),
+        paths,
+        stopped: ended,
+        dead: ended,
+        title: async (w) => (await info(w))?.title,
+        info,
+        ids,
         async send(ids, m) {
           const r = run([CREW_BIN, 'orchestration', 'send', ...sendArgs(ids, m)])
           if (r.status !== 0) throw new Error(r.stderr)
@@ -172,7 +184,12 @@ const HOSTS = [
         other: make,
         status: async (path) => (await request(paths, { op: 'worktree.statuses' })).statuses[resolve(path)] ?? null,
         removed: async (path) => !existsSync(path),
-        setups: async (path) => (existsSync(setupLog) ? readFileSync(setupLog, 'utf8').split('\n').filter((l) => l && resolve(l) === resolve(path)).length : 0),
+        setups: async (path) =>
+          existsSync(setupLog)
+            ? readFileSync(setupLog, 'utf8')
+                .split('\n')
+                .filter((l) => l && resolve(l) === resolve(path)).length
+            : 0,
       }
     },
   },
@@ -220,7 +237,7 @@ async function died(h, title) {
 
 export const SCENARIOS = [
   {
-    name: 'start: the harness runs with the runner\'s session id, in a terminal of its own, and gets its prompt',
+    name: "start: the harness runs with the runner's session id, in a terminal of its own, and gets its prompt",
     async run(h) {
       const w = await start(h, 'start')
       assert.equal(typeof w.terminal, 'string')
@@ -285,7 +302,7 @@ export const SCENARIOS = [
       assert.equal(typeof next.dispatchId, 'string')
       assert.ok((await h.host.terminalList()).includes(next.terminal))
       await eventually('the continue prompt in the session', () => delivered(h, next, 'Carry on from where you stopped.'))
-      assert.ok(await delivered(h, next, w.prompt), 'the turn it died in is still its session\'s')
+      assert.ok(await delivered(h, next, w.prompt), "the turn it died in is still its session's")
       await eventually('idle once the continued turn ends', () => idle(h, next, 1_000))
       assert.equal(await h.dead(next), false)
     },
@@ -337,14 +354,17 @@ export const SCENARIOS = [
       const other = h.other()
       assert.equal((await other.runUse({ runId: run })).runId, run)
       const taken = await other.mailCheck()
-      assert.deepEqual(taken.messages.map((m) => m.id), batch.messages.map((m) => m.id))
+      assert.deepEqual(
+        taken.messages.map((m) => m.id),
+        batch.messages.map((m) => m.id),
+      )
       assert.equal((await h.host.mailCheck()).deliveryId, null, 'the old coordinator reads no run')
       await assert.rejects(start(h, 'fenced'), /consumer_fenced/)
       await assert.rejects(other.runUse({ runId: 'run_nosuch' }), /run_not_found/)
     },
   },
   {
-    name: 'worker show and submit: live until submit\'s worker_done settles it succeeded, which the mailbox then holds; submit with IDs not its own fails',
+    name: "worker show and submit: live until submit's worker_done settles it succeeded, which the mailbox then holds; submit with IDs not its own fails",
     async run(h) {
       const w = await start(h, 'show')
       assert.deepEqual(await shown(h, w), { settled: false, outcome: null, gone: false, exited: false, terminal: w.terminal })
@@ -383,7 +403,7 @@ export const SCENARIOS = [
     },
   },
   {
-    name: 'mailbox: a worker\'s handoff and escalation wait in order until checked; a batch comes back replayed until acknowledged, and the ack answers the next',
+    name: "mailbox: a worker's handoff and escalation wait in order until checked; a batch comes back replayed until acknowledged, and the ack answers the next",
     async run(h) {
       const w = await start(h, 'mail')
       const ids = await h.ids(w)
@@ -393,19 +413,28 @@ export const SCENARIOS = [
       const first = await h.host.mailCheck()
       assert.equal(typeof first.deliveryId, 'string')
       assert.equal(first.replayed, false)
-      assert.deepEqual(first.messages.map((m) => [m.type, m.subject, m.body, m.dispatchId, m.taskId, m.outcome]), [
-        ['handoff', 'note', 'the note', w.dispatchId, ids.taskId, null],
-        ['escalation', 'Blocked: login', 'log in to the registry', w.dispatchId, ids.taskId, null],
-      ])
+      assert.deepEqual(
+        first.messages.map((m) => [m.type, m.subject, m.body, m.dispatchId, m.taskId, m.outcome]),
+        [
+          ['handoff', 'note', 'the note', w.dispatchId, ids.taskId, null],
+          ['escalation', 'Blocked: login', 'log in to the registry', w.dispatchId, ids.taskId, null],
+        ],
+      )
       const again = await h.host.mailCheck()
       assert.equal(again.deliveryId, first.deliveryId)
       assert.equal(again.replayed, true)
-      assert.deepEqual(again.messages.map((m) => m.id), first.messages.map((m) => m.id))
+      assert.deepEqual(
+        again.messages.map((m) => m.id),
+        first.messages.map((m) => m.id),
+      )
       await h.send(ids, { type: 'worker_done', subject: 'gave up', body: 'nothing to be done', outcome: 'failed' })
       const next = await h.host.mailCheck({ ack: first.deliveryId })
       assert.equal(next.acknowledged, first.deliveryId)
       assert.notEqual(next.deliveryId, first.deliveryId)
-      assert.deepEqual(next.messages.map((m) => [m.type, m.outcome]), [['worker_done', 'failed']])
+      assert.deepEqual(
+        next.messages.map((m) => [m.type, m.outcome]),
+        [['worker_done', 'failed']],
+      )
       assert.deepEqual(await shown(h, w), { settled: true, outcome: 'failed', gone: false, exited: false, terminal: w.terminal })
       await assert.rejects(h.host.mailCheck({ ack: 'delivery_nosuch' }), /stale_delivery/)
       const last = await h.host.mailCheck({ ack: next.deliveryId })
@@ -415,7 +444,7 @@ export const SCENARIOS = [
     },
   },
   {
-    name: 'child worktree: named <runId>-<n>, its setup hook\'s output in its baseline and none with skip; its status set, and removed with its terminal',
+    name: "child worktree: named <runId>-<n>, its setup hook's output in its baseline and none with skip; its status set, and removed with its terminal",
     async run(h) {
       const run = await runOf(h)
       const baselines = []
@@ -434,7 +463,7 @@ export const SCENARIOS = [
     },
   },
   {
-    name: 'chain worktree: made once as <runId>-chain, its setup hook run once and its output its baseline; workers start in it one after another, a child beside it is made as ever, and a doctor\'s with setup skipped; reclaimed, it is made again, its hook run once more',
+    name: "chain worktree: made once as <runId>-chain, its setup hook run once and its output its baseline; workers start in it one after another, a child beside it is made as ever, and a doctor's with setup skipped; reclaimed, it is made again, its hook run once more",
     async run(h) {
       const run = await runOf(h)
       const baselines = []
@@ -492,7 +521,10 @@ export const SCENARIOS = [
 for (const kind of HOSTS) {
   test(`${kind.name} host: has every session-level method, and every run, worker and mailbox one`, () => {
     const { host } = kind.open()
-    assert.deepEqual([...SESSION_METHODS, ...RUN_METHODS].filter((m) => typeof host[m] !== 'function'), [])
+    assert.deepEqual(
+      [...SESSION_METHODS, ...RUN_METHODS].filter((m) => typeof host[m] !== 'function'),
+      [],
+    )
   })
   for (const scenario of SCENARIOS.filter((s) => !kind.scenarios || kind.scenarios.test(s.name))) test(`${kind.name} host: ${scenario.name}`, () => scenario.run(kind.open()))
 }
@@ -500,12 +532,15 @@ for (const kind of HOSTS) {
 // The crew host alone: what the fake host has no pty, harness or daemon for.
 const crewKind = HOSTS.find((k) => k.name === 'crew')
 
-test('crew host: has crew\'s own methods beyond the interface, sessionStart, mailSend and terminalsInfo', () => {
+test("crew host: has crew's own methods beyond the interface, sessionStart, mailSend and terminalsInfo", () => {
   const { host } = crewKind.open()
-  assert.deepEqual(CREW_ONLY.filter((m) => typeof host[m] !== 'function'), [])
+  assert.deepEqual(
+    CREW_ONLY.filter((m) => typeof host[m] !== 'function'),
+    [],
+  )
 })
 
-test('crew host: the harness starts from the runner\'s launch line word for word, only its program swapped, and crew\'s hooks for that session after it', async () => {
+test("crew host: the harness starts from the runner's launch line word for word, only its program swapped, and crew's hooks for that session after it", async () => {
   const h = crewKind.open()
   const launch = { harness: 'claude', model: 'opus', effort: 'high', permissionMode: 'acceptEdits' }
   const w = await start(h, 'launch line', launch)
@@ -517,7 +552,7 @@ test('crew host: the harness starts from the runner\'s launch line word for word
   assert.equal(s.title, 'launch line')
 })
 
-test('crew host: the fake harness is a TUI on the alternate screen that echoes each prompt, crew\'s preamble first', async () => {
+test("crew host: the fake harness is a TUI on the alternate screen that echoes each prompt, crew's preamble first", async () => {
   const h = crewKind.open()
   const w = await start(h, 'tui')
   await eventually('the start prompt', () => delivered(h, w, w.prompt))
@@ -530,20 +565,20 @@ test('crew host: the fake harness is a TUI on the alternate screen that echoes e
   assert.ok(!screen.lines.some((l) => l.includes('starting')), 'the normal screen is not shown')
 })
 
-test('crew host: a hosted session runs with Claude\'s agent view off, so Left arrow cannot take the person out of it', async () => {
+test("crew host: a hosted session runs with Claude's agent view off, so Left arrow cannot take the person out of it", async () => {
   const h = crewKind.open()
   const w = await start(h, 'no agent view')
   await eventually('the header', async () => (await request(h.paths, { op: 'session.screen', id: w.terminal })).screen.lines.some((l) => l.includes(`fake claude ${w.sessionId} · no agent view`)))
 })
 
-test('crew host: pi\'s transcript is written in pi\'s format, where the runner finds it by the session id', async () => {
+test("crew host: pi's transcript is written in pi's format, where the runner finds it by the session id", async () => {
   const h = crewKind.open()
   const w = await start(h, 'pi', { harness: 'pi', model: 'sonnet', effort: 'low' })
   const s = await h.info(w)
   assert.deepEqual(s.command.slice(2), ['--approve', '--session-id', w.sessionId, '--model', 'sonnet', '--thinking', 'low', '-e', PI_EXTENSION])
   const transcripts = sessionTranscripts({ env: crewScratch().env })
   // The reply lands in its own append, a moment after the file appears.
-  const usage = await eventually('pi\'s transcript, its reply in', () => {
+  const usage = await eventually("pi's transcript, its reply in", () => {
     const u = transcripts.usage({ harness: 'pi', sessionId: w.sessionId, worktree: w.worktree })
     return u?.tokens !== null && u
   })
@@ -576,7 +611,7 @@ test('crew host: a harness that ends before its first prompt fails the start and
   assert.deepEqual(await h.host.terminalList(), before)
 })
 
-test('crew host: a dialog before the first prompt is the person\'s: asking hears of it, nothing is typed into it, and the prompt goes in once they answer it', async () => {
+test("crew host: a dialog before the first prompt is the person's: asking hears of it, nothing is typed into it, and the prompt goes in once they answer it", async () => {
   const h = crewKind.open({ env: { CREW_FAKE_DIALOG: 'trust' } })
   const heard = []
   const starting = start(h, 'trusted', { asking: (seen) => heard.push(seen) })
@@ -586,7 +621,10 @@ test('crew host: a dialog before the first prompt is the person\'s: asking hears
   await sleep(PAST_QUIET)
   assert.equal(heard.length, 1, 'a dialog that stays is heard of once')
   const screen = await h.host.terminalScreen({ terminal: shown.terminal, lines: 30 })
-  assert.ok(screen.some((l) => l.includes('Yes, I trust this folder')), 'nothing was typed into it')
+  assert.ok(
+    screen.some((l) => l.includes('Yes, I trust this folder')),
+    'nothing was typed into it',
+  )
   // The person answers it in the session.
   await request(h.paths, { op: 'session.write', id: shown.terminal, data: '\x1b[B' })
   await request(h.paths, { op: 'session.write', id: shown.terminal, data: '\r' })
@@ -617,7 +655,10 @@ test("crew host: pi's dialog before the first prompt is heard of from pi's own e
   await sleep(PAST_QUIET)
   assert.equal(heard.length, 1, 'a dialog that stays is heard of once')
   const screen = await h.host.terminalScreen({ terminal: shown.terminal, lines: 30 })
-  assert.ok(screen.some((l) => l.includes('Allow project MCP server')), 'nothing was typed into it')
+  assert.ok(
+    screen.some((l) => l.includes('Allow project MCP server')),
+    'nothing was typed into it',
+  )
   // The person answers it in the session.
   await request(h.paths, { op: 'session.write', id: shown.terminal, data: '\r' })
   const w = await starting
@@ -627,7 +668,7 @@ test("crew host: pi's dialog before the first prompt is heard of from pi's own e
   assert.ok(readFileSync(path, 'utf8').includes(w.prompt), 'the start prompt went in')
 })
 
-test("crew host: pi is ready once it says so, from its own session_start event, however much its terminal draws; one that never says so is not ready, and needs the person at readyMs", async () => {
+test('crew host: pi is ready once it says so, from its own session_start event, however much its terminal draws; one that never says so is not ready, and needs the person at readyMs', async () => {
   const ticking = crewKind.open({ env: { CREW_FAKE_TICK: '1' } })
   const w = await start(ticking, 'pi ticking', { harness: 'pi' })
   const s = (await request(ticking.paths, { op: 'session.list' })).sessions.find((x) => x.id === w.terminal)
@@ -649,7 +690,10 @@ test("crew host: pi is ready once it says so, from its own session_start event, 
   assert.ok(readFileSync(path2, 'utf8').includes(w2.prompt), 'the start prompt went in once told')
 })
 
-for (const [harness, asks] of [['claude', 'Claude asks permission to use Bash: touch asked.txt'], ['pi', 'pi asks: Allow Bash?']]) {
+for (const [harness, asks] of [
+  ['claude', 'Claude asks permission to use Bash: touch asked.txt'],
+  ['pi', 'pi asks: Allow Bash?'],
+]) {
   test(`crew host: a ${harness} worker that asks the person mid-turn is waiting on them, from its own events, until they answer`, async () => {
     const h = crewKind.open()
     const w = await start(h, `asks on ${harness}`, { harness, prompt: `Contract prompt for asks on ${harness}. [ask Bash]` })
@@ -660,7 +704,7 @@ for (const [harness, asks] of [['claude', 'Claude asks permission to use Bash: t
   })
 }
 
-test('crew host: a continued session runs the runner\'s resume line word for word, crew\'s hooks after it, in the dead one\'s worktree, and the dead one is closed', async () => {
+test("crew host: a continued session runs the runner's resume line word for word, crew's hooks after it, in the dead one's worktree, and the dead one is closed", async () => {
   const h = crewKind.open()
   const { w, next } = await died(h, 'resume line')
   const [, ...words] = resumeCommand({ harness: 'claude', sessionId: w.sessionId }).split(' ')
@@ -678,7 +722,10 @@ test('crew host: a harness still in its turn is ended before its session is cont
   await eventually('the prompt in the session', () => delivered(h, w, w.prompt))
   const next = await h.host.workerContinue({ run: w.run, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title: 'stalled', prompt: 'Carry on, stalled.', harness: 'claude', sessionId: w.sessionId })
   await eventually('the continue prompt in the session', () => delivered(h, { ...next, sessionId: w.sessionId }, 'Carry on, stalled.'))
-  assert.deepEqual((await h.host.terminalList()).filter((t) => t === w.terminal || t === next.terminal), [next.terminal])
+  assert.deepEqual(
+    (await h.host.terminalList()).filter((t) => t === w.terminal || t === next.terminal),
+    [next.terminal],
+  )
 })
 
 test('crew host: an ended harness is idle, and a session the daemon does not hold is refused', async () => {
@@ -692,7 +739,7 @@ test('crew host: an ended harness is idle, and a session the daemon does not hol
   await assert.rejects(h.host.terminalIdle({ terminal: 'no-such-terminal' }), /no crew session/)
 })
 
-test('crew host: a child worktree is at <repo-parent>/<repo>.crew/<runId>-<n>, on a branch of that name, set up by the repo\'s hook after it is made', async () => {
+test("crew host: a child worktree is at <repo-parent>/<repo>.crew/<runId>-<n>, on a branch of that name, set up by the repo's hook after it is made", async () => {
   const h = crewKind.open()
   const { cwd, root } = crewScratch()
   const run = await runOf(h)
@@ -763,18 +810,18 @@ test('crew host: a setup hook that fails fails the start and leaves no worktree 
   assert.equal(spawnSync('git', ['-C', crewScratch().cwd, 'rev-parse', '--verify', '--quiet', `refs/heads/${run}-1`]).status, 1)
 })
 
-test('crew host: remove takes only a worktree crew made, never the operator\'s own', async () => {
+test("crew host: remove takes only a worktree crew made, never the operator's own", async () => {
   const h = crewKind.open()
   await assert.rejects(h.host.worktreeRemove({ path: crewScratch().cwd }), /not a worktree crew made/)
   assert.ok(existsSync(join(crewScratch().cwd, 'README.md')))
 })
 
-test('crew config: a repo\'s setup hook is keyed by its path in crew\'s home, and a repo it does not name has none', () => {
+test("crew config: a repo's setup hook is keyed by its path in crew's home, and a repo it does not name has none", () => {
   const { paths, cwd, root } = crewScratch()
   assert.equal(repoConfig(paths, cwd).setup, join(root, 'setup-hook.mjs'))
   assert.equal(repoConfig(paths, process.platform === 'win32' ? cwd.toUpperCase().replace(/\\/g, '/') : cwd).setup, join(root, 'setup-hook.mjs'))
   assert.deepEqual(repoConfig(paths, join(root, 'elsewhere')), {})
-  assert.ok(!existsSync(join(cwd, '.crew')), 'nothing of crew\'s in the repo')
+  assert.ok(!existsSync(join(cwd, '.crew')), "nothing of crew's in the repo")
 })
 
 test('crew host: a whole session host by its name, whose agent-side send refuses a dispatch crew never made', async () => {

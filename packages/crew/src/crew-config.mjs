@@ -63,7 +63,12 @@ const CTRL = 'abcdefgklnopqrstuvwxyz'
 export const BACK_KEYS = [...Object.keys(NAMED), ...Object.keys(FKEYS), ...[...CTRL].map((c) => `ctrl+${c}`)]
 
 // How a back key is named on screen: Ctrl+Shift+←, F12, Ctrl+B.
-export const backKeyLabel = (name) => String(name).trim().toLowerCase().replace(/\+left$/, '+←').replace(/(^|\+)([a-z←]\w*)/g, (_, sep, w) => sep + (w.length === 1 ? w.toUpperCase() : w[0].toUpperCase() + w.slice(1)))
+export const backKeyLabel = (name) =>
+  String(name)
+    .trim()
+    .toLowerCase()
+    .replace(/\+left$/, '+←')
+    .replace(/(^|\+)([a-z←]\w*)/g, (_, sep, w) => sep + (w.length === 1 ? w.toUpperCase() : w[0].toUpperCase() + w.slice(1)))
 
 // The byte sequences a back key name arrives as.
 export function backKeySequences(name) {

@@ -108,7 +108,12 @@ export const objectiveOf = (meta, fallback) => [meta?.name, meta?.description].f
 // written in.
 function canonical(v) {
   if (Array.isArray(v)) return v.map(canonical)
-  if (v && typeof v === 'object') return Object.fromEntries(Object.keys(v).sort().map((k) => [k, canonical(v[k])]))
+  if (v && typeof v === 'object')
+    return Object.fromEntries(
+      Object.keys(v)
+        .sort()
+        .map((k) => [k, canonical(v[k])]),
+    )
   return v
 }
 
@@ -116,7 +121,10 @@ function canonical(v) {
 // run was halting (ADR-0016), never what the call is, so a resume that makes
 // the same call without it still finds its node's result.
 export const journalKey = (prompt, { inFlight, ...opts } = {}) =>
-  'v1:' + createHash('sha256').update(JSON.stringify([prompt, canonical(opts)])).digest('hex')
+  'v1:' +
+  createHash('sha256')
+    .update(JSON.stringify([prompt, canonical(opts)]))
+    .digest('hex')
 
 // The journal's entry types and its one fold live in journal.mjs.
 export { JOURNAL_ENTRIES, readJournal }
@@ -134,7 +142,13 @@ export function runnerLog(stateDir, print, clock = realClock) {
   const path = join(stateDir, 'runner.log')
   return (s) => {
     const at = iso(clock)
-    appendFileSync(path, String(s).split('\n').map((l) => `${at} ${l}\n`).join(''))
+    appendFileSync(
+      path,
+      String(s)
+        .split('\n')
+        .map((l) => `${at} ${l}\n`)
+        .join(''),
+    )
     print(s)
   }
 }
@@ -155,7 +169,26 @@ export function runnerLog(stateDir, print, clock = realClock) {
 // outage, and resume({ node }), the attached view's r: resumeHost while an
 // outage is on, else the halted run's node, or with none every held node.
 // onHalt({ node, nodes }): told each time a node is held and the run halts.
-export async function runScript(text, { host, stateDir, out: print = (s) => console.log(s), settings = {}, clock = realClock, transcripts = sessionTranscripts(), fallbackObjective = 'workflow run', resume = false, permissionMode = null, registry = null, project = process.cwd(), script: scriptPath = null, control = {}, onHalt = () => {}, runnerTerminal = null }) {
+export async function runScript(
+  text,
+  {
+    host,
+    stateDir,
+    out: print = (s) => console.log(s),
+    settings = {},
+    clock = realClock,
+    transcripts = sessionTranscripts(),
+    fallbackObjective = 'workflow run',
+    resume = false,
+    permissionMode = null,
+    registry = null,
+    project = process.cwd(),
+    script: scriptPath = null,
+    control = {},
+    onHalt = () => {},
+    runnerTerminal = null,
+  },
+) {
   const limits = { ...SETTINGS, ...settings }
   const out = runnerLog(stateDir, print, clock)
   const script = loadScript(text)
@@ -236,7 +269,10 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
   // A resume's Run is paused under its id before its takeover lands.
   const runIdNow = () => armed ?? earlier.run?.runId ?? null
   const outage = hostOutage({
-    clock, limits, probe: () => host.probe(), unreachable: (e) => hostUnreachable(host, e),
+    clock,
+    limits,
+    probe: () => host.probe(),
+    unreachable: (e) => hostUnreachable(host, e),
     on: ({ phase, since, ms, reason, paused }) => {
       journal({ type: 'outage', phase, since: new Date(since).toISOString(), ...(reason && { reason }), ...(ms != null && { ms }) })
       if (phase === 'start') out(`!! ${host.name} unreachable (${reason}): every ${host.name} call waits for it, and no agent is charged for it; probing it for up to ${took(limits.outageLimitMs)} before the run pauses`)
@@ -341,7 +377,9 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
   const history = ({ n, origin, title }) => {
     let log = []
     try {
-      log = readFileSync(join(stateDir, 'runner.log'), 'utf8').split('\n').filter((l) => l.includes(` ${title}:`) || l.includes(` ${title} `))
+      log = readFileSync(join(stateDir, 'runner.log'), 'utf8')
+        .split('\n')
+        .filter((l) => l.includes(` ${title}:`) || l.includes(` ${title} `))
     } catch {}
     return { entries: journalLines(journalPath).filter((e) => e.n === n || e.origin === origin), log }
   }
@@ -350,10 +388,24 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
   // and checked at the first agent(), before any worker, as agent() checks
   // its own launch: a bad row is refused up front, never at the first doctor.
   let recover = null
-  const doctorLaunch = () => (recover ??= launchOf(meta.value?.roles?.recover ?? {}, permissionMode, 'the role table\'s recover row'))
+  const doctorLaunch = () => (recover ??= launchOf(meta.value?.roles?.recover ?? {}, permissionMode, "the role table's recover row"))
   const life = agentLifecycle({
-    host, clock, limits, out, stateDir, objective: () => objectiveOf(meta.value, fallbackObjective), journal, retainWorktree, onRun, takeOver: earlier.run?.runId ?? null, transcripts,
-    nextN: () => ++count, doctorLaunch, history, outage, mailHandled: earlier.mail.map((m) => m.messageId),
+    host,
+    clock,
+    limits,
+    out,
+    stateDir,
+    objective: () => objectiveOf(meta.value, fallbackObjective),
+    journal,
+    retainWorktree,
+    onRun,
+    takeOver: earlier.run?.runId ?? null,
+    transcripts,
+    nextN: () => ++count,
+    doctorLaunch,
+    history,
+    outage,
+    mailHandled: earlier.mail.map((m) => m.messageId),
     mailPending: earlier.mail.filter((m) => m.action === 'pending').map((m) => ({ id: m.messageId, type: m.kind, dispatchId: m.dispatchId, outcome: m.outcome ?? null, subject: m.subject, body: m.body })),
     chainBefore: chain ?? null,
   })
@@ -363,10 +415,17 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
     out(`== ${title}`)
   }
   const log = (msg) => out(`   ${msg}`)
-  const parallel = (fns) => Promise.all(fns.map((f, i) => Promise.resolve().then(f).catch((e) => {
-    out(`!! parallel: thunk ${i} threw (${e?.message ?? e}); it resolves to null`)
-    return null
-  })))
+  const parallel = (fns) =>
+    Promise.all(
+      fns.map((f, i) =>
+        Promise.resolve()
+          .then(f)
+          .catch((e) => {
+            out(`!! parallel: thunk ${i} threw (${e?.message ?? e}); it resolves to null`)
+            return null
+          }),
+      ),
+    )
 
   async function agent(prompt, opts = {}) {
     if (opts.schema) checkSchema(opts.schema)
@@ -421,7 +480,19 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
     }
     if (entry?.unsettled && !entry.held) out(`>> ${title}: its worker never started in the last run; it starts now`)
 
-    const call = { prompt, schema: opts.schema, isolation: ['worktree', 'chain'].includes(opts.isolation) ? opts.isolation : 'none', launch, key, n, label, title, phaseName, ...(node && { node }), ...(opts.attended && { attended: typeof opts.attended === 'string' ? opts.attended : 'a person is needed in this session' }) }
+    const call = {
+      prompt,
+      schema: opts.schema,
+      isolation: ['worktree', 'chain'].includes(opts.isolation) ? opts.isolation : 'none',
+      launch,
+      key,
+      n,
+      label,
+      title,
+      phaseName,
+      ...(node && { node }),
+      ...(opts.attended && { attended: typeof opts.attended === 'string' ? opts.attended : 'a person is needed in this session' }),
+    }
     // A patient's doctor rounds so far, and, while its agent() waited on
     // them, the round the resume goes on with: it is not started again.
     const treated = entry?.rounds ? { rounds: entry.rounds, ...(entry.held && { held: entry.held, origin: entry.held.origin }) } : {}
@@ -448,7 +519,7 @@ export async function runScript(text, { host, stateDir, out: print = (s) => cons
       const questions = v === null ? null : decisionsNeeded(v)
       if (v !== null && !questions) break
       wasHeld = true
-      const reason = questions ? questions.join(' · ') : readJournal(journalPath).nodes.get(call.node)?.reason ?? 'it failed'
+      const reason = questions ? questions.join(' · ') : (readJournal(journalPath).nodes.get(call.node)?.reason ?? 'it failed')
       await halt.hold({ node: call.node, title: call.title, needsDecision: !!questions, reason, ...(questions && { questions }) })
       v = await resumeNode(call, readJournal(journalPath).nodes.get(call.node) ?? {})
     }
@@ -620,7 +691,10 @@ export function attachView({ spawnView, tab, log, tail = () => [], clock = realC
     }
     c.on('message', (m) => {
       if (m?.type === 'detach') detached = true
-      if (m?.type === 'resume') Promise.resolve().then(() => resume({ node: typeof m.node === 'string' ? m.node : null })).catch((e) => log(`!! r: could not resume: ${e?.message ?? e}`))
+      if (m?.type === 'resume')
+        Promise.resolve()
+          .then(() => resume({ node: typeof m.node === 'string' ? m.node : null }))
+          .catch((e) => log(`!! r: could not resume: ${e?.message ?? e}`))
     })
     c.on('exit', ended)
     c.on('error', (e) => {
@@ -661,7 +735,9 @@ export function watchResumeRequests({ stateDir, resume, log = () => {}, pollMs =
       const m = JSON.parse(text)
       node = typeof m?.node === 'string' ? m.node : null
     } catch {}
-    Promise.resolve().then(() => resume({ node })).catch((e) => log(`!! r: could not resume: ${e?.message ?? e}`))
+    Promise.resolve()
+      .then(() => resume({ node }))
+      .catch((e) => log(`!! r: could not resume: ${e?.message ?? e}`))
   }
   const timer = setInterval(take, pollMs)
   timer.unref?.()
@@ -722,20 +798,27 @@ if (isMain) {
   // With no terminal (the offline tests, a redirected launch) there is no view,
   // and the runner prints as it always did. On crew there is none either: the
   // operator's one tree is `crew view`'s, and nobody enters the runner's session.
-  const view = process.stdout.isTTY && process.stdin.isTTY && hostName !== 'crew'
-    ? attachView({
-      spawnView: () => spawn(process.execPath, [VIEW, '--attached', dir, '--host', hostName ?? LEGACY_HOST], { stdio: ['inherit', 'inherit', 'inherit', 'ipc'] }),
-      tab: (s) => console.log(s),
-      log: (s) => say(s),
-      tail: () => logTail(dir),
-      restore: restoreTab,
-      guard: (on) => (on ? process.on('SIGINT', ignore) : process.off('SIGINT', ignore)),
-      resume: (m) => control.resume?.(m),
-    })
-    : null
+  const view =
+    process.stdout.isTTY && process.stdin.isTTY && hostName !== 'crew'
+      ? attachView({
+          spawnView: () => spawn(process.execPath, [VIEW, '--attached', dir, '--host', hostName ?? LEGACY_HOST], { stdio: ['inherit', 'inherit', 'inherit', 'ipc'] }),
+          tab: (s) => console.log(s),
+          log: (s) => say(s),
+          tail: () => logTail(dir),
+          restore: restoreTab,
+          guard: (on) => (on ? process.on('SIGINT', ignore) : process.off('SIGINT', ignore)),
+          resume: (m) => control.resume?.(m),
+        })
+      : null
   const gate = view ? view.gate : (print) => print
-  const say = runnerLog(dir, gate((s) => console.log(s)))
-  const sayError = runnerLog(dir, gate((s) => console.error(s)))
+  const say = runnerLog(
+    dir,
+    gate((s) => console.log(s)),
+  )
+  const sayError = runnerLog(
+    dir,
+    gate((s) => console.error(s)),
+  )
   view?.start()
   watchResumeRequests({ stateDir: dir, resume: (m) => control.resume?.(m), log: (s) => say(s) })
   const host = await openHost(hostName)
@@ -760,7 +843,7 @@ if (isMain) {
       control,
       // On crew the Run's terminal is this adapter's, not the runner's: the
       // operator enters the runner by its own session, which the daemon names.
-      runnerTerminal: host.id === 'crew' ? process.env.CREW_SESSION ?? null : null,
+      runnerTerminal: host.id === 'crew' ? (process.env.CREW_SESSION ?? null) : null,
     })
     summary = { runner: 'session', host: host.id, ok: true, result }
   } catch (e) {

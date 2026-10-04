@@ -28,8 +28,7 @@ const shellLine = (words) => words.map((w) => (SHELL_WORD.test(w) ? w : `'${w}'`
 // Without one the command is still built, which is how a call's launch words
 // are checked before any worker starts. launchWords is the same launch as
 // argv, for a host that spawns it with no shell (crew).
-export const launchWords = ({ harness = 'claude', model, effort, permissionMode, sessionId }) =>
-  commandWords(harness, sessionId && ['--session-id', sessionId], { model, effort, permissionMode })
+export const launchWords = ({ harness = 'claude', model, effort, permissionMode, sessionId }) => commandWords(harness, sessionId && ['--session-id', sessionId], { model, effort, permissionMode })
 export const launchCommand = (launch) => shellLine(launchWords(launch))
 
 // The same launch, carrying on the session it started (session continuation,
@@ -44,7 +43,7 @@ export const resumeCommand = (launch) => shellLine(resumeWords(launch))
 // The harness and session id a launch or resume line, split into words, runs,
 // whatever its program word; sessionId is null in any other command.
 export function launchedSession(words) {
-  const after = (flag) => (words.includes(flag) ? words[words.indexOf(flag) + 1] ?? null : null)
+  const after = (flag) => (words.includes(flag) ? (words[words.indexOf(flag) + 1] ?? null) : null)
   return { harness: words.includes('--approve') ? 'pi' : 'claude', sessionId: after('--session-id') ?? after('--resume') }
 }
 
@@ -125,5 +124,10 @@ export function lastUsedModel(harness, { home = homedir(), env = process.env } =
 export async function piModels(run, { platform = process.platform, env = process.env, cwd = process.cwd() } = {}) {
   const r = await run(...childCommand('pi', ['--list-models'], { cwd, env, platform }))
   if (r.code !== 0) return []
-  return r.stdout.split('\n').slice(1).map((l) => l.trim().split(/\s+/)).filter((w) => w.length >= 2).map(([provider, id]) => `${provider}/${id}`)
+  return r.stdout
+    .split('\n')
+    .slice(1)
+    .map((l) => l.trim().split(/\s+/))
+    .filter((w) => w.length >= 2)
+    .map(([provider, id]) => `${provider}/${id}`)
 }

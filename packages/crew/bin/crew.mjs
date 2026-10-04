@@ -85,7 +85,7 @@ const USAGE = [
   '       crew daemon start | status | stop [--force] | restart [--force]',
   '       crew orchestration send --from <h> --dispatch-capability <c> --task-id <t> --dispatch-id <d> --type <worker_done|handoff|escalation> --subject <s> --body <b> [--outcome succeeded|failed]',
   'debug: crew session spawn [--cwd <dir>] -- <command…> | list | screen <id> | kill <id>',
-  '       crew console (the daemon\'s raw sessions; a run\'s are entered from crew view)',
+  "       crew console (the daemon's raw sessions; a run's are entered from crew view)",
   `hosts: ${HOSTS.join(', ')}`,
 ].join('\n')
 
@@ -265,7 +265,7 @@ async function view(args, { waitMs = 0 } = {}) {
     return runs.model.projects.flatMap((p) => p.runs).find((r) => r.runId === target || samePath(r.runDir, target))
   }
   const deadline = Date.now() + waitMs
-  let run = target && await find()
+  let run = target && (await find())
   while (target && !run && Date.now() < deadline) {
     await sleep(250)
     run = await find()

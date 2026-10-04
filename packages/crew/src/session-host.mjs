@@ -56,24 +56,40 @@
 export const CREW_ONLY = Object.freeze(['sessionStart', 'mailSend', 'terminalsParked', 'terminalPark', 'terminalsInfo'])
 
 export const SESSION_HOST = Object.freeze([
-  'unreachable', 'probe', 'guardWith',
-  'runCreate', 'runUse',
-  'workerStart', 'workerShow', 'workerStop', 'workerContinue', 'workerRelease',
-  'terminalIdle', 'terminalSend', 'terminalEnter', 'terminalClearInput', 'terminalScreen',
-  'terminalList', 'terminalClose', 'terminalSwitch', 'terminalRename', 'logTail', 'resumeRunner',
-  'chainWorktree', 'worktreeLines', 'worktreeStatus', 'worktreeRemove',
-  'mailCheck', 'workerDone',
+  'unreachable',
+  'probe',
+  'guardWith',
+  'runCreate',
+  'runUse',
+  'workerStart',
+  'workerShow',
+  'workerStop',
+  'workerContinue',
+  'workerRelease',
+  'terminalIdle',
+  'terminalSend',
+  'terminalEnter',
+  'terminalClearInput',
+  'terminalScreen',
+  'terminalList',
+  'terminalClose',
+  'terminalSwitch',
+  'terminalRename',
+  'logTail',
+  'resumeRunner',
+  'chainWorktree',
+  'worktreeLines',
+  'worktreeStatus',
+  'worktreeRemove',
+  'mailCheck',
+  'workerDone',
 ])
 
 // The session-level methods: a worker's session and its terminal, apart from
 // the run, worktrees and mailbox around it. The host contract suite
 // (test/test-host-contract.mjs) runs every host through them, and through
 // the run, worker and mailbox methods of RUN_METHODS.
-export const SESSION_METHODS = Object.freeze([
-  'workerStart', 'workerStop', 'workerContinue',
-  'terminalIdle', 'terminalSend', 'terminalEnter', 'terminalClearInput', 'terminalScreen',
-  'terminalList', 'terminalClose', 'terminalRename',
-])
+export const SESSION_METHODS = Object.freeze(['workerStart', 'workerStop', 'workerContinue', 'terminalIdle', 'terminalSend', 'terminalEnter', 'terminalClearInput', 'terminalScreen', 'terminalList', 'terminalClose', 'terminalRename'])
 
 export const RUN_METHODS = Object.freeze(['runCreate', 'runUse', 'workerShow', 'workerRelease', 'workerDone', 'mailCheck', 'chainWorktree', 'worktreeLines', 'worktreeStatus', 'worktreeRemove'])
 

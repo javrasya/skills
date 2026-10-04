@@ -54,7 +54,7 @@ test('crew run: one script, there, on a host crew knows', () => {
   assert.match(bad.stderr, /unknown host tmux/)
 })
 
-test('crew run --host orca: it is the runner, with the runner\'s own argv', () => {
+test("crew run --host orca: it is the runner, with the runner's own argv", () => {
   const r = crew('run', '--host', 'orca')
   assert.equal(r.status, 2)
   assert.match(r.stderr, /usage: node runner\.mjs/)
@@ -81,23 +81,35 @@ test('crew run: on the crew host, a whole run of fake-harness agents in crew ses
   assert.deepEqual(summary, { runner: 'session', host: 'crew', ok: true, result: { first: 'hello', second: 'world' } }, readFileSync(join(runDir, 'runner.log'), 'utf8'))
   const { sessions } = await request(crewPaths(ENV), { op: 'session.list' })
   assert.equal(sessions.find((s) => s.id === runner)?.title, 'crew run workflow.js')
-  const lines = (path) => readFileSync(path, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+  const lines = (path) =>
+    readFileSync(path, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l))
   const workers = lines(join(runDir, 'journal.jsonl')).filter((e) => e.type === 'started')
   assert.equal(workers.length, 2)
-  for (const w of workers) assert.ok(sessions.some((s) => s.id === w.terminal && s.command.includes(FAKE_HARNESS)), `${w.title} ran in a crew session of the fake harness`)
+  for (const w of workers)
+    assert.ok(
+      sessions.some((s) => s.id === w.terminal && s.command.includes(FAKE_HARNESS)),
+      `${w.title} ran in a crew session of the fake harness`,
+    )
   const rows = lines(join(ENV.CLAUDE_CONFIG_DIR, 'orca-runs.jsonl'))
   const armed = rows.find((e) => e.type === 'armed')
   assert.ok(armed, 'the run is registered')
   assert.deepEqual({ project: armed.project, runDir: armed.runDir, spec: armed.spec, script: armed.script, host: armed.host }, { project, runDir, spec: 'crew-run-fixture', script, host: 'crew' })
   assert.match(armed.runId, /^run_/)
   assert.ok(rows.some((e) => e.type === 'ended' && e.runId === armed.runId && e.outcome === 'ok'))
-  assert.deepEqual(rows.filter((e) => e.type === 'runner').map((e) => [e.terminal, e.host]), [[runner, 'crew']], 'the runner is its crew session, to be entered from crew view')
+  assert.deepEqual(
+    rows.filter((e) => e.type === 'runner').map((e) => [e.terminal, e.host]),
+    [[runner, 'crew']],
+    'the runner is its crew session, to be entered from crew view',
+  )
   const ls = crew('ls')
   assert.equal(ls.status, 0, ls.stderr)
   assert.match(ls.stdout, new RegExp(`^  ${armed.runId} +crew +crew-run-fixture +ok +runner`, 'm'))
 })
 
-test('crew start: a spec number, and with no terminal every row\'s flag, each missing one named', async () => {
+test("crew start: a spec number, and with no terminal every row's flag, each missing one named", async () => {
   const none = crew('start')
   assert.equal(none.status, 2)
   assert.match(none.stderr, /crew start: the spec issue number is required\nusage: crew run/)
@@ -115,7 +127,11 @@ test('crew run: crew killed mid-run, stop and restart refused meanwhile; started
   const r = spawnSync(process.execPath, [CREW, 'run', 'workflow.js'], { encoding: 'utf8', env: ENV, cwd: project })
   assert.equal(r.status, 0, r.stderr)
   const runDir = join(project, 'orca-run')
-  const lines = (path) => (existsSync(path) ? readFileSync(path, 'utf8') : '').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+  const lines = (path) =>
+    (existsSync(path) ? readFileSync(path, 'utf8') : '')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l))
   const journal = () => lines(join(runDir, 'journal.jsonl'))
   const log = () => (existsSync(join(runDir, 'runner.log')) ? readFileSync(join(runDir, 'runner.log'), 'utf8') : '')
   await eventually('both workers mid-turn', () => journal().filter((e) => e.type === 'started').length === 2, 60_000)
@@ -130,21 +146,32 @@ test('crew run: crew killed mid-run, stop and restart refused meanwhile; started
   const paths = crewPaths(ENV)
   const { pid } = await request(paths, { op: 'hello' })
   process.kill(pid, 'SIGKILL')
-  await eventually('the daemon gone', () => {
-    try {
-      process.kill(pid, 0)
-      return false
-    } catch {
-      return true
-    }
-  }, 20_000)
+  await eventually(
+    'the daemon gone',
+    () => {
+      try {
+        process.kill(pid, 0)
+        return false
+      } catch {
+        return true
+      }
+    },
+    20_000,
+  )
   const started = crew('daemon', 'start')
   assert.equal(started.status, 0, started.stderr)
 
   const summary = await eventually('summary.json', () => existsSync(join(runDir, 'summary.json')) && JSON.parse(readFileSync(join(runDir, 'summary.json'), 'utf8')), 120_000)
   assert.deepEqual(summary, { runner: 'session', host: 'crew', ok: true, result: { first: 'hello', second: 'world' } }, log())
   const continued = journal().filter((e) => e.type === 'continued')
-  assert.deepEqual(continued.map((e) => [e.title, e.hostDied, e.attempt]).sort(), [['[Greet] first', true, 0], ['[Greet] second', true, 0]], log())
+  assert.deepEqual(
+    continued.map((e) => [e.title, e.hostDied, e.attempt]).sort(),
+    [
+      ['[Greet] first', true, 0],
+      ['[Greet] second', true, 0],
+    ],
+    log(),
+  )
   assert.match(log(), /its session died with its session host; continuing session \S+ \(not counted against the cap\)/)
   const rows = lines(join(ENV.CLAUDE_CONFIG_DIR, 'orca-runs.jsonl')).filter((e) => e.runId === runId)
   assert.equal(rows.filter((e) => e.type === 'runner').length, 2, 'a second runner took the run up')
@@ -152,7 +179,7 @@ test('crew run: crew killed mid-run, stop and restart refused meanwhile; started
   assert.equal(rows.at(-1).outcome, 'ok')
 })
 
-test('crew orchestration send: a worker\'s message needs its IDs and a type, and names a dispatch crew made', () => {
+test("crew orchestration send: a worker's message needs its IDs and a type, and names a dispatch crew made", () => {
   const missing = crew('orchestration', 'send', '--type', 'handoff')
   assert.equal(missing.status, 2)
   assert.match(missing.stderr, /missing --task-id, --dispatch-id/)
@@ -162,7 +189,7 @@ test('crew orchestration send: a worker\'s message needs its IDs and a type, and
   assert.match(stranger.stderr, /dispatch_not_found/)
 })
 
-test('crew ls: every run of the registry, crew\'s and Orca\'s, by project; crew view <run> needs a run the registry has, and a terminal', () => {
+test("crew ls: every run of the registry, crew's and Orca's, by project; crew view <run> needs a run the registry has, and a terminal", () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-bin-ls-'))
   const registry = join(dir, 'runs.jsonl')
   assert.equal(crew('ls', '--registry', registry).stdout.trim(), 'the run registry holds no run yet')
@@ -216,15 +243,16 @@ test('crew pause | resume <run>: by run id, run folder, its name or state dir; a
 
 // crew rm waits on the runner it ends, so the test's event loop must be free
 // to reap that runner: spawnSync would leave it a zombie, alive to a probe.
-const crewAsync = (...args) => new Promise((resolve) => {
-  const child = spawn(process.execPath, [CREW, ...args], { env: ENV })
-  let stdout = ''
-  let stderr = ''
-  child.stdout.on('data', (d) => (stdout += d))
-  child.stderr.on('data', (d) => (stderr += d))
-  child.stdin.end()
-  child.once('close', (status) => resolve({ status, stdout, stderr }))
-})
+const crewAsync = (...args) =>
+  new Promise((resolve) => {
+    const child = spawn(process.execPath, [CREW, ...args], { env: ENV })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', (d) => (stdout += d))
+    child.stderr.on('data', (d) => (stderr += d))
+    child.stdin.end()
+    child.once('close', (status) => resolve({ status, stdout, stderr }))
+  })
 
 test('crew rm <run>: asks first, and any answer but y removes nothing; y, or --yes, ends the runner its runner.pid names, forgets the run and deletes its run folder', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-bin-rm-'))
@@ -254,7 +282,7 @@ test('crew rm <run>: asks first, and any answer but y removes nothing; y, or --y
   assert.equal(crew('ls', '--registry', registry).stdout.trim(), 'the run registry holds no run yet')
 })
 
-test('crew view: with no run, the runs list; --attached and --standalone are the run view\'s own argv', () => {
+test("crew view: with no run, the runs list; --attached and --standalone are the run view's own argv", () => {
   const list = crew('view', '--registry', join(mkdtempSync(join(tmpdir(), 'crew-bin-')), 'runs.jsonl'))
   assert.equal(list.status, 3, 'no run named: the runs list, which needs a terminal')
   assert.match(list.stderr, /crew view: needs a terminal/)

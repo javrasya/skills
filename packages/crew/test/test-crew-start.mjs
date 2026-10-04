@@ -37,7 +37,7 @@ const VALUES = { SPEC: 94, REPO: 'acme/app', REPO_DIR: 'C:\\work\\app', NOTES_DI
 
 test('render: the template with the ten values is what the skill renders, RUNNER session', () => {
   const template = readFileSync(templatePath(), 'utf8')
-  assert.equal(templatePath(), SKILL_TEMPLATE, 'in a checkout the skill folder\'s template is the one rendered')
+  assert.equal(templatePath(), SKILL_TEMPLATE, "in a checkout the skill folder's template is the one rendered")
   const rendered = renderTemplate(template, { ...VALUES, RUNNER: 'session' })
   assert.equal(rendered, skillRender(template, { ...VALUES, RUNNER: 'session' }))
   assert.doesNotMatch(rendered, new RegExp(`__(${PLACEHOLDERS.join('|')})__`))
@@ -56,8 +56,17 @@ test('render: a validation list is substituted as written, whatever it holds', (
 test("render: a validation list the template's String.raw literal cannot hold is refused, naming the line, not rendered into a workflow.js that dies on load", () => {
   const template = readFileSync(templatePath(), 'utf8')
   const BS = '\\'
-  for (const [list, why] of [['npm test\necho `date`\n', /line 2 holds a backtick: "echo `date`"/], ['npm test -- ${{ matrix.x }}\n', /line 1 holds \$\{/], [`make ${BS}\nnpm test\n`, /line 1 ends in a backslash/], [`npm test ${BS}`, /line 1 ends in a backslash/]]) {
-    assert.throws(() => renderTemplate(template, { ...VALUES, RUNNER: 'session', VALIDATION: list }), (e) => /the validation list cannot be armed/.test(e.message) && why.test(e.message), list)
+  for (const [list, why] of [
+    ['npm test\necho `date`\n', /line 2 holds a backtick: "echo `date`"/],
+    ['npm test -- ${{ matrix.x }}\n', /line 1 holds \$\{/],
+    [`make ${BS}\nnpm test\n`, /line 1 ends in a backslash/],
+    [`npm test ${BS}`, /line 1 ends in a backslash/],
+  ]) {
+    assert.throws(
+      () => renderTemplate(template, { ...VALUES, RUNNER: 'session', VALIDATION: list }),
+      (e) => /the validation list cannot be armed/.test(e.message) && why.test(e.message),
+      list,
+    )
   }
   assert.doesNotThrow(() => renderTemplate(template, { ...VALUES, RUNNER: 'session', VALIDATION: `# a ${BS} in the middle is held\nnpm test -- a${BS}b $HOME\n` }))
 })
@@ -66,7 +75,7 @@ test('form keys: arrows, Enter, Tab, Esc and Ctrl+C from raw input', () => {
   assert.deepEqual(keysOf('\x1b[A\x1b[B\x1b[C\x1b[D\r\t\x1b[Z'), ['up', 'down', 'right', 'left', 'enter', 'down', 'up'])
   assert.deepEqual(keysOf('\x1b'), ['cancel'])
   assert.deepEqual(keysOf('\x03'), ['interrupt'])
-  assert.deepEqual(keysOf('\x1b[24~'), [], 'an unknown sequence is no key of the form\'s')
+  assert.deepEqual(keysOf('\x1b[24~'), [], "an unknown sequence is no key of the form's")
   assert.deepEqual(keysOf('op\x7f'), [{ char: 'o' }, { char: 'p' }, 'backspace'], 'a letter is typed into the search')
 })
 
@@ -86,7 +95,9 @@ class FakeStdin extends EventEmitter {
     this.chunks = [...chunks]
     this.raw = []
   }
-  setRawMode(on) { this.raw.push(on) }
+  setRawMode(on) {
+    this.raw.push(on)
+  }
   on(event, fn) {
     super.on(event, fn)
     if (event === 'data') {
@@ -102,15 +113,34 @@ class FakeStdin extends EventEmitter {
     return this
   }
 }
-const fakeStdout = () => ({ text: '', write(s) { this.text += s } })
+const fakeStdout = () => ({
+  text: '',
+  write(s) {
+    this.text += s
+  },
+})
 const lastScreen = (out) => strip(out.text.split('\x1b[2J\x1b[H').pop())
 
 test('form at a terminal: every row with its default and flag, GH Stack shown disabled with the docs link', () => {
   const lines = drawStartForm(startForm(FACTS), 0, 'crew start').map(strip)
-  for (const [label, value, flag] of [['Harness', 'Claude Code', '--harness'], ['Model', 'opus', '--model'], ['Base branch', 'develop', '--base'], ['Prior work', 'None \u2014 the stack starts on develop', '--start-ref'], ['Stack mode', 'Basic Git stacking', '--stack-mode'], ['Run order', 'Parallel', '--run-order'], ['Permission mode', 'auto', '--permission-mode']]) {
-    assert.ok(lines.some((l) => l.includes(label) && l.includes(value) && l.includes(flag)), `${label}: ${lines.join('\n')}`)
+  for (const [label, value, flag] of [
+    ['Harness', 'Claude Code', '--harness'],
+    ['Model', 'opus', '--model'],
+    ['Base branch', 'develop', '--base'],
+    ['Prior work', 'None \u2014 the stack starts on develop', '--start-ref'],
+    ['Stack mode', 'Basic Git stacking', '--stack-mode'],
+    ['Run order', 'Parallel', '--run-order'],
+    ['Permission mode', 'auto', '--permission-mode'],
+  ]) {
+    assert.ok(
+      lines.some((l) => l.includes(label) && l.includes(value) && l.includes(flag)),
+      `${label}: ${lines.join('\n')}`,
+    )
   }
-  assert.ok(lines.some((l) => l.includes('GH Stack (unavailable): not enabled for this repo') && l.includes(STACKS_DOCS)), lines.join('\n'))
+  assert.ok(
+    lines.some((l) => l.includes('GH Stack (unavailable): not enabled for this repo') && l.includes(STACKS_DOCS)),
+    lines.join('\n'),
+  )
   const pi = drawStartForm(startForm(FACTS, { flags: { harness: 'pi' } }), 0).map(strip)
   assert.ok(!pi.some((l) => l.includes('Permission mode')), 'no permission mode for pi')
 })
@@ -133,7 +163,10 @@ const MANY = { ...FACTS, models: { ...FACTS.models, pi: { last: 'm000', list: Ar
 test('form at a terminal: a focused row lists at most WINDOW options, saying how many more', () => {
   const lines = drawStartForm(startForm(MANY, { flags: { harness: 'pi' } }), 1).map(strip)
   assert.equal(lines.filter((l) => /^\s+(●\s)?m\d{3}$/.test(l.trimEnd())).length, WINDOW, lines.join('\n'))
-  assert.ok(lines.some((l) => l.includes(`↓ ${121 - WINDOW} more`)), lines.join('\n'))
+  assert.ok(
+    lines.some((l) => l.includes(`↓ ${121 - WINDOW} more`)),
+    lines.join('\n'),
+  )
   const other = drawStartForm(startForm(MANY, { flags: { harness: 'pi' } }), 0).map(strip)
   assert.ok(!other.some((l) => /m05\d/.test(l)), 'an unfocused row lists none of its options')
 })
@@ -163,10 +196,12 @@ const daemons = []
 after(async () => {
   for (const paths of daemons) await stopDaemon(paths, { force: true }).catch(() => {})
 })
-const fakeOrchestrator = (home) => ({ repoDir, harness, model, permissionMode }) => {
-  const env = { ...process.env, CLAUDE_CONFIG_DIR: join(home, '.claude'), PI_CODING_AGENT_SESSION_DIR: join(home, '.pi') }
-  return orchestrator({ harness, model, permissionMode, cwd: repoDir, env, program: [process.execPath, FAKE_HARNESS], answerMs: 60_000 })
-}
+const fakeOrchestrator =
+  (home) =>
+  ({ repoDir, harness, model, permissionMode }) => {
+    const env = { ...process.env, CLAUDE_CONFIG_DIR: join(home, '.claude'), PI_CODING_AGENT_SESSION_DIR: join(home, '.pi') }
+    return orchestrator({ harness, model, permissionMode, cwd: repoDir, env, program: [process.execPath, FAKE_HARNESS], answerMs: 60_000 })
+  }
 // The preflight as `crew start` runs it, on the fake harness.
 const fakeCheck = ({ repoDir, harness, model }) => preflight({ harness, model, cwd: repoDir, program: [process.execPath, FAKE_HARNESS] })
 
@@ -206,11 +241,20 @@ function world({ validation = 'npm test\n', stackInstalled = true } = {}) {
   // Each start's own run id, in order: r1, r2, …
   let armed = 0
   const start = (argv, over = {}) => startCommand({ argv, paths, cwd: repoDir, tty: false, run, home, env: {}, launch, orchestrate: fakeOrchestrator(home), check: fakeCheck, newRunId: (spec) => `${spec}-r${++armed}`, ...over })
-  return { home, repoDir, paths, notesDir, calls, launches, start, ready: (async () => {
-    await git('init', '-q', '-b', 'develop')
-    await git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init')
-    await git('branch', 'main')
-  })() }
+  return {
+    home,
+    repoDir,
+    paths,
+    notesDir,
+    calls,
+    launches,
+    start,
+    ready: (async () => {
+      await git('init', '-q', '-b', 'develop')
+      await git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init')
+      await git('branch', 'main')
+    })(),
+  }
 }
 
 test('crew start with no terminal: every missing flag is an error naming it, and nothing is armed', async () => {
@@ -237,7 +281,10 @@ test('crew start: the harness is checked on the answered model, in the checkout,
     checked.push(c)
     throw new Error('claude answered with an error: Invalid API key · Please run /login')
   }
-  await assert.rejects(w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r', '\r']), stdout: fakeStdout(), orchestrate, check: refused }), (e) => e.code === 1 && /^claude on \S+ cannot run here: claude answered with an error: Invalid API key · Please run \/login; nothing armed$/.test(e.message))
+  await assert.rejects(
+    w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r', '\r']), stdout: fakeStdout(), orchestrate, check: refused }),
+    (e) => e.code === 1 && /^claude on \S+ cannot run here: claude answered with an error: Invalid API key · Please run \/login; nothing armed$/.test(e.message),
+  )
   assert.deepEqual([checked[0].repoDir, checked[0].harness, typeof checked[0].model], [w.repoDir, 'claude', 'string'])
   assert.equal(asked, 0, 'the orchestrator is never asked')
   assert.equal(w.launches.length, 0)
@@ -260,7 +307,10 @@ test("crew start at a terminal, no validation.md: the orchestrator's draft is th
   const out = fakeStdout()
   const keys = ['\r', '\r', '\r', '\r', '\r', '\r', '\r', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[F', '\r', 'make check', '\x13']
   const armed = await w.start(['94'], { tty: true, stdin: new FakeStdin(keys), stdout: out })
-  const draft = out.text.split('\x1b[2J\x1b[H').map(strip).find((screen) => screen.includes("drafted by crew's orchestrator"))
+  const draft = out.text
+    .split('\x1b[2J\x1b[H')
+    .map(strip)
+    .find((screen) => screen.includes("drafted by crew's orchestrator"))
   assert.ok(draft, out.text)
   for (const line of FIXED_DRAFT.trim().split('\n')) assert.ok(draft.includes(line), `${line} in the draft step:\n${draft}`)
   assert.ok(draft.includes(join(w.notesDir, 'validation.md')))
@@ -276,8 +326,15 @@ test('crew start at a terminal: cancelling the draft writes nothing and arms not
   const w = world({ validation: null })
   await w.ready
   await assert.rejects(w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r', '\r', 'x', '\x1b']), stdout: fakeStdout() }), (e) => e.code === 130 && /no validation list written, nothing armed/.test(e.message))
-  const failing = () => ({ ask: async () => { throw new OrchestratorError('validation-list', 'its session settled failed') } })
-  await assert.rejects(w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r', '\r']), stdout: fakeStdout(), orchestrate: failing }), (e) => e.code === 1 && /the orchestrator gave no valid answer to validation-list: its session settled failed; no validation list written, nothing armed/.test(e.message))
+  const failing = () => ({
+    ask: async () => {
+      throw new OrchestratorError('validation-list', 'its session settled failed')
+    },
+  })
+  await assert.rejects(
+    w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r', '\r']), stdout: fakeStdout(), orchestrate: failing }),
+    (e) => e.code === 1 && /the orchestrator gave no valid answer to validation-list: its session settled failed; no validation list written, nothing armed/.test(e.message),
+  )
   assert.equal(w.launches.length, 0)
   assert.ok(!existsSync(join(w.notesDir, 'validation.md')))
   assert.ok(!existsSync(join(w.notesDir, 'runs')))
@@ -297,31 +354,38 @@ test('crew start at a terminal: Ctrl+C while the orchestrator drafts closes its 
   const drafting = () => {
     let giveUp
     return {
-      ask: () => new Promise((_, reject) => {
-        giveUp = reject
-        setImmediate(() => ctrlC())
-      }),
+      ask: () =>
+        new Promise((_, reject) => {
+          giveUp = reject
+          setImmediate(() => ctrlC())
+        }),
       close: async () => {
         closed++
         giveUp(new OrchestratorError('validation-list', 'its asker stopped asking', { stopped: true }))
       },
     }
   }
-  await assert.rejects(w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r', '\r']), stdout: fakeStdout(), orchestrate: drafting, interrupt }), (e) => e.code === 130 && /cancelled while the orchestrator drafted; its session closed, no validation list written, nothing armed/.test(e.message))
+  await assert.rejects(
+    w.start(['94'], { tty: true, stdin: new FakeStdin(['\r', '\r', '\r', '\r', '\r', '\r', '\r']), stdout: fakeStdout(), orchestrate: drafting, interrupt }),
+    (e) => e.code === 130 && /cancelled while the orchestrator drafted; its session closed, no validation list written, nothing armed/.test(e.message),
+  )
   assert.equal(closed, 1, 'the question given up, its session closed')
-  assert.equal(listening, false, 'Ctrl+C is crew start\'s own again')
+  assert.equal(listening, false, "Ctrl+C is crew start's own again")
   assert.equal(w.launches.length, 0)
   assert.ok(!existsSync(join(w.notesDir, 'validation.md')))
 })
 
-test("crew start at a terminal: a draft edited to hold a backtick is not confirmed; the step stays, says why, and confirms once it is gone", async () => {
+test('crew start at a terminal: a draft edited to hold a backtick is not confirmed; the step stays, says why, and confirms once it is gone', async () => {
   const w = world({ validation: null })
   await w.ready
   const out = fakeStdout()
   const one = () => ({ ask: async () => ({ checks: [{ command: 'npm test', source: 'package.json' }] }) })
   const keys = ['\r', '\r', '\r', '\r', '\r', '\r', '\r', '\x1b[B', '\x1b[F', ' `x`', '\x13', '\b', '\b', '\b', '\b', '\x13']
   const armed = await w.start(['94'], { tty: true, stdin: new FakeStdin(keys), stdout: out, orchestrate: one })
-  const refused = out.text.split('\x1b[2J\x1b[H').map(strip).find((screen) => screen.includes('Not confirmed'))
+  const refused = out.text
+    .split('\x1b[2J\x1b[H')
+    .map(strip)
+    .find((screen) => screen.includes('Not confirmed'))
   assert.ok(refused, out.text)
   assert.match(refused, /Not confirmed: the list's line 2 holds a backtick: "npm test `x`"/)
   assert.equal(readFileSync(join(w.notesDir, 'validation.md'), 'utf8'), '# package.json\nnpm test\n')
@@ -359,7 +423,7 @@ test('crew start at a terminal: Enter through the form renders workflow.js into 
   const stateDir = join(runDir, 'orca-run')
   assert.equal(armed.script, script)
   assert.deepEqual(w.launches, [{ script, stateDir, permissionMode: 'auto', cwd: w.repoDir, title: 'implement-spec #94: Crew, the session runner' }])
-  assert.ok(!existsSync(join(runDir, 'validation.md')), 'the validation list is read from the spec\'s notes dir, never copied into the run')
+  assert.ok(!existsSync(join(runDir, 'validation.md')), "the validation list is read from the spec's notes dir, never copied into the run")
   const template = readFileSync(templatePath(), 'utf8')
   // Its research notes are its own too; the validation list stays the spec's.
   assert.equal(readFileSync(script, 'utf8'), skillRender(template, { SPEC: 94, REPO: 'acme/app', REPO_DIR: w.repoDir, NOTES_DIR: runDir, BASE_REF: 'develop', START_REF: 'develop', STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session', VALIDATION: 'npm t\n' }))
@@ -427,10 +491,10 @@ test('run default, pi: every role row carries harness pi, piModel the chosen mod
   assert.ok(CLAUDE_MODELS.includes(roles.impl.model))
 })
 
-test('a per-role override in crew\'s per-repo config wins for that role only', async () => {
+test("a per-role override in crew's per-repo config wins for that role only", async () => {
   const { script } = await armedWith(['--harness', 'claude', '--model', 'sonnet', '--permission-mode', 'auto'], { roles: { impl: { harness: 'pi', model: 'openai/gpt-5' }, gate: { harness: 'claude', model: 'opus' } } })
   const roles = rolesOf(script)
-  assert.deepEqual(roles.impl, { harness: 'pi', piModel: 'openai/gpt-5', model: 'sonnet' }, 'a pi override keeps the run default\'s Claude model')
+  assert.deepEqual(roles.impl, { harness: 'pi', piModel: 'openai/gpt-5', model: 'sonnet' }, "a pi override keeps the run default's Claude model")
   assert.deepEqual(roles.gate, { harness: 'claude', model: 'opus' })
   for (const name of ROLE_NAMES.filter((r) => r !== 'impl' && r !== 'gate')) assert.deepEqual(roles[name], { harness: 'claude', model: 'sonnet' }, name)
   const onPi = rolesOf((await armedWith(['--harness', 'pi', '--model', 'lmstudio/qwen3'], { roles: { review: { harness: 'claude', model: 'haiku' } } })).script)
@@ -438,7 +502,7 @@ test('a per-role override in crew\'s per-repo config wins for that role only', a
   assert.deepEqual(onPi.impl, { harness: 'pi', piModel: 'lmstudio/qwen3', model: 'opus' })
 })
 
-test('a per-role override naming no role of the template\'s is refused, and nothing is armed', async () => {
+test("a per-role override naming no role of the template's is refused, and nothing is armed", async () => {
   const w = world()
   await w.ready
   configRoles(w, { implement: { harness: 'pi', model: 'x/y' } })
@@ -467,7 +531,16 @@ test('the rendered script still runs on the Workflow runner: only role rows diff
     calls.push(opts)
     throw stop
   }
-  await assert.rejects(loadScript(rendered)(agent, async (fns) => Promise.all(fns.map((f) => f())), () => {}, () => {}, {}), (e) => e === stop)
+  await assert.rejects(
+    loadScript(rendered)(
+      agent,
+      async (fns) => Promise.all(fns.map((f) => f())),
+      () => {},
+      () => {},
+      {},
+    ),
+    (e) => e === stop,
+  )
   assert.equal(calls.length, 1)
   assert.ok(CLAUDE_MODELS.includes(calls[0].model), calls[0].model)
   assert.equal(calls[0].harness, 'pi')
@@ -505,7 +578,10 @@ test('crew start never shares a run: each start arms a new run in its own folder
   const written = readFileSync(first.script, 'utf8')
   const second = await w.start(['94', ...FLAGS])
   assert.equal(second.script, join(w.notesDir, 'runs', '94-r2', 'workflow.js'))
-  assert.deepEqual(w.launches.map((l) => l.stateDir), [firstState, join(w.notesDir, 'runs', '94-r2', 'orca-run')])
+  assert.deepEqual(
+    w.launches.map((l) => l.stateDir),
+    [firstState, join(w.notesDir, 'runs', '94-r2', 'orca-run')],
+  )
   assert.equal(readFileSync(first.script, 'utf8'), written)
   assert.equal(readFileSync(join(firstState, 'runner.pid'), 'utf8'), String(process.pid))
   assert.ok(existsSync(join(firstState, 'halted.json')))
