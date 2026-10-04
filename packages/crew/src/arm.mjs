@@ -3,11 +3,11 @@
 // repo, its path and the notes directory, render the bundled template into a
 // new run's own folder under it, and launch the runner there as a crew
 // session, as `crew run` does.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
-import { randomBytes } from 'crypto'
-import { homedir } from 'os'
-import { dirname, join, resolve } from 'path'
-import { fileURLToPath } from 'url'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { homedir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { readCrewConfig, repoConfig } from './crew-config.mjs'
 import { runFolderOf, stateDirOf } from './run-layout.mjs'
 import { ensureDaemon, request } from './daemon/client.mjs'
@@ -23,10 +23,7 @@ import { preflight } from './headless.mjs'
 
 // The copy `npm pack` bundles (scripts/pack-template.mjs), else, in a checkout
 // of this repo, the skill folder's own: the copy is taken from it.
-export const TEMPLATES = [
-  fileURLToPath(new URL('../workflow.template.js', import.meta.url)),
-  fileURLToPath(new URL('../../../skills/engineering/implement-spec-in-workflow/workflow.template.js', import.meta.url)),
-]
+export const TEMPLATES = [fileURLToPath(new URL('../workflow.template.js', import.meta.url)), fileURLToPath(new URL('../../../skills/engineering/implement-spec-in-workflow/workflow.template.js', import.meta.url))]
 
 export function templatePath(candidates = TEMPLATES) {
   const found = candidates.find((p) => existsSync(p))
@@ -60,7 +57,10 @@ const ROLE_ROW = /^( +)(\w+): RUN_DEFAULT,/gm
 export const roleRow = ({ harness, model }, claudeModel) => (harness === 'pi' ? { harness: 'pi', piModel: model, model: claudeModel } : { harness, model })
 
 const quote = (v) => `'${String(v).replace(/[\\']/g, '\\$&')}'`
-const literal = (row) => `{ ${Object.entries(row).map(([k, v]) => `${k}: ${quote(v)}`).join(', ')} }`
+const literal = (row) =>
+  `{ ${Object.entries(row)
+    .map(([k, v]) => `${k}: ${quote(v)}`)
+    .join(', ')} }`
 
 // The rendered script's role table: RUN_DEFAULT from the form's harness and
 // model, and each role in `roles` (crew's per-repo config) on a row of its
@@ -73,9 +73,7 @@ export function renderRoles(script, { runDefault, roles = {} }) {
   const unknown = Object.keys(roles).filter((r) => !names.includes(r))
   if (unknown.length) throw new Error(`crew config roles: ${unknown.join(', ')} ${unknown.length > 1 ? 'are no roles' : 'is no role'} of the workflow template's; its roles are ${names.join(', ')}`)
   const claudeModel = runDefault.harness === 'claude' ? runDefault.model : line[1]
-  return script
-    .replace(DEFAULT_LINE, () => `const RUN_DEFAULT = ${literal(roleRow(runDefault, claudeModel))}`)
-    .replace(ROLE_ROW, (row, indent, name) => (roles[name] ? `${indent}${name}: ${literal(roleRow(roles[name], claudeModel))},` : row))
+  return script.replace(DEFAULT_LINE, () => `const RUN_DEFAULT = ${literal(roleRow(runDefault, claudeModel))}`).replace(ROLE_ROW, (row, indent, name) => (roles[name] ? `${indent}${name}: ${literal(roleRow(roles[name], claudeModel))},` : row))
 }
 
 // The run default a rendered script's RUN_DEFAULT line holds, as the form's
@@ -140,8 +138,7 @@ const programOf = (paths, harness) => readCrewConfig(paths).harnesses?.[harness]
 
 // The orchestrator `crew start` drafts a missing validation list with: in the
 // checkout, on the harness and model the form answered.
-export const crewOrchestrator = ({ paths, repoDir, harness, model, permissionMode }) =>
-  orchestrator({ harness, model, permissionMode, cwd: repoDir, program: programOf(paths, harness) })
+export const crewOrchestrator = ({ paths, repoDir, harness, model, permissionMode }) => orchestrator({ harness, model, permissionMode, cwd: repoDir, program: programOf(paths, harness) })
 
 // `crew start`'s check, before it drafts or arms anything, that the harness
 // the form answered is logged in and reaches its model: one headless turn in
@@ -218,9 +215,22 @@ async function draftStep({ target, answers, orchestrate, paths, stdin, stdout, h
 // is drawn, `attempts` times in all, before the start is refused.
 export async function armRun({ target, answers, roles, newId, attempts = 5, template = readFileSync(templatePath(), 'utf8'), launch }) {
   const { spec, repo, repoDir, notesDir, title, validation } = target
-  const render = (runFolder) => renderRoles(renderTemplate(template, {
-    SPEC: spec, REPO: repo, REPO_DIR: repoDir, NOTES_DIR: runFolder, BASE_REF: answers.base, START_REF: answers.startRef, STACK_MODE: answers.stackMode, RUN_ORDER: answers.runOrder, RUNNER: 'session', VALIDATION: validation,
-  }), { runDefault: answers, roles })
+  const render = (runFolder) =>
+    renderRoles(
+      renderTemplate(template, {
+        SPEC: spec,
+        REPO: repo,
+        REPO_DIR: repoDir,
+        NOTES_DIR: runFolder,
+        BASE_REF: answers.base,
+        START_REF: answers.startRef,
+        STACK_MODE: answers.stackMode,
+        RUN_ORDER: answers.runOrder,
+        RUNNER: 'session',
+        VALIDATION: validation,
+      }),
+      { runDefault: answers, roles },
+    )
   let runFolder, rendered
   for (let i = 1; ; i++) {
     runFolder = runFolderOf(notesDir, newId())

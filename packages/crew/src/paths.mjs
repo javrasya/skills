@@ -1,5 +1,5 @@
 // One path however it is spelled.
-import { resolve } from 'path'
+import { resolve } from 'node:path'
 
 // A path's key, so two spellings of it compare equal: resolved, no trailing
 // separator, and on Windows forward slashes and case-folded.

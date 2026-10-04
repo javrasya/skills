@@ -1,7 +1,7 @@
 // crew pause, crew resume and crew rm: what p, r and x do in the run view,
 // from the command line, on a run named by its run id, its run folder (crew
 // start's runs/<id>) or its state dir.
-import { basename } from 'path'
+import { basename } from 'node:path'
 import { samePath } from './paths.mjs'
 import { REGISTRY_PATH, readRegistry, runRegistry } from './registry.mjs'
 import { alreadyPaused, notPaused, pauseRun, unpauseRun } from './pause.mjs'
@@ -35,7 +35,7 @@ export function resumeCommand({ registry = REGISTRY_PATH, target }) {
 // ask(question): the operator's answer, one line. `yes` skips the run's
 // confirmation, never a force-delete's. openHost(run): the run's host, opened
 // only once the run is found.
-export async function removeCommand({ registry = REGISTRY_PATH, target, openHost, ask, yes = false, unpushed = worktreeUnpushed, stopRunner = stopRunnerOf, out = () => {} }) {
+export async function removeCommand({ registry = REGISTRY_PATH, target, openHost, ask, yes = false, unpushed = worktreeUnpushed, stopRunner = stopRunnerOf, out = /** @type {(line: string) => unknown} */ (() => {}) }) {
   const run = runOf(registry, target)
   if (!yes) {
     const answer = await ask(`Remove run ${run.runId}? It stops its runner and every agent, reclaims its worktrees, forgets the run and deletes ${runFolderOfStateDir(run.runDir)}; its PRs on GitHub stay. [y/N] `)

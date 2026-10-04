@@ -16,7 +16,7 @@
 //                    the prompt as sent, for one that cannot take a schema
 //   answer(stdout, schema)
 //                    the value it answered, or a throw saying why none
-import { spawn } from 'child_process'
+import { spawn } from 'node:child_process'
 import { childCommand } from './command.mjs'
 import { validate } from './schema.mjs'
 import { nativeEnv } from './harness.mjs'
@@ -38,8 +38,13 @@ export const HEADLESS = Object.freeze({
   // `structured_output` is the answer, checked against the schema by Claude.
   claude: Object.freeze({
     words: ({ schema, model, effort, permissionMode, dirs = [] }) => [
-      '-p', '--output-format', 'json', ...(schema ? ['--json-schema', JSON.stringify(schema)] : []),
-      ...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : []), ...(permissionMode ? ['--permission-mode', permissionMode] : []),
+      '-p',
+      '--output-format',
+      'json',
+      ...(schema ? ['--json-schema', JSON.stringify(schema)] : []),
+      ...(model ? ['--model', model] : []),
+      ...(effort ? ['--effort', effort] : []),
+      ...(permissionMode ? ['--permission-mode', permissionMode] : []),
       ...dirs.flatMap((d) => ['--add-dir', d]),
     ],
     prompt: (prompt) => prompt,
@@ -50,7 +55,12 @@ export const HEADLESS = Object.freeze({
       } catch {
         throw new Error(`claude printed no result: ${stdout.trim().slice(-300) || 'nothing'}`)
       }
-      if (r.is_error || r.subtype !== 'success') throw new Error(`claude answered with an error: ${String(r.result ?? r.subtype ?? 'no reason given').trim().slice(0, 500)}`)
+      if (r.is_error || r.subtype !== 'success')
+        throw new Error(
+          `claude answered with an error: ${String(r.result ?? r.subtype ?? 'no reason given')
+            .trim()
+            .slice(0, 500)}`,
+        )
       if (!schema) return r.result
       if (r.structured_output === undefined) throw new Error('claude gave no structured answer')
       return r.structured_output

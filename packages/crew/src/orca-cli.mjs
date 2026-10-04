@@ -2,11 +2,11 @@
 // talk to Orca (ADR-0011). Callers see only the plain shapes these methods
 // return; the JSON field names of Orca's `--json` output (as of 1.4.207) stay
 // in this file. fake-orca.mjs implements the same interface, offline.
-import { execFile } from 'child_process'
+import { execFile } from 'node:child_process'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { gitProbes, prepareChainWorktree, prepareWorktree, reuseWorktree, worktreeLines } from './worktree.mjs'
 import { sessionTranscripts } from './transcript.mjs'
-import { bounded, chainName, execGit, gitIn, realTimer, worktreeName } from './git.mjs'
+import { bounded, chainName, execGit, realTimer, worktreeName } from './git.mjs'
 import { launchCommand, resumeCommand, SHELL_WORD } from './harness.mjs'
 import { runnerArgs } from './daemon/runs.mjs'
 
@@ -22,6 +22,7 @@ export class OrcaError extends Error {
 // stderr), its CLI unable to start, or no orca to spawn. Only these are an
 // outage (outage.mjs). A timeout, or any error from an Orca that answered, is
 // not: a hung Orca must never stall the run without limit.
+/** @param {(Error & { code?: string }) | string | null | undefined} e */
 export function orcaUnreachable(e) {
   if (!(e instanceof Error)) return false
   if (e.code === 'runtime_unavailable' || /\bruntime_unavailable\b/.test(e.message)) return true
@@ -97,8 +98,7 @@ export function resumeRunnerCommand({ runner, script, stateDir, permissionMode =
 
 // The one worker-start argv: it adopts a terminal the runner made, so it never
 // carries --agent. fake-orca.mjs builds its starts from this too.
-export const workerStartArgs = ({ run, prompt, title, place, terminal }) =>
-  ['orchestration', 'worker-start', '--run', run, '--spec', prompt, '--task-title', title, ...place, '--terminal', terminal]
+export const workerStartArgs = ({ run, prompt, title, place, terminal }) => ['orchestration', 'worker-start', '--run', run, '--spec', prompt, '--task-title', title, ...place, '--terminal', terminal]
 
 // A `worker-show` result as the runner reads it. fake-orca.mjs answers in
 // Orca's shape and reads it through this too.
@@ -148,6 +148,7 @@ const TAB_GONE = new Set(['terminal_not_writable', 'terminal_exited', 'terminal_
 // the checkout the runner runs in, every child worktree's parent, whose MCP
 // answers a child gets (mcp-answers.mjs), read and written through `fs`;
 // `transcripts` is what promptDelivered reads a session's transcript with.
+/** @param {{ bin?: string, call?: ReturnType<typeof execOrca>, git?: typeof execGit, clock?: { timer: typeof realTimer }, callMs?: number, createMs?: number, platform?: NodeJS.Platform, project?: string, fs?: import('./mcp-answers.mjs').McpFs, transcripts?: ReturnType<typeof sessionTranscripts> }} [options] */
 export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(bin), git = execGit, clock = { timer: realTimer }, callMs = RUNNER_SETTINGS.hostCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, platform = process.platform, project = process.cwd(), fs, transcripts = sessionTranscripts() } = {}) {
   const once = (args, waitMs = 0) => withTimeout(clock, callMs + waitMs, call(args, callMs + waitMs), args.slice(0, 2).join(' '))
   let outage = null
@@ -197,10 +198,14 @@ export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(
   async function earlierWorktree(name, dispatched, baseline) {
     const row = await findWorktree(name)
     if (!row) return null
-    return reuseWorktree(row.path, { dispatched, baseline }, {
-      held: async () => ((await orca(['terminal', 'list', '--worktree', `path:${row.path}`]))?.terminals ?? []).some((x) => x.agentIdentity && !x.orphaned),
-      ...gitProbes(row.path, row.branch, bound),
-    })
+    return reuseWorktree(
+      row.path,
+      { dispatched, baseline },
+      {
+        held: async () => ((await orca(['terminal', 'list', '--worktree', `path:${row.path}`]))?.terminals ?? []).some((x) => x.agentIdentity && !x.orphaned),
+        ...gitProbes(row.path, row.branch, bound),
+      },
+    )
   }
 
   // `worktree create` of `name` from the run's worktree: its path, and whether
@@ -555,7 +560,14 @@ function mailRow(row) {
   }
   if (!payload || typeof payload !== 'object') payload = {}
   return {
-    id: row?.id ?? null, type: row?.type ?? null, from: row?.from_handle ?? null, subject: row?.subject ?? null, body: row?.body ?? null,
-    taskId: payload.taskId ?? null, dispatchId: payload.dispatchId ?? null, outcome: payload.outcome ?? null, createdAt: row?.created_at ?? null,
+    id: row?.id ?? null,
+    type: row?.type ?? null,
+    from: row?.from_handle ?? null,
+    subject: row?.subject ?? null,
+    body: row?.body ?? null,
+    taskId: payload.taskId ?? null,
+    dispatchId: payload.dispatchId ?? null,
+    outcome: payload.outcome ?? null,
+    createdAt: row?.created_at ?? null,
   }
 }

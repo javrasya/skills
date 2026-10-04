@@ -21,7 +21,7 @@ export function validate(schema, value, path = '$') {
   const errors = []
   if (schema.type !== undefined) {
     const types = [].concat(schema.type)
-    if (!types.some((t) => IS[t] && IS[t](value))) {
+    if (!types.some((t) => IS[t]?.(value))) {
       errors.push(`${path}: expected ${types.join(' or ')}, got ${kindOf(value)}`)
       return errors
     }
@@ -42,7 +42,7 @@ export function validate(schema, value, path = '$') {
   if (Array.isArray(value)) {
     if (schema.minItems !== undefined && value.length < schema.minItems) errors.push(`${path}: expected at least ${schema.minItems} items, got ${value.length}`)
     if (schema.maxItems !== undefined && value.length > schema.maxItems) errors.push(`${path}: expected at most ${schema.maxItems} items, got ${value.length}`)
-    if (schema.items) value.forEach((v, i) => errors.push(...validate(schema.items, v, `${path}[${i}]`)))
+    if (schema.items) for (const [i, v] of value.entries()) errors.push(...validate(schema.items, v, `${path}[${i}]`))
   }
   return errors
 }

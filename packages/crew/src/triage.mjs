@@ -11,9 +11,9 @@
 //
 // Only a console asks: a run that halts while nobody has it open in `crew
 // view` is triaged when someone next opens it there (ADR-0018).
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { writeJsonAtomic } from './fsutil.mjs'
-import { dirname, join } from 'path'
+import { dirname, join } from 'node:path'
 import { TRIAGE_SCHEMA, triagePrompt } from './orchestrator.mjs'
 
 // A question still asking this long after it was claimed has no asker left:
@@ -68,11 +68,12 @@ export function triageHalt({ stateDir, orchestrate, now = () => Date.now() }) {
     } catch {}
     return { asked: true, state: entry.state }
   }
-  return (async () => orchestrate().ask({ name: 'halt-triage', prompt: triagePrompt({ stateDir, notice }), schema: TRIAGE_SCHEMA, dirs: [stateDir] }))()
-    .then((answer) => record({ state: 'answered', answer }), (e) => {
+  return (async () => orchestrate().ask({ name: 'halt-triage', prompt: triagePrompt({ stateDir, notice }), schema: TRIAGE_SCHEMA, dirs: [stateDir] }))().then(
+    (answer) => record({ state: 'answered', answer }),
+    (e) => {
       if (!e?.stopped) return record({ state: 'failed', error: e?.message ?? String(e) })
       rmSync(file, { force: true })
       return { asked: true, state: null }
-    })
+    },
+  )
 }
-

@@ -3,22 +3,13 @@
 //   node packages/crew/test/test-start-form.mjs
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'fs'
-import { tmpdir } from 'os'
-import { join } from 'path'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { crewPaths } from '../src/daemon/transport.mjs'
 import { DEFAULTS } from '../src/crew-config.mjs'
 import { piModels } from '../src/harness.mjs'
-import {
-  STACKS_DOCS,
-  flagsToAnswers,
-  probeStart,
-  rememberAnswers,
-  rememberedAnswers,
-  settleStackMode,
-  stackOptions,
-  startForm,
-} from '../src/start-form.mjs'
+import { STACKS_DOCS, flagsToAnswers, probeStart, rememberAnswers, rememberedAnswers, settleStackMode, stackOptions, startForm } from '../src/start-form.mjs'
 
 const scratch = (name) => mkdtempSync(join(tmpdir(), `crew-start-${name}-`))
 
@@ -52,18 +43,36 @@ function fakeRun(table) {
 test('start form: every row has its default, Claude first', () => {
   const form = startForm(facts())
   assert.deepEqual(form.answers(), { harness: 'claude', model: 'opus[1m]', base: 'develop', startRef: 'develop', stackMode: 'native', runOrder: 'parallel', permissionMode: 'auto' })
-  assert.deepEqual(form.rows().map((r) => [r.row, r.flag]), [
-    ['harness', '--harness'], ['model', '--model'], ['base', '--base'], ['startRef', '--start-ref'], ['stackMode', '--stack-mode'], ['runOrder', '--run-order'], ['permissionMode', '--permission-mode'],
-  ])
-  assert.deepEqual(row(form, 'harness').options.map((o) => o.label), ['Claude Code', 'pi'])
-  assert.deepEqual(row(form, 'base').options.map((o) => o.value), ['develop', 'main', 'feature/x'])
+  assert.deepEqual(
+    form.rows().map((r) => [r.row, r.flag]),
+    [
+      ['harness', '--harness'],
+      ['model', '--model'],
+      ['base', '--base'],
+      ['startRef', '--start-ref'],
+      ['stackMode', '--stack-mode'],
+      ['runOrder', '--run-order'],
+      ['permissionMode', '--permission-mode'],
+    ],
+  )
+  assert.deepEqual(
+    row(form, 'harness').options.map((o) => o.label),
+    ['Claude Code', 'pi'],
+  )
+  assert.deepEqual(
+    row(form, 'base').options.map((o) => o.value),
+    ['develop', 'main', 'feature/x'],
+  )
 })
 
 test('start form: Claude cycles through the static list plus its last-used model', () => {
   assert.deepEqual(DEFAULTS.claudeModels, ['opus', 'sonnet', 'haiku', 'opus[1m]', 'sonnet[1m]'])
   const form = startForm(facts({ models: { ...FACTS.models, claude: { last: 'claude-opus-4-6', list: ['claude-opus-4-6', ...DEFAULTS.claudeModels] } } }))
   assert.equal(form.answers().model, 'claude-opus-4-6')
-  assert.deepEqual(row(form, 'model').options.map((o) => o.value), ['claude-opus-4-6', ...DEFAULTS.claudeModels])
+  assert.deepEqual(
+    row(form, 'model').options.map((o) => o.value),
+    ['claude-opus-4-6', ...DEFAULTS.claudeModels],
+  )
   assert.equal(form.cycle('model').answers().model, 'opus')
   assert.equal(form.cycle('model', -1).cycle('model', -1).answers().model, 'sonnet[1m]')
 })
@@ -76,11 +85,17 @@ test('start form: no last-used model falls to the first in the list', () => {
 test('start form: permission mode is shown for Claude and hidden for pi', () => {
   const form = startForm(facts())
   assert.ok(row(form, 'permissionMode'))
-  assert.deepEqual(row(form, 'permissionMode').options.map((o) => o.value), ['auto', 'acceptEdits', 'bypassPermissions', 'dontAsk', 'default'])
+  assert.deepEqual(
+    row(form, 'permissionMode').options.map((o) => o.value),
+    ['auto', 'acceptEdits', 'bypassPermissions', 'dontAsk', 'default'],
+  )
   form.set('harness', 'pi')
   assert.equal(row(form, 'permissionMode'), undefined)
   assert.deepEqual(form.answers(), { harness: 'pi', model: 'lmstudio/qwen3', base: 'develop', startRef: 'develop', stackMode: 'native', runOrder: 'parallel' })
-  assert.deepEqual(row(form, 'model').options.map((o) => o.value), ['lmstudio/qwen3', 'anthropic/claude-opus-4-6'])
+  assert.deepEqual(
+    row(form, 'model').options.map((o) => o.value),
+    ['lmstudio/qwen3', 'anthropic/claude-opus-4-6'],
+  )
   assert.throws(() => form.set('permissionMode', 'auto'), /--permission-mode: pi has no permission mode/)
   assert.deepEqual(form.missingFlags({}), ['--harness', '--model', '--base', '--stack-mode'])
   form.cycle('harness')
@@ -90,14 +105,26 @@ test('start form: permission mode is shown for Claude and hidden for pi', () => 
 
 test('stack mode: GH Stack when the extension is in and the stacks API answers', () => {
   const opts = stackOptions({ installed: true, api: 'enabled' })
-  assert.deepEqual(opts.map((o) => [o.value, o.label, o.disabled]), [['native', 'GH Stack', false], ['chain', 'Basic Git stacking', false]])
+  assert.deepEqual(
+    opts.map((o) => [o.value, o.label, o.disabled]),
+    [
+      ['native', 'GH Stack', false],
+      ['chain', 'Basic Git stacking', false],
+    ],
+  )
   assert.equal(startForm(facts()).answers().stackMode, 'native')
 })
 
 test('stack mode: Install and Use GH Stack when the extension is missing, never the default', () => {
   const f = facts({ ghStack: { installed: false, api: 'enabled' } })
   const opts = stackOptions(f.ghStack)
-  assert.deepEqual(opts.map((o) => [o.value, o.label, o.disabled]), [['install', 'Install and Use GH Stack', false], ['chain', 'Basic Git stacking', false]])
+  assert.deepEqual(
+    opts.map((o) => [o.value, o.label, o.disabled]),
+    [
+      ['install', 'Install and Use GH Stack', false],
+      ['chain', 'Basic Git stacking', false],
+    ],
+  )
   const form = startForm(f)
   assert.equal(form.answers().stackMode, 'chain')
   assert.equal(form.cycle('stackMode').answers().stackMode, 'install')
@@ -120,15 +147,21 @@ test('stack mode: GH Stack shown disabled on a 404, with the docs link, whether 
   }
 })
 
-test('stack mode: a stacks API that does not answer disables GH Stack with gh\'s words', () => {
+test("stack mode: a stacks API that does not answer disables GH Stack with gh's words", () => {
   const [native] = stackOptions({ installed: true, api: 'unknown', detail: 'HTTP 502' })
   assert.equal(native.disabled, true)
   assert.match(native.note, /did not answer: HTTP 502/)
 })
 
-test('stack mode: with the extension missing and a stacks API that does not answer, GH Stack is disabled with gh\'s words, never Install and Use', () => {
+test("stack mode: with the extension missing and a stacks API that does not answer, GH Stack is disabled with gh's words, never Install and Use", () => {
   const opts = stackOptions({ installed: false, api: 'unknown', detail: 'HTTP 502' })
-  assert.deepEqual(opts.map((o) => [o.value, o.disabled]), [['native', true], ['chain', false]])
+  assert.deepEqual(
+    opts.map((o) => [o.value, o.disabled]),
+    [
+      ['native', true],
+      ['chain', false],
+    ],
+  )
   assert.match(opts[0].note, /did not answer: HTTP 502/)
   const f = facts({ ghStack: { installed: false, api: 'unknown', detail: 'HTTP 502' } })
   assert.equal(startForm(f).answers().stackMode, 'chain')
@@ -150,7 +183,13 @@ test('stack mode: only the Install and Use answer installs the extension', async
 
 test('run order: Parallel by default, Sequential one step away', () => {
   const form = startForm(facts())
-  assert.deepEqual(row(form, 'runOrder').options.map((o) => [o.value, o.label]), [['parallel', 'Parallel'], ['sequential', 'Sequential']])
+  assert.deepEqual(
+    row(form, 'runOrder').options.map((o) => [o.value, o.label]),
+    [
+      ['parallel', 'Parallel'],
+      ['sequential', 'Sequential'],
+    ],
+  )
   assert.equal(row(form, 'runOrder').label, 'Run order')
   assert.equal(form.answers().runOrder, 'parallel')
   assert.equal(form.cycle('runOrder').answers().runOrder, 'sequential')
@@ -164,7 +203,15 @@ test('prior work (ADR-0023): none by default, spelled as the base itself; every 
   const r = row(form, 'startRef')
   assert.equal(r.label, 'Prior work')
   assert.equal(r.flag, '--start-ref')
-  assert.deepEqual(r.options.map((o) => [o.value, o.label]), [['develop', 'None \u2014 the stack starts on develop'], ['main', 'main'], ['feature/x', 'feature/x'], ['spec/827-integration', 'spec/827-integration']])
+  assert.deepEqual(
+    r.options.map((o) => [o.value, o.label]),
+    [
+      ['develop', 'None \u2014 the stack starts on develop'],
+      ['main', 'main'],
+      ['feature/x', 'feature/x'],
+      ['spec/827-integration', 'spec/827-integration'],
+    ],
+  )
   assert.match(r.options[3].note, /whole-stack review fixes, not a ticket's work/)
   assert.equal(r.options[1].note, undefined)
   assert.equal(form.answers().startRef, 'develop', 'none is the base')
@@ -176,7 +223,10 @@ test('prior work: none follows the base; a named branch stays, unless it becomes
   const form = startForm(facts())
   form.set('base', 'main')
   assert.equal(form.answers().startRef, 'main', 'none moved with the base')
-  assert.deepEqual(row(form, 'startRef').options.map((o) => o.value), ['main', 'develop', 'feature/x'])
+  assert.deepEqual(
+    row(form, 'startRef').options.map((o) => o.value),
+    ['main', 'develop', 'feature/x'],
+  )
   form.set('startRef', 'feature/x')
   form.set('base', 'develop')
   assert.equal(form.answers().startRef, 'feature/x', 'a named branch stays')
@@ -295,7 +345,7 @@ test('flags: a value the form does not allow is an error naming the flag', () =>
   assert.equal(startForm(facts(), { flags: { model: 'claude-haiku-4-5' } }).answers().model, 'claude-haiku-4-5')
 })
 
-test('probeStart: the facts from git, gh, pi and each harness\'s settings', async () => {
+test("probeStart: the facts from git, gh, pi and each harness's settings", async () => {
   const home = scratch('userhome')
   mkdirSync(join(home, '.claude'), { recursive: true })
   writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ model: 'sonnet[1m]' }))

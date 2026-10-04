@@ -41,11 +41,23 @@ import { samePath } from './paths.mjs'
 // agent only if Orca made it a worktree, and then has no dispatch or tab. A
 // call replayed from the journal is the agent that first returned its value.
 export function agentsOf(journalPath) {
-  return readJournal(journalPath).agents.filter(madeByRun).map((a) => ({
-    runId: a.runId, n: a.n, origin: a.origin, name: agentName(a), title: a.title, launched: a.launched, dispatchId: a.dispatchId,
-    terminal: a.terminal, worktree: a.worktree, harness: a.harness, state: a.state === 'done' ? 'ok' : a.state === 'failed' ? 'failed' : 'running', reason: a.reason,
-    workerLeft: a.workerLeft === true,
-  }))
+  return readJournal(journalPath)
+    .agents.filter(madeByRun)
+    .map((a) => ({
+      runId: a.runId,
+      n: a.n,
+      origin: a.origin,
+      name: agentName(a),
+      title: a.title,
+      launched: a.launched,
+      dispatchId: a.dispatchId,
+      terminal: a.terminal,
+      worktree: a.worktree,
+      harness: a.harness,
+      state: a.state === 'done' ? 'ok' : a.state === 'failed' ? 'failed' : 'running',
+      reason: a.reason,
+      workerLeft: a.workerLeft === true,
+    }))
 }
 
 // The worktree the run view may show: one the run created, by its name.
@@ -84,6 +96,10 @@ export const keptRunning = (agent) => agent.state === 'failed' && agent.workerLe
 // then stops that worker before anything else. `open`: the terminal list's
 // handles, when the caller has already read it for a batch. A refusal
 // because Orca was not there at all (an outage, ADR-0015) is `unreachable`.
+// What a reclaim answers: refused with its reason, or done with its notes.
+/** @typedef {{ reclaimed: boolean, reason?: string, unreachable?: boolean, stoppable?: boolean, unpushed?: number, notes?: string[] }} Reclaim */
+
+/** @returns {Promise<Reclaim>} */
 export async function reclaimAgent(agent, { host, unpushed = worktreeUnpushed, force = false, stop = false, open = null }) {
   const refuse = (reason, e = null) => ({ reclaimed: false, reason, ...(hostUnreachable(host, e) && { unreachable: true }) })
   let stopFirst = false
@@ -172,6 +188,7 @@ const unknownDispatch = (e) => e?.code === 'dispatch_not_found' || e?.code === '
 // so a later whole-run reclaim leaves it be until a resume. Answers as
 // reclaimAgent does: { reclaimed: true, notes } or { reclaimed: false, reason },
 // with `unpushed` and `unreachable` alike.
+/** @returns {Promise<Reclaim>} */
 export async function reclaimChainAfter(kept, chain, { host, journaled, unpushed = worktreeUnpushed, force = false, registry = null }) {
   const refuse = (reason, e = null) => ({ reclaimed: false, reason, ...(hostUnreachable(host, e) && { unreachable: true }) })
   if (kept.length) return refuse('an agent of the run was kept')
@@ -217,7 +234,7 @@ export async function reclaimChainAfter(kept, chain, { host, journaled, unpushed
 // `{ agent: chainAgent(chain), reason }`, which keeps the run open too.
 // Returns { reclaimed: [agent], kept: [{ agent, reason }] }, a kept one also
 // `unreachable` when Orca was not there to reclaim it.
-export async function reclaimRun(agents, { host, unpushed = worktreeUnpushed, force = false, keep = () => null, registry = null, closeRun = true, runId = null, chain = null, journaled = agents, out = () => {} }) {
+export async function reclaimRun(agents, { host, unpushed = worktreeUnpushed, force = false, keep = /** @type {(agent: object) => string | null} */ (() => null), registry = null, closeRun = true, runId = null, chain = null, journaled = agents, out = /** @type {(line: string) => unknown} */ (() => {}) }) {
   const record = (entry) => {
     try {
       registry?.reclaimed(entry)
@@ -252,12 +269,17 @@ export async function reclaimRun(agents, { host, unpushed = worktreeUnpushed, fo
   }
   if (chain && closeRun) {
     const agent = chainAgent(chain)
-    const r = await reclaimChainAfter(kept.filter((k) => k.agent.runId === chain.runId), chain, { host, journaled, unpushed, force, registry })
+    const r = await reclaimChainAfter(
+      kept.filter((k) => k.agent.runId === chain.runId),
+      chain,
+      { host, journaled, unpushed, force, registry },
+    )
     if (r.reclaimed) for (const note of r.notes) out(`!! ${agent.title}: ${note}`)
     else kept.push({ agent, reason: r.reason, ...(r.unreachable && { unreachable: true }), ...(r.unpushed && { unpushed: r.unpushed }) })
   }
-  if (closeRun) for (const id of new Set([...agents.map((a) => a.runId), ...(chain ? [chain.runId] : []), ...(runId ? [runId] : [])])) {
-    if (!kept.some((k) => k.agent.runId === id)) record({ runId: id })
-  }
+  if (closeRun)
+    for (const id of new Set([...agents.map((a) => a.runId), ...(chain ? [chain.runId] : []), ...(runId ? [runId] : [])])) {
+      if (!kept.some((k) => k.agent.runId === id)) record({ runId: id })
+    }
   return { reclaimed, kept }
 }

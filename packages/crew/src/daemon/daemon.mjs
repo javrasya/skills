@@ -58,11 +58,11 @@
 // (#104): the runner continues every session lost with the old daemon. Such a
 // run is claimed before the daemon answers anyone, so a run view's r that
 // started this daemon cannot give the run a second runner.
-import net from 'net'
-import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync } from 'fs'
-import { join } from 'path'
-import { StringDecoder } from 'string_decoder'
-import { fileURLToPath } from 'url'
+import net from 'node:net'
+import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync } from 'node:fs'
+import { join } from 'node:path'
+import { StringDecoder } from 'node:string_decoder'
+import { fileURLToPath } from 'node:url'
 import { connect, crewPaths, lineDecoder, noDaemon, send } from './transport.mjs'
 import { runBook, runnerCommand, runnerTitle } from './runs.mjs'
 import { REGISTRY_PATH } from '../registry.mjs'
@@ -80,6 +80,7 @@ const WAKE_HOLD_MS = 5 * 60_000
 // A daemon listening already: another client started one first.
 class AlreadyRunning extends Error {}
 
+/** @returns {Promise<void>} */
 function listen(server, endpoint) {
   return new Promise((resolvePromise, reject) => {
     const failed = (e) => {
@@ -138,6 +139,7 @@ const runKey = (dir) => pathKey(dir)
 // are; a lost runner still running after `runnerGoneMs` (a pty's children may
 // trail their owner by a moment) is left alone, never run twice. parkAfterMs:
 // crew's config's unless given, 0 for never; looked for every `parkSweepMs`.
+/** @param {{ paths?: ReturnType<typeof crewPaths>, registry?: string, liveRuns?: ReturnType<typeof runBook>['liveRuns'] | null, spawnSession?: typeof import('./session.mjs').ptySession, restoreSession?: typeof import('./session.mjs').restoredSession, exit?: (code: number) => never, log?: (...parts: unknown[]) => void, runnerGoneMs?: number, parkAfterMs?: number | null, parkSweepMs?: number }} [options] */
 export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PATH, liveRuns = null, spawnSession, restoreSession, exit = (code) => process.exit(code), log: say = log, runnerGoneMs = 10_000, parkAfterMs = null, parkSweepMs = 30_000 } = {}) {
   parkAfterMs ??= configuredParkAfterMs(paths, say)
   const open = spawnSession ?? (await import('./session.mjs')).ptySession
@@ -197,6 +199,7 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
     })
   }
 
+  /** @param {{ command: string[], cwd: string, env?: NodeJS.ProcessEnv, cols?: number, rows?: number, title: string | null, runDir?: string | null }} options */
   function spawnOne({ command, cwd, env, cols, rows, title, runDir = null }) {
     const id = book.sessionId()
     // Always the directory it was asked for, never the daemon's own: that is
@@ -512,7 +515,7 @@ if (isMain) {
   // Started detached, it has no terminal to lose; a hangup is not a reason to stop.
   process.on('SIGHUP', () => {})
   // One bad request must never take every session down with the daemon.
-  process.on('unhandledRejection', (e) => log(`crew daemon: unhandled rejection: ${e?.stack ?? e}`))
+  process.on('unhandledRejection', (/** @type {{ stack?: string } | null | undefined} */ e) => log(`crew daemon: unhandled rejection: ${e?.stack ?? e}`))
   try {
     const daemon = await startDaemon()
     process.on('SIGTERM', () => daemon.shutdown('SIGTERM'))

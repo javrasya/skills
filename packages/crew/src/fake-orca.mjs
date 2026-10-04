@@ -68,7 +68,7 @@
 // not from the runner, and still land. guardWith(outage) waits each call, and
 // each step of a start, on the runner's outage (outage.mjs), as the adapter
 // waits each command; probe() is the outage's look, recorded as `probe`.
-import { existsSync } from 'fs'
+import { existsSync } from 'node:fs'
 import { OrcaError, orcaUnreachable, afterCreateTimeout, resumeRunnerCommand, tailCommand, workerStartArgs, withTimeout, workerStatus } from './orca-cli.mjs'
 import { reuseWorktree } from './worktree.mjs'
 import { chainName } from './git.mjs'
@@ -113,7 +113,19 @@ export const fakeTranscripts = (orca) => ({
   path: ({ sessionId }) => `C:/fake/transcripts/${sessionId}.jsonl`,
 })
 
-export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run', runPrefix = 'run_fake', coordinator = 'term_runner', tabs = [], faults = {}, callMs = RUNNER_SETTINGS.hostCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, setupLeaves = [], promptLoss = () => null } = {}) {
+export function fakeOrca({
+  worker = /** @type {(w: { prompt: string, preamble: object, worktree: string, orca: object, state: object }) => Promise<unknown>} */ (async () => {}),
+  clock = null,
+  runWorktree = 'C:/fake/run',
+  runPrefix = 'run_fake',
+  coordinator = 'term_runner',
+  tabs = [],
+  faults = {},
+  callMs = RUNNER_SETTINGS.hostCallMs,
+  createMs = RUNNER_SETTINGS.worktreeCreateMs,
+  setupLeaves = [],
+  promptLoss = /** @type {(start: { title: string, count: number, sessionId: string }) => unknown} */ (() => null),
+} = {}) {
   const calls = []
   const dispatches = new Map()
   const table = fakeWorktrees({ runWorktree, setupLeaves })
@@ -202,12 +214,16 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     const found = findWorktree(name)
     if (!found) return null
     const [path, w] = found
-    await reuseWorktree(path, { dispatched, baseline }, {
-      // As the adapter's: an agent's tab still open in it.
-      held: () => [...dispatches.values()].some((d) => d.worktree === path && !d.released && !d.gone),
-      lines: () => w.porcelain,
-      commits: () => w.commits,
-    })
+    await reuseWorktree(
+      path,
+      { dispatched, baseline },
+      {
+        // As the adapter's: an agent's tab still open in it.
+        held: () => [...dispatches.values()].some((d) => d.worktree === path && !d.released && !d.gone),
+        lines: () => w.porcelain,
+        commits: () => w.commits,
+      },
+    )
     record({ verb: 'worktreeReuse', worktree: path })
     return path
   }
@@ -267,9 +283,15 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     runs,
     as,
     closeTab: (handle) => closedTabs.add(handle),
-    down: (error) => { gone = error },
-    up: () => { gone = null },
-    guardWith: (o) => { outage = o },
+    down: (error) => {
+      gone = error
+    },
+    up: () => {
+      gone = null
+    },
+    guardWith: (o) => {
+      outage = o
+    },
     async probe() {
       record({ verb: 'probe', ok: !gone })
       if (gone) throw gone
@@ -379,7 +401,21 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       if (argv.includes('--agent')) throw new Error(`fake orca: worker-start for ${title} was called with --agent`)
       // Like Claude Code, the agent titles its own tab from its prompt.
       const d = {
-        ...preamble, run, title, ...launch, sessionId, command, prompt: text, worktree, tabTitle: text.slice(0, 30), ...fresh(), transcript: null, onNudge: null, onContinue: null, terminalState: 'retained',
+        ...preamble,
+        run,
+        title,
+        ...launch,
+        sessionId,
+        command,
+        prompt: text,
+        worktree,
+        tabTitle: text.slice(0, 30),
+        ...fresh(),
+        transcript: null,
+        onNudge: null,
+        onContinue: null,
+        deliver: /** @type {(() => void) | null} */ (null),
+        terminalState: 'retained',
       }
       dispatches.set(d.dispatchId, d)
       record({ verb: 'workerStart', dispatchId: d.dispatchId, title, ...launch, sessionId, command, argv, placement: child ? 'new-child' : chain ? 'chain' : 'current', worktree })
@@ -456,7 +492,10 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     // its prompt or in something typed to it since, a continuation's prompt included.
     async promptDelivered({ sessionId, needle }) {
       const d = [...dispatches.values()].filter((x) => x.sessionId === sessionId).at(-1)
-      const flat = (s) => String(s ?? '').replace(/\s+/g, ' ').trim()
+      const flat = (s) =>
+        String(s ?? '')
+          .replace(/\s+/g, ' ')
+          .trim()
       return !!d && !d.delivery && (!flat(needle) || [d.prompt, ...d.nudges, ...(d.resumedWith ?? [])].some((t) => flat(t).includes(flat(needle))))
     },
 
@@ -481,9 +520,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
       if (away()) await reach()
       const d = terminal(handle, 'terminal read')
       record({ verb: 'terminalScreen', dispatchId: d.dispatchId, lines })
-      const screen = d.delivery === 'never'
-        ? ['New MCP server found in this project: slint', '❯ 1. Use this and all future MCP servers in this project', '  2. Use this MCP server', '  3. Continue without using this MCP server', 'Enter to confirm · Esc to cancel']
-        : ['❯']
+      const screen = d.delivery === 'never' ? ['New MCP server found in this project: slint', '❯ 1. Use this and all future MCP servers in this project', '  2. Use this MCP server', '  3. Continue without using this MCP server', 'Enter to confirm · Esc to cancel'] : ['❯']
       return screen.slice(-lines)
     },
 
@@ -524,7 +561,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     // with the IDs from its preamble. Returns the message's id.
     async mailSend({ from, capability, taskId, dispatchId, type, subject, body, outcome = null }) {
       const d = sender({ from, capability, taskId, dispatchId })
-      const m = post(d, { type, subject, body, outcome: type === 'worker_done' ? outcome ?? 'succeeded' : null })
+      const m = post(d, { type, subject, body, outcome: type === 'worker_done' ? (outcome ?? 'succeeded') : null })
       record({ verb: 'mailSend', id: m.id, type, dispatchId, outcome: m.outcome, body })
       return { id: m.id }
     },
@@ -582,8 +619,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
     async terminalList() {
       if (away()) await reach()
       record({ verb: 'terminalList' })
-      return [coordinator, ...openTabs, ...[...logTabs].filter(([, t]) => t.open).map(([h]) => h), ...[...dispatches.values()].filter((d) => !d.gone).map((d) => d.handle)]
-        .filter((h) => !closedTabs.has(h))
+      return [coordinator, ...openTabs, ...[...logTabs].filter(([, t]) => t.open).map(([h]) => h), ...[...dispatches.values()].filter((d) => !d.gone).map((d) => d.handle)].filter((h) => !closedTabs.has(h))
     },
 
     async terminalClose({ terminal: handle }) {
@@ -755,7 +791,11 @@ export function fakeOrcaCli({ setupLeaves = [], runWorktree = 'C:/fake/run', coo
       return VERBS[verb](args)
     },
     async git(cwd, args) {
-      if (args[0] === 'status' && worktrees.has(cwd)) return worktrees.get(cwd).porcelain.map((l) => `${l}\n`).join('')
+      if (args[0] === 'status' && worktrees.has(cwd))
+        return worktrees
+          .get(cwd)
+          .porcelain.map((l) => `${l}\n`)
+          .join('')
       throw new Error(`git ${args[0]} in ${cwd}: the offline Orca CLI plays no such git`)
     },
   }

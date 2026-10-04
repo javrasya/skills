@@ -22,10 +22,10 @@
 // terminal-kit is installed beside this file on first use (npm ci), because
 // the skill may be a detached copy of the repo; npm's output goes to the log:
 // the run's runner.log attached, orca-runs-view.log beside the registry standalone.
-import { spawnSync } from 'child_process'
-import { appendFileSync, closeSync, openSync } from 'fs'
-import { dirname, join, resolve } from 'path'
-import { fileURLToPath } from 'url'
+import { spawnSync } from 'node:child_process'
+import { appendFileSync, closeSync, openSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { runView, runsView } from '../run-view-model.mjs'
 import { parseFlags } from '../args.mjs'
 import { REGISTRY_PATH } from '../registry.mjs'
@@ -42,9 +42,13 @@ const REFRESH_MS = 2000
 // refresh, a key, a click or a resize.
 const MARQUEE_MS = 250
 
+// Not a dependency of the package: the view installs it on first use, below,
+// so the specifier is a value the checker does not resolve.
+const TERMINAL_KIT = 'terminal-kit'
+
 async function terminalKit(logPath) {
   try {
-    return (await import('terminal-kit')).default
+    return (await import(TERMINAL_KIT)).default
   } catch (e) {
     if (e?.code !== 'ERR_MODULE_NOT_FOUND') throw e
   }
@@ -56,7 +60,7 @@ async function terminalKit(logPath) {
     closeSync(fd)
   }
   try {
-    return (await import('terminal-kit')).default
+    return (await import(TERMINAL_KIT)).default
   } catch {
     return null
   }
@@ -77,7 +81,13 @@ const runDir = standalone ? null : resolve(option('--attached'))
 const logPath = standalone ? join(dirname(registry), 'orca-runs-view.log') : join(runDir, 'runner.log')
 const logLine = (s) => {
   try {
-    appendFileSync(logPath, String(s).split('\n').map((l) => `${new Date().toISOString()} ${l}\n`).join(''))
+    appendFileSync(
+      logPath,
+      String(s)
+        .split('\n')
+        .map((l) => `${new Date().toISOString()} ${l}\n`)
+        .join(''),
+    )
   } catch {}
 }
 if (!process.stdout.isTTY || !process.stdin.isTTY) {
@@ -137,7 +147,9 @@ const view = standalone ? null : runView({ stateDir: runDir, host, registry, unp
 const top = runs ?? view
 const tree = () => (runs ? runs.opened() : view)
 let flash = null
+/** @type {(y: number) => number | null} */
 let rowAt = () => null
+/** @type {(y: number) => string | null} */
 let optionAt = () => null
 
 function render() {
@@ -187,10 +199,14 @@ function quit() {
 // as the last refresh left it, and the next refresh tries again.
 let busy = Promise.resolve()
 const act = (fn) => {
-  busy = busy.then(fn).catch((e) => {
-    logLine(`!! run view: ${e?.stack ?? e}`)
-    flash = `error: ${e?.message ?? e}`
-  }).then(render).catch(crash)
+  busy = busy
+    .then(fn)
+    .catch((e) => {
+      logLine(`!! run view: ${e?.stack ?? e}`)
+      flash = `error: ${e?.message ?? e}`
+    })
+    .then(render)
+    .catch(crash)
   return busy
 }
 // A refresh is queued only once the last one has finished, so a slow Orca

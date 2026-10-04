@@ -9,9 +9,9 @@
 // talk to: recorded in the run's state dir (CONSULT_FILE, #168), so the run
 // tree lists it under Orchestrator and the person can enter it again. It
 // never answers a scheduling question: the questions are crew's, and none is one.
-import { randomUUID } from 'crypto'
-import { appendFileSync, readFileSync } from 'fs'
-import { join } from 'path'
+import { randomUUID } from 'node:crypto'
+import { appendFileSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { checkSchema } from './schema.mjs'
 import { runHeadless } from './headless.mjs'
 import { validationLineProblem } from './validation-list.mjs'
@@ -110,7 +110,12 @@ export function validationText({ checks }) {
   if (bad) throw new Error(`a check's command is not one line: ${JSON.stringify(bad.command)}`)
   const unheld = checks.find((c) => validationLineProblem(c.command))
   if (unheld) throw new Error(`a check's command ${validationLineProblem(unheld.command)}: ${JSON.stringify(unheld.command)}`)
-  const comment = (s) => s.replace(/[\r\n]+/g, ' ').replace(/`/g, "'").replace(/\$\{/g, '$ {').replace(/[\\\s]+$/, '')
+  const comment = (s) =>
+    s
+      .replace(/[\r\n]+/g, ' ')
+      .replace(/`/g, "'")
+      .replace(/\$\{/g, '$ {')
+      .replace(/[\\\s]+$/, '')
   return checks.map((c) => `# ${comment(c.source)}\n${c.command.trim()}\n`).join('')
 }
 
@@ -149,7 +154,10 @@ export const TRIAGE_SCHEMA = Object.freeze({
 // The run directory's files, as both orchestrator uses name them.
 const runFiles = (stateDir) => `its halted.json (the held nodes, while it is halted), journal.jsonl (every call and what became of it), runner.log, the agents' results (agents/*/result.json) and summary.json (once the run has ended), all in ${stateDir}`
 
-export const triagePrompt = ({ stateDir, notice }) => `You are crew's orchestrator. A workflow run has halted: ${notice.nodes.length === 1 ? 'one node is' : `${notice.nodes.length} nodes are`} held until the operator resumes ${notice.nodes.length === 1 ? 'it' : 'them'} with r: ${notice.nodes.map((n) => n.node).join(', ')}. The run's state is ${runFiles(stateDir)}.
+export const triagePrompt = ({
+  stateDir,
+  notice,
+}) => `You are crew's orchestrator. A workflow run has halted: ${notice.nodes.length === 1 ? 'one node is' : `${notice.nodes.length} nodes are`} held until the operator resumes ${notice.nodes.length === 1 ? 'it' : 'them'} with r: ${notice.nodes.map((n) => n.node).join(', ')}. The run's state is ${runFiles(stateDir)}.
 
 Read what you need of those files, and nothing else: change nothing, and never run anything.
 

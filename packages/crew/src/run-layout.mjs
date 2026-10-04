@@ -1,7 +1,7 @@
 // Where a run's files live. A crew start run has a run folder of its own,
 // <notes dir>/runs/<id>, and its state dir is the folder's orca-run. Any other
 // run has a state dir alone, beside its script (launchRunner's default).
-import { basename, dirname, join } from 'path'
+import { basename, dirname, join } from 'node:path'
 
 const RUNS = 'runs'
 const STATE_DIR = 'orca-run'

@@ -6,9 +6,8 @@
 // The model is read from the run's journal, its agents' session transcripts,
 // Orca's terminal list and the run registry; the actions go to Orca, and a
 // reclaim goes through reclaim.mjs, so the view keeps its rules.
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from 'fs'
-import { basename, dirname, join } from 'path'
-import { fileURLToPath } from 'url'
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import { sessionTranscripts } from './transcript.mjs'
 import { pathKey, samePath } from './paths.mjs'
 import { agentName, agentsOf, chainAgent, reclaimAgent, reclaimChainAfter, reclaimRun, runWorktree } from './reclaim.mjs'
@@ -16,6 +15,7 @@ import { foldJournal, journalLines, readJournal, timeOf } from './journal.mjs'
 import { REGISTRY_PATH, readRegistry, runRegistry } from './registry.mjs'
 import { worktreeUnpushed } from './git.mjs'
 import { hostUnreachable } from './session-host.mjs'
+/** @typedef {import('./session-host.mjs').SessionHost} SessionHost */
 import { CONSOLE_PHASE, closeConsult, consoleTitle, consultSessions, isOrchestratorTitle } from './orchestrator.mjs'
 import { haltNoticeOf, readTriage } from './triage.mjs'
 import { RESUME_REQUEST } from './halt.mjs'
@@ -53,10 +53,13 @@ const TITLE = /^\[([^\]]*)\] ([\s\S]*)$/
 // of a node that a later one superseded (journal.mjs) is no row either, but
 // Reclaim All still takes it, with any worktree it was given. An orchestrator
 // session (orchestrator.mjs) is never a row, whatever journal names one.
-const agentsIn = (fold) => fold.agents.filter((a) => !isOrchestratorTitle(a.title)).map((a) => {
-  const [, phase, label] = TITLE.exec(a.title ?? '') ?? [null, 'Run', a.title ?? `agent-${a.n}`]
-  return { ...a, phase, label }
-})
+const agentsIn = (fold) =>
+  fold.agents
+    .filter((a) => !isOrchestratorTitle(a.title))
+    .map((a) => {
+      const [, phase, label] = TITLE.exec(a.title ?? '') ?? [null, 'Run', a.title ?? `agent-${a.n}`]
+      return { ...a, phase, label }
+    })
 
 // The `?` sessions the run dir records (orchestrator.mjs consultSessions,
 // #168), each as a row of the Orchestrator phase, shaped like an agent so the
@@ -70,25 +73,61 @@ const agentsIn = (fold) => fold.agents.filter((a) => !isOrchestratorTitle(a.titl
 // running, its reason saying crew did not answer, rather than failing it.
 const GONE = 'its crew session is gone'
 function consoleRows(sessions, { infos, unread }, now) {
-  return sessions.filter((s) => s.state !== 'closed').map((s) => {
-    const info = s.terminal && infos ? infos.find((i) => i.terminal === s.terminal) ?? null : null
-    const parked = !!info?.parked
-    const [state, reason] = s.state !== 'started' ? [s.state, s.reason]
-      : unread ? ['running', `crew's sessions could not be read: ${unread}`]
-      : !infos ? ['running', null]
-      : !info ? ['failed', GONE]
-      : parked ? ['done', null]
-      : !info.alive ? ['failed', `its harness ended${info.exit?.code != null ? ` (exit ${info.exit.code})` : ''}`]
-      : info.waiting ? ['needs you', info.waiting]
-      : ['running', null]
-    const from = Date.parse(s.at)
-    return {
-      n: s.n, origin: `console:${s.n}`, label: `console ${s.n}`, title: consoleTitle(s.n), phase: CONSOLE_PHASE, console: true,
-      state, reason, continuations: 0, replayed: false, launched: !!s.terminal, runId: null, dispatchId: null, harness: s.harness, sessionId: s.sessionId, worktree: null, dir: s.dir,
-      terminal: s.terminal, waiting: state === 'needs you' ? reason : null, nextAt: null, workerLeft: false, patient: null, round: null, doctors: [],
-      tabOpen: s.terminal && infos ? !!info : null, parked, reclaimed: false, from: Number.isFinite(from) ? from : null, to: null, elapsedMs: Number.isFinite(from) ? Math.max(0, now - from) : null,
-    }
-  })
+  return sessions
+    .filter((s) => s.state !== 'closed')
+    .map((s) => {
+      const info = s.terminal && infos ? (infos.find((i) => i.terminal === s.terminal) ?? null) : null
+      const parked = !!info?.parked
+      const [state, reason] =
+        s.state !== 'started'
+          ? [s.state, s.reason]
+          : unread
+            ? ['running', `crew's sessions could not be read: ${unread}`]
+            : !infos
+              ? ['running', null]
+              : !info
+                ? ['failed', GONE]
+                : parked
+                  ? ['done', null]
+                  : !info.alive
+                    ? ['failed', `its harness ended${info.exit?.code != null ? ` (exit ${info.exit.code})` : ''}`]
+                    : info.waiting
+                      ? ['needs you', info.waiting]
+                      : ['running', null]
+      const from = Date.parse(s.at)
+      return {
+        n: s.n,
+        origin: `console:${s.n}`,
+        label: `console ${s.n}`,
+        title: consoleTitle(s.n),
+        phase: CONSOLE_PHASE,
+        console: true,
+        state,
+        reason,
+        continuations: 0,
+        replayed: false,
+        launched: !!s.terminal,
+        runId: null,
+        dispatchId: null,
+        harness: s.harness,
+        sessionId: s.sessionId,
+        worktree: null,
+        dir: s.dir,
+        terminal: s.terminal,
+        waiting: state === 'needs you' ? reason : null,
+        nextAt: null,
+        workerLeft: false,
+        patient: null,
+        round: null,
+        doctors: [],
+        tabOpen: s.terminal && infos ? !!info : null,
+        parked,
+        reclaimed: false,
+        from: Number.isFinite(from) ? from : null,
+        to: null,
+        elapsedMs: Number.isFinite(from) ? Math.max(0, now - from) : null,
+      }
+    })
 }
 
 // A phase's agents in row order: each doctor right under its patient, in
@@ -273,6 +312,9 @@ export function outcomeOf(stateDir) {
 const AT_WORK = ['starting', 'running', 'continued', 'stuck', 'blocked', 'needs you']
 const atWork = (agents) => agents.filter((a) => AT_WORK.includes(a.state))
 
+/**
+ * @param {{ stateDir: string, host: SessionHost, clock?: { now: () => number }, transcripts?: Partial<ReturnType<typeof sessionTranscripts>>, registry?: string, unpushed?: typeof worktreeUnpushed, alive?: typeof runnerAlive, resumeHost?: (() => unknown) | null, resumeHalted?: ((node: string | null) => unknown) | null, enter?: boolean, triage?: (() => unknown) | null, remove?: (() => ReturnType<typeof removeRun>) | null }} options
+ */
 export function runView({ stateDir, host, clock = { now: () => Date.now() }, transcripts = sessionTranscripts(), registry = REGISTRY_PATH, unpushed = worktreeUnpushed, alive = runnerAlive, resumeHost = null, resumeHalted = null, enter = false, triage = null, remove = null }) {
   const journalPath = join(stateDir, 'journal.jsonl')
   // name -> folded, only for phases the operator folded or unfolded.
@@ -307,7 +349,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   // A doctor is reclaimed with its patient, and never on its own (#77): a
   // reclaim that names a doctor reclaims its patient, then its doctors, and
   // one on its own only once its patient is reclaimed.
-  const patientOf = (a) => (a.patient == null ? null : agentsNow().find((p) => p.origin === a.patient) ?? null)
+  const patientOf = (a) => (a.patient == null ? null : (agentsNow().find((p) => p.origin === a.patient) ?? null))
   const doctorsOf = (a) => agentsNow().filter((d) => d.patient === a.origin && !d.reclaimed)
   const withPatient = (a) => {
     const p = patientOf(a)
@@ -347,7 +389,11 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     if (!dialog) return null
     if (dialog.kind === 'confirm') return { kind: 'confirm', title: dialog.title, lines: dialog.lines }
     const options = optionsFor(row)
-    if (options[dialog.highlight]?.disabled !== false) dialog.highlight = Math.max(0, options.findIndex((o) => !o.disabled))
+    if (options[dialog.highlight]?.disabled !== false)
+      dialog.highlight = Math.max(
+        0,
+        options.findIndex((o) => !o.disabled),
+      )
     return dialog.of === 'park' ? { kind: 'choose', title: 'Park', verb: 'parks', options, highlight: dialog.highlight } : { kind: 'choose', title: 'Reclaim', options, highlight: dialog.highlight }
   }
 
@@ -365,9 +411,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     const row = rows[selected] ?? null
     selectedKey = row?.key ?? null
     if (shown.key !== selectedKey) shown = { key: selectedKey, at: clock.now() }
-    const pane = !row ? null
-      : row.kind === 'agent' ? { kind: 'agent', agent: row.agent }
-      : { kind: 'phase', phase: row.phase, problems: problemsOf(row.phase.agents).map((agent) => ({ agent, reason: agent.reason })) }
+    const pane = !row ? null : row.kind === 'agent' ? { kind: 'agent', agent: row.agent } : { kind: 'phase', phase: row.phase, problems: problemsOf(row.phase.agents).map((agent) => ({ agent, reason: agent.reason })) }
     view.model = { header, phases: allPhases(), rows, selected, selectedAt: shown.at, pane, message, latest, alert, dialog: dialogModel(row), halt }
     return view.model
   }
@@ -449,10 +493,10 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     superseded = every.filter((a) => a.superseded)
     const blocked = agents.filter((a) => a.state === 'blocked')
     const needed = agents.filter((a) => a.state === 'needs you')
-    alert = [
-      blocked.length && `BLOCKED ON A HUMAN: ${blocked.map((a) => `${a.title} in tab ${a.terminal ?? '—'} waits on ${a.waiting ?? 'an answer'}`).join(' · ')}`,
-      needed.length && `NEEDS YOU: ${needed.map((a) => `${a.title} in tab ${a.terminal ?? '—'}: ${a.reason ?? 'no reason given'}`).join(' · ')}`,
-    ].filter(Boolean).join(' · ') || null
+    alert =
+      [blocked.length && `BLOCKED ON A HUMAN: ${blocked.map((a) => `${a.title} in tab ${a.terminal ?? '—'} waits on ${a.waiting ?? 'an answer'}`).join(' · ')}`, needed.length && `NEEDS YOU: ${needed.map((a) => `${a.title} in tab ${a.terminal ?? '—'}: ${a.reason ?? 'no reason given'}`).join(' · ')}`]
+        .filter(Boolean)
+        .join(' · ') || null
 
     // A resume journals its carried lines before the calls it replays, so
     // the order lines come in is no phase order: the script's is, and one it
@@ -541,9 +585,8 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     layout()
     return { enter: { session, title } }
   }
-  const enterAgent = (agent) => (agent.terminal ? enterSession(agent.terminal, agent.title, agent.tabOpen)
-    : agent.console ? say(`${agent.title} has no session: ${agent.state === 'starting' ? 'it is still starting' : `its start failed: ${agent.reason}`}`)
-    : say(`${agent.title} has no session: its worker never started here`))
+  const enterAgent = (agent) =>
+    agent.terminal ? enterSession(agent.terminal, agent.title, agent.tabOpen) : agent.console ? say(`${agent.title} has no session: ${agent.state === 'starting' ? 'it is still starting' : `its start failed: ${agent.reason}`}`) : say(`${agent.title} has no session: its worker never started here`)
 
   const activate = (row) => (!row ? {} : row.kind === 'phase' ? toggle(row.phase) : host?.inPlace ? enterAgent(row.agent) : focus(row.agent))
 
@@ -595,6 +638,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   // alone. What it answers names the agent as `agent: { n, title }`, so a
   // confirmed retry goes to the agent refused, never to whatever row the
   // selection sits on by then: a refresh that folds its phase moves it.
+  /** @param {{ n?: number, force?: boolean, stop?: boolean }} [options] */
   async function reclaim({ n, force = false, stop = false } = {}) {
     if (hostAway()) return say(HOST_GONE)
     let a
@@ -614,11 +658,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     if (r && !r.reclaimed) return { ...say(r.unreachable ? HOST_GONE : `kept ${a.title}: ${r.reason}`), reclaim: r, agent: target, ...also }
     if (!r && !doctors.reclaimed.length && !doctors.kept.length) return { ...say(`${a.title} has nothing to reclaim: it launched nothing in this run`), agent: target }
     if (r || doctors.reclaimed.length) await refresh()
-    const notes = [
-      ...(r?.notes ?? []),
-      ...doctors.reclaimed.flatMap(({ agent, reclaim: dr }) => dr.notes.map((note) => `${agent.title}: ${note}`)),
-      ...doctors.kept.map(({ agent, reclaim: dr }) => `kept ${agent.title}: ${dr.reason}`),
-    ]
+    const notes = [...(r?.notes ?? []), ...doctors.reclaimed.flatMap(({ agent, reclaim: dr }) => dr.notes.map((note) => `${agent.title}: ${note}`)), ...doctors.kept.map(({ agent, reclaim: dr }) => `kept ${agent.title}: ${dr.reason}`)]
     const what = r ? a.title : `${a.title}'s doctors`
     return { ...say(`reclaimed ${what}${withDoctors(r ? doctors.reclaimed.length : 0)}${notes.length ? `; ${notes.join('; ')}` : ''}`), reclaim: r, agent: target, ...also }
   }
@@ -741,14 +781,16 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     if (reclaimed.length || closedConsoles?.closed.length) await refresh()
     dialog = nextConfirmation(kept)
     const asked = kept.filter((k) => confirmationOf(k)).length
-    const text = kept.some((k) => k.reclaim.unreachable) ? `${HOST_GONE}; reclaimed ${reclaimed.length} of ${total} before it went` : [
-      `reclaimed ${reclaimed.length} of ${total} agent${total === 1 ? '' : 's'} of ${what}`,
-      ...(chainGone ? [`removed ${chainGone.title}`] : []),
-      ...(closedConsoles ? [closedConsoles.text] : []),
-      ...kept.filter((k) => !confirmationOf(k)).map(({ agent, reclaim: r }) => `kept ${agent.title}: ${r.reason}`),
-      ...(asked ? [`${asked} to confirm`] : []),
-      ...notes,
-    ].join('; ')
+    const text = kept.some((k) => k.reclaim.unreachable)
+      ? `${HOST_GONE}; reclaimed ${reclaimed.length} of ${total} before it went`
+      : [
+          `reclaimed ${reclaimed.length} of ${total} agent${total === 1 ? '' : 's'} of ${what}`,
+          ...(chainGone ? [`removed ${chainGone.title}`] : []),
+          ...(closedConsoles ? [closedConsoles.text] : []),
+          ...kept.filter((k) => !confirmationOf(k)).map(({ agent, reclaim: r }) => `kept ${agent.title}: ${r.reason}`),
+          ...(asked ? [`${asked} to confirm`] : []),
+          ...notes,
+        ].join('; ')
     return { ...say(text), option: option.id, reclaimed, kept: kept.map(({ agent, reclaim: r }) => ({ agent, reason: r.reason })) }
   }
 
@@ -812,7 +854,10 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
       dialog = null
       if (name !== 'y') return say('nothing removed')
       const handle = await (remove ?? removeHere)()
-      return forceNext(handle, handle.kept.filter((k) => k.unpushed > 0))
+      return forceNext(
+        handle,
+        handle.kept.filter((k) => k.unpushed > 0),
+      )
     }
     if (dialog.act === 'force') {
       const { handle, k, queue } = dialog
@@ -980,7 +1025,12 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
         }
         return resumeHost || resumeHalted ? askResume() : {}
       case 'x':
-        dialog = { kind: 'confirm', act: 'remove', title: `Remove run ${header?.runId ?? ''}?`, lines: ['Stops its runner and every agent, reclaims its worktrees (one holding unpushed commits is asked about), forgets the run and deletes its folder. Its PRs on GitHub stay.', '', 'y = remove it · any other key cancels'] }
+        dialog = {
+          kind: 'confirm',
+          act: 'remove',
+          title: `Remove run ${header?.runId ?? ''}?`,
+          lines: ['Stops its runner and every agent, reclaims its worktrees (one holding unpushed commits is asked about), forgets the run and deletes its folder. Its PRs on GitHub stay.', '', 'y = remove it · any other key cancels'],
+        }
         layout()
         return {}
       case 'q':
@@ -1038,6 +1088,9 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
 // (arm.mjs runOrchestrator): an opened run's halt is triaged, and `?` on it
 // answers { enter: { session, close } } for a fresh orchestrator session the
 // renderer enters and closes on leaving it. The rest is as runView's.
+/**
+ * @param {{ host: SessionHost | null, hostOf?: (name: string) => SessionHost, clock?: { now: () => number }, registry?: string, transcripts?: Partial<ReturnType<typeof sessionTranscripts>>, unpushed?: typeof worktreeUnpushed, alive?: typeof runnerAlive, runner?: string, enter?: boolean, orchestrator?: ReturnType<typeof import('./arm.mjs').runOrchestrator> | null }} options
+ */
 export function runsView({ host, hostOf = () => host, clock = { now: () => Date.now() }, registry = REGISTRY_PATH, transcripts = sessionTranscripts(), unpushed = worktreeUnpushed, alive = runnerAlive, runner = RUNNER_PATH, enter = false, orchestrator = null }) {
   const folds = new Map()
   // runId -> { host, terminal, pid, starting }: the tab r opened, and the runner.pid
@@ -1104,12 +1157,25 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
       const armedAt = Date.parse(r.armedAt)
       const number = specNumber(r.spec)
       const run = {
-        runId: r.runId, host: r.host, name: r.spec, spec: number ? `#${number}` : null, project: r.project, runDir: r.runDir,
-        script: r.script, permissionMode: r.permissionMode, terminal: launched.get(r.runId)?.terminal ?? r.runner?.terminal ?? null,
-        outcome: r.state === 'running' ? null : r.state, outagePaused: r.state === 'running' ? r.paused ?? null : null, operatorPaused: !!r.runDir && pausedAt(r.runDir), alive: live, reclaimed: r.reclaimed,
+        runId: r.runId,
+        host: r.host,
+        name: r.spec,
+        spec: number ? `#${number}` : null,
+        project: r.project,
+        runDir: r.runDir,
+        script: r.script,
+        permissionMode: r.permissionMode,
+        terminal: launched.get(r.runId)?.terminal ?? r.runner?.terminal ?? null,
+        outcome: r.state === 'running' ? null : r.state,
+        outagePaused: r.state === 'running' ? (r.paused ?? null) : null,
+        operatorPaused: !!r.runDir && pausedAt(r.runDir),
+        alive: live,
+        reclaimed: r.reclaimed,
         kept: r.reclaimed ? 0 : agents.filter((a) => !done.has(a.name)).length,
         closable: !r.reclaimed && live === false,
-        armedAt: Number.isFinite(armedAt) ? armedAt : null, ageMs: Number.isFinite(armedAt) ? Math.max(0, now - armedAt) : null, resumable: live === false && !r.reclaimed,
+        armedAt: Number.isFinite(armedAt) ? armedAt : null,
+        ageMs: Number.isFinite(armedAt) ? Math.max(0, now - armedAt) : null,
+        resumable: live === false && !r.reclaimed,
       }
       const key = r.project ? pathKey(r.project) : ''
       if (!byProject.has(key)) byProject.set(key, { key, name: r.project ? basename(r.project) : '(no project)', path: r.project, folded: false, runs: [] })
@@ -1141,7 +1207,10 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
     // r reaches the run's runner as a request file it takes (runner.mjs), since
     // this tree is no child of it.
     const request = (node) => writeJsonAtomic(join(run.runDir, RESUME_REQUEST), { node: node ?? null })
-    opened = { runId, view: runView({ stateDir: run.runDir, host: hostOf(run.host), enter, clock, transcripts, registry, unpushed, resumeHost: () => request(null), resumeHalted: request, alive: () => (recorded.has(runId) ? liveOf(recorded.get(runId), lastOpen) : null), triage: orchestrator ? () => orchestrator.triage(run) : null }) }
+    opened = {
+      runId,
+      view: runView({ stateDir: run.runDir, host: hostOf(run.host), enter, clock, transcripts, registry, unpushed, resumeHost: () => request(null), resumeHalted: request, alive: () => (recorded.has(runId) ? liveOf(recorded.get(runId), lastOpen) : null), triage: orchestrator ? () => orchestrator.triage(run) : null }),
+    }
     await opened.view.refresh()
     message = null
     layout()

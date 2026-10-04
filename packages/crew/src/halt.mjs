@@ -28,6 +28,7 @@ import { holdQueue } from './hold.mjs'
 //                    already being resumed; { resumed: [node…] }
 //   nodes()          every held node's name, in the order they were held
 // }
+/** @param {{ journal: (entry: object) => unknown, out: (line: string) => unknown, record?: (what: string, entry: object) => unknown, runId?: () => string | null, onHalt?: (halt: { node: string, nodes: string[] }) => unknown, onChange?: (held: object[]) => unknown, queue?: ReturnType<typeof holdQueue> }} options */
 export function runHalt({ journal, out, record = () => {}, runId = () => null, onHalt = () => {}, onChange = () => {}, queue = holdQueue() }) {
   // node -> { node, title, needsDecision, reason, questions, go, resuming }
   const held = new Map()

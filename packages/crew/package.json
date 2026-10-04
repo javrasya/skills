@@ -21,6 +21,11 @@
     "node": ">=20"
   },
   "scripts": {
+    "lint": "biome lint",
+    "format": "biome format --write",
+    "format:check": "biome format",
+    "typecheck": "tsc -p .",
+    "check": "npm run lint && npm run typecheck && npm test",
     "test": "node --test-force-exit test/test-shared.mjs && node --test-force-exit test/test-screens.mjs && node --test-force-exit test/test-waiting.mjs && node --test-force-exit test/test-orca-runner.mjs && node --test-force-exit test/test-crew-bin.mjs && node --test-force-exit test/test-daemon.mjs && node --test-force-exit test/test-console.mjs && node --test-force-exit test/test-host-contract.mjs && node --test-force-exit test/test-crew-run.mjs && node --test-force-exit test/test-start-form.mjs && node --test-force-exit test/test-crew-start.mjs && node --test-force-exit test/test-orchestrator.mjs",
     "prepack": "node scripts/pack-template.mjs",
     "postpack": "node scripts/pack-template.mjs --clean"
@@ -28,5 +33,10 @@
   "dependencies": {
     "@xterm/headless": "6.0.0",
     "node-pty": "1.1.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.15",
+    "@types/node": "^26.6.4",
+    "typescript": "^7.0.2"
   }
 }

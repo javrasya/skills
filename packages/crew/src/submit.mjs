@@ -3,15 +3,14 @@
 // on its result: it validates the payload against the agent's schema and
 // exits 1 with every error, so the agent repairs its payload inside its own
 // turn. Only a valid payload is recorded, and only then is worker_done sent.
-import { readFileSync, realpathSync } from 'fs'
-import { fileURLToPath } from 'url'
+import { readFileSync, realpathSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { validate } from './schema.mjs'
 import { parseFlags } from './args.mjs'
 import { writeJsonAtomic } from './fsutil.mjs'
 import { openHost, workerHost } from './hosts.mjs'
 
-export const USAGE =
-  'usage: node submit.mjs --result <file> --payload <file> [--schema <file>] --from <worker_handle> --dispatch-capability <capability> --task-id <task_id> --dispatch-id <dispatch_id>'
+export const USAGE = 'usage: node submit.mjs --result <file> --payload <file> [--schema <file>] --from <worker_handle> --dispatch-capability <capability> --task-id <task_id> --dispatch-id <dispatch_id>'
 
 const FLAGS = {
   '--schema': 'schema',
@@ -45,6 +44,10 @@ function readText(path) {
   return buf.toString('utf8').replace(/^﻿/, '')
 }
 
+/**
+ * @param {string[]} argv
+ * @param {{ host?: import('./session-host.mjs').SessionHost, stdout?: (line: string) => unknown, stderr?: (line: string) => unknown }} [options]
+ */
 export async function submit(argv, { host, stdout = (s) => process.stdout.write(s + '\n'), stderr = (s) => process.stderr.write(s + '\n') } = {}) {
   let a
   try {
@@ -95,7 +98,7 @@ export async function submit(argv, { host, stdout = (s) => process.stdout.write(
   writeJsonAtomic(a.result, value)
 
   try {
-    await (host ?? await openHost(workerHost())).workerDone({
+    await (host ?? (await openHost(workerHost()))).workerDone({
       from: a.from,
       capability: a.capability,
       taskId: a.taskId,

@@ -47,6 +47,7 @@ export function probesBy(ms, limits) {
 //   sleep(ms)   waits ms of time Orca was there: a retry's backoff
 //   resume()    probes at once, sharing a probe already out: { back, outage },
 //               back once Orca answered, outage whether there was one
+/** @param {{ clock: { now: () => number, sleep: (ms: number) => Promise<unknown>, timer: (ms: number) => { promise: Promise<unknown>, cancel: () => void } }, limits: typeof import('./settings.mjs').RUNNER_SETTINGS, probe: () => Promise<unknown>, unreachable: (e: unknown) => boolean, on?: (event: { phase: 'start' | 'paused' | 'end', since: number, at: number, ms?: number, paused?: boolean, reason?: string }) => unknown }} options */
 export function hostOutage({ clock, limits, probe, unreachable, on = () => {} }) {
   let current = null
   let ended = 0
@@ -54,9 +55,16 @@ export function hostOutage({ clock, limits, probe, unreachable, on = () => {} })
 
   // True unless the probe found Orca still gone: an Orca that answers with
   // an error, or not in time, is there, and the call it held meets that itself.
-  const ask = () => (probing ??= Promise.resolve().then(probe).then(() => true, (e) => !unreachable(e)).finally(() => {
-    probing = null
-  }))
+  const ask = () =>
+    (probing ??= Promise.resolve()
+      .then(probe)
+      .then(
+        () => true,
+        (e) => !unreachable(e),
+      )
+      .finally(() => {
+        probing = null
+      }))
 
   const lost = () => ended + (current ? clock.now() - current.since : 0)
 

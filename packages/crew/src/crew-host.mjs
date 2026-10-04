@@ -10,11 +10,11 @@
 // worker_done go through. Its session's environment names crew as its host
 // (CREW_HOST, CREW_HOME), so submit and that command reach this daemon with
 // no Orca installed.
-import { execFile } from 'child_process'
-import { existsSync } from 'fs'
-import { basename, dirname, extname, join, resolve } from 'path'
-import { randomBytes } from 'crypto'
-import { fileURLToPath } from 'url'
+import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { basename, dirname, extname, join, resolve } from 'node:path'
+import { randomBytes } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import { crewPaths } from './daemon/transport.mjs'
 import { daemonGone, ensureDaemon, request } from './daemon/client.mjs'
 import { runnerCommand } from './daemon/runs.mjs'
@@ -39,9 +39,10 @@ export const CREW_BIN = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url
 // own. Neither changes what the harness does or shows.
 export const PI_EXTENSION = fileURLToPath(new URL('./hooks/crew-pi.mjs', import.meta.url))
 export const CLAUDE_HOOK = fileURLToPath(new URL('./hooks/claude-hook.mjs', import.meta.url))
-export const claudeSettings = (node = process.execPath) => JSON.stringify({
-  hooks: Object.fromEntries(CLAUDE_HOOK_EVENTS.map((event) => [event, [{ hooks: [{ type: 'command', command: `"${node}" "${CLAUDE_HOOK}"`, timeout: 10 }] }]])),
-})
+export const claudeSettings = (node = process.execPath) =>
+  JSON.stringify({
+    hooks: Object.fromEntries(CLAUDE_HOOK_EVENTS.map((event) => [event, [{ hooks: [{ type: 'command', command: `"${node}" "${CLAUDE_HOOK}"`, timeout: 10 }] }]])),
+  })
 export const waitWords = (harness) => (harness === 'pi' ? ['-e', PI_EXTENSION] : harness === 'claude' ? ['--settings', claudeSettings()] : [])
 
 // The rows of a session's screen read for what it shows.
@@ -92,16 +93,30 @@ function hookCommand(script) {
   return childCommand(script, [])
 }
 
+/** @returns {Promise<void>} */
 function runHook(script, { repo, worktree, env, ms }) {
   const [program, args] = hookCommand(script)
   return new Promise((done, reject) => {
     execFile(program, args, { cwd: worktree, env: { ...env, CREW_REPO: repo, CREW_WORKTREE: worktree }, timeout: ms, windowsHide: true, maxBuffer: 16 << 20 }, (err, stdout, stderr) =>
-      err ? reject(fail('setup_failed', `the setup hook ${script} failed in ${worktree}${err.killed ? ` (killed after ${Math.round(ms / 1000)}s)` : ''}: ${String(stderr || err.message).trim().split('\n').slice(-8).join('\n')}`)) : done())
+      err
+        ? reject(
+            fail(
+              'setup_failed',
+              `the setup hook ${script} failed in ${worktree}${err.killed ? ` (killed after ${Math.round(ms / 1000)}s)` : ''}: ${String(stderr || err.message)
+                .trim()
+                .split('\n')
+                .slice(-8)
+                .join('\n')}`,
+            ),
+          )
+        : done(),
+    )
   })
 }
 
 // A log's lines, then every line added to it, drawn in a session of its own.
-const TAIL = "const fs=require('fs');const p=process.argv[1];let at=0;const show=()=>{let s;try{s=fs.statSync(p)}catch{return}if(s.size<at)at=0;if(s.size===at)return;const b=Buffer.alloc(s.size-at);const fd=fs.openSync(p,'r');fs.readSync(fd,b,0,b.length,at);fs.closeSync(fd);at=s.size;process.stdout.write(b.toString('utf8').replace(/\\r?\\n/g,'\\r\\n'))};show();setInterval(show,500)"
+const TAIL =
+  "const fs=require('fs');const p=process.argv[1];let at=0;const show=()=>{let s;try{s=fs.statSync(p)}catch{return}if(s.size<at)at=0;if(s.size===at)return;const b=Buffer.alloc(s.size-at);const fd=fs.openSync(p,'r');fs.readSync(fd,b,0,b.length,at);fs.closeSync(fd);at=s.size;process.stdout.write(b.toString('utf8').replace(/\\r?\\n/g,'\\r\\n'))};show();setInterval(show,500)"
 
 // `cwd` is the run's worktree, where a worker without a child worktree runs,
 // and the checkout whose MCP answers a child worktree gets (`project`);
@@ -118,7 +133,23 @@ const TAIL = "const fs=require('fs');const p=process.argv[1];let at=0;const show
 // say, once its terminal has been quiet for `quietMs`. Git calls are bounded
 // at `callMs`, and a worktree's making, its setup hook included, at `createMs`.
 // `start` answers with the daemon, starting it when none does.
-export function crewHost({ paths = crewPaths(), env = process.env, cwd = process.cwd(), project = cwd, harnesses = readCrewConfig(paths).harnesses ?? {}, transcripts = sessionTranscripts({ env }), quietMs = RUNNER_SETTINGS.quietOutputMs, readyMs = 180_000, settleMs = 1_000, screens = SCREENS, endMs = 10_000, pollMs = 100, callMs = RUNNER_SETTINGS.hostCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, start = ensureDaemon } = {}) {
+export function crewHost({
+  paths = crewPaths(),
+  env = process.env,
+  cwd = process.cwd(),
+  project = cwd,
+  harnesses = readCrewConfig(paths).harnesses ?? {},
+  transcripts = sessionTranscripts({ env }),
+  quietMs = RUNNER_SETTINGS.quietOutputMs,
+  readyMs = 180_000,
+  settleMs = 1_000,
+  screens = SCREENS,
+  endMs = 10_000,
+  pollMs = 100,
+  callMs = RUNNER_SETTINGS.hostCallMs,
+  createMs = RUNNER_SETTINGS.worktreeCreateMs,
+  start = ensureDaemon,
+} = {}) {
   // This adapter's side of the Runs it creates or takes over, as a runner's
   // terminal is on Orca: the daemon fences every other coordinator out.
   const coordinator = `coord_${randomBytes(6).toString('hex')}`
@@ -176,7 +207,10 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     }
     for (;;) {
       const s = await sessionOf(id)
-      if (!s?.alive) throw new Error(`\`${command.join(' ')}\` in crew session ${id} ended before its first prompt${s?.exit ? ` (exit ${s.exit.code})` : ''}${shown ? `, while ${shown.dialog === UNRECOGNISED ? 'its screen was not one crew recognises' : `it asked: ${shown.dialog}`}` : ''}; its screen:\n${(await screen(id, 15).catch(() => [])).join('\n')}`)
+      if (!s?.alive)
+        throw new Error(
+          `\`${command.join(' ')}\` in crew session ${id} ended before its first prompt${s?.exit ? ` (exit ${s.exit.code})` : ''}${shown ? `, while ${shown.dialog === UNRECOGNISED ? 'its screen was not one crew recognises' : `it asked: ${shown.dialog}`}` : ''}; its screen:\n${(await screen(id, 15).catch(() => [])).join('\n')}`,
+        )
       // A harness that told the daemon it waits on the person (pi's dialogs,
       // its extension's events) shows a dialog, whatever its screen.
       const seen = s.waiting ? { state: 'dialog', dialog: 'a dialog', ask: `${s.waiting}: enter the session and answer it`, detail: null } : readScreen(harness, await screen(id, SCREEN_ROWS), screens)
@@ -263,7 +297,7 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
   // anyone's work, and a branch it did not make is left where it was.
   async function addWorktree(repo, name, path, skip, existing = false) {
     await gitIn(cwd, ['worktree', 'add', ...(existing ? ['--detach', path, 'HEAD'] : ['-b', name, path, 'HEAD'])], { ms: createMs })
-    const setup = skip ? null : repoConfig(paths, repo).setup ?? null
+    const setup = skip ? null : (repoConfig(paths, repo).setup ?? null)
     if (!setup) return
     try {
       await runHook(setup, { repo, worktree: path, env, ms: createMs })
@@ -288,10 +322,14 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
     const path = join(crewWorktrees(repo), child.name)
     const known = (await worktreesOf(repo, bound)).find((w) => samePath(w.path, path))
     if (known && child.retry) {
-      await reuseWorktree(path, { dispatched: child.dispatched, baseline: child.baseline ?? null }, {
-        held: async () => (await sessions()).some((s) => s.alive && samePath(s.cwd, path)),
-        ...gitProbes(path, known.branch, bound),
-      })
+      await reuseWorktree(
+        path,
+        { dispatched: child.dispatched, baseline: child.baseline ?? null },
+        {
+          held: async () => (await sessions()).some((s) => s.alive && samePath(s.cwd, path)),
+          ...gitProbes(path, known.branch, bound),
+        },
+      )
       return { path, made: false }
     }
     if (known || existsSync(path)) throw fail('worktree_name_taken', `${path} already exists: crew makes each <runId>-<n> worktree once`, { worktree: path, final: true })
@@ -345,7 +383,17 @@ export function crewHost({ paths = crewPaths(), env = process.env, cwd = process
           if (made.made) baseline = await prepareWorktree({ project, worktree, bound, onBaseline: child.onBaseline, warnings })
         }
         const text = typeof prompt === 'function' ? prompt(baseline) : prompt
-        const w = await launch(launchWords({ harness, model, effort, permissionMode, sessionId }), { harness, dir: worktree, title, prompt: text, run, asking, typing: () => { dispatched = true } })
+        const w = await launch(launchWords({ harness, model, effort, permissionMode, sessionId }), {
+          harness,
+          dir: worktree,
+          title,
+          prompt: text,
+          run,
+          asking,
+          typing: () => {
+            dispatched = true
+          },
+        })
         return { dispatchId: w.terminal, taskId: w.taskId, terminal: w.terminal, worktree, warnings }
       } catch (e) {
         if (child && worktree !== cwd && e instanceof Object) e.worktree ??= worktree

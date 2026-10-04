@@ -52,14 +52,21 @@ export const DOCTOR_NUDGE = `The workflow has not received your report: your fin
 // is a note, sent as Run mail (ADR-0014).
 // earlier: each earlier round of this patient, { round, note, outcome }, so
 // that no doctor hands it a note that already failed.
-const earlierRounds = (earlier) => (earlier.length ? `
+const earlierRounds = (earlier) =>
+  earlier.length
+    ? `
 
 ## Earlier doctor rounds
 Each earlier round's note, and how that round ended. None of them cured the patient: never hand it a note that already failed.
-${earlier.map(({ round, note, outcome }) => `
+${earlier
+  .map(
+    ({ round, note, outcome }) => `
 ### Round ${round}
 Note: ${note ?? 'none'}
-Outcome: ${outcome}`).join('\n')}` : '')
+Outcome: ${outcome}`,
+  )
+  .join('\n')}`
+    : ''
 
 export function doctorPrompt({ patient, reason, round, rounds, transcript, worktree, entries, log, earlier = [] }) {
   return `You are a doctor in a workflow run. One of its agents, the patient, failed, and its agent() call waits on you: its dependents wait with it. Work out why it failed, and write a note: guidance that lets the patient avoid that failure when it carries on. This is doctor round ${round} of ${rounds}.
@@ -77,7 +84,7 @@ Report over Run mail to your Run's mailbox, with the IDs from your session host'
 Title: ${patient.title}
 Failure reason: ${reason}
 Transcript: ${transcript}
-Worktree: ${worktree ?? 'none: it ran in the run\'s own worktree'}${earlierRounds(earlier)}
+Worktree: ${worktree ?? "none: it ran in the run's own worktree"}${earlierRounds(earlier)}
 
 ## Its prompt
 ${patient.prompt}
@@ -93,7 +100,9 @@ ${log.join('\n') || '(none)'}`
 export const doctorContinuePrompt = (why) => `You were interrupted: the workflow runner stopped this session and resumed it (${why}). Carry on with your diagnosis where you left off, then ${REPORT}. If a session host's preamble came with this message, take the IDs for Run mail from it, not from an earlier one.`
 
 // A doctor's remedy: the patient's session carries on with its note.
-export const notePrompt = (note) => `You were stopped: this session failed, and the workflow runner resumed it once a doctor, an agent that read your transcript, had worked out why. Its note follows. Carry on where you left off, with the note in mind, and finish the task, then run the submit command from your instructions until it exits 0. If a session host's preamble came with this message, take the four IDs for submit from it, not from an earlier one.
+export const notePrompt = (
+  note,
+) => `You were stopped: this session failed, and the workflow runner resumed it once a doctor, an agent that read your transcript, had worked out why. Its note follows. Carry on where you left off, with the note in mind, and finish the task, then run the submit command from your instructions until it exits 0. If a session host's preamble came with this message, take the four IDs for submit from it, not from an earlier one.
 
 ## The doctor's note
 ${note}`
@@ -161,8 +170,14 @@ export function runMailbox({ host, journal, out, handled: mailHandled = [], pend
     if (!box && m.dispatchId && !agentsOut.has(m.dispatchId)) {
       hold(m)
       journal({
-        type: 'mail', messageId: m.id, kind: m.type ?? null, action: 'pending', dispatchId: m.dispatchId, ...(m.outcome && { outcome: m.outcome }),
-        ...(m.subject != null && { subject: m.subject }), ...(m.body != null && { body: m.body }),
+        type: 'mail',
+        messageId: m.id,
+        kind: m.type ?? null,
+        action: 'pending',
+        dispatchId: m.dispatchId,
+        ...(m.outcome && { outcome: m.outcome }),
+        ...(m.subject != null && { subject: m.subject }),
+        ...(m.body != null && { body: m.body }),
       })
       return
     }
@@ -172,10 +187,15 @@ export function runMailbox({ host, journal, out, handled: mailHandled = [], pend
     const open = !!box && !box.closed
     const action = mailAction(m.type, m.outcome, box)
     journal({
-      type: 'mail', messageId: m.id, kind: m.type ?? null, action, ...(m.outcome && { outcome: m.outcome }),
-      ...(box && { doctor: box.doctor, patient: box.patient, round: box.round }), ...(open && m.body != null && { body: m.body }),
+      type: 'mail',
+      messageId: m.id,
+      kind: m.type ?? null,
+      action,
+      ...(m.outcome && { outcome: m.outcome }),
+      ...(box && { doctor: box.doctor, patient: box.patient, round: box.round }),
+      ...(open && m.body != null && { body: m.body }),
     })
-    if (open && answers(m.type)) box.needsYou = action === 'needsYou' ? (m.body || m.subject || 'no reason given') : null
+    if (open && answers(m.type)) box.needsYou = action === 'needsYou' ? m.body || m.subject || 'no reason given' : null
     if (action === 'needsYou') {
       out(`!!!!!!!! ${box.title} NEEDS YOU: ${box.needsYou}`)
       out(`!!!!!!!! ${box.title}: do it, then tell it so in its tab ${box.terminal ?? '—'}; it waits for as long as it takes`)
@@ -206,7 +226,10 @@ export function doctorRounds({ limits, journal, out, life, failAgent, nextN, doc
   const doctorsOut = new Set()
   const track = (p) => {
     doctorsOut.add(p)
-    p.then(() => doctorsOut.delete(p), () => {})
+    p.then(
+      () => doctorsOut.delete(p),
+      () => {},
+    )
   }
 
   // Each round's note and outcome (trail), from the fold on a resume. A held
@@ -236,8 +259,7 @@ export function doctorRounds({ limits, journal, out, life, failAgent, nextN, doc
     // Back here after a remedy: that round's note carried it on, and it died again.
     const last = rounds.trail.at(-1)
     if (last && last.outcome === null) last.outcome = `its note carried the patient on, and it failed again: ${failure.reason}`
-    const transcript = failure.sessionId == null ? 'none: its worker never started'
-      : transcripts.path?.({ harness: failure.harness, sessionId: failure.sessionId, worktree: failure.worktree }) ?? `none found for ${failure.harness} session ${failure.sessionId}`
+    const transcript = failure.sessionId == null ? 'none: its worker never started' : (transcripts.path?.({ harness: failure.harness, sessionId: failure.sessionId, worktree: failure.worktree }) ?? `none found for ${failure.harness} session ${failure.sessionId}`)
     while (rounds.round < max) {
       const round = ++rounds.round
       // A doctor taken up runs under a new n, as a resumed call does; one that
@@ -247,14 +269,26 @@ export function doctorRounds({ limits, journal, out, life, failAgent, nextN, doc
       const dLabel = `recover -> ${label}`
       const dTitle = `[${phaseName}] ${dLabel}`
       journal({ type: 'doctor', key, n, title, origin, round, reason: failure.reason, doctor })
-      out(again
-        ? `>> ${title}: doctor round ${round} of ${max} goes on after the resume: ${dTitle} ${again.worker ? 'is taken up' : again.unlaunched ? 'never launched, so it starts now' : 'ended while no runner watched it'}, and its agent() waits`
-        : `>> ${title}: ${failure.reason}; doctor round ${round} of ${max}: ${dTitle} diagnoses it, and its agent() waits`)
+      out(
+        again
+          ? `>> ${title}: doctor round ${round} of ${max} goes on after the resume: ${dTitle} ${again.worker ? 'is taken up' : again.unlaunched ? 'never launched, so it starts now' : 'ended while no runner watched it'}, and its agent() waits`
+          : `>> ${title}: ${failure.reason}; doctor round ${round} of ${max}: ${dTitle} diagnoses it, and its agent() waits`,
+      )
       let handed
-      const handoff = new Promise((r) => { handed = r })
+      const handoff = new Promise((r) => {
+        handed = r
+      })
       const box = {
-        doctor, patient: origin, round, title: dTitle, terminal: null, ended: again?.gaveUp != null ? { outcome: 'failed' } : again?.ended ?? null, gaveUp: again?.gaveUp ?? null,
-        remedied: !!again?.remedy, closed: false, needsYou: again?.needsYou ?? null,
+        doctor,
+        patient: origin,
+        round,
+        title: dTitle,
+        terminal: null,
+        ended: again?.gaveUp != null ? { outcome: 'failed' } : (again?.ended ?? null),
+        gaveUp: again?.gaveUp ?? null,
+        remedied: !!again?.remedy,
+        closed: false,
+        needsYou: again?.needsYou ?? null,
         handoff: async (m) => {
           rounds.trail.push({ round, note: m.body ?? '', outcome: null })
           handed(await remedy(call, failure, { round, doctor, message: m }))
@@ -327,9 +361,7 @@ export function doctorRounds({ limits, journal, out, life, failAgent, nextN, doc
 // worker's files, as the lifecycle does.
 export function heldRounds(p, { agents, mail, agentDir }) {
   const { rounds } = p
-  const trail = rounds.flatMap((r, i) => (r.outcome === 'remedy'
-    ? [{ round: r.round, note: r.note, outcome: rounds[i + 1] ? `its note carried the patient on, and it failed again: ${rounds[i + 1].reason}` : null }]
-    : r.outcome === 'gaveUp' ? [{ round: r.round, note: null, outcome: `no remedy: ${r.why}` }] : []))
+  const trail = rounds.flatMap((r, i) => (r.outcome === 'remedy' ? [{ round: r.round, note: r.note, outcome: rounds[i + 1] ? `its note carried the patient on, and it failed again: ${rounds[i + 1].reason}` : null }] : r.outcome === 'gaveUp' ? [{ round: r.round, note: null, outcome: `no remedy: ${r.why}` }] : []))
   const last = rounds.at(-1)
   if (last.outcome === 'remedy') return { rounds: { round: p.round, trail } }
   const open = last.outcome === null
@@ -345,16 +377,30 @@ export function heldRounds(p, { agents, mail, agentDir }) {
   return {
     rounds: { round: p.round, trail },
     held: {
-      origin: p.origin, round: last.round, reason: last.reason, open,
+      origin: p.origin,
+      round: last.round,
+      reason: last.reason,
+      open,
       doctor: last.doctor ?? null,
-      worker: out ? {
-        n: d.n, title: d.title, dir: agentDir(d.origin, d.title?.replace(/^\[[^\]]*\] /, '') || `agent-${d.origin}`), run: d.runId, dispatchId: d.dispatchId, harness: d.harness,
-        sessionId: d.sessionId, terminal: d.terminal, worktree: d.worktree, continuations: d.continuations, origin: d.origin,
-      } : null,
+      worker: out
+        ? {
+            n: d.n,
+            title: d.title,
+            dir: agentDir(d.origin, d.title?.replace(/^\[[^\]]*\] /, '') || `agent-${d.origin}`),
+            run: d.runId,
+            dispatchId: d.dispatchId,
+            harness: d.harness,
+            sessionId: d.sessionId,
+            terminal: d.terminal,
+            worktree: d.worktree,
+            continuations: d.continuations,
+            origin: d.origin,
+          }
+        : null,
       unlaunched: unlaunched ? { made: d?.worktree ? [d.worktree] : [], baseline: d?.baseline ?? null } : null,
       remedy: remedy ? { id: remedy.messageId, body: remedy.body ?? '' } : null,
       needsYou: out && d.state === 'needs you' ? d.reason : null,
-      gaveUp: gaveUp ? gaveUp.body ?? '' : null,
+      gaveUp: gaveUp ? (gaveUp.body ?? '') : null,
       ended: ended ? { outcome: ended.outcome ?? 'succeeded' } : null,
       restart: p.launched ? null : { made: p.worktree ? [p.worktree] : [], baseline: p.baseline },
     },

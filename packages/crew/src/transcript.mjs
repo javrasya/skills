@@ -6,9 +6,9 @@
 //   pi:     ~/.pi/agent/sessions/--<enc>--/<created-at>_<id>.jsonl, the enc
 //           being the cwd with '/', '\' and ':' as '-'. pi writes the file
 //           lazily, at its first assistant message.
-import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'fs'
-import { homedir } from 'os'
-import { join, resolve } from 'path'
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
 
 // The user's Claude directory: CLAUDE_CONFIG_DIR when set, else ~/.claude.
 // The one place it is resolved: Claude transcripts and the run registry
@@ -17,12 +17,17 @@ export const claudeDir = ({ home = homedir(), env = process.env } = {}) => env.C
 // pi's own dir, its settings.json and (by default) its sessions/ in it.
 export const piAgentDir = ({ home = homedir(), env = process.env } = {}) => env.PI_CODING_AGENT_DIR || join(home, '.pi', 'agent')
 
-export const claudeSlug =(cwd) => resolve(cwd).replace(/[^A-Za-z0-9]/g, '-')
-export const piDir = (cwd) => `--${resolve(cwd).replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`
+export const claudeSlug = (cwd) => resolve(cwd).replace(/[^A-Za-z0-9]/g, '-')
+export const piDir = (cwd) =>
+  `--${resolve(cwd)
+    .replace(/^[/\\]/, '')
+    .replace(/[/\\:]/g, '-')}--`
 
 const dirsIn = (root) => {
   try {
-    return readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => join(root, d.name))
+    return readdirSync(root, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => join(root, d.name))
   } catch {
     return []
   }
@@ -59,7 +64,11 @@ export function transcriptPath({ harness, sessionId, worktree, scan = true, home
   const name = `${sessionId}.jsonl`
   if (worktree && existsSync(join(root, claudeSlug(worktree), name))) return join(root, claudeSlug(worktree), name)
   if (!scan) return null
-  return dirsIn(root).map((d) => join(d, name)).find((f) => existsSync(f)) ?? null
+  return (
+    dirsIn(root)
+      .map((d) => join(d, name))
+      .find((f) => existsSync(f)) ?? null
+  )
 }
 
 // Context size is what the latest turn sent the model; tokens, every turn's
@@ -112,7 +121,10 @@ function usageReader() {
       const bytes = Buffer.concat([f.rest, chunk])
       const end = bytes.lastIndexOf(0x0a)
       f.rest = bytes.subarray(end + 1)
-      for (const line of bytes.subarray(0, end + 1).toString('utf8').split('\n')) {
+      for (const line of bytes
+        .subarray(0, end + 1)
+        .toString('utf8')
+        .split('\n')) {
         let u
         try {
           u = usageOf(JSON.parse(line))
@@ -137,7 +149,10 @@ function usageReader() {
 // the prompt worker-start typed, submitted. Whitespace is compared collapsed,
 // as a TUI may rewrap what is typed into it. A meta line (a hook's or a local
 // command's) and a subagent's are no prompt of the session's.
-const flat = (s) => String(s ?? '').replace(/\s+/g, ' ').trim()
+const flat = (s) =>
+  String(s ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
 export function promptDelivered(text, needle) {
   const want = flat(needle)
   if (!want) return false
@@ -150,7 +165,15 @@ export function promptDelivered(text, needle) {
     }
     if (e?.type !== 'user' || e.isMeta || e.isSidechain) continue
     const c = e.message?.content
-    const said = typeof c === 'string' ? c : Array.isArray(c) ? c.filter((b) => b?.type === 'text').map((b) => b.text).join('\n') : ''
+    const said =
+      typeof c === 'string'
+        ? c
+        : Array.isArray(c)
+          ? c
+              .filter((b) => b?.type === 'text')
+              .map((b) => b.text)
+              .join('\n')
+          : ''
     if (flat(said).includes(want)) return true
   }
   return false

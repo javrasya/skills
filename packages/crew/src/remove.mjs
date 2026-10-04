@@ -7,8 +7,8 @@
 // the ones they say to; finish() forgets the run whatever was left, naming
 // each once, with why it was left. Each kept one carries `worktree`, its path:
 // the chain's is its run's, not its agent's, which chainAgent leaves unset.
-import { rmSync } from 'fs'
-import { join } from 'path'
+import { rmSync } from 'node:fs'
+import { join } from 'node:path'
 import { readJournal } from './journal.mjs'
 import { agentsOf, reclaimAgent, reclaimChainAfter, reclaimRun } from './reclaim.mjs'
 import { runnerAlive, runnerPid } from './run-view-model.mjs'
@@ -30,7 +30,7 @@ export async function stopRunnerOf(stateDir, { waitMs = 5_000, sleep = (ms) => n
   for (let waited = 0; waited < waitMs && runnerAlive(stateDir) === true; waited += 100) await sleep(100)
 }
 
-export async function removeRun({ stateDir, runId, host, registry = null, unpushed = worktreeUnpushed, out = () => {}, stopRunner = stopRunnerOf }) {
+export async function removeRun({ stateDir, runId, host, registry = null, unpushed = worktreeUnpushed, out = /** @type {(line: string) => unknown} */ (() => {}), stopRunner = stopRunnerOf }) {
   await stopRunner(stateDir)
   const journalPath = join(stateDir, 'journal.jsonl')
   const agents = agentsOf(journalPath)
@@ -63,9 +63,7 @@ export async function removeRun({ stateDir, runId, host, registry = null, unpush
   return {
     kept,
     async force(k) {
-      const r = k.agent.chain
-        ? await reclaimChainAfter([], chain, { host, journaled: agents, unpushed, force: true, registry })
-        : await reclaimAgent(k.agent, { host, unpushed, force: true })
+      const r = k.agent.chain ? await reclaimChainAfter([], chain, { host, journaled: agents, unpushed, force: true, registry }) : await reclaimAgent(k.agent, { host, unpushed, force: true })
       if (r.reclaimed) left.delete(k)
       else left.set(k, r.reason)
       return r

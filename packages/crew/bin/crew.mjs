@@ -55,9 +55,9 @@
 // Each entry keeps its own argv parsing and its own "am I main" check, so this
 // hands it the argv it would have had launched directly, then loads it in this
 // process: a child process would split the terminal and its signals between two.
-import { existsSync, realpathSync } from 'fs'
-import { basename, resolve } from 'path'
-import { fileURLToPath, pathToFileURL } from 'url'
+import { existsSync, realpathSync } from 'node:fs'
+import { basename, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { HOST_NAMES as HOSTS } from '../src/hosts.mjs'
 import { crewPaths } from '../src/daemon/transport.mjs'
 import { ensureDaemon, request, stopDaemon } from '../src/daemon/client.mjs'
@@ -85,7 +85,7 @@ const USAGE = [
   '       crew daemon start | status | stop [--force] | restart [--force]',
   '       crew orchestration send --from <h> --dispatch-capability <c> --task-id <t> --dispatch-id <d> --type <worker_done|handoff|escalation> --subject <s> --body <b> [--outcome succeeded|failed]',
   'debug: crew session spawn [--cwd <dir>] -- <command…> | list | screen <id> | kill <id>',
-  '       crew console (the daemon\'s raw sessions; a run\'s are entered from crew view)',
+  "       crew console (the daemon's raw sessions; a run's are entered from crew view)",
   `hosts: ${HOSTS.join(', ')}`,
 ].join('\n')
 
@@ -145,6 +145,7 @@ async function daemon(args) {
   console.log(`${said(hello)}${hello.started ? ' (started)' : ''}`)
 }
 
+/** @param {string[]} argv */
 async function session([verb, ...args]) {
   if (verb === 'spawn') {
     const dash = args.indexOf('--')
@@ -234,7 +235,7 @@ async function runCommand(verb, args) {
     const hosts = await openHosts({ paths, callMs: RUNNER_SETTINGS.viewCallMs })
     return hosts[run.host] ?? hosts[LEGACY_HOST]
   }
-  const { createInterface } = await import('readline/promises')
+  const { createInterface } = await import('node:readline/promises')
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   try {
     console.log(await removeCommand({ registry, target, openHost, yes: !!values['--yes'], ask: (q) => rl.question(q), out: (s) => console.error(s) }))
@@ -265,7 +266,7 @@ async function view(args, { waitMs = 0 } = {}) {
     return runs.model.projects.flatMap((p) => p.runs).find((r) => r.runId === target || samePath(r.runDir, target))
   }
   const deadline = Date.now() + waitMs
-  let run = target && await find()
+  let run = target && (await find())
   while (target && !run && Date.now() < deadline) {
     await sleep(250)
     run = await find()
@@ -287,6 +288,7 @@ async function view(args, { waitMs = 0 } = {}) {
 
 const SEND_FLAGS = { '--from': 'from', '--dispatch-capability': 'capability', '--task-id': 'taskId', '--dispatch-id': 'dispatchId', '--type': 'type', '--subject': 'subject', '--body': 'body', '--outcome': 'outcome' }
 
+/** @param {string[]} argv */
 async function orchestration([verb, ...args]) {
   if (verb !== 'send') usage(`crew orchestration: ${verb ? `unexpected ${verb}` : 'send'}`)
   // A body or subject may start with --: every flag here takes a value.

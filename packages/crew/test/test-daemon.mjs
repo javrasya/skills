@@ -4,12 +4,12 @@
 //   node packages/crew/test/test-daemon.mjs
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
-import { tmpdir } from 'os'
-import { join } from 'path'
-import { spawn, spawnSync } from 'child_process'
-import net from 'net'
-import { fileURLToPath } from 'url'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { spawn, spawnSync } from 'node:child_process'
+import net from 'node:net'
+import { fileURLToPath } from 'node:url'
 import { crewPaths, lineDecoder } from '../src/daemon/transport.mjs'
 import { daemonHello, enterSession, request, stopDaemon } from '../src/daemon/client.mjs'
 import { startDaemon } from '../src/daemon/daemon.mjs'
@@ -94,7 +94,7 @@ test('daemon: with none running, a crew command starts one that outlives its ter
   const terminal = spawn(process.execPath, [shell], { env, stdio: ['ignore', 'pipe', 'inherit'], detached: process.platform !== 'win32' })
   let said = ''
   terminal.stdout.on('data', (d) => (said += d))
-  const pid = Number(await until('the terminal\'s crew command', () => /pid (\d+) .*\(started\)/.exec(said)?.[1]))
+  const pid = Number(await until("the terminal's crew command", () => /pid (\d+) .*\(started\)/.exec(said)?.[1]))
   assert.ok(alive(pid))
   if (process.platform === 'win32') spawnSync('taskkill', ['/T', '/F', '/PID', String(terminal.pid)])
   else process.kill(-terminal.pid, 'SIGHUP')
@@ -114,12 +114,12 @@ test('daemon: with none running, a crew command starts one that outlives its ter
 test('daemon: run and view start it too, before their own work', async () => {
   const { paths, crew } = scratch()
   const view = crew('view')
-  assert.equal(view.status, 3, 'the view\'s own refusal: it needs a terminal')
+  assert.equal(view.status, 3, "the view's own refusal: it needs a terminal")
   // Bare `crew view` is the runs list now, so a second run named is the usage error.
   const usage = crew('view', 'one', 'two')
-  assert.equal(usage.status, 2, 'the view\'s own usage error')
+  assert.equal(usage.status, 2, "the view's own usage error")
   const attached = crew('view', '--attached')
-  assert.equal(attached.status, 2, 'the view\'s own usage error')
+  assert.equal(attached.status, 2, "the view's own usage error")
   assert.ok(await daemonHello(paths))
   assert.equal(crew('--help').status, 0)
 })
@@ -174,7 +174,10 @@ test('daemon: a request that is JSON but not an object gets an error reply, and 
   try {
     const socket = net.connect(paths.endpoint)
     const replies = []
-    socket.on('data', lineDecoder((m) => replies.push(m)))
+    socket.on(
+      'data',
+      lineDecoder((m) => replies.push(m)),
+    )
     const sent = ['null', '42', '"x"', '[]', 'true']
     socket.write(sent.map((line) => `${line}\n`).join(''))
     await until('a reply to each', () => replies.length === sent.length)
@@ -195,12 +198,7 @@ test('daemon: a request that is JSON but not an object gets an error reply, and 
 
 test('session: a spawned session keeps running and keeps its screen while nobody has it entered', async () => {
   const { paths, crew } = scratch()
-  const program = [
-    "process.stdout.write('header\\r\\n')",
-    "process.stdout.write('\\x1b[5;10Hkept')",
-    'let n = 0',
-    "setInterval(() => process.stdout.write('\\x1b[2;1Htick ' + (++n)), 100)",
-  ].join('\n')
+  const program = ["process.stdout.write('header\\r\\n')", "process.stdout.write('\\x1b[5;10Hkept')", 'let n = 0', "setInterval(() => process.stdout.write('\\x1b[2;1Htick ' + (++n)), 100)"].join('\n')
   const spawned = crew('session', 'spawn', '--', 'node', '-e', program)
   assert.equal(spawned.status, 0, spawned.stderr)
   const id = spawned.stdout.trim()
@@ -219,7 +217,10 @@ test('session: a spawned session keeps running and keeps its screen while nobody
   assert.equal(later.screen.lines[4], '         kept', 'the screen as the program drew it, kept with nobody watching')
 
   const listed = (await request(paths, { op: 'session.list' })).sessions
-  assert.deepEqual(listed.map((s) => [s.id, s.alive]), [[id, true]])
+  assert.deepEqual(
+    listed.map((s) => [s.id, s.alive]),
+    [[id, true]],
+  )
   const printed = crew('session', 'screen', id)
   assert.equal(printed.status, 0, printed.stderr)
   assert.match(printed.stdout, /^header\n/)
@@ -236,7 +237,8 @@ function fakeSession({ id, command, cwd, env, title = null }) {
   let exit = null
   const exits = new Set()
   return {
-    id, env,
+    id,
+    env,
     info: () => ({ id, title, command, cwd, pid: 1, cols: 80, rows: 24, alive: exit === null, exit, quietMs: null }),
     onExit: (watch) => exits.add(watch),
     kill() {
@@ -287,12 +289,19 @@ test('daemon: a session is ready once its harness says so, whatever its terminal
   }
 })
 
-test('daemon: parks a done agent\'s harness once quiet past parkAfterMs, never an unsettled, failed, busy, entered or asking one, and refuses a write to it', async () => {
+test("daemon: parks a done agent's harness once quiet past parkAfterMs, never an unsettled, failed, busy, entered or asking one, and refuses a write to it", async () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
   const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
   homes.push(paths)
   const spawned = []
-  const quiet = new Map([['done', 5_000], ['busy', 10], ['unsettled', 5_000], ['failed', 5_000], ['entered', 5_000], ['asking', 5_000]])
+  const quiet = new Map([
+    ['done', 5_000],
+    ['busy', 10],
+    ['unsettled', 5_000],
+    ['failed', 5_000],
+    ['entered', 5_000],
+    ['asking', 5_000],
+  ])
   const daemon = await startDaemon({ paths, registry: join(dir, 'runs.jsonl'), spawnSession: quietSession(spawned, quiet), parkAfterMs: 1_000, parkSweepMs: 20, exit: () => {}, log: () => {} })
   try {
     const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c', runner: null })
@@ -386,7 +395,7 @@ test('daemon: a real pty parked and entered again runs its resume line and shows
   }
 })
 
-test('daemon: after a restart every agent session comes back under its old id, parked, its env never on disk; a working one shows hostDied for its runner to continue, and entering any resumes it with crew\'s env', async () => {
+test("daemon: after a restart every agent session comes back under its old id, parked, its env never on disk; a working one shows hostDied for its runner to continue, and entering any resumes it with crew's env", async () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
   const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
   homes.push(paths)
@@ -406,7 +415,7 @@ test('daemon: after a restart every agent session comes back under its old id, p
   const failed = await worker('failed', 'failed')
   const working = await worker('working', null)
   const closed = await worker('closed', 'succeeded')
-  const { session: plain } = await request(paths, { op: 'session.spawn', command: ['node', 'tail.mjs'], cwd: dir })
+  await request(paths, { op: 'session.spawn', command: ['node', 'tail.mjs'], cwd: dir })
   await request(paths, { op: 'session.rename', id: done, title: 'done, renamed' })
   await request(paths, { op: 'session.close', id: closed })
   await request(paths, { op: 'stop', force: true })
@@ -437,7 +446,7 @@ test('daemon: after a restart every agent session comes back under its old id, p
   }
 })
 
-test('daemon: session.revive starts a parked session\'s harness again in place and holds it unparked until written to; a live one is left as it is', async () => {
+test("daemon: session.revive starts a parked session's harness again in place and holds it unparked until written to; a live one is left as it is", async () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
   const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
   homes.push(paths)
@@ -465,12 +474,25 @@ test('daemon: session.revive starts a parked session\'s harness again in place a
   }
 })
 
-test('daemon: session.park parks a done agent\'s session at once, however recently it drew; anything else is refused, naming why', async () => {
+test("daemon: session.park parks a done agent's session at once, however recently it drew; anything else is refused, naming why", async () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
   const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
   homes.push(paths)
   const spawned = []
-  const daemon = await startDaemon({ paths, registry: join(dir, 'runs.jsonl'), spawnSession: quietSession(spawned, new Map([['done', 10], ['working', 10]])), parkAfterMs: 0, exit: () => {}, log: () => {} })
+  const daemon = await startDaemon({
+    paths,
+    registry: join(dir, 'runs.jsonl'),
+    spawnSession: quietSession(
+      spawned,
+      new Map([
+        ['done', 10],
+        ['working', 10],
+      ]),
+    ),
+    parkAfterMs: 0,
+    exit: () => {},
+    log: () => {},
+  })
   try {
     const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c', runner: null })
     const worker = async (name, outcome) => {
@@ -608,7 +630,10 @@ test('daemon: r on a run whose runner died with the daemon, starting the daemon,
     const other = view()
     await other.refresh()
     assert.match((await other.resume(run.id)).message, new RegExp(`has its runner already, in crew session ${resumed.resumed}`))
-    assert.deepEqual((await runners()).map((s) => s.id), [resumed.resumed])
+    assert.deepEqual(
+      (await runners()).map((s) => s.id),
+      [resumed.resumed],
+    )
   } finally {
     second?.shutdown('test over')
   }
@@ -660,7 +685,12 @@ test('daemon: a ? session, titled orchestrator/console and of no dispatch (#168)
   homes.push(paths)
   const registry = join(dir, 'runs.jsonl')
   const spawned = []
-  const quiet = new Map([['quiet', 5_000], ['tail', 5_000], ['fresh', 10], ['ending', 10]])
+  const quiet = new Map([
+    ['quiet', 5_000],
+    ['tail', 5_000],
+    ['fresh', 10],
+    ['ending', 10],
+  ])
   const spawnSession = quietSession(spawned, quiet)
   const exits = []
   await startDaemon({ paths, registry, spawnSession, parkAfterMs: 1_000, parkSweepMs: 20, exit: () => exits.push(1), log: () => {} })
@@ -690,7 +720,10 @@ test('daemon: a ? session, titled orchestrator/console and of no dispatch (#168)
   try {
     const { sessions } = await request(paths, { op: 'session.list' })
     assert.deepEqual(sessions.map((s) => s.id).sort(), [quietOne, fresh, ending].sort(), 'every ? session, never the log tail')
-    assert.deepEqual(sessions.map((s) => [s.title, s.parked, s.restored, s.alive]), sessions.map(() => ['orchestrator/console', true, true, false]))
+    assert.deepEqual(
+      sessions.map((s) => [s.title, s.parked, s.restored, s.alive]),
+      sessions.map(() => ['orchestrator/console', true, true, false]),
+    )
     ;(await enterSession(paths, { id: quietOne }, () => {})).socket.destroy()
     assert.deepEqual([spawned[0].id, spawned[0].command, spawned[0].cwd], [quietOne, ['claude', '--resume', 'uuid-quiet', 'quiet'], dir])
   } finally {
@@ -720,18 +753,33 @@ test("daemon: an orchestrator question's Run is never live, and is dropped from 
   await assert.rejects(request(paths, { op: 'stop' }), (e) => e.message.includes(`1 run(s) live: ${plain.id};`), 'a live question never holds stop up')
   await request(paths, { op: 'worker.stop', id: answered.session })
   await request(paths, { op: 'session.close', id: answered.session })
-  assert.deepEqual(book().runs.map((r) => r.id), [pending.run, plain.id], 'the closed question is dropped')
+  assert.deepEqual(
+    book().runs.map((r) => r.id),
+    [pending.run, plain.id],
+    'the closed question is dropped',
+  )
   assert.ok(!book().dispatches.some((d) => d.id === answered.session), 'its dispatch with it')
   await request(paths, { op: 'session.close', id: worker })
-  assert.deepEqual(book().runs.map((r) => r.id), [pending.run, plain.id], 'a workflow Run is kept however its sessions end')
+  assert.deepEqual(
+    book().runs.map((r) => r.id),
+    [pending.run, plain.id],
+    'a workflow Run is kept however its sessions end',
+  )
   first.shutdown('test over')
   await until('the first daemon to stop', () => exits.length === 1)
   const second = await startDaemon({ paths, registry: join(dir, 'orca-runs.jsonl'), spawnSession: fakeSession, exit: () => {}, log: () => {} })
   try {
     await second.recovered
     await spawn()
-    assert.deepEqual(book().runs.map((r) => r.id), [plain.id], 'a question none of whose sessions outlived its daemon is dropped')
-    assert.deepEqual(book().dispatches.map((d) => d.id), [worker])
+    assert.deepEqual(
+      book().runs.map((r) => r.id),
+      [plain.id],
+      'a question none of whose sessions outlived its daemon is dropped',
+    )
+    assert.deepEqual(
+      book().dispatches.map((d) => d.id),
+      [worker],
+    )
   } finally {
     second.shutdown('test over')
   }

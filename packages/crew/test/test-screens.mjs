@@ -5,13 +5,13 @@
 //   node packages/crew/test/test-screens.mjs
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'fs'
+import { readFileSync } from 'node:fs'
 import { SCREENS, readScreen, readsReady, tellsReady } from '../src/screens.mjs'
 import { foldJournal } from '../src/journal.mjs'
 
 const screen = (name) => readFileSync(new URL(`./fixtures/screens/${name}.txt`, import.meta.url), 'utf8').split('\n')
 
-test("claude: its input box is ready; its trust and MCP dialogs are named, each saying what the person must do; any other dialog is still one", () => {
+test('claude: its input box is ready; its trust and MCP dialogs are named, each saying what the person must do; any other dialog is still one', () => {
   assert.deepEqual(readScreen('claude', screen('claude-ready')), { state: 'ready' })
   const trust = readScreen('claude', screen('claude-trust'))
   assert.deepEqual([trust.state, trust.dialog, trust.detail], ['dialog', 'workspace trust', 'Accessing workspace:'])
@@ -58,7 +58,13 @@ test('fold: a dialog makes a starting agent need you, in the session it answers 
   a = agentOf([...asked, line('retry', { attempt: 2, reason: 'its worker did not start: it ended', nextAt: at }), line('dialogClosed')])
   assert.deepEqual([a.state, a.reason], ['starting', 'its worker did not start: it ended'], 'a dialog a retry ended is not closed again')
   // A continued session's dialog puts it back to continued.
-  a = agentOf([...asked, line('dialogClosed'), line('started', { run: 'run_1', dispatchId: '7', harness: 'claude', sessionId: 's', worktree: null, terminal: '7', dir: 'agents/1' }),
-    line('continued', { dispatchId: '8', sessionId: 's', terminal: '8', reason: 'it died', attempt: 1, reopened: true }), line('dialog', { terminal: '8', dialog: 'a dialog', ask: 'x' }), line('dialogClosed')])
+  a = agentOf([
+    ...asked,
+    line('dialogClosed'),
+    line('started', { run: 'run_1', dispatchId: '7', harness: 'claude', sessionId: 's', worktree: null, terminal: '7', dir: 'agents/1' }),
+    line('continued', { dispatchId: '8', sessionId: 's', terminal: '8', reason: 'it died', attempt: 1, reopened: true }),
+    line('dialog', { terminal: '8', dialog: 'a dialog', ask: 'x' }),
+    line('dialogClosed'),
+  ])
   assert.equal(a.state, 'continued')
 })

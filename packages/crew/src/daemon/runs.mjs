@@ -42,10 +42,10 @@
 //   mail.check { coordinator, ack }             → { deliveryId, acknowledged, replayed, messages }
 //   worktree.status { path, status }            → { path, status }
 //   worktree.statuses                           → { statuses: { <path>: <status> } }
-import { randomBytes } from 'crypto'
-import { existsSync, readFileSync } from 'fs'
-import { basename } from 'path'
-import { fileURLToPath } from 'url'
+import { randomBytes } from 'node:crypto'
+import { existsSync, readFileSync } from 'node:fs'
+import { basename } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { readRegistry } from '../registry.mjs'
 import { writeJsonAtomic } from '../fsutil.mjs'
 import { DEFAULT_HOST } from '../hosts.mjs'
@@ -59,8 +59,7 @@ export const RUNNER_PATH = fileURLToPath(new URL('../runner.mjs', import.meta.ur
 // built: on `host`, none named when null (a runner that names none is on
 // LEGACY_HOST), always naming its state dir, and resuming from it by default,
 // as the run view's r and crew's own recovery do.
-export const runnerArgs = ({ runner = RUNNER_PATH, script, host = DEFAULT_HOST, stateDir, resume = true, permissionMode = null }) =>
-  [runner, script, ...(host ? ['--host', host] : []), '--state-dir', stateDir, ...(resume ? ['--resume'] : []), ...(permissionMode ? ['--permission-mode', permissionMode] : [])]
+export const runnerArgs = ({ runner = RUNNER_PATH, script, host = DEFAULT_HOST, stateDir, resume = true, permissionMode = null }) => [runner, script, ...(host ? ['--host', host] : []), '--state-dir', stateDir, ...(resume ? ['--resume'] : []), ...(permissionMode ? ['--permission-mode', permissionMode] : [])]
 
 // The runner's command line as a crew session runs it.
 export const runnerCommand = (options) => [process.execPath, ...runnerArgs({ ...options, host: 'crew' })]
@@ -112,8 +111,14 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
   const save = () => {
     if (!file) return
     const book = {
-      runs: [...runs.values()].map((r) => ({ ...r, acked: [...r.acked] })), dispatches: [...dispatches.values()],
-      statuses: Object.fromEntries(statuses), sessions: Object.fromEntries(specs), messages, deliveries, nextSession, running: [...running, ...died],
+      runs: [...runs.values()].map((r) => ({ ...r, acked: [...r.acked] })),
+      dispatches: [...dispatches.values()],
+      statuses: Object.fromEntries(statuses),
+      sessions: Object.fromEntries(specs),
+      messages,
+      deliveries,
+      nextSession,
+      running: [...running, ...died],
     }
     // Whole or not at all: a daemon killed mid-write must not lose the book.
     writeJsonAtomic(file, book)
@@ -148,7 +153,13 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
   const ops = {
     'run.create': ({ objective = '', coordinator, runner = null }) => {
       const r = {
-        id: `run_${hex(6)}`, objective: String(objective), coordinator: word(coordinator, 'coordinator'), runner: runnerOf(runner), pending: [], batch: null, acked: new Set(),
+        id: `run_${hex(6)}`,
+        objective: String(objective),
+        coordinator: word(coordinator, 'coordinator'),
+        runner: runnerOf(runner),
+        pending: [],
+        batch: null,
+        acked: new Set(),
         ...(isOrchestratorTitle(objective) && { orchestrator: true }),
       }
       runs.set(r.id, r)
@@ -193,8 +204,15 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
       if (!MAIL_TYPES.includes(type)) throw new Error(`not a message type crew takes: ${JSON.stringify(type)}; one of ${MAIL_TYPES.join(', ')}`)
       if (outcome != null && (type !== 'worker_done' || !OUTCOMES.has(outcome))) throw new Error(`not an outcome for ${type}: ${JSON.stringify(outcome)}`)
       const m = {
-        id: `msg_${++messages}_${hex(3)}`, type, from: d.id, subject: String(subject), body: String(body),
-        taskId: d.taskId, dispatchId: d.id, outcome: type === 'worker_done' ? outcome ?? 'succeeded' : null, createdAt: now(),
+        id: `msg_${++messages}_${hex(3)}`,
+        type,
+        from: d.id,
+        subject: String(subject),
+        body: String(body),
+        taskId: d.taskId,
+        dispatchId: d.id,
+        outcome: type === 'worker_done' ? (outcome ?? 'succeeded') : null,
+        createdAt: now(),
       }
       runOf(d.run).pending.push(m)
       if (type === 'worker_done' && !d.settled) Object.assign(d, { settled: true, outcome: m.outcome })
@@ -224,8 +242,9 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
 
   for (const [name, op] of Object.entries(ops)) {
     if (name === 'worker.show' || name === 'worktree.statuses') continue
+    // Reflect.apply, since the ops differ in arity and this wraps them all alike.
     ops[name] = (...args) => {
-      const reply = op(...args)
+      const reply = Reflect.apply(op, null, args)
       save()
       return reply
     }
@@ -243,11 +262,13 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
   function liveRuns() {
     const book = registered()
     const working = new Set([...dispatches.values()].filter((d) => alive(d.id)).map((d) => d.run))
-    return [...runs.values()].filter((r) => {
-      if (r.orchestrator) return false
-      const e = book.get(r.id)
-      return e ? unfinished(e) && (alive(r.runner) || working.has(r.id)) : working.has(r.id)
-    }).map((r) => named(r, book.get(r.id)))
+    return [...runs.values()]
+      .filter((r) => {
+        if (r.orchestrator) return false
+        const e = book.get(r.id)
+        return e ? unfinished(e) && (alive(r.runner) || working.has(r.id)) : working.has(r.id)
+      })
+      .map((r) => named(r, book.get(r.id)))
   }
 
   // The runs whose runner session died with an earlier daemon while the
@@ -255,10 +276,12 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
   // project, permissionMode }, what starting their runner again takes.
   function recoverable() {
     const book = registered()
-    return [...runs.values()].filter((r) => r.runner && died.has(r.runner) && book.get(r.id) && unfinished(book.get(r.id))).map((r) => {
-      const { script, runDir, project, permissionMode } = book.get(r.id)
-      return { runId: r.id, script, runDir, project, permissionMode }
-    })
+    return [...runs.values()]
+      .filter((r) => r.runner && died.has(r.runner) && book.get(r.id) && unfinished(book.get(r.id)))
+      .map((r) => {
+        const { script, runDir, project, permissionMode } = book.get(r.id)
+        return { runId: r.id, script, runDir, project, permissionMode }
+      })
   }
 
   return {
