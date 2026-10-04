@@ -5,7 +5,7 @@
 // turn. Only a valid payload is recorded, and only then is worker_done sent.
 import { readFileSync, realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { validate } from './schema.mjs'
+import { acceptResult, acceptedMail } from './accept.mjs'
 import { parseFlags } from './args.mjs'
 import { writeJsonAtomic } from './fsutil.mjs'
 import { openHost, workerHost } from './hosts.mjs'
@@ -66,45 +66,38 @@ export async function submit(argv, { host, stdout = (s) => process.stdout.write(
     return 1
   }
 
-  let value = text
+  // The runner wrote this file: one it cannot read is the run's fault, not
+  // the payload's, so it is a usage error (2), never a rejection (1).
+  let schema = null
   if (a.schema) {
-    // The runner wrote this file: one it cannot read is the run's fault, not
-    // the payload's, so it is a usage error (2), never a rejection (1).
-    let schema
     try {
       schema = JSON.parse(readText(a.schema))
     } catch (e) {
       stderr(`submit: cannot read schema ${a.schema}: ${e.message}`)
       return 2
     }
-    try {
-      value = JSON.parse(text)
-    } catch (e) {
-      stderr(`submit rejected: payload is not valid JSON: ${e.message}`)
-      stderr('Fix the payload and run submit again.')
-      return 1
-    }
-    const errors = validate(schema, value)
-    if (errors.length) {
-      stderr(`submit rejected: ${errors.length} validation error(s) against ${a.schema}`)
-      for (const err of errors) stderr(`  ${err}`)
-      stderr('Fix the payload and run submit again.')
-      return 1
-    }
   }
+  const accepted = acceptResult(schema, text, a.schema)
+  if (accepted.errors) {
+    for (const line of accepted.errors) stderr(line)
+    return 1
+  }
+  const { value } = accepted
 
   // Written whole or not at all: the runner reads this file once it sees the
   // worker settle, and must never read half of it.
   writeJsonAtomic(a.result, value)
 
+  const { subject, body } = acceptedMail(a.result)
   try {
     await (host ?? (await openHost(workerHost()))).workerDone({
       from: a.from,
       capability: a.capability,
       taskId: a.taskId,
       dispatchId: a.dispatchId,
-      subject: 'result submitted',
-      body: `Submitted a result that is valid against its schema. It is recorded at ${a.result}. Nothing remains for this task.`,
+      subject,
+      body,
+      result: value,
     })
   } catch (e) {
     stderr(`submit: the result is recorded at ${a.result}, but worker_done failed: ${e.message}`)

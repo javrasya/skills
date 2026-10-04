@@ -4,7 +4,7 @@
 //   node packages/crew/test/test-daemon.mjs
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
@@ -15,7 +15,8 @@ import { daemonHello, enterSession, request, stopDaemon } from '../src/daemon/cl
 import { startDaemon } from '../src/daemon/daemon.mjs'
 import { resolveCommand } from '../src/command.mjs'
 import { runRegistry } from '../src/registry.mjs'
-import { crewHost } from '../src/crew-host.mjs'
+import { crewHost, crewMcpConfig } from '../src/crew-host.mjs'
+import { MCP_SERVER, tool } from '../src/tools.mjs'
 import { runsView } from '../src/run-view-model.mjs'
 
 const CREW = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url))
@@ -431,7 +432,7 @@ test("daemon: after a restart every agent session comes back under its old id, p
     assert.deepEqual([of(done).title, of(done).cwd, of(done).command, of(done).alive, of(done).parked], ['done, renamed', join(dir, 'done'), ['claude', '--session-id', 'uuid-done', '--model', 'opus'], false, true])
     assert.equal(spawned.length, 0, 'no harness started until someone enters')
     const show = async (id) => (await request(paths, { op: 'worker.show', id })).worker
-    assert.deepEqual(await show(working), { settled: false, outcome: null, gone: true, exited: false, waiting: null, terminal: working, hostDied: true })
+    assert.deepEqual(await show(working), { settled: false, outcome: null, submissions: 0, note: null, needsYou: null, gone: true, exited: false, waiting: null, terminal: working, hostDied: true })
     assert.deepEqual([(await show(done)).settled, (await show(done)).gone, (await show(failed)).outcome], [true, false, 'failed'])
 
     for (const id of [done, working]) (await enterSession(paths, { id }, () => {})).socket.destroy()
@@ -443,6 +444,381 @@ test("daemon: after a restart every agent session comes back under its old id, p
     assert.deepEqual([(await show(working)).gone, (await show(working)).hostDied], [false, undefined])
   } finally {
     second.shutdown('test over')
+  }
+})
+
+test('daemon: every worker_done a dispatch sends is counted and taken as its outcome and last result, settled or not, and the next daemon keeps them (#173)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const registry = join(dir, 'runs.jsonl')
+  const spawnSession = quietSession([], new Map())
+  const exits = []
+  await startDaemon({ paths, registry, spawnSession, parkAfterMs: 60_000, exit: () => exits.push(1), log: () => {} })
+  const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c', runner: null })
+  const { session } = await request(paths, { op: 'session.spawn', command: ['claude', '--session-id', 'uuid-r'], cwd: dir, title: 'held' })
+  const id = session.id
+  const { worker: w } = await request(paths, { op: 'run.worker', run: run.id, session: id, coordinator: 'c' })
+  const show = async () => (await request(paths, { op: 'worker.show', id })).worker
+  const result = () => request(paths, { op: 'worker.result', id })
+  const done = (outcome, value) => request(paths, { op: 'mail.send', taskId: w.taskId, dispatchId: id, capability: w.capability, type: 'worker_done', outcome, ...(value !== undefined && { result: value }) })
+  const shape = ({ result, outcome, submissions }) => ({ result, outcome, submissions })
+
+  assert.deepEqual([(await show()).submissions, shape(await result())], [0, { result: null, outcome: null, submissions: 0 }])
+  await done('succeeded', { decisions_needed: ['which?'] })
+  assert.deepEqual([(await show()).settled, (await show()).submissions], [true, 1])
+  await done('failed', { decisions_needed: [] })
+  assert.deepEqual([(await show()).settled, (await show()).outcome, (await show()).submissions], [true, 'failed', 2])
+  assert.deepEqual(shape(await result()), { result: { decisions_needed: [] }, outcome: 'failed', submissions: 2 })
+  // A worker_done with no result (`crew orchestration send`) still counts, its result none.
+  await done('succeeded')
+  assert.deepEqual(shape(await result()), { result: null, outcome: 'succeeded', submissions: 3 })
+  await done('succeeded', 'plain text')
+  // The crew host hands it back as the daemon does.
+  const host = crewHost({ paths, harnesses: {}, start: async () => {} })
+  assert.deepEqual(await host.workerResult({ dispatch: id }), { result: 'plain text', outcome: 'succeeded', submissions: 4 })
+  await assert.rejects(request(paths, { op: 'worker.result', id: 'nope' }), /dispatch_not_found/)
+
+  await request(paths, { op: 'stop', force: true })
+  await until('the first daemon to stop', () => exits.length === 1)
+  const second = await startDaemon({ paths, registry, spawnSession, parkAfterMs: 60_000, exit: () => {}, log: () => {} })
+  try {
+    assert.deepEqual([(await show()).submissions, shape(await result())], [4, { result: 'plain text', outcome: 'succeeded', submissions: 4 }])
+  } finally {
+    second.shutdown('test over')
+  }
+})
+
+test("daemon: a session submits and mails by its id alone, its result checked against the schema run.worker gave its dispatch, which the next daemon keeps; a session of no dispatch, a released one, and a doctor's submit are refused, saying why (#174)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const registry = join(dir, 'runs.jsonl')
+  const spawnSession = quietSession([], new Map())
+  const exits = []
+  await startDaemon({ paths, registry, spawnSession, parkAfterMs: 60_000, exit: () => exits.push(1), log: () => {} })
+  const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c', runner: null })
+  const spawn = async (title) => (await request(paths, { op: 'session.spawn', command: ['claude', '--session-id', `uuid-${title}`], cwd: dir, title })).session.id
+  const schema = { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } }, additionalProperties: false }
+  const resultPath = join(dir, 'result.json')
+  const [worker, text, doctor, released, bare] = [await spawn('worker'), await spawn('text'), await spawn('doctor'), await spawn('released'), await spawn('bare')]
+  const dispatch = (session, extra) => request(paths, { op: 'run.worker', run: run.id, session, coordinator: 'c', ...extra })
+  await assert.rejects(dispatch(worker, { agent: { role: 'boss' } }), /not an agent role: "boss"; one of worker, doctor/)
+  await assert.rejects(dispatch(worker, { agent: { schema: ['x'] } }), /not a result schema/)
+  const { worker: workerTask } = await dispatch(worker, { agent: { role: 'worker', schema, resultPath } })
+  await dispatch(text, {})
+  await dispatch(doctor, { agent: { role: 'doctor' } })
+  await dispatch(released, { agent: { schema } })
+  await request(paths, { op: 'worker.release', id: released })
+  const submit = (id, payload) => request(paths, { op: 'worker.submit', id, payload })
+  const mail = (id, m) => request(paths, { op: 'worker.mail', id, ...m })
+  const result = async (id) => {
+    const { result, outcome, submissions } = await request(paths, { op: 'worker.result', id })
+    return { result, outcome, submissions }
+  }
+  // What its harness equips each session with: a session of no agent, or of
+  // one released, is told it has none, not refused.
+  const agents = async () => Promise.all([worker, text, doctor, released, bare, 'nope'].map(async (id) => (await request(paths, { op: 'worker.agent', id })).agent))
+  const AGENTS = [{ role: 'worker', schema }, { role: 'worker', schema: null }, { role: 'doctor', schema: null }, null, null, null]
+  assert.deepEqual(await agents(), AGENTS)
+
+  // Every error at once, nothing stored or settled.
+  await assert.rejects(submit(worker, { ok: 1, extra: true }), (e) => /2 validation error\(s\) against its schema\n {2}\$\.ok: expected boolean, got integer\n {2}\$: unexpected property "extra"\nFix the payload and submit again\./.test(e.message))
+  await assert.rejects(submit(worker, '{ not json'), /payload is not valid JSON/)
+  assert.deepEqual([existsSync(resultPath), (await request(paths, { op: 'worker.show', id: worker })).worker.settled], [false, false])
+  const accepted = await submit(worker, '{"ok": true}')
+  assert.deepEqual([/^msg_/.test(accepted.id), accepted.resultPath], [true, resultPath])
+  assert.deepEqual([JSON.parse(readFileSync(resultPath, 'utf8')), await result(worker)], [{ ok: true }, { result: { ok: true }, outcome: 'succeeded', submissions: 1 }])
+  await submit(worker, { ok: false })
+  assert.deepEqual(await result(worker), { result: { ok: false }, outcome: 'succeeded', submissions: 2 })
+  // A schemaless agent's result is text.
+  await assert.rejects(submit(text, { ok: true }), /this agent's result is text/)
+  await submit(text, 'plain words')
+  assert.deepEqual(await result(text), { result: 'plain words', outcome: 'succeeded', submissions: 1 })
+
+  await assert.rejects(submit(bare, 'x'), new RegExp(`no dispatch for session ${bare}: crew takes results only from a session it started for an agent`))
+  await assert.rejects(submit('nope', 'x'), /no dispatch for session nope/)
+  await assert.rejects(submit(released, { ok: true }), new RegExp(`session ${released}'s dispatch was released: its runner let its agent go, so it takes no more results`))
+  await assert.rejects(submit(doctor, 'done'), new RegExp(`session ${doctor} is a doctor's: a doctor submits no result`))
+  assert.equal((await result(doctor)).submissions, 0)
+
+  // Mail, fenced alike; a worker's result never goes as mail, a doctor's worker_done does.
+  await mail(doctor, { type: 'handoff', subject: 'note', body: 'carry on' })
+  await mail(doctor, { type: 'worker_done', outcome: 'failed', body: 'gave up' })
+  assert.deepEqual(await result(doctor), { result: null, outcome: 'failed', submissions: 1 })
+  await mail(worker, { type: 'escalation', body: 'stuck' })
+  await assert.rejects(mail(worker, { type: 'worker_done' }), new RegExp(`session ${worker} is a worker's: its result goes through submit`))
+  await assert.rejects(mail(worker, { type: 'chatter' }), /not a message type crew takes/)
+  await assert.rejects(mail(bare, { type: 'handoff' }), /no dispatch for session/)
+  await assert.rejects(mail(released, { type: 'handoff' }), /dispatch was released: its runner let its agent go, so it takes no more mail/)
+  const { messages } = await request(paths, { op: 'mail.check', coordinator: 'c' })
+  assert.deepEqual(
+    messages.map((m) => [m.type, m.dispatchId, m.body, m.outcome]),
+    [
+      ['worker_done', worker, 'Submitted a result that is valid against its schema. It is recorded at ' + resultPath + '. Nothing remains for this task.', 'succeeded'],
+      ['worker_done', worker, 'Submitted a result that is valid against its schema. It is recorded at ' + resultPath + '. Nothing remains for this task.', 'succeeded'],
+      ['worker_done', text, 'Submitted a result that is valid against its schema. Nothing remains for this task.', 'succeeded'],
+      ['handoff', doctor, 'carry on', null],
+      ['worker_done', doctor, 'gave up', 'failed'],
+      ['escalation', worker, 'stuck', null],
+    ],
+  )
+
+  // A result sent as mail, as the CLI submit sends it, is checked the same way.
+  const send = (r) => request(paths, { op: 'mail.send', taskId: workerTask.taskId, dispatchId: worker, type: 'worker_done', result: r })
+  await assert.rejects(send({ ok: 'yes' }), /submit rejected: 1 validation error\(s\) against its schema\n {2}\$\.ok: expected boolean, got string\nFix the payload and submit again\./)
+  assert.equal((await result(worker)).submissions, 2)
+  await send({ ok: true })
+  assert.deepEqual(await result(worker), { result: { ok: true }, outcome: 'succeeded', submissions: 3 })
+
+  await request(paths, { op: 'stop', force: true })
+  await until('the first daemon to stop', () => exits.length === 1)
+  const second = await startDaemon({ paths, registry, spawnSession, parkAfterMs: 60_000, exit: () => {}, log: () => {} })
+  try {
+    assert.deepEqual(await agents(), AGENTS)
+    await assert.rejects(submit(worker, { ok: 'no' }), /expected boolean, got string/)
+    await submit(worker, { ok: true })
+    assert.deepEqual(await result(worker), { result: { ok: true }, outcome: 'succeeded', submissions: 4 })
+    await assert.rejects(submit(doctor, 'done'), /is a doctor's/)
+    await assert.rejects(submit(released, { ok: true }), /was released/)
+  } finally {
+    second.shutdown('test over')
+  }
+})
+
+// Claude's side of crew's MCP server: started as crew's --mcp-config says,
+// its env's ${VAR} expanded from the session's `env` as Claude does.
+function mcpClient(env) {
+  const crew = JSON.parse(crewMcpConfig()).mcpServers[MCP_SERVER]
+  const expanded = Object.fromEntries(Object.entries(crew.env).map(([k, v]) => [k, v.replace(/\$\{(\w+)(?::-([^}]*))?\}/g, (_, name, otherwise = '') => env[name] ?? otherwise)]))
+  const child = spawn(crew.command, crew.args, { env: { PATH: process.env.PATH, ...expanded }, stdio: ['pipe', 'pipe', 'inherit'] })
+  const waiting = new Map()
+  // The notifications it sent, by method.
+  const notified = []
+  let next = 0
+  child.stdout.setEncoding('utf8')
+  child.stdout.on(
+    'data',
+    lineDecoder((m) => (m.id == null ? notified.push(m.method) : waiting.get(m.id)?.(m))),
+  )
+  const rpc = (method, params) =>
+    new Promise((answer) => {
+      const id = ++next
+      waiting.set(id, answer)
+      child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
+    })
+  const names = async () => (await rpc('tools/list')).result.tools.map((t) => t.name)
+  const call = async (name, args) => (await rpc('tools/call', { name, arguments: args })).result
+  return { rpc, names, call, notified, close: () => child.stdin.end() }
+}
+
+test("daemon: crew's MCP server answers initialize, lists a session's tools by its agent's role with the table's descriptions, and makes each call one daemon op; a refusal, and a daemon gone, come back as error content naming it (#177)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const exits = []
+  await startDaemon({ paths, registry: join(dir, 'runs.jsonl'), spawnSession: quietSession([], new Map()), parkAfterMs: 60_000, exit: () => exits.push(1), log: () => {} })
+  const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c', runner: null })
+  const spawn_ = async (title) => (await request(paths, { op: 'session.spawn', command: ['claude', '--session-id', `uuid-${title}`], cwd: dir, title })).session.id
+  const schema = { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } }
+  const resultPath = join(dir, 'result.json')
+  const [worker, doctor, bare] = [await spawn_('worker'), await spawn_('doctor'), await spawn_('bare')]
+  await request(paths, { op: 'run.worker', run: run.id, session: worker, coordinator: 'c', agent: { role: 'worker', schema, resultPath } })
+  await request(paths, { op: 'run.worker', run: run.id, session: doctor, coordinator: 'c', agent: { role: 'doctor' } })
+  const clients = []
+  const client = (env) => {
+    const c = mcpClient({ CREW_HOME: paths.home, ...env })
+    clients.push(c)
+    return c
+  }
+  const show = async (id) => (await request(paths, { op: 'worker.show', id })).worker
+  try {
+    const w = client({ CREW_SESSION: worker, CREW_AGENT: '1' })
+    const init = await w.rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'claude-code', version: '2.1.289' } })
+    assert.deepEqual(init.result, { protocolVersion: '2025-06-18', capabilities: { tools: { listChanged: true } }, serverInfo: { name: MCP_SERVER, version: '1' } })
+    const { tools } = (await w.rpc('tools/list')).result
+    assert.deepEqual(
+      tools.map((t) => [t.name, t.description]),
+      ['status', 'needs_you', 'submit'].map((name) => [name, tool(name).description]),
+    )
+    assert.deepEqual(tools[2].inputSchema, schema)
+    assert.deepEqual(await w.call('status', { note: 'reading the code' }), { content: [{ type: 'text', text: 'Posted: the operator sees "reading the code" on your row.' }] })
+    await w.call('needs_you', { reason: 'log in to npm' })
+    assert.deepEqual([(await show(worker)).note, (await show(worker)).needsYou], ['reading the code', 'log in to npm'])
+    // The daemon's refusal is error content, Claude's to show its agent.
+    const refused = await w.call('submit', { ok: 'yes' })
+    assert.equal(refused.isError, true)
+    assert.match(refused.content[0].text, /submit rejected: 1 validation error\(s\)[\s\S]*\$\.ok: expected boolean, got string/)
+    assert.equal((await show(worker)).settled, false)
+    assert.match((await w.call('submit', { ok: true })).content[0].text, /^Submitted: the workflow has your result\. It is recorded at .*result\.json\./)
+    assert.deepEqual(JSON.parse(readFileSync(resultPath, 'utf8')), { ok: true })
+    assert.deepEqual([(await show(worker)).settled, (await request(paths, { op: 'worker.result', id: worker })).submissions], [true, 1])
+    assert.equal((await w.call('handoff', { note: 'x' })).isError, true)
+    assert.equal((await w.rpc('resources/list')).error.code, -32601)
+
+    const d = client({ CREW_SESSION: doctor, CREW_AGENT: '1' })
+    assert.deepEqual(await d.names(), ['status', 'needs_you', 'handoff', 'give_up'])
+    assert.match((await d.call('handoff', { note: 'read the lockfile first' })).content[0].text, /^Handed off: /)
+    assert.deepEqual([(await show(doctor)).settled, (await show(doctor)).outcome], [true, 'succeeded'])
+
+    // A session of no agent, and a claude outside crew, list none.
+    for (const env of [{ CREW_SESSION: bare }, {}]) {
+      const none = client(env)
+      assert.deepEqual(await none.names(), [], JSON.stringify(env))
+      assert.equal((await none.call('status', { note: 'x' })).isError, true)
+    }
+
+    await request(paths, { op: 'stop', force: true })
+    await until('the daemon to stop', () => exits.length === 1)
+    const gone = await w.call('status', { note: 'still here' })
+    assert.equal(gone.isError, true)
+    assert.match(gone.content[0].text, /^crew's daemon is not reachable \(.*\)\. Your note was not posted: carry on with your task\.$/)
+    assert.match((await w.call('submit', { ok: true })).content[0].text, /^crew's daemon is not reachable \(.*\)\. Your result was not submitted: submit it with the command line in your instructions instead, as they say\.$/)
+  } finally {
+    for (const c of clients) c.close()
+  }
+})
+
+test("daemon: crew's MCP server in an agent's session whose dispatch comes after its first tools/list lists none, goes on looking, and tells Claude its list changed once its agent is found (#171)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  await startDaemon({ paths, registry: join(dir, 'runs.jsonl'), spawnSession: quietSession([], new Map()), parkAfterMs: 60_000, exit: () => {}, log: () => {} })
+  const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c', runner: null })
+  const late = (await request(paths, { op: 'session.spawn', command: ['claude', '--session-id', 'uuid-late'], cwd: dir, title: 'late' })).session.id
+  const c = mcpClient({ CREW_HOME: paths.home, CREW_SESSION: late, CREW_AGENT: '1' })
+  try {
+    await c.rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'claude-code', version: '2.1.289' } })
+    assert.deepEqual(await c.names(), [])
+    assert.deepEqual(c.notified, [])
+    await request(paths, { op: 'run.worker', run: run.id, session: late, coordinator: 'c', agent: { role: 'worker' } })
+    await until('its list changed', () => c.notified.includes('notifications/tools/list_changed'))
+    assert.deepEqual(await c.names(), ['status', 'needs_you', 'submit'])
+  } finally {
+    c.close()
+    await request(paths, { op: 'stop', force: true })
+  }
+})
+
+test("daemon: a session's note and needs-you reason are kept on its dispatch, for worker.show and the next daemon; needs-you clears on its next note, submit or mail, a CLI send included; a session of no dispatch is refused (#175)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const registry = join(dir, 'runs.jsonl')
+  const spawnSession = quietSession([], new Map())
+  const exits = []
+  await startDaemon({ paths, registry, spawnSession, parkAfterMs: 60_000, exit: () => exits.push(1), log: () => {} })
+  const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c', runner: null })
+  const spawn = async (title) => (await request(paths, { op: 'session.spawn', command: ['claude', '--session-id', `uuid-${title}`], cwd: dir, title })).session.id
+  const [worker, doctor, released, bare] = [await spawn('worker'), await spawn('doctor'), await spawn('released'), await spawn('bare')]
+  const { worker: w } = await request(paths, { op: 'run.worker', run: run.id, session: worker, coordinator: 'c' })
+  await request(paths, { op: 'run.worker', run: run.id, session: doctor, coordinator: 'c', agent: { role: 'doctor' } })
+  await request(paths, { op: 'run.worker', run: run.id, session: released, coordinator: 'c' })
+  await request(paths, { op: 'worker.release', id: released })
+  const status = async (id, note) => (await request(paths, { op: 'worker.status', id, note })).note
+  const needsYou = async (id, reason) => (await request(paths, { op: 'worker.needsYou', id, reason })).needsYou
+  const kept = async (id) => {
+    const { note, needsYou } = (await request(paths, { op: 'worker.show', id })).worker
+    return { note, needsYou }
+  }
+
+  assert.deepEqual(await kept(worker), { note: null, needsYou: null })
+  assert.equal(await status(worker, '  reading the code  '), 'reading the code')
+  assert.equal(await needsYou(worker, 'log in to npm'), 'log in to npm')
+  assert.deepEqual(await kept(worker), { note: 'reading the code', needsYou: 'log in to npm' })
+  // A later note replaces the last, cut to 200 characters, and clears needs-you.
+  assert.equal(await status(worker, 'x'.repeat(250)), 'x'.repeat(200))
+  assert.deepEqual(await kept(worker), { note: 'x'.repeat(200), needsYou: null })
+  await needsYou(worker, 'again')
+  await request(paths, { op: 'worker.mail', id: worker, type: 'escalation', body: 'stuck' })
+  assert.equal((await kept(worker)).needsYou, null, 'mail clears it')
+  await needsYou(worker, 'again')
+  await request(paths, { op: 'mail.send', taskId: w.taskId, dispatchId: worker, capability: w.capability, type: 'handoff', body: 'from the CLI' })
+  assert.equal((await kept(worker)).needsYou, null, '`crew orchestration send` clears it')
+  await needsYou(worker, 'again')
+  await request(paths, { op: 'worker.submit', id: worker, payload: 'done' })
+  assert.equal((await kept(worker)).needsYou, null, 'a submit clears it')
+  await status(doctor, 'reading the log')
+  await needsYou(worker, 'kept')
+
+  await assert.rejects(needsYou(worker, '  '), /not a reason/)
+  await assert.rejects(status(worker, 3), /not a note: 3/)
+  await assert.rejects(status(bare, 'hi'), new RegExp(`no dispatch for session ${bare}: crew takes notes only from a session it started for an agent`))
+  await assert.rejects(needsYou('nope', 'hi'), /no dispatch for session nope/)
+  await assert.rejects(status(released, 'hi'), /dispatch was released/)
+  await assert.rejects(needsYou(doctor, 'hi'), new RegExp(`session ${doctor} is a doctor's: a doctor that needs the person says so with an escalation`))
+
+  await request(paths, { op: 'stop', force: true })
+  await until('the first daemon to stop', () => exits.length === 1)
+  const second = await startDaemon({ paths, registry, spawnSession, parkAfterMs: 60_000, exit: () => {}, log: () => {} })
+  try {
+    assert.deepEqual(
+      [await kept(worker), await kept(doctor)],
+      [
+        { note: 'x'.repeat(200), needsYou: 'kept' },
+        { note: 'reading the log', needsYou: null },
+      ],
+    )
+  } finally {
+    second.shutdown('test over')
+  }
+})
+
+test("daemon: a doctor's session hands off its note as a handoff then its worker_done succeeded, and gives up as its worker_done failed, the reason its body, each in one op; a worker's session is refused either, saying why (#176)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const spawnSession = quietSession([], new Map())
+  const daemon = await startDaemon({ paths, registry: join(dir, 'runs.jsonl'), spawnSession, parkAfterMs: 60_000, exit: () => {}, log: () => {} })
+  try {
+    const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c', runner: null })
+    const spawn = async (title) => (await request(paths, { op: 'session.spawn', command: ['pi', '--session-id', `uuid-${title}`], cwd: dir, title })).session.id
+    const [healer, quitter, worker, released, bare] = [await spawn('healer'), await spawn('quitter'), await spawn('worker'), await spawn('released'), await spawn('bare')]
+    for (const [session, role] of [
+      [healer, 'doctor'],
+      [quitter, 'doctor'],
+      [worker, 'worker'],
+      [released, 'doctor'],
+    ])
+      await request(paths, { op: 'run.worker', run: run.id, session, coordinator: 'c', agent: { role } })
+    await request(paths, { op: 'worker.release', id: released })
+    const handoff = (id, note) => request(paths, { op: 'worker.handoff', id, note })
+    const giveUp = (id, reason) => request(paths, { op: 'worker.giveUp', id, reason })
+    const result = async (id) => {
+      const { outcome, submissions } = await request(paths, { op: 'worker.result', id })
+      return { outcome, submissions }
+    }
+
+    const sent = await handoff(healer, '  read the lockfile first  ')
+    assert.match(sent.id, /^msg_/)
+    assert.deepEqual(await result(healer), { outcome: 'succeeded', submissions: 1 })
+    // A second is taken as mail as any is: the runner acts on no later handoff.
+    await handoff(healer, 'another note')
+    await giveUp(quitter, 'only a human can grant the sandbox')
+    assert.deepEqual(await result(quitter), { outcome: 'failed', submissions: 1 })
+
+    await assert.rejects(handoff(quitter, '  '), /not a note/)
+    await assert.rejects(giveUp(quitter, 3), /not a reason: 3/)
+    await assert.rejects(handoff(worker, 'x'), new RegExp(`session ${worker} is a worker's: a handoff is a doctor's note, which ends its round, and a worker has no round to end; it finishes with submit`))
+    await assert.rejects(giveUp(worker, 'x'), new RegExp(`session ${worker} is a worker's: give_up ends a doctor's round, and a worker has no round to end; it finishes with submit, or says it needs the person`))
+    assert.deepEqual(await result(worker), { outcome: null, submissions: 0 })
+    await assert.rejects(handoff(bare, 'x'), new RegExp(`no dispatch for session ${bare}: crew takes handoffs only from a session it started for an agent`))
+    await assert.rejects(giveUp(released, 'x'), /dispatch was released: its runner let its agent go, so it takes no more give-ups/)
+
+    const { messages } = await request(paths, { op: 'mail.check', coordinator: 'c' })
+    assert.deepEqual(
+      messages.map((m) => [m.type, m.dispatchId, m.subject, m.body, m.outcome]),
+      [
+        ['handoff', healer, 'note', 'read the lockfile first', null],
+        ['worker_done', healer, 'note handed off', 'Handed off its note.', 'succeeded'],
+        ['handoff', healer, 'note', 'another note', null],
+        ['worker_done', healer, 'note handed off', 'Handed off its note.', 'succeeded'],
+        ['worker_done', quitter, 'gave up', 'only a human can grant the sandbox', 'failed'],
+      ],
+    )
+    assert.equal(messages[0].id, sent.id)
+  } finally {
+    daemon.shutdown('test over')
   }
 })
 
@@ -559,7 +935,7 @@ test('daemon: one that died with a run live is followed by one that starts its r
     assert.deepEqual(again.command.slice(2), [script, '--host', 'crew', '--state-dir', runDir, '--resume'])
     assert.deepEqual([again.cwd, again.title], [project, 'crew run workflow.js'])
     const show = async (id) => (await request(paths, { op: 'worker.show', id })).worker
-    assert.deepEqual(await show(lost), { settled: false, outcome: null, gone: true, exited: false, waiting: null, terminal: lost, hostDied: true })
+    assert.deepEqual(await show(lost), { settled: false, outcome: null, submissions: 0, note: null, needsYou: null, gone: true, exited: false, waiting: null, terminal: lost, hostDied: true })
     assert.equal((await show(ended)).hostDied, undefined, 'it had ended before the daemon went')
     assert.deepEqual((await request(paths, { op: 'run.use', id: run.id, coordinator: 'c3', runner: again.id })).run, { id: run.id, coordinator: 'c3' })
     await assert.rejects(request(paths, { op: 'stop' }), (e) => e.message.includes(`live: ${run.id} (the-spec)`))

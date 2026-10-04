@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-09-30. Amends ADR-0018's orchestrator and ADR-0017's readiness. Amended 2026-10-02 by ADR-0022: crew adds one thing to a worker's launch, a pi extension or Claude hooks that tell the daemon when the harness waits on the person; pi's dialogs are known from those events, not its screen.
+Accepted — 2026-09-30. Amends ADR-0018's orchestrator and ADR-0017's readiness. Amended 2026-10-02 by ADR-0022: crew adds one thing to a worker's launch, a pi extension or Claude hooks that tell the daemon when the harness waits on the person; pi's dialogs are known from those events, not its screen. Amended 2026-10-04 by ADR-0027: crew also adds its own agent tools to a session it starts, and allows them in its per-session Claude settings.
 
 ## Context
 

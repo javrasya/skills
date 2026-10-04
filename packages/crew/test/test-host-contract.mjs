@@ -28,7 +28,7 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { fakeOrca, fakeOrcaCli } from '../src/fake-orca.mjs'
 import { orcaCli } from '../src/orca-cli.mjs'
-import { PI_EXTENSION, claudeSettings, crewHost, crewWorktrees } from '../src/crew-host.mjs'
+import { CLAUDE_HOOK, CREW_MCP, PI_EXTENSION, claudeSettings, crewHost, crewMcpConfig, crewWorktrees } from '../src/crew-host.mjs'
 import { repoConfig } from '../src/crew-config.mjs'
 import { CREW_ONLY, RUN_METHODS, SESSION_METHODS, hostUnreachable } from '../src/session-host.mjs'
 import { reclaimAgent } from '../src/reclaim.mjs'
@@ -44,6 +44,8 @@ import { SUBMIT } from '../src/lifecycle.mjs'
 import { crewPaths } from '../src/daemon/transport.mjs'
 import { request, stopDaemon } from '../src/daemon/client.mjs'
 import { startDaemon } from '../src/daemon/daemon.mjs'
+import crewPi from '../src/hooks/crew-pi.mjs'
+import { tool } from '../src/tools.mjs'
 
 const FAKE_HARNESS = fileURLToPath(new URL('./fixtures/crew/fake-harness.mjs', import.meta.url))
 const CREW_BIN = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url))
@@ -546,10 +548,26 @@ test("crew host: the harness starts from the runner's launch line word for word,
   const w = await start(h, 'launch line', launch)
   const [, ...words] = launchCommand({ ...launch, sessionId: w.sessionId }).split(' ')
   const s = await h.info(w)
-  assert.deepEqual(s.command, [process.execPath, FAKE_HARNESS, ...words, '--settings', claudeSettings()])
+  assert.deepEqual(s.command, [process.execPath, FAKE_HARNESS, ...words, '--settings', claudeSettings(), '--mcp-config', crewMcpConfig()])
   assert.equal(s.cwd, crewScratch().cwd)
   assert.equal(w.worktree, crewScratch().cwd)
   assert.equal(s.title, 'launch line')
+})
+
+test("crew host: a Claude session's settings allow crew's tools without a prompt per call, beside its hooks, and its MCP config starts crew's server with the session's own ids; the repo's servers stay (#177)", () => {
+  const settings = JSON.parse(claudeSettings())
+  assert.deepEqual(settings.permissions, { allow: ['submit', 'status', 'needs_you', 'handoff', 'give_up'].map((name) => `mcp__crew-agent-tools__${name}`) })
+  assert.equal(settings.hooks.PreToolUse?.[0].hooks[0].command, `"${process.execPath}" "${CLAUDE_HOOK}"`)
+  assert.deepEqual(JSON.parse(crewMcpConfig()), {
+    mcpServers: { 'crew-agent-tools': { type: 'stdio', command: process.execPath, args: [CREW_MCP], env: { CREW_SESSION: '${CREW_SESSION}', CREW_HOME: '${CREW_HOME}', CREW_AGENT: '${CREW_AGENT:-}' } } },
+  })
+  // The harness's own line, as an operator runs it, carries none of crew's words: crew adds them to its sessions alone.
+  assert.deepEqual(
+    launchCommand({ harness: 'claude', sessionId: randomUUID() })
+      .split(' ')
+      .filter((w) => /^--(settings|mcp-config|strict-mcp-config)$/.test(w)),
+    [],
+  )
 })
 
 test("crew host: the fake harness is a TUI on the alternate screen that echoes each prompt, crew's preamble first", async () => {
@@ -709,7 +727,7 @@ test("crew host: a continued session runs the runner's resume line word for word
   const { w, next } = await died(h, 'resume line')
   const [, ...words] = resumeCommand({ harness: 'claude', sessionId: w.sessionId }).split(' ')
   const s = await h.info(next)
-  assert.deepEqual(s.command, [process.execPath, FAKE_HARNESS, ...words, '--settings', claudeSettings()])
+  assert.deepEqual(s.command, [process.execPath, FAKE_HARNESS, ...words, '--settings', claudeSettings(), '--mcp-config', crewMcpConfig()])
   assert.equal(s.cwd, crewScratch().cwd)
   assert.equal(next.worktree, crewScratch().cwd)
   assert.equal(s.title, 'resume line')
@@ -726,6 +744,144 @@ test('crew host: a harness still in its turn is ended before its session is cont
     (await h.host.terminalList()).filter((t) => t === w.terminal || t === next.terminal),
     [next.terminal],
   )
+})
+
+test("crew host: a worker's dispatch knows its agent's role, schema and result file from its start, and its continue's new dispatch from the continue: either submits by its session id alone (#174)", async () => {
+  const h = crewKind.open()
+  const dir = scratchDir()
+  const schema = { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } }
+  const resultPath = join(dir, 'result.json')
+  const w = await start(h, 'submits by session', { prompt: 'Contract prompt for submits by session. [die]', agent: { role: 'worker', schema, resultPath } })
+  await assert.rejects(request(h.paths, { op: 'worker.submit', id: w.terminal, payload: { ok: 'yes' } }), /1 validation error\(s\)[\s\S]*\$\.ok: expected boolean, got string/)
+  assert.equal(existsSync(resultPath), false)
+  await request(h.paths, { op: 'worker.submit', id: w.terminal, payload: { ok: true } })
+  assert.deepEqual(JSON.parse(readFileSync(resultPath, 'utf8')), { ok: true })
+  const settled = await shown(h, w)
+  assert.deepEqual([settled.settled, settled.outcome], [true, 'succeeded'])
+  await eventually('the harness dead', () => h.dead(w))
+  const next = await h.host.workerContinue({ run: w.run, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title: 'submits by session', prompt: 'Carry on.', harness: 'claude', sessionId: w.sessionId, agent: { role: 'worker', schema, resultPath } })
+  assert.notEqual(next.dispatchId, w.dispatchId)
+  await assert.rejects(request(h.paths, { op: 'worker.submit', id: next.terminal, payload: {} }), /missing required property "ok"/)
+  await request(h.paths, { op: 'worker.submit', id: next.terminal, payload: { ok: false } })
+  assert.deepEqual(await h.host.workerResult({ dispatch: next.dispatchId }), { result: { ok: false }, outcome: 'succeeded', submissions: 1 })
+  assert.deepEqual(JSON.parse(readFileSync(resultPath, 'utf8')), { ok: false })
+
+  const doctor = await start(h, 'a doctor', { agent: { role: 'doctor' } })
+  await assert.rejects(request(h.paths, { op: 'worker.submit', id: doctor.terminal, payload: 'done' }), /is a doctor's: a doctor submits no result/)
+})
+
+// A pi as crew's extension sees it: what it registers, and its session_start.
+function stubPi(env) {
+  const on = new Map()
+  const tools = []
+  crewPi({ on: (type, fn) => on.set(type, fn), registerTool: (t) => tools.push(t) }, env)
+  return { tools, start: () => on.get('session_start')({ type: 'session_start', reason: 'startup' }, {}) }
+}
+
+test("crew host: crew's pi extension gives a worker's session `status`, `needs_you` and `submit`, the table's descriptions and its schema as parameters, which submits by session; a doctor's gets `status`, `needs_you`, `handoff` and `give_up`, one of no dispatch and an operator's own pi none; a daemon gone is named (#174, #175, #176)", async () => {
+  const h = crewKind.open()
+  const schema = { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } }
+  const resultPath = join(scratchDir(), 'result.json')
+  const w = await start(h, 'stub pi', { prompt: 'Contract prompt for stub pi. [turn 600000]', agent: { role: 'worker', schema, resultPath } })
+  const env = { CREW_HOME: h.paths.home, CREW_SESSION: w.terminal }
+  const pi = stubPi(env)
+  await pi.start()
+  assert.deepEqual(
+    pi.tools.map((t) => [t.name, t.description]),
+    ['status', 'needs_you', 'submit'].map((name) => [name, tool(name).description]),
+  )
+  const [status, needsYou, submit] = pi.tools
+  assert.deepEqual(submit.parameters, schema)
+  const kept = async (a) => {
+    const { note, needsYou } = await h.host.workerShow({ dispatch: a.dispatchId })
+    return { note, needsYou }
+  }
+  assert.match((await status.execute('call_0', { note: 'reading the code' })).content[0].text, /^Posted: the operator sees "reading the code" on your row\.$/)
+  await needsYou.execute('call_0', { reason: 'log in to npm' })
+  assert.deepEqual(await kept(w), { note: 'reading the code', needsYou: 'log in to npm' })
+  const said = await submit.execute('call_1', { ok: true })
+  assert.equal((await kept(w)).needsYou, null)
+  assert.match(said.content[0].text, /^Submitted: the workflow has your result\. It is recorded at .*result\.json\. Nothing remains for this task: stop and idle\.$/)
+  assert.deepEqual(JSON.parse(readFileSync(resultPath, 'utf8')), { ok: true })
+  assert.deepEqual(await h.host.workerResult({ dispatch: w.dispatchId }), { result: { ok: true }, outcome: 'succeeded', submissions: 1 })
+  // The daemon checks it again, and says why it refuses.
+  await assert.rejects(submit.execute('call_2', { ok: 'yes' }), /submit rejected: 1 validation error\(s\)/)
+  env.CREW_HOME = join(crewScratch().root, 'no-daemon-here')
+  await assert.rejects(status.execute('call_3', { note: 'x' }), /^Error: crew's daemon is not reachable \(.*\)\. Your note was not posted: carry on with your task\.$/)
+  await assert.rejects(submit.execute('call_3', { ok: true }), /^Error: crew's daemon is not reachable \(.*\)\. Your result was not submitted: submit it with the command line in your instructions instead, as they say\.$/)
+  // A worker's escalation is no mail the runner acts on: its needs_you names no CLI line, so the agent is never told the operator heard.
+  await assert.rejects(
+    needsYou.execute('call_3', { reason: 'x' }),
+    (e) => /^crew's daemon is not reachable \(.*\)\. The operator was not told, and no command line tells them for you\. Wait in this session, and say in your final message what blocks you and what the human must do or decide\.$/.test(e.message) && !/orchestration|escalation/.test(e.message),
+  )
+
+  const text = await start(h, 'stub pi text', { prompt: 'Contract prompt for stub pi text. [turn 600000]', agent: { role: 'worker' } })
+  const textPi = stubPi({ CREW_HOME: h.paths.home, CREW_SESSION: text.terminal })
+  await textPi.start()
+  assert.deepEqual(textPi.tools[2].parameters.required, ['text'])
+  await textPi.tools[2].execute('call_1', { text: 'plain words' })
+  assert.equal((await h.host.workerResult({ dispatch: text.dispatchId })).result, 'plain words')
+
+  const doctor = await start(h, 'stub pi doctor', { prompt: 'Contract prompt for stub pi doctor. [turn 600000]', agent: { role: 'doctor' } })
+  const doctorPi = stubPi({ CREW_HOME: h.paths.home, CREW_SESSION: doctor.terminal })
+  await doctorPi.start()
+  assert.deepEqual(
+    doctorPi.tools.map((t) => [t.name, t.description]),
+    ['status', 'needs_you', 'handoff', 'give_up'].map((name) => [name, tool(name).description]),
+  )
+  // A doctor's needs_you is its escalation, as mail; its row's needs-you is the runner's.
+  await doctorPi.tools[1].execute('call_1', { reason: 'grant the sandbox' })
+  assert.equal((await kept(doctor)).needsYou, null)
+  // handoff and give_up each end its round in one op: its dispatch settles.
+  assert.match((await doctorPi.tools[2].execute('call_2', { note: 'read the lockfile first' })).content[0].text, /^Handed off: the runner carries the patient on with your note, and your round is over\. Nothing remains for you: stop and idle\.$/)
+  assert.deepEqual(await h.host.workerResult({ dispatch: doctor.dispatchId }), { result: null, outcome: 'succeeded', submissions: 1 })
+  const quitter = await start(h, 'stub pi quitter', { prompt: 'Contract prompt for stub pi quitter. [turn 600000]', agent: { role: 'doctor' } })
+  const quitterEnv = { CREW_HOME: h.paths.home, CREW_SESSION: quitter.terminal }
+  const quitterPi = stubPi(quitterEnv)
+  await quitterPi.start()
+  assert.match((await quitterPi.tools[3].execute('call_1', { reason: 'only a human can fix it' })).content[0].text, /^Gave up: your round is over, with no note\. Nothing remains for you: stop and idle\.$/)
+  assert.deepEqual(await h.host.workerResult({ dispatch: quitter.dispatchId }), { result: null, outcome: 'failed', submissions: 1 })
+  quitterEnv.CREW_HOME = join(crewScratch().root, 'no-daemon-here')
+  await assert.rejects(quitterPi.tools[2].execute('call_2', { note: 'x' }), (e) => e.message.endsWith(`Your note was not sent. Send it over Run mail instead, with the IDs your instructions give: ${tool('handoff').fallback()}`))
+  await assert.rejects(quitterPi.tools[3].execute('call_2', { reason: 'x' }), (e) => e.message.endsWith(`The run was not told. Send it over Run mail instead, with the IDs your instructions give: ${tool('give_up').fallback()}`))
+  // A doctor's escalation is mail the runner acts on: its needs_you names it.
+  await assert.rejects(quitterPi.tools[1].execute('call_2', { reason: 'x' }), (e) => e.message.endsWith(`The operator was not told. Run this instead, with the IDs your instructions give: ${tool('needs_you').fallback({ role: 'doctor' })}`))
+  for (const none of [{ CREW_HOME: h.paths.home, CREW_SESSION: 'no-such-session' }, { CREW_HOME: h.paths.home }]) {
+    const other = stubPi(none)
+    // Its ready is pi's to report, for a session the daemon does not hold.
+    await other.start().catch((e) => assert.match(e.message, /^no session no-such-session$/))
+    assert.deepEqual(other.tools, [], JSON.stringify(none))
+  }
+})
+
+test("crew host: a pi worker calls crew's submit tool: pi rejects a payload that fails its schema in the turn, and the one it repairs settles its dispatch (#174)", async () => {
+  const h = crewKind.open()
+  const schema = { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } }
+  const resultPath = join(scratchDir(), 'result.json')
+  const w = await start(h, 'pi submits', { harness: 'pi', prompt: 'Contract prompt for pi submits. [call submit {"ok":"yes"}] [call submit {"ok":true}]', agent: { role: 'worker', schema, resultPath } })
+  await eventually('it settled', async () => (await shown(h, w)).settled)
+  assert.deepEqual(await h.host.workerResult({ dispatch: w.dispatchId }), { result: { ok: true }, outcome: 'succeeded', submissions: 1 })
+  assert.deepEqual(JSON.parse(readFileSync(resultPath, 'utf8')), { ok: true })
+  const results = await eventually("both tool results in pi's transcript", () => {
+    const path = transcriptPath({ harness: 'pi', sessionId: w.sessionId, worktree: w.worktree, env: crewScratch().env })
+    const r =
+      path && existsSync(path)
+        ? readFileSync(path, 'utf8')
+            .split('\n')
+            .filter(Boolean)
+            .map((l) => JSON.parse(l).message)
+            .filter((m) => m?.role === 'toolResult')
+        : []
+    return r.length === 2 && r
+  })
+  assert.deepEqual(
+    results.map((m) => [m.toolName, m.isError]),
+    [
+      ['submit', true],
+      ['submit', false],
+    ],
+  )
+  assert.match(results[0].content[0].text, /^Validation failed for tool "submit":\n {2}- \$\.ok: expected boolean, got string/)
 })
 
 test('crew host: an ended harness is idle, and a session the daemon does not hold is refused', async () => {

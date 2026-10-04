@@ -20,6 +20,7 @@ import { daemonGone, ensureDaemon, request } from './daemon/client.mjs'
 import { runnerCommand } from './daemon/runs.mjs'
 import { crewSessionEnv, launchedSession, launchWords, resumeWords } from './harness.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
+import { MCP_SERVER, TOOLS } from './tools.mjs'
 import { SCREENS, readScreen, readsReady, tellsReady } from './screens.mjs'
 import { CLAUDE_HOOK_EVENTS } from './waiting.mjs'
 import { sessionTranscripts } from './transcript.mjs'
@@ -36,14 +37,28 @@ export const CREW_BIN = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url
 // (ADR-0022): a way for the harness to tell the daemon, from its own events,
 // when it waits on the person (waiting.mjs). pi loads crew's extension; Claude
 // takes crew's hooks as settings of that session alone, beside the person's
-// own. Neither changes what the harness does or shows.
+// own. Neither changes what the harness does or shows. Both also give the
+// session crew's tools (ADR-0027): pi's extension registers them, and Claude
+// starts crew's MCP server, after the hooks, whose tools its settings allow
+// without a prompt per call, by their exact names and none other. No
+// --strict-mcp-config: the repo's own servers stay.
 export const PI_EXTENSION = fileURLToPath(new URL('./hooks/crew-pi.mjs', import.meta.url))
 export const CLAUDE_HOOK = fileURLToPath(new URL('./hooks/claude-hook.mjs', import.meta.url))
+export const CREW_MCP = fileURLToPath(new URL('./hooks/crew-mcp.mjs', import.meta.url))
 export const claudeSettings = (node = process.execPath) =>
   JSON.stringify({
     hooks: Object.fromEntries(CLAUDE_HOOK_EVENTS.map((event) => [event, [{ hooks: [{ type: 'command', command: `"${node}" "${CLAUDE_HOOK}"`, timeout: 10 }] }]])),
+    permissions: { allow: TOOLS.map((t) => `mcp__${MCP_SERVER}__${t.name}`) },
   })
-export const waitWords = (harness) => (harness === 'pi' ? ['-e', PI_EXTENSION] : harness === 'claude' ? ['--settings', claudeSettings()] : [])
+// The session's id is the daemon's to give once the line is spawned, so the
+// env names the session's own: Claude expands ${VAR} in a --mcp-config (its
+// "dynamic" scope) from its environment, which crew sets (crewSessionEnv).
+// CREW_AGENT is set on an agent's session only, hence its empty default.
+export const crewMcpConfig = (node = process.execPath) =>
+  JSON.stringify({
+    mcpServers: { [MCP_SERVER]: { type: 'stdio', command: node, args: [CREW_MCP], env: { CREW_SESSION: '${CREW_SESSION}', CREW_HOME: '${CREW_HOME}', CREW_AGENT: '${CREW_AGENT:-}' } } },
+  })
+export const waitWords = (harness) => (harness === 'pi' ? ['-e', PI_EXTENSION] : harness === 'claude' ? ['--settings', claudeSettings(), '--mcp-config', crewMcpConfig()] : [])
 
 // The rows of a session's screen read for what it shows.
 const SCREEN_ROWS = 500
@@ -264,12 +279,16 @@ export function crewHost({
   // starts to go in, past which a worker may have it. With no `run` it is no
   // worker: no dispatch, no preamble, only the prompt.
   // `asking` is ready's: who hears of a dialog the person must answer first.
-  async function launch(line, { harness, dir, title, prompt, run, typing = () => {}, asking = null }) {
+  // `agent` is what its dispatch knows of its agent, for a submit by session
+  // (runs.mjs): { role, schema, resultPath }.
+  async function launch(line, { harness, dir, title, prompt, run, typing = () => {}, asking = null, agent = null }) {
     const [program, ...args] = line
     const command = [...(harnesses[harness] ?? [program]), ...args, ...waitWords(harness)]
-    const { session } = await call({ op: 'session.spawn', command, cwd: dir, env: sessionEnv, title })
+    // CREW_AGENT: its dispatch follows the session, which its harness's tools
+    // wait for (hooks/crew-pi.mjs).
+    const { session } = await call({ op: 'session.spawn', command, cwd: dir, env: run ? { ...sessionEnv, CREW_AGENT: '1' } : sessionEnv, title })
     try {
-      const { worker } = run ? await call({ op: 'run.worker', run, session: session.id, coordinator }) : { worker: null }
+      const { worker } = run ? await call({ op: 'run.worker', run, session: session.id, coordinator, agent }) : { worker: null }
       await ready(session.id, command, { harness, asking })
       typing()
       await terminalSend({ terminal: session.id, text: (worker ? crewPreamble({ terminal: session.id, ...worker }) : '') + prompt })
@@ -370,7 +389,8 @@ export function crewHost({
     // (ready above), as workerContinue's does; the start waits it out.
     // With `chain`, chainWorktree's path, the worker runs in the run's chain
     // worktree, which is never this start's to make or name on its error.
-    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null, chain = null, asking = null }) {
+    // `agent` goes on its dispatch, as a continue's does.
+    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null, chain = null, asking = null, agent = null }) {
       if (!sessionId) throw new Error(`workerStart: ${title} has no session id; the runner assigns one to every worker`)
       const warnings = []
       let worktree = chain ?? cwd
@@ -390,6 +410,7 @@ export function crewHost({
           prompt: text,
           run,
           asking,
+          agent,
           typing: () => {
             dispatched = true
           },
@@ -417,7 +438,7 @@ export function crewHost({
     // one session id would both write its transcript), is closed once the new
     // one has its prompt. A pty whose program ended cannot take another, and a
     // harness run straight in its pty has no shell to type a resume line into.
-    async workerContinue({ run, dispatch, terminal = dispatch, worktree = null, title, prompt, harness = 'claude', model, effort, permissionMode, sessionId, asking = null }) {
+    async workerContinue({ run, dispatch, terminal = dispatch, worktree = null, title, prompt, harness = 'claude', model, effort, permissionMode, sessionId, asking = null, agent = null }) {
       const line = resumeWords({ harness, model, effort, permissionMode, sessionId })
       const old = await sessionOf(terminal)
       if (old?.alive) {
@@ -429,15 +450,15 @@ export function crewHost({
         }
       }
       const dir = old?.cwd ?? worktree ?? cwd
-      const w = await launch(line, { harness, dir, title: old?.title ?? title, prompt, run, asking })
+      const w = await launch(line, { harness, dir, title: old?.title ?? title, prompt, run, asking, agent })
       if (old) await call({ op: 'session.close', id: old.id }).catch(() => {})
       return { dispatchId: w.terminal, taskId: w.taskId, terminal: w.terminal, worktree: dir, reopened: true }
     },
 
     // From crew's own records: settled once its worker_done came (or it was
     // stopped), gone once its session is closed, exited once its program
-    // ended, and waiting on what its harness's own events say it waits on the
-    // person for (waitWords).
+    // ended, waiting on what its harness's own events say it waits on the
+    // person for (waitWords), and its agent's note and needs-you (#175).
     async workerShow({ dispatch }) {
       return (await call({ op: 'worker.show', id: dispatch })).worker
     },
@@ -445,6 +466,13 @@ export function crewHost({
     // last screen stay until closed.
     async workerStop({ dispatch }) {
       await call({ op: 'worker.stop', id: dispatch })
+    },
+    // Crew's own (session-host.mjs CREW_ONLY): the last result its worker
+    // submitted, with the count of every worker_done it sent, so a runner
+    // holding its node can tell a submit again from the one it took.
+    async workerResult({ dispatch }) {
+      const { result, outcome, submissions } = await call({ op: 'worker.result', id: dispatch })
+      return { result, outcome, submissions }
     },
     async workerRelease({ dispatch }) {
       await call({ op: 'worker.release', id: dispatch })
@@ -558,8 +586,8 @@ export function crewHost({
 
     // A worker's own calls, from its session (submit, and `crew orchestration
     // send`): the IDs its preamble gave it.
-    async workerDone({ from, capability, taskId, dispatchId, subject, body }) {
-      await call({ op: 'mail.send', from, capability, taskId, dispatchId, type: 'worker_done', outcome: 'succeeded', subject, body })
+    async workerDone({ from, capability, taskId, dispatchId, subject, body, result = null }) {
+      await call({ op: 'mail.send', from, capability, taskId, dispatchId, type: 'worker_done', outcome: 'succeeded', subject, body, result })
     },
     async mailSend({ from, capability, taskId, dispatchId, type, subject, body, outcome = null }) {
       return { id: (await call({ op: 'mail.send', from, capability, taskId, dispatchId, type, subject, body, outcome })).id }

@@ -140,7 +140,9 @@ function nameCell(a, depth, elapsed) {
   return { text: prefix + chars.slice(at, at + w).join(''), overflows: true }
 }
 
-const agentLine = (a, depth = 0, elapsed = null) => `  ${String(a.n).padStart(3)}   ${nameCell(a, depth, elapsed).text} ${fit(stateOf(a), STATE_W)} ${contextCell(a)}   ${grey(size(a.tokens).padStart(6))}   ${duration(a.elapsedMs).padStart(7)}${a.parked ? grey('   ⏾ parked') : ''}`
+// An agent's note (#175) ends its row, where the screen's width cuts it: the
+// columns after STATE keep their place on every row.
+const agentLine = (a, depth = 0, elapsed = null) => `  ${String(a.n).padStart(3)}   ${nameCell(a, depth, elapsed).text} ${fit(stateOf(a), STATE_W)} ${contextCell(a)}   ${grey(size(a.tokens).padStart(6))}   ${duration(a.elapsedMs).padStart(7)}${a.parked ? grey('   ⏾ parked') : ''}${a.note ? `   ${c('3', a.note)}` : ''}`
 
 const PANE = 4
 
@@ -153,7 +155,7 @@ function agentPane(a) {
   return [
     ` ${bold(a.title ?? `[${a.phase}] ${a.label}`)}  ${stateOf(a)}  ctx ${a.context == null ? '—' : banded(a, size(a.context))}  total ${grey(size(a.tokens))}  ${duration(a.elapsedMs)}`,
     ` worktree ${a.worktree ? cyan(worktreeName(a.worktree)) : grey('—')}   tab ${tab}   session ${grey(a.sessionId ?? '—')}${a.continuations ? `   ${c(COLOUR.continued, `the runner continued it ${a.continuations} time${a.continuations === 1 ? '' : 's'}`)}` : ''}`,
-    a.reason ? ` ${c(a.state === 'failed' || a.state === 'blocked' ? '31' : '33', 'reason')} ${a.reason}${a.state === 'starting' && a.nextAt ? grey(`; next attempt at ${a.nextAt.slice(11, 19)}`) : ''}` : '',
+    a.reason ? ` ${c(a.state === 'failed' || a.state === 'blocked' ? '31' : '33', 'reason')} ${a.reason}${a.state === 'starting' && a.nextAt ? grey(`; next attempt at ${a.nextAt.slice(11, 19)}`) : ''}` : a.note ? ` ${grey('note')} ${a.note}` : '',
     grey(` transcript ${a.transcript ?? '—'}`),
   ]
 }

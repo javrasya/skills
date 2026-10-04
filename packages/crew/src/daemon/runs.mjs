@@ -1,6 +1,6 @@
 // The daemon's runs: crew's own Runs, the dispatch each worker session runs
 // under, and each Run's mailbox, the same shapes the Orca host answers in
-// (orca-cli.mjs). They outlive the daemon, kept in the crew home's runs.json,
+// (orca-cli.mjs). They outlive the daemon, kept in its store (store.mjs),
 // while its sessions do not: a daemon that dies (a crash, a kill, a reboot, a
 // forced stop) takes every session with it. The next daemon knows which of its
 // sessions were still running then: a dispatch lost that way shows `hostDied`,
@@ -17,7 +17,31 @@
 // and capability are crew's, typed to the worker in its preamble, and a
 // message sent as that dispatch must name its task id, and its session and
 // capability when it names them at all (a prompt typed again carries no
-// capability). A worker_done settles its dispatch.
+// capability). A worker_done settles its dispatch, and every one it sends,
+// settled or not, is counted (`submissions`) and taken as its outcome and its
+// last result: an agent of a node its runner holds may submit again (#173).
+// The result is the value submit validated, sent along with the worker_done,
+// and checked here again against its dispatch's schema (accept.mjs); null for
+// one that sent none (`crew orchestration send`).
+//
+// A dispatch also knows its agent's role (a worker, or a doctor), the schema
+// its result is checked against, null for a text result, and the file its
+// runner reads that result from: the agent the runner's run.worker named, so a
+// session can submit by its id alone (worker.submit), checked again here as
+// submit checks it, and send its mail (worker.mail). Either is refused a
+// session of no dispatch, or of one released; a doctor submits nothing, and
+// a worker's result goes only through submit. A doctor ends its round by its
+// id too (#176): worker.handoff sends its note as a handoff, then its
+// worker_done succeeded, and worker.giveUp its worker_done failed, the reason
+// its body: the mail its prompt's CLI line sends, each in one op. A worker
+// has no round, so either refuses it.
+//
+// A session may also set a note, what it is doing now, cut to NOTE_MAX
+// (worker.status), and say it needs the person, and why (worker.needsYou), both
+// kept on its dispatch for worker.show (#175). Crew acts on nothing in a note.
+// Needs-you holds until the session's next note or message, any mail.send
+// for its dispatch included (`crew orchestration send`). A doctor's needs-you
+// is its escalation, sent as mail, so worker.needsYou refuses a doctor.
 //
 // A Run whose objective is an orchestrator question's title (orchestrator.mjs)
 // is flagged `orchestrator` at its creation: it is crew's own question, no
@@ -34,22 +58,31 @@
 //
 //   run.create { objective, coordinator, runner } → { run: { id, coordinator } }
 //   run.use { id, coordinator, runner }         → { run: { id, coordinator } }
-//   run.worker { run, session, coordinator }    → { worker: { taskId, capability } }
-//   worker.show { id }                          → { worker: { settled, outcome, gone, exited, waiting, terminal, hostDied? } }
+//   run.worker { run, session, coordinator, agent: { role, schema, resultPath } } → { worker: { taskId, capability } }
+//   worker.show { id }                          → { worker: { settled, outcome, submissions, note, needsYou, gone, exited, waiting, terminal, hostDied? } }
+//   worker.result { id }                        → { result, outcome, submissions }: its last worker_done's
 //   worker.stop { id }                          → { worker }: its program ended, unsettled ones cancelled
 //   worker.release { id }                       → { worker }
-//   mail.send { from, capability, taskId, dispatchId, type, subject, body, outcome } → { id }
+//   worker.agent { id }                         → { agent: { role, schema } | null }: session id's, null for one of no dispatch or a released one
+//   worker.submit { id, payload }               → { id, resultPath }: session id's result, sent as its worker_done
+//   worker.mail { id, type, subject, body, outcome } → { id }: as mail.send, from session id
+//   worker.handoff { id, note }                 → { id }: a doctor's note, as a handoff and its worker_done; id the handoff's
+//   worker.giveUp { id, reason }                → { id }: a doctor's worker_done failed, the reason its body
+//   worker.status { id, note }                  → { note }: session id's note, as kept
+//   worker.needsYou { id, reason }              → { needsYou }: session id's reason
+//   mail.send { from, capability, taskId, dispatchId, type, subject, body, outcome, result } → { id }
 //   mail.check { coordinator, ack }             → { deliveryId, acknowledged, replayed, messages }
 //   worktree.status { path, status }            → { path, status }
 //   worktree.statuses                           → { statuses: { <path>: <status> } }
 import { randomBytes } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
 import { basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readRegistry } from '../registry.mjs'
-import { writeJsonAtomic } from '../fsutil.mjs'
 import { DEFAULT_HOST } from '../hosts.mjs'
 import { isOrchestratorTitle } from '../orchestrator.mjs'
+import { acceptResult, acceptedMail } from '../accept.mjs'
+import { NOTE_MAX } from '../tools.mjs'
+import { writeJsonAtomic } from '../fsutil.mjs'
 
 // The runner every launch of one starts: `crew run`, `crew start`, crew's own
 // recovery and the run views' r.
@@ -70,13 +103,15 @@ export const runnerTitle = (script) => `crew run ${basename(script)}`
 export const MAIL_TYPES = Object.freeze(['worker_done', 'handoff', 'escalation'])
 const OUTCOMES = new Set(['succeeded', 'failed'])
 const STATUSES = new Set(['todo', 'in-progress', 'in-review', 'completed'])
+export const ROLES = Object.freeze(['worker', 'doctor'])
 
 const hex = (n) => randomBytes(n).toString('hex')
 
-// sessions: the daemon's, by id, each with info(). file: where the book is
-// kept, null for nowhere; registry: the run registry, which says whether a Run
-// is live, null for none.
-export function runBook({ sessions, now = () => new Date().toISOString(), file = null, registry = null }) {
+// sessions: the daemon's, by id, each with info(). store: where the book is
+// kept (store.mjs), null for nowhere; registry: the run registry, which says
+// whether a Run is live, null for none.
+/** @param {{ sessions: Map<string, any>, now?: () => string, store?: import('./store.mjs').Store | null, registry?: string | null }} options */
+export function runBook({ sessions, now = () => new Date().toISOString(), store = null, registry = null }) {
   const runs = new Map()
   const dispatches = new Map()
   const statuses = new Map()
@@ -90,39 +125,33 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
   const running = new Set()
   let died = new Set()
 
-  let kept = null
-  try {
-    kept = file && existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : null
-  } catch {
-    // Written whole by rename, so only a hand-edited book fails to parse: the
-    // daemon still starts, with no runs.
-  }
-  if (kept) {
-    for (const r of kept.runs ?? []) if (!r.orchestrator) runs.set(r.id, { ...r, acked: new Set(r.acked) })
-    for (const d of kept.dispatches ?? []) if (runs.has(d.run)) dispatches.set(d.id, d)
-    for (const [path, status] of Object.entries(kept.statuses ?? {})) statuses.set(path, status)
+  if (store) {
+    for (const [id, r] of store.list('runs')) if (!r.orchestrator) runs.set(id, { ...r, acked: new Set(r.acked) })
+    for (const [id, d] of store.list('dispatches')) if (runs.has(d.run)) dispatches.set(id, d)
+    for (const [path, status] of store.list('statuses')) statuses.set(path, status)
     // An agent's session comes back, and a `?` session; any other of no
     // dispatch was a log tail or a runner, which is started again its own
     // way, or not at all.
-    for (const [id, spec] of Object.entries(kept.sessions ?? {})) if (dispatches.has(id) || isOrchestratorTitle(spec?.title)) specs.set(id, spec)
-    ;({ messages = 0, deliveries = 0, nextSession = 1 } = kept)
-    died = new Set(kept.running ?? [])
+    for (const [id, spec] of store.list('sessions')) if (dispatches.has(id) || isOrchestratorTitle(spec?.title)) specs.set(id, spec)
+    messages = store.read('meta', 'messages') ?? 0
+    deliveries = store.read('meta', 'deliveries') ?? 0
+    nextSession = store.read('meta', 'nextSession') ?? 1
+    died = new Set(store.read('meta', 'running') ?? [])
   }
-  const save = () => {
-    if (!file) return
-    const book = {
-      runs: [...runs.values()].map((r) => ({ ...r, acked: [...r.acked] })),
-      dispatches: [...dispatches.values()],
-      statuses: Object.fromEntries(statuses),
-      sessions: Object.fromEntries(specs),
-      messages,
-      deliveries,
-      nextSession,
-      running: [...running, ...died],
-    }
-    // Whole or not at all: a daemon killed mid-write must not lose the book.
-    writeJsonAtomic(file, book)
-  }
+  // Every record at once: the store writes them whole or not at all.
+  const save = () =>
+    store?.write({
+      runs: [...runs.values()].map((r) => [r.id, { ...r, acked: [...r.acked] }]),
+      dispatches: [...dispatches],
+      statuses: [...statuses],
+      sessions: [...specs],
+      meta: [
+        ['messages', messages],
+        ['deliveries', deliveries],
+        ['nextSession', nextSession],
+        ['running', [...running, ...died]],
+      ],
+    })
   const runnerOf = (runner) => (runner == null ? null : String(runner))
 
   const runOf = (id) => {
@@ -141,13 +170,50 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
   }
   const shown = (r) => ({ id: r.id, coordinator: r.coordinator })
 
+  // The dispatch session `id` runs, for a message it sends by its id alone.
+  const sessionDispatch = (id, what) => {
+    const d = dispatches.get(String(id))
+    if (!d) throw new Error(`no dispatch for session ${id}: crew takes ${what} only from a session it started for an agent, under the dispatch its runner made`)
+    if (d.released) throw new Error(`session ${id}'s dispatch was released: its runner let its agent go, so it takes no more ${what}`)
+    return d
+  }
+
+  // A message to the dispatch's Run's mailbox; a worker_done settles it.
+  const post = (d, { type, subject = '', body = '', outcome = null, result = null }) => {
+    if (!MAIL_TYPES.includes(type)) throw new Error(`not a message type crew takes: ${JSON.stringify(type)}; one of ${MAIL_TYPES.join(', ')}`)
+    if (outcome != null && (type !== 'worker_done' || !OUTCOMES.has(outcome))) throw new Error(`not an outcome for ${type}: ${JSON.stringify(outcome)}`)
+    const m = {
+      id: `msg_${++messages}_${hex(3)}`,
+      type,
+      from: d.id,
+      subject: String(subject),
+      body: String(body),
+      taskId: d.taskId,
+      dispatchId: d.id,
+      outcome: type === 'worker_done' ? (outcome ?? 'succeeded') : null,
+      createdAt: now(),
+    }
+    runOf(d.run).pending.push(m)
+    d.needsYou = null
+    if (type === 'worker_done') Object.assign(d, { settled: true, outcome: m.outcome, submissions: (d.submissions ?? 0) + 1, result })
+    return { id: m.id }
+  }
+
+  // The payload as its dispatch's result (accept.mjs), checked against its
+  // schema, or text when it has none.
+  const resultOf = (d, payload) => {
+    const accepted = acceptResult(d.schema ?? null, payload)
+    if (accepted.errors) throw new Error(accepted.errors.join('\n'))
+    return accepted.value
+  }
+
   // An unsettled agent's session restored from an earlier daemon and not yet
   // revived is, to its runner, the session that daemon lost: gone, its host died, so the runner
   // continues it as it would one never restored.
   const show = (d) => {
     const s = sessions.get(d.id)?.info() ?? null
     const lost = !s || (!!s.restored && !s.alive && !d.settled)
-    return { settled: d.settled, outcome: d.outcome, gone: lost, exited: !lost && !s.alive, waiting: s?.waiting ?? null, terminal: d.id, ...(lost && !d.settled && died.has(d.id) && { hostDied: true }) }
+    return { settled: d.settled, outcome: d.outcome, submissions: d.submissions ?? 0, note: d.note ?? null, needsYou: d.needsYou ?? null, gone: lost, exited: !lost && !s.alive, waiting: s?.waiting ?? null, terminal: d.id, ...(lost && !d.settled && died.has(d.id) && { hostDied: true }) }
   }
 
   const ops = {
@@ -175,16 +241,24 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
       }
       return { run: shown(r) }
     },
-    'run.worker': ({ run, session, coordinator }) => {
+    'run.worker': ({ run, session, coordinator, agent = null }) => {
+      const { role = 'worker', schema = null, resultPath = null } = agent ?? {}
       const r = runOf(run)
+      if (!ROLES.includes(role)) throw new Error(`not an agent role: ${JSON.stringify(role)}; one of ${ROLES.join(', ')}`)
+      if (schema !== null && (typeof schema !== 'object' || Array.isArray(schema))) throw new Error(`not a result schema: ${JSON.stringify(schema)?.slice(0, 80)}`)
+      if (resultPath !== null) word(resultPath, 'result path')
       if (r.coordinator !== coordinator) throw new Error(`consumer_fenced: this coordinator is no longer bound to run ${r.id}`)
       if (!sessions.has(String(session))) throw new Error(`no session ${session}`)
       if (dispatches.has(String(session))) throw new Error(`session ${session} already runs a dispatch`)
-      const d = { id: String(session), run: r.id, taskId: `task_${hex(6)}`, capability: `cap_${hex(12)}`, settled: false, outcome: null, released: false }
+      const d = { id: String(session), run: r.id, taskId: `task_${hex(6)}`, capability: `cap_${hex(12)}`, settled: false, outcome: null, released: false, submissions: 0, result: null, role, schema, resultPath }
       dispatches.set(d.id, d)
       return { worker: { taskId: d.taskId, capability: d.capability } }
     },
     'worker.show': ({ id }) => ({ worker: show(dispatchOf(id)) }),
+    'worker.result': ({ id }) => {
+      const d = dispatchOf(id)
+      return { result: d.result ?? null, outcome: d.outcome, submissions: d.submissions ?? 0 }
+    },
     'worker.stop': ({ id }) => {
       const d = dispatchOf(id)
       sessions.get(d.id)?.kill()
@@ -196,27 +270,60 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
       d.released = true
       return { worker: show(d) }
     },
-    'mail.send': ({ from = null, capability = null, taskId, dispatchId, type, subject = '', body = '', outcome = null }) => {
+    'mail.send': ({ from = null, capability = null, taskId, dispatchId, type, subject = '', body = '', outcome = null, result = null }) => {
       const d = dispatchOf(dispatchId)
       if (d.taskId !== taskId || (from != null && from !== d.id) || (capability != null && capability !== d.capability)) {
         throw new Error(`consumer_fenced: a message from ${dispatchId} does not match its preamble`)
       }
-      if (!MAIL_TYPES.includes(type)) throw new Error(`not a message type crew takes: ${JSON.stringify(type)}; one of ${MAIL_TYPES.join(', ')}`)
-      if (outcome != null && (type !== 'worker_done' || !OUTCOMES.has(outcome))) throw new Error(`not an outcome for ${type}: ${JSON.stringify(outcome)}`)
-      const m = {
-        id: `msg_${++messages}_${hex(3)}`,
-        type,
-        from: d.id,
-        subject: String(subject),
-        body: String(body),
-        taskId: d.taskId,
-        dispatchId: d.id,
-        outcome: type === 'worker_done' ? (outcome ?? 'succeeded') : null,
-        createdAt: now(),
-      }
-      runOf(d.run).pending.push(m)
-      if (type === 'worker_done' && !d.settled) Object.assign(d, { settled: true, outcome: m.outcome })
-      return { id: m.id }
+      // A result sent as mail (the CLI submit's) is checked as worker.submit
+      // checks one, when its dispatch knows its schema.
+      return post(d, { type, subject, body, outcome, result: result != null && d.schema != null ? resultOf(d, result) : result })
+    },
+    // What a session's harness equips it with (hooks/crew-pi.mjs): asked as
+    // it starts, so a session crew started for no agent is told so, not refused.
+    'worker.agent': ({ id }) => {
+      const d = dispatches.get(String(id))
+      return { agent: d && !d.released ? { role: d.role ?? 'worker', schema: d.schema ?? null } : null }
+    },
+    'worker.submit': ({ id, payload }) => {
+      const d = sessionDispatch(id, 'results')
+      if (d.role === 'doctor') throw new Error(`session ${id} is a doctor's: a doctor submits no result, it reports with a handoff or an escalation`)
+      const result = resultOf(d, payload)
+      // Written before it settles, whole or not at all: the runner reads this
+      // file once it sees the worker settle.
+      if (d.resultPath) writeJsonAtomic(d.resultPath, result)
+      const { id: message } = post(d, { ...acceptedMail(d.resultPath ?? null), result })
+      return { id: message, resultPath: d.resultPath ?? null }
+    },
+    'worker.mail': ({ id, type, subject = '', body = '', outcome = null }) => {
+      const d = sessionDispatch(id, 'mail')
+      if (type === 'worker_done' && d.role !== 'doctor') throw new Error(`session ${id} is a worker's: its result goes through submit, which checks it against its schema, never as mail`)
+      return post(d, { type, subject, body, outcome })
+    },
+    'worker.handoff': ({ id, note }) => {
+      const d = sessionDispatch(id, 'handoffs')
+      if (d.role !== 'doctor') throw new Error(`session ${id} is a worker's: a handoff is a doctor's note, which ends its round, and a worker has no round to end; it finishes with submit`)
+      const body = word(typeof note === 'string' ? note.trim() : note, 'note')
+      const handoff = post(d, { type: 'handoff', subject: 'note', body })
+      post(d, { type: 'worker_done', subject: 'note handed off', body: 'Handed off its note.', outcome: 'succeeded' })
+      return handoff
+    },
+    'worker.giveUp': ({ id, reason }) => {
+      const d = sessionDispatch(id, 'give-ups')
+      if (d.role !== 'doctor') throw new Error(`session ${id} is a worker's: give_up ends a doctor's round, and a worker has no round to end; it finishes with submit, or says it needs the person`)
+      return post(d, { type: 'worker_done', subject: 'gave up', body: word(typeof reason === 'string' ? reason.trim() : reason, 'reason'), outcome: 'failed' })
+    },
+    'worker.status': ({ id, note }) => {
+      const d = sessionDispatch(id, 'notes')
+      if (typeof note !== 'string') throw new Error(`not a note: ${JSON.stringify(note)?.slice(0, 80)}`)
+      Object.assign(d, { note: note.trim().slice(0, NOTE_MAX) || null, needsYou: null })
+      return { note: d.note }
+    },
+    'worker.needsYou': ({ id, reason }) => {
+      const d = sessionDispatch(id, 'needs-you')
+      if (d.role === 'doctor') throw new Error(`session ${id} is a doctor's: a doctor that needs the person says so with an escalation, as mail`)
+      d.needsYou = word(typeof reason === 'string' ? reason.trim() : reason, 'reason')
+      return { needsYou: d.needsYou }
     },
     'mail.check': ({ coordinator, ack = null }) => {
       const r = [...runs.values()].reverse().find((x) => x.coordinator === coordinator) ?? null
@@ -241,7 +348,7 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
   }
 
   for (const [name, op] of Object.entries(ops)) {
-    if (name === 'worker.show' || name === 'worktree.statuses') continue
+    if (name === 'worker.show' || name === 'worker.result' || name === 'worker.agent' || name === 'worktree.statuses') continue
     // Reflect.apply, since the ops differ in arity and this wraps them all alike.
     ops[name] = (...args) => {
       const reply = Reflect.apply(op, null, args)

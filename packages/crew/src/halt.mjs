@@ -21,7 +21,12 @@ import { holdQueue } from './hold.mjs'
 //   on()             whether the run is halted
 //   hold(node)       holds a node: { node, title, needsDecision, reason,
 //                    questions? };
-//                    resolves once r resumes it, which the caller then does
+//                    resolves once r resumes it, which the caller then does,
+//                    or with 'resubmit' once wake() does
+//   wake(node)       its worker submitted again (#173): the node is resumed
+//                    as r would, unless r already is; whichever comes first
+//                    acts, and the other finds it being resumed. Whether it
+//                    woke it
 //   settle(node)     a held node succeeded: the run leaves halted once none
 //                    is left, and every held call no other gate holds goes on
 //   resume(node)     r: resumes that held node, or with none every one not
@@ -87,7 +92,16 @@ export function runHalt({ journal, out, record = () => {}, runId = () => null, o
     return { resumed: ready.map((t) => t.node) }
   }
 
-  return { on: () => on, hold, settle, resume, nodes: () => [...held.keys()] }
+  function wake(node) {
+    const t = held.get(node)
+    if (!t || t.resuming) return false
+    t.resuming = true
+    out(`>> ${node}: its worker submitted again while it was held: resuming it`)
+    t.go('resubmit')
+    return true
+  }
+
+  return { on: () => on, hold, settle, resume, wake, nodes: () => [...held.keys()] }
 }
 
 // The file the tree's r writes in a run's state dir for its runner to take

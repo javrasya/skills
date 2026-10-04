@@ -65,6 +65,7 @@ import { StringDecoder } from 'node:string_decoder'
 import { fileURLToPath } from 'node:url'
 import { connect, crewPaths, lineDecoder, noDaemon, send } from './transport.mjs'
 import { runBook, runnerCommand, runnerTitle } from './runs.mjs'
+import { fileStore } from './store.mjs'
 import { REGISTRY_PATH } from '../registry.mjs'
 import { pathKey } from '../paths.mjs'
 import { crewSessionEnv, resumedCommand } from '../harness.mjs'
@@ -145,7 +146,7 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
   const open = spawnSession ?? (await import('./session.mjs')).ptySession
   const restore = restoreSession ?? (await import('./session.mjs')).restoredSession
   const sessions = new Map()
-  const book = runBook({ sessions, file: paths.runs ?? join(paths.home, 'runs.json'), registry })
+  const book = runBook({ sessions, store: fileStore(paths.runs ?? join(paths.home, 'runs.json')), registry })
   liveRuns ??= book.liveRuns
   const sockets = new Set()
   let stopping = false
