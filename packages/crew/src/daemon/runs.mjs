@@ -1,6 +1,6 @@
 // The daemon's runs: crew's own Runs, the dispatch each worker session runs
 // under, and each Run's mailbox, the same shapes the Orca host answers in
-// (orca-cli.mjs). They outlive the daemon, kept in the crew home's runs.json,
+// (orca-cli.mjs). They outlive the daemon, kept in its store (store.mjs),
 // while its sessions do not: a daemon that dies (a crash, a kill, a reboot, a
 // forced stop) takes every session with it. The next daemon knows which of its
 // sessions were still running then: a dispatch lost that way shows `hostDied`,
@@ -43,11 +43,9 @@
 //   worktree.status { path, status }            → { path, status }
 //   worktree.statuses                           → { statuses: { <path>: <status> } }
 import { randomBytes } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
 import { basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readRegistry } from '../registry.mjs'
-import { writeJsonAtomic } from '../fsutil.mjs'
 import { DEFAULT_HOST } from '../hosts.mjs'
 import { isOrchestratorTitle } from '../orchestrator.mjs'
 
@@ -73,10 +71,11 @@ const STATUSES = new Set(['todo', 'in-progress', 'in-review', 'completed'])
 
 const hex = (n) => randomBytes(n).toString('hex')
 
-// sessions: the daemon's, by id, each with info(). file: where the book is
-// kept, null for nowhere; registry: the run registry, which says whether a Run
-// is live, null for none.
-export function runBook({ sessions, now = () => new Date().toISOString(), file = null, registry = null }) {
+// sessions: the daemon's, by id, each with info(). store: where the book is
+// kept (store.mjs), null for nowhere; registry: the run registry, which says
+// whether a Run is live, null for none.
+/** @param {{ sessions: Map<string, any>, now?: () => string, store?: import('./store.mjs').Store | null, registry?: string | null }} options */
+export function runBook({ sessions, now = () => new Date().toISOString(), store = null, registry = null }) {
   const runs = new Map()
   const dispatches = new Map()
   const statuses = new Map()
@@ -90,39 +89,33 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
   const running = new Set()
   let died = new Set()
 
-  let kept = null
-  try {
-    kept = file && existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : null
-  } catch {
-    // Written whole by rename, so only a hand-edited book fails to parse: the
-    // daemon still starts, with no runs.
-  }
-  if (kept) {
-    for (const r of kept.runs ?? []) if (!r.orchestrator) runs.set(r.id, { ...r, acked: new Set(r.acked) })
-    for (const d of kept.dispatches ?? []) if (runs.has(d.run)) dispatches.set(d.id, d)
-    for (const [path, status] of Object.entries(kept.statuses ?? {})) statuses.set(path, status)
+  if (store) {
+    for (const [id, r] of store.list('runs')) if (!r.orchestrator) runs.set(id, { ...r, acked: new Set(r.acked) })
+    for (const [id, d] of store.list('dispatches')) if (runs.has(d.run)) dispatches.set(id, d)
+    for (const [path, status] of store.list('statuses')) statuses.set(path, status)
     // An agent's session comes back, and a `?` session; any other of no
     // dispatch was a log tail or a runner, which is started again its own
     // way, or not at all.
-    for (const [id, spec] of Object.entries(kept.sessions ?? {})) if (dispatches.has(id) || isOrchestratorTitle(spec?.title)) specs.set(id, spec)
-    ;({ messages = 0, deliveries = 0, nextSession = 1 } = kept)
-    died = new Set(kept.running ?? [])
+    for (const [id, spec] of store.list('sessions')) if (dispatches.has(id) || isOrchestratorTitle(spec?.title)) specs.set(id, spec)
+    messages = store.read('meta', 'messages') ?? 0
+    deliveries = store.read('meta', 'deliveries') ?? 0
+    nextSession = store.read('meta', 'nextSession') ?? 1
+    died = new Set(store.read('meta', 'running') ?? [])
   }
-  const save = () => {
-    if (!file) return
-    const book = {
-      runs: [...runs.values()].map((r) => ({ ...r, acked: [...r.acked] })),
-      dispatches: [...dispatches.values()],
-      statuses: Object.fromEntries(statuses),
-      sessions: Object.fromEntries(specs),
-      messages,
-      deliveries,
-      nextSession,
-      running: [...running, ...died],
-    }
-    // Whole or not at all: a daemon killed mid-write must not lose the book.
-    writeJsonAtomic(file, book)
-  }
+  // Every record at once: the store writes them whole or not at all.
+  const save = () =>
+    store?.write({
+      runs: [...runs.values()].map((r) => [r.id, { ...r, acked: [...r.acked] }]),
+      dispatches: [...dispatches],
+      statuses: [...statuses],
+      sessions: [...specs],
+      meta: [
+        ['messages', messages],
+        ['deliveries', deliveries],
+        ['nextSession', nextSession],
+        ['running', [...running, ...died]],
+      ],
+    })
   const runnerOf = (runner) => (runner == null ? null : String(runner))
 
   const runOf = (id) => {
