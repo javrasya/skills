@@ -231,7 +231,9 @@ export const closeConsult = (stateDir, n, { now = Date.now() } = {}) => consultW
 
 // A fresh `?` session on a host that starts sessions of no Run (the crew
 // host's sessionStart): titled orchestrator/console, in no run's journal, so
-// never a node of any run's graph; recorded in the run dir as above. Returns
+// never a node of any run's graph; recorded in the run dir as above, and
+// told the run's state dir, which the host keeps on the session so its
+// harness equips it with the orchestrator's tools (#194, tools.mjs). Returns
 // { terminal, n }, its session id and its number among the run's.
 export async function consultSession({ host, stateDir, harness = 'claude', model = null, effort = null, permissionMode = null, dir, now = Date.now }) {
   const n = (consultSessions(stateDir, { now: now() }).at(-1)?.n ?? 0) + 1
@@ -239,7 +241,7 @@ export async function consultSession({ host, stateDir, harness = 'claude', model
   consultWrite(stateDir, { type: 'starting', n, harness, model, dir }, now())
   let terminal
   try {
-    ;({ terminal } = await host.sessionStart({ title: orchestratorTitle('console'), prompt: consultPrompt(stateDir), harness, model, effort, permissionMode, sessionId, dir }))
+    ;({ terminal } = await host.sessionStart({ title: orchestratorTitle('console'), prompt: consultPrompt(stateDir), harness, model, effort, permissionMode, sessionId, dir, stateDir }))
   } catch (e) {
     consultWrite(stateDir, { type: 'failed', n, reason: e?.message ?? String(e) }, now())
     throw e

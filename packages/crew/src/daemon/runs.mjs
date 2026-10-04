@@ -49,7 +49,11 @@
 // dispatches with it, once every session of it is closed, and by the next
 // daemon, which none of its sessions outlive. A session of no Run titled as
 // the orchestrator's `?` is (`console`): the person's conversation about a
-// run, kept for the next daemon as an agent's session is (#168).
+// run, kept for the next daemon as an agent's session is (#168). Its spec
+// keeps the run's state dir its opener named (session.spawn `stateDir`), so
+// worker.agent answers it the orchestrator's agent, { role: 'orchestrator',
+// stateDir }, and its harness equips it with the orchestrator's tools (#194).
+// A `?` session spawned with no state dir is about no run: it has no agent.
 //
 // The mailbox is Orca's: a check freezes every waiting message into a batch
 // and hands that batch back, marked replayed, until it is acknowledged; `ack`
@@ -63,7 +67,7 @@
 //   worker.result { id }                        → { result, outcome, submissions }: its last worker_done's
 //   worker.stop { id }                          → { worker }: its program ended, unsettled ones cancelled
 //   worker.release { id }                       → { worker }
-//   worker.agent { id }                         → { agent: { role, schema } | null }: session id's, null for one of no dispatch or a released one
+//   worker.agent { id }                         → { agent: { role, schema, stateDir? } | null }: session id's, null for one of no dispatch or a released one; a `?` session's is the orchestrator's, with its run's state dir
 //   worker.submit { id, payload }               → { id, resultPath }: session id's result, sent as its worker_done
 //   worker.mail { id, type, subject, body, outcome } → { id }: as mail.send, from session id
 //   worker.handoff { id, note }                 → { id }: a doctor's note, as a handoff and its worker_done; id the handoff's
@@ -283,7 +287,9 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
     // it starts, so a session crew started for no agent is told so, not refused.
     'worker.agent': ({ id }) => {
       const d = dispatches.get(String(id))
-      return { agent: d && !d.released ? { role: d.role ?? 'worker', schema: d.schema ?? null } : null }
+      if (d) return { agent: d.released ? null : { role: d.role ?? 'worker', schema: d.schema ?? null } }
+      const spec = specs.get(String(id))
+      return { agent: isOrchestratorTitle(spec?.title) && typeof spec.stateDir === 'string' ? { role: 'orchestrator', schema: null, stateDir: spec.stateDir } : null }
     },
     'worker.submit': ({ id, payload }) => {
       const d = sessionDispatch(id, 'results')
@@ -408,9 +414,10 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
     ended(id) {
       if (running.delete(id)) save()
     },
-    // What session `id` runs, kept for the next daemon; its title as renamed.
-    spawned(id, { command, cwd, title }) {
-      specs.set(id, { command, cwd, title })
+    // What session `id` runs, kept for the next daemon; its title as renamed;
+    // and, for a `?` session, the run's state dir it is about.
+    spawned(id, { command, cwd, title, stateDir = null }) {
+      specs.set(id, { command, cwd, title, ...(typeof stateDir === 'string' && { stateDir }) })
       save()
     },
     renamed(id, title) {
@@ -419,7 +426,7 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
       save()
     },
     // The agent sessions an earlier daemon held and never closed: { id,
-    // command, cwd, title }.
+    // command, cwd, title, stateDir? }.
     restorable: () => [...specs].map(([id, spec]) => ({ id, ...spec })),
     // Session `id` is closed: forgotten, and the orchestrator Run it was a
     // dispatch of goes, once no session of it is left.

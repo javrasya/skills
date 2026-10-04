@@ -48,9 +48,10 @@
 //
 // Some methods are crew's only, outside the interface, and no runner calls
 // them on a host it was handed: sessionStart({ title, prompt, harness,
-// model, effort, permissionMode, sessionId, dir }) → { terminal }, a harness
-// session of no Run (the orchestrator's `?`, orchestrator.mjs, always asked
-// of a crew host: arm.mjs runOrchestrator); mailSend, a worker's `crew
+// model, effort, permissionMode, sessionId, dir, stateDir }) → { terminal },
+// a harness session of no Run (the orchestrator's `?`, orchestrator.mjs,
+// always asked of a crew host: arm.mjs runOrchestrator), stateDir the run it
+// is about, for its tools (#194); mailSend, a worker's `crew
 // orchestration send` (bin/crew.mjs; on Orca a worker sends with Orca's own
 // CLI, and fake-orca.mjs has one only to play a worker in the suite); and
 // the parking ones the run tree calls only when the host has them:

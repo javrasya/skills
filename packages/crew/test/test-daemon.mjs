@@ -489,6 +489,36 @@ test('daemon: every worker_done a dispatch sends is counted and taken as its out
   }
 })
 
+test("daemon: a `?` session spawned with its run's state dir is the orchestrator's to worker.agent, with that dir, which the next daemon keeps; a `?` session of no state dir, and a session of no dispatch titled otherwise, have no agent (#194)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const registry = join(dir, 'runs.jsonl')
+  const spawnSession = quietSession([], new Map())
+  const exits = []
+  await startDaemon({ paths, registry, spawnSession, parkAfterMs: 60_000, exit: () => exits.push(1), log: () => {} })
+  const stateDir = join(dir, 'orca-run')
+  mkdirSync(stateDir)
+  const spawn = async (title, extra = {}) => (await request(paths, { op: 'session.spawn', command: ['claude', '--session-id', `uuid-${title}`], cwd: dir, title, ...extra })).session.id
+  const console = await spawn('orchestrator/console', { stateDir })
+  const bare = await spawn('orchestrator/console')
+  const other = await spawn('not a console', { stateDir })
+  const agentOf = async (id) => (await request(paths, { op: 'worker.agent', id })).agent
+  assert.deepEqual(await agentOf(console), { role: 'orchestrator', schema: null, stateDir })
+  assert.deepEqual([await agentOf(bare), await agentOf(other)], [null, null])
+  await assert.rejects(request(paths, { op: 'worker.show', id: console }), /dispatch_not_found/, 'still no dispatch of any run')
+
+  await request(paths, { op: 'stop', force: true })
+  await until('the first daemon to stop', () => exits.length === 1)
+  const second = await startDaemon({ paths, registry, spawnSession, parkAfterMs: 60_000, exit: () => {}, log: () => {} })
+  try {
+    assert.deepEqual(await agentOf(console), { role: 'orchestrator', schema: null, stateDir }, 'the next daemon knows its run')
+    assert.equal(await agentOf(bare), null)
+  } finally {
+    second.shutdown('test over')
+  }
+})
+
 test("daemon: a session submits and mails by its id alone, its result checked against the schema run.worker gave its dispatch, which the next daemon keeps; a session of no dispatch, a released one, and a doctor's submit are refused, saying why (#174)", async () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
   const paths = crewPaths({ CREW_HOME: join(dir, 'home') })

@@ -7,10 +7,12 @@
 //   hello                                  → { pid, version, endpoint }
 //   stop { force }                         → refused, naming them, while runs are
 //     live, unless force
-//   session.spawn { command, cwd, env, cols, rows, title, runDir } → { session }:
+//   session.spawn { command, cwd, env, cols, rows, title, runDir, stateDir } → { session }:
 //     its program gets its session's id as CREW_SESSION. With runDir it is that
 //     run's runner, refused run_live while the run has one: a runner session
-//     still running, or one this daemon is starting for it itself (recovery)
+//     still running, or one this daemon is starting for it itself (recovery).
+//     With stateDir it is a `?` session about that run (#194): kept in its
+//     record for the next daemon, and what worker.agent answers for it
 //   session.list                           → { sessions }
 //   session.screen { id }                  → { screen: { lines, cursor, alternate } }
 //   session.write { id, data, paste }      → { session }: data typed as keys,
@@ -200,13 +202,13 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
     })
   }
 
-  /** @param {{ command: string[], cwd: string, env?: NodeJS.ProcessEnv, cols?: number, rows?: number, title: string | null, runDir?: string | null }} options */
-  function spawnOne({ command, cwd, env, cols, rows, title, runDir = null }) {
+  /** @param {{ command: string[], cwd: string, env?: NodeJS.ProcessEnv, cols?: number, rows?: number, title: string | null, runDir?: string | null, stateDir?: string | null }} options */
+  function spawnOne({ command, cwd, env, cols, rows, title, runDir = null, stateDir = null }) {
     const id = book.sessionId()
     // Always the directory it was asked for, never the daemon's own: that is
     // wherever the crew command that started the daemon happened to run.
     if (typeof cwd !== 'string' || !cwd) throw new Error(`session.spawn needs the directory to start ${command[0]} in`)
-    const session = openOne(id, { command, cwd, env: { ...(env ?? process.env), CREW_SESSION: id }, cols, rows, title })
+    const session = openOne(id, { command, cwd, env: { ...(env ?? process.env), CREW_SESSION: id }, cols, rows, title, ...(stateDir !== null && { stateDir }) })
     if (runDir !== null) runnerDirs.set(id, runKey(runDir))
     say(`session ${id} spawned: ${command.join(' ')} (pid ${session.info().pid})`)
     return session
@@ -321,10 +323,10 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
       setImmediate(() => shutdown(force ? 'stop --force' : 'stop'))
       return { pid: process.pid }
     },
-    'session.spawn': ({ command, cwd, env, cols, rows, title = null, runDir = null }) => {
+    'session.spawn': ({ command, cwd, env, cols, rows, title = null, runDir = null, stateDir = null }) => {
       if (!Array.isArray(command) || !command.length || !command.every((a) => typeof a === 'string')) throw new Error('session.spawn needs a command: a non-empty list of strings')
       if (runDir !== null) vacant(text(runDir, 'run dir'))
-      return { session: spawnOne({ command, cwd, env, cols, rows, title: title === null ? null : text(title, 'title'), runDir }).info() }
+      return { session: spawnOne({ command, cwd, env, cols, rows, title: title === null ? null : text(title, 'title'), runDir, stateDir: stateDir === null ? null : text(stateDir, 'state dir') }).info() }
     },
     'session.list': () => ({ sessions: [...sessions.values()].map((s) => s.info()) }),
     'session.screen': async ({ id }) => ({ screen: await sessionOf(id).screen() }),
@@ -478,13 +480,13 @@ export async function startDaemon({ paths = crewPaths(), registry = REGISTRY_PAT
   // comes back parked, under its own id: entering it resumes its harness
   // (#164). Its env was never kept, so it runs in this daemon's, with crew's
   // own on top. One with no session to resume is forgotten.
-  for (const { id, command, cwd, title } of book.restorable()) {
+  for (const { id, command, cwd, title, stateDir } of book.restorable()) {
     if (!resumedCommand(command)) {
       book.closed(id)
       continue
     }
     sessions.set(id, waitsOn(restore({ id, command, cwd, title })))
-    spawnedWith.set(id, { command, cwd, title, env: crewSessionEnv(process.env, { home: paths.home, session: id }) })
+    spawnedWith.set(id, { command, cwd, title, ...(typeof stateDir === 'string' && { stateDir }), env: crewSessionEnv(process.env, { home: paths.home, session: id }) })
     parked.add(id)
   }
 
