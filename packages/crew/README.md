@@ -226,6 +226,15 @@ Not yet confirmed against live Orca: that `worker-show` follows a dispatch whose
 
 ## Two checks, and when each runs
 
+Before either, the package's own scripts, each one command and each clean on the committed code:
+
+- `npm run lint`: Biome's linter over `src`, `bin`, `test` and `scripts`; `biome.jsonc` records the style and names, with a reason, every rule switched off.
+- `npm run format`: Biome's formatter, writing; `npm run format:check` only reports. A no-op on the committed code.
+- `npm run typecheck`: TypeScript's checker over the `.mjs` sources of `src` and `bin`, `checkJs`, no emit, non-strict. An error is fixed with JSDoc on the option bag or parameter the checker could not infer, never suppressed.
+- `npm run check`: lint, then typecheck, then the test suite, stopping at the first failure.
+
+Per change, run `lint`, `format:check`, `typecheck` and the test files the change touches. For review, run `check`.
+
 - **Offline:** `node scripts/test-orca-runner.mjs`, which runs the crew package's suite (`packages/crew/test/`); `npm test` in `packages/crew` runs the same. Fast and free. It runs the runner against the fake Orca, so it proves the runner does what the fake says Orca does, and nothing about the Workflow runner.
 - **The runner contract test:** `scripts/runner-contract.workflow.js`. Slow, and it spends tokens on eight short agents per fresh run, so it runs by hand. It is the only check that the session runner gives a script what the Workflow runner gives it, and that is the promise the whole session runner rests on.
 - **The Orca-only contract test:** `scripts/runner-contract-orca.workflow.js`, for the guarantees only the session runner makes. An agent runs it end to end with the Orca CLI, with no human and no `/workflows` UI (see [The Orca-only contract](#the-orca-only-contract)).
