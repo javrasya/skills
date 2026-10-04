@@ -145,6 +145,7 @@ async function daemon(args) {
   console.log(`${said(hello)}${hello.started ? ' (started)' : ''}`)
 }
 
+/** @param {string[]} argv */
 async function session([verb, ...args]) {
   if (verb === 'spawn') {
     const dash = args.indexOf('--')
@@ -287,6 +288,7 @@ async function view(args, { waitMs = 0 } = {}) {
 
 const SEND_FLAGS = { '--from': 'from', '--dispatch-capability': 'capability', '--task-id': 'taskId', '--dispatch-id': 'dispatchId', '--type': 'type', '--subject': 'subject', '--body': 'body', '--outcome': 'outcome' }
 
+/** @param {string[]} argv */
 async function orchestration([verb, ...args]) {
   if (verb !== 'send') usage(`crew orchestration: ${verb ? `unexpected ${verb}` : 'send'}`)
   // A body or subject may start with --: every flag here takes a value.

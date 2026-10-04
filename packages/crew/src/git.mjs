@@ -105,7 +105,7 @@ export const chainName = (runId) => `${runId}-chain`
 // A program's exit, never a rejection: { code, stdout, stderr }, code null
 // when it could not start at all (not installed). The probes `crew start`
 // makes take one of these, so a test hands them its own.
-export function execProgram(program, args, { cwd, timeoutMs = RUNNER_SETTINGS.hostCallMs } = {}) {
+export function execProgram(program, args, { cwd, timeoutMs = RUNNER_SETTINGS.hostCallMs } = /** @type {{ cwd?: string, timeoutMs?: number }} */ ({})) {
   return new Promise((resolve) => {
     execFile(program, args, { cwd, windowsHide: true, timeout: timeoutMs }, (err, stdout, stderr) => resolve({ code: err ? (typeof err.code === 'number' ? err.code : null) : 0, stdout: String(stdout ?? ''), stderr: String(stderr ?? err?.message ?? '') }))
   })

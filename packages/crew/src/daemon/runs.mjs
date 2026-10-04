@@ -242,8 +242,9 @@ export function runBook({ sessions, now = () => new Date().toISOString(), file =
 
   for (const [name, op] of Object.entries(ops)) {
     if (name === 'worker.show' || name === 'worktree.statuses') continue
+    // Reflect.apply, since the ops differ in arity and this wraps them all alike.
     ops[name] = (...args) => {
-      const reply = op(...args)
+      const reply = Reflect.apply(op, null, args)
       save()
       return reply
     }

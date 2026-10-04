@@ -22,7 +22,7 @@ export const ENTER_KEYS = [
 // table does not name: the chunk carries the whole sequence, as raw input
 // delivers a keypress. Any other character is `char(c)`'s key, or none when
 // it answers nothing.
-export function decodeKeys(chunk, table, { char = () => null } = {}) {
+export function decodeKeys(chunk, table, { char = () => null } = /** @type {{ char?: (c: string) => unknown }} */ ({})) {
   const keys = []
   for (let i = 0; i < chunk.length; ) {
     const hit = table.find(([seq]) => chunk.startsWith(seq, i))

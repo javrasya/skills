@@ -14,6 +14,10 @@ import { join } from 'node:path'
 // The keys Claude records a project's MCP answers under.
 export const MCP_KEYS = Object.freeze(['enabledMcpjsonServers', 'disabledMcpjsonServers', 'enableAllProjectMcpServers'])
 
+/** @typedef {{ enabledMcpjsonServers?: string[], disabledMcpjsonServers?: string[], enableAllProjectMcpServers?: boolean }} McpSettings */
+// The slice of node:fs the answers are read and written through, so a test hands in its own.
+/** @typedef {Pick<typeof import('node:fs'), 'existsSync' | 'readFileSync' | 'writeFileSync' | 'mkdirSync'>} McpFs */
+
 const names = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [])
 
 // The worktree's local settings once the source's answers are merged in: the
@@ -22,6 +26,7 @@ const names = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') 
 // unanswered is disabled, since a worker never turns on a server the operator
 // never approved. `added` names those. `changed` is false when the merge
 // leaves the settings as they were.
+/** @param {{ source?: McpSettings, target?: McpSettings, servers?: string[] }} options */
 export function mergeMcpAnswers({ source = {}, target = {}, servers = [] }) {
   const settings = { ...target }
   for (const k of MCP_KEYS) if (source[k] !== undefined) settings[k] = source[k]
@@ -51,6 +56,7 @@ function readJson(fs, path, what) {
 // to answer, nothing written. The worktree's file is rewritten, as 2-space JSON, only when the
 // answers change it. Returns { written, added }; throws on a file it cannot
 // read or write, which the caller turns into a warning.
+/** @param {{ project: string, worktree: string, fs?: McpFs }} options */
 export function copyMcpAnswers({ project, worktree, fs = { existsSync, readFileSync, writeFileSync, mkdirSync } }) {
   const mcp = readJson(fs, join(worktree, '.mcp.json'), "the worktree's")
   const servers = Object.keys(mcp.mcpServers && typeof mcp.mcpServers === 'object' ? mcp.mcpServers : {})

@@ -253,7 +253,7 @@ export function agentLifecycle({
   objective,
   journal,
   retainWorktree,
-  onRun = () => {},
+  onRun = /** @type {(run: { runId: string, terminal?: string, takenOver?: boolean }) => unknown} */ (() => {}),
   takeOver = null,
   transcripts = sessionTranscripts(),
   nextN,
@@ -412,7 +412,7 @@ export function agentLifecycle({
   // to be continued, since a held one is otherwise never read as dead. nudgeText:
   // what a nudge types, a doctor's its own, and owes what an idle death
   // says it went without, a doctor's its report.
-  async function watch(w, { title, harness, sessionId, nudged, moving = () => {}, blocked = () => {}, unblocked = () => {}, mail = null, held = () => false, attended = false, nudgeText = NUDGE, owes = 'submitting' }) {
+  async function watch(w, { title, harness, sessionId, nudged, moving = () => {}, blocked = /** @type {(waiting: string) => unknown} */ (() => {}), unblocked = () => {}, mail = null, held = () => false, attended = false, nudgeText = NUDGE, owes = 'submitting' }) {
     const start = clock.now()
     let errors = 0
     let nudges = 0

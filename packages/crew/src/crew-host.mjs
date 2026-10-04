@@ -93,6 +93,7 @@ function hookCommand(script) {
   return childCommand(script, [])
 }
 
+/** @returns {Promise<void>} */
 function runHook(script, { repo, worktree, env, ms }) {
   const [program, args] = hookCommand(script)
   return new Promise((done, reject) => {

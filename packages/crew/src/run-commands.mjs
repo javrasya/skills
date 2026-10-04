@@ -35,7 +35,7 @@ export function resumeCommand({ registry = REGISTRY_PATH, target }) {
 // ask(question): the operator's answer, one line. `yes` skips the run's
 // confirmation, never a force-delete's. openHost(run): the run's host, opened
 // only once the run is found.
-export async function removeCommand({ registry = REGISTRY_PATH, target, openHost, ask, yes = false, unpushed = worktreeUnpushed, stopRunner = stopRunnerOf, out = () => {} }) {
+export async function removeCommand({ registry = REGISTRY_PATH, target, openHost, ask, yes = false, unpushed = worktreeUnpushed, stopRunner = stopRunnerOf, out = /** @type {(line: string) => unknown} */ (() => {}) }) {
   const run = runOf(registry, target)
   if (!yes) {
     const answer = await ask(`Remove run ${run.runId}? It stops its runner and every agent, reclaims its worktrees, forgets the run and deletes ${runFolderOfStateDir(run.runDir)}; its PRs on GitHub stay. [y/N] `)

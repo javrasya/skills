@@ -22,6 +22,7 @@ export class OrcaError extends Error {
 // stderr), its CLI unable to start, or no orca to spawn. Only these are an
 // outage (outage.mjs). A timeout, or any error from an Orca that answered, is
 // not: a hung Orca must never stall the run without limit.
+/** @param {(Error & { code?: string }) | string | null | undefined} e */
 export function orcaUnreachable(e) {
   if (!(e instanceof Error)) return false
   if (e.code === 'runtime_unavailable' || /\bruntime_unavailable\b/.test(e.message)) return true
@@ -147,6 +148,7 @@ const TAB_GONE = new Set(['terminal_not_writable', 'terminal_exited', 'terminal_
 // the checkout the runner runs in, every child worktree's parent, whose MCP
 // answers a child gets (mcp-answers.mjs), read and written through `fs`;
 // `transcripts` is what promptDelivered reads a session's transcript with.
+/** @param {{ bin?: string, call?: ReturnType<typeof execOrca>, git?: typeof execGit, clock?: { timer: typeof realTimer }, callMs?: number, createMs?: number, platform?: NodeJS.Platform, project?: string, fs?: import('./mcp-answers.mjs').McpFs, transcripts?: ReturnType<typeof sessionTranscripts> }} [options] */
 export function orcaCli({ bin = process.env.ORCA_BIN || 'orca', call = execOrca(bin), git = execGit, clock = { timer: realTimer }, callMs = RUNNER_SETTINGS.hostCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, platform = process.platform, project = process.cwd(), fs, transcripts = sessionTranscripts() } = {}) {
   const once = (args, waitMs = 0) => withTimeout(clock, callMs + waitMs, call(args, callMs + waitMs), args.slice(0, 2).join(' '))
   let outage = null

@@ -60,6 +60,7 @@ const unique = (xs) => [...new Set(xs.filter(Boolean))]
 //                        and the ones it cycles through
 //   ghStack              { installed, api: 'enabled'|'disabled'|'unknown', detail }
 //   repo                 owner/name as gh knows it, null when it knows none
+/** @param {{ cwd?: string, paths?: ReturnType<typeof import('./daemon/transport.mjs').crewPaths>, home?: string, env?: NodeJS.ProcessEnv, run?: typeof execProgram }} [options] */
 export async function probeStart({ cwd = process.cwd(), paths, home = homedir(), env = process.env, run = execProgram } = {}) {
   const claudeLast = lastUsedModel('claude', { home, env })
   const piLast = lastUsedModel('pi', { home, env })
@@ -102,7 +103,7 @@ export function flagsToAnswers(argv) {
 // flags. A remembered answer the facts no longer allow (a branch gone, GH
 // Stack no longer available) falls back to the default; a flag they do not
 // allow is an error naming the flag.
-export function startForm(facts, { remembered = {}, flags = {} } = {}) {
+export function startForm(facts, { remembered = {}, flags = {} } = /** @type {{ remembered?: { harness?: string, models?: Record<string, string>, base?: string, stackMode?: string, runOrder?: string, permissionMode?: string }, flags?: Record<string, string | true> }} */ ({})) {
   const stacks = stackOptions(facts.ghStack)
   const usable = (row, v) => options(row).some((o) => o.value === v && !o.disabled)
   const modelFor = (harness) => remembered.models?.[harness] || facts.models[harness]?.last || facts.models[harness]?.list[0] || null

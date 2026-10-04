@@ -319,11 +319,13 @@ const HELP_STEP = 4
 // row and all. `?` on an opened run enters a fresh orchestrator session,
 // closed once left (runsView's consult). Actions run one at a time, as the run
 // view's do.
-export function runsConsole({ paths, stdin, stdout, runs, backKey = 'ctrl+shift+left', refreshMs = 2_000, holdMs = 50, now = () => Date.now(), onError = () => {} }) {
+export function runsConsole({ paths, stdin, stdout, runs, backKey = 'ctrl+shift+left', refreshMs = 2_000, holdMs = 50, now = () => Date.now(), onError = /** @type {(e: Error) => void} */ (() => {}) }) {
   let flash = null
   let shown = false
   let timer = null
+  /** @type {(y: number) => number | null} */
   let rowAt = () => null
+  /** @type {(y: number) => string | null} */
   let optionAt = () => null
   // The key line's row, and how far it is scrolled sideways.
   let helpAt = null

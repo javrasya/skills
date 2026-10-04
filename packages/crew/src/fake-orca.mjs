@@ -113,7 +113,19 @@ export const fakeTranscripts = (orca) => ({
   path: ({ sessionId }) => `C:/fake/transcripts/${sessionId}.jsonl`,
 })
 
-export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 'C:/fake/run', runPrefix = 'run_fake', coordinator = 'term_runner', tabs = [], faults = {}, callMs = RUNNER_SETTINGS.hostCallMs, createMs = RUNNER_SETTINGS.worktreeCreateMs, setupLeaves = [], promptLoss = () => null } = {}) {
+export function fakeOrca({
+  worker = /** @type {(w: { prompt: string, preamble: object, worktree: string, orca: object, state: object }) => Promise<unknown>} */ (async () => {}),
+  clock = null,
+  runWorktree = 'C:/fake/run',
+  runPrefix = 'run_fake',
+  coordinator = 'term_runner',
+  tabs = [],
+  faults = {},
+  callMs = RUNNER_SETTINGS.hostCallMs,
+  createMs = RUNNER_SETTINGS.worktreeCreateMs,
+  setupLeaves = [],
+  promptLoss = /** @type {(start: { title: string, count: number, sessionId: string }) => unknown} */ (() => null),
+} = {}) {
   const calls = []
   const dispatches = new Map()
   const table = fakeWorktrees({ runWorktree, setupLeaves })
@@ -402,6 +414,7 @@ export function fakeOrca({ worker = async () => {}, clock = null, runWorktree = 
         transcript: null,
         onNudge: null,
         onContinue: null,
+        deliver: /** @type {(() => void) | null} */ (null),
         terminalState: 'retained',
       }
       dispatches.set(d.dispatchId, d)

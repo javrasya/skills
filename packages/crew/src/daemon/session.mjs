@@ -58,6 +58,8 @@ export function ptySession({ id, command, cwd, env, cols = 120, rows = 30, title
   const [file, ...args] = command
   const terminal = new Terminal({ cols, rows, scrollback: 1000, allowProposedApi: true })
   const modes = trackModes(terminal)
+  // node-pty's conout worker is internal to its Windows agent, so its type does not name it.
+  /** @type {import('node-pty').IPty & { _agent?: { _conoutSocketWorker?: { dispose?: () => void } } }} */
   const child = pty.spawn(resolveCommand(file, { cwd, env }), args, {
     name: 'xterm-256color',
     cols,
@@ -73,6 +75,9 @@ export function ptySession({ id, command, cwd, env, cols = 120, rows = 30, title
   let killing = false
   let entered = 0
   let lastOutput = null
+  // Resolves once everything the program wrote so far is parsed, so the screen and the modes read are current.
+  /** @returns {Promise<void>} */
+  const parsed = () => new Promise((done) => terminal.write('', done))
   child.onData((data) => {
     lastOutput = Date.now()
     terminal.write(data)
@@ -103,7 +108,7 @@ export function ptySession({ id, command, cwd, env, cols = 120, rows = 30, title
     },
     // The visible screen as text, once everything the program wrote so far is parsed.
     async screen() {
-      await new Promise((done) => terminal.write('', done))
+      await parsed()
       const buffer = terminal.buffer.active
       const lines = []
       for (let y = 0; y < terminal.rows; y++) lines.push(buffer.getLine(buffer.viewportY + y)?.translateToString(true) ?? '')
@@ -115,7 +120,7 @@ export function ptySession({ id, command, cwd, env, cols = 120, rows = 30, title
     // input rather than submitting what came before.
     async paste(text) {
       if (exit !== null) throw new Error(`session ${id} has exited`)
-      await new Promise((done) => terminal.write('', done))
+      await parsed()
       child.write(terminal.modes.bracketedPasteMode ? `\x1b[200~${text}\x1b[201~` : text)
     },
     // The pty and the emulator in the same tick, or the screen kept wraps at the old width.
@@ -134,6 +139,10 @@ export function ptySession({ id, command, cwd, env, cols = 120, rows = 30, title
     // Output that arrives while the emulator catches up is held and follows
     // the repaint, so nothing is shown twice or lost. onExit is called if the
     // program ends while entered. Returns leave(); the session keeps running.
+    /**
+     * @param {(data: string) => unknown} out
+     * @param {(exit: { code: number, signal: number | null }) => unknown} [onExit]
+     */
     enter(out, onExit = () => {}) {
       entered++
       let held = []

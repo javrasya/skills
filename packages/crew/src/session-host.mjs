@@ -93,6 +93,12 @@ export const SESSION_METHODS = Object.freeze(['workerStart', 'workerStop', 'work
 
 export const RUN_METHODS = Object.freeze(['runCreate', 'runUse', 'workerShow', 'workerRelease', 'workerDone', 'mailCheck', 'chainWorktree', 'worktreeLines', 'worktreeStatus', 'worktreeRemove'])
 
+// A host as the checker sees it. Hosts are duck-typed: sessionHost() checks
+// the methods SESSION_HOST names at runtime, and the fakes the tests hand in
+// implement only what they need, so the checker is told its id, its name, and
+// that the rest is whatever the host defines.
+/** @typedef {{ id: string, name: string, inPlace?: boolean } & Record<string, any>} SessionHost */
+
 // The methods of the interface `host` lacks, [] for a whole one.
 export const missingMethods = (host) => SESSION_HOST.filter((m) => typeof host?.[m] !== 'function')
 

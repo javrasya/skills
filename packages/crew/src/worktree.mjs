@@ -50,6 +50,7 @@ export const gitProbes = (path, branch, bound) => ({
 // porcelain lines it holds, is taken and handed to onBaseline. A failure to
 // copy the answers is a warning, and leaves the worker to the prompt-delivery
 // check (lifecycle.mjs). Returns the baseline.
+/** @param {{ project: string, worktree: string, bound: { ms: number }, onBaseline?: (baseline: { worktree: string, lines: string[] }) => unknown, warnings: string[], fs?: import('./mcp-answers.mjs').McpFs }} options */
 export async function prepareWorktree({ project, worktree, bound, onBaseline, warnings, fs }) {
   try {
     const m = copyMcpAnswers({ project, worktree, ...(fs && { fs }) })
@@ -65,6 +66,7 @@ export async function prepareWorktree({ project, worktree, bound, onBaseline, wa
 // The run's chain worktree, just made, readied as a child's is. Its baseline
 // unread is a warning, never a failure: the worktree is made all the same,
 // and the runner journals it with no baseline. Returns the baseline or null.
+/** @param {{ project: string, worktree: string, bound: { ms: number }, warnings: string[], fs?: import('./mcp-answers.mjs').McpFs }} options */
 export async function prepareChainWorktree({ project, worktree, bound, warnings, fs }) {
   try {
     return await prepareWorktree({ project, worktree, bound, warnings, fs })

@@ -120,7 +120,7 @@ function canonical(v) {
 // `inFlight` is left out: it says only whether the call was made while the
 // run was halting (ADR-0016), never what the call is, so a resume that makes
 // the same call without it still finds its node's result.
-export const journalKey = (prompt, { inFlight, ...opts } = {}) =>
+export const journalKey = (prompt, { inFlight, ...opts } = /** @type {{ inFlight?: boolean, [option: string]: unknown }} */ ({})) =>
   'v1:' +
   createHash('sha256')
     .update(JSON.stringify([prompt, canonical(opts)]))
@@ -169,6 +169,7 @@ export function runnerLog(stateDir, print, clock = realClock) {
 // outage, and resume({ node }), the attached view's r: resumeHost while an
 // outage is on, else the halted run's node, or with none every held node.
 // onHalt({ node, nodes }): told each time a node is held and the run halts.
+/** @typedef {{ resumeHost?: () => Promise<unknown>, resume?: (r?: { node?: string | null }) => Promise<unknown> }} RunControl */
 export async function runScript(
   text,
   {
@@ -184,7 +185,7 @@ export async function runScript(
     registry = null,
     project = process.cwd(),
     script: scriptPath = null,
-    control = {},
+    control = /** @type {RunControl} */ ({}),
     onHalt = () => {},
     runnerTerminal = null,
   },
@@ -649,7 +650,7 @@ export function finish({ stateDir, summary, out }) {
 // Returns { start(), gate(print), closed, crashes() }. gate wraps a print so
 // it reaches the tab only once no view is attached. closed resolves once no
 // view is attached.
-export function attachView({ spawnView, tab, log, tail = () => [], clock = realClock, limits = SETTINGS, restore = () => {}, guard = () => {}, resume = () => {} }) {
+export function attachView({ spawnView, tab, log, tail = () => [], clock = realClock, limits = SETTINGS, restore = () => {}, guard = /** @type {(on: boolean) => unknown} */ (() => {}), resume = /** @type {(m: { node?: string | null }) => unknown} */ (() => {}) }) {
   let attached = true
   let crashes = 0
   let close
@@ -716,7 +717,7 @@ export function attachView({ spawnView, tab, log, tail = () => [], clock = realC
 // child of the runner's, so it writes RESUME_REQUEST in the state dir
 // ({ node }, node null for every held one) and the runner, polling, takes it
 // (deletes it) and resumes as the attached view's IPC r does.
-export function watchResumeRequests({ stateDir, resume, log = () => {}, pollMs = 1_000 }) {
+export function watchResumeRequests({ stateDir, resume, log = /** @type {(line: string) => unknown} */ (() => {}), pollMs = 1_000 }) {
   const file = join(stateDir, RESUME_REQUEST)
   const take = () => {
     let text
@@ -790,6 +791,7 @@ if (isMain) {
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, 'runner.pid'), String(process.pid))
   const ignore = () => {}
+  /** @type {RunControl} */
   const control = {}
   // With no terminal (the offline tests, a redirected launch) there is no view,
   // and the runner prints as it always did. On crew there is none either: the

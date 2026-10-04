@@ -42,9 +42,13 @@ const REFRESH_MS = 2000
 // refresh, a key, a click or a resize.
 const MARQUEE_MS = 250
 
+// Not a dependency of the package: the view installs it on first use, below,
+// so the specifier is a value the checker does not resolve.
+const TERMINAL_KIT = 'terminal-kit'
+
 async function terminalKit(logPath) {
   try {
-    return (await import('terminal-kit')).default
+    return (await import(TERMINAL_KIT)).default
   } catch (e) {
     if (e?.code !== 'ERR_MODULE_NOT_FOUND') throw e
   }
@@ -56,7 +60,7 @@ async function terminalKit(logPath) {
     closeSync(fd)
   }
   try {
-    return (await import('terminal-kit')).default
+    return (await import(TERMINAL_KIT)).default
   } catch {
     return null
   }
@@ -143,7 +147,9 @@ const view = standalone ? null : runView({ stateDir: runDir, host, registry, unp
 const top = runs ?? view
 const tree = () => (runs ? runs.opened() : view)
 let flash = null
+/** @type {(y: number) => number | null} */
 let rowAt = () => null
+/** @type {(y: number) => string | null} */
 let optionAt = () => null
 
 function render() {

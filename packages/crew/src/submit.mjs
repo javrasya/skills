@@ -44,6 +44,10 @@ function readText(path) {
   return buf.toString('utf8').replace(/^﻿/, '')
 }
 
+/**
+ * @param {string[]} argv
+ * @param {{ host?: import('./session-host.mjs').SessionHost, stdout?: (line: string) => unknown, stderr?: (line: string) => unknown }} [options]
+ */
 export async function submit(argv, { host, stdout = (s) => process.stdout.write(s + '\n'), stderr = (s) => process.stderr.write(s + '\n') } = {}) {
   let a
   try {

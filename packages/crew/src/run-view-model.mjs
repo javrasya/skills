@@ -15,6 +15,7 @@ import { foldJournal, journalLines, readJournal, timeOf } from './journal.mjs'
 import { REGISTRY_PATH, readRegistry, runRegistry } from './registry.mjs'
 import { worktreeUnpushed } from './git.mjs'
 import { hostUnreachable } from './session-host.mjs'
+/** @typedef {import('./session-host.mjs').SessionHost} SessionHost */
 import { CONSOLE_PHASE, closeConsult, consoleTitle, consultSessions, isOrchestratorTitle } from './orchestrator.mjs'
 import { haltNoticeOf, readTriage } from './triage.mjs'
 import { RESUME_REQUEST } from './halt.mjs'
@@ -311,6 +312,9 @@ export function outcomeOf(stateDir) {
 const AT_WORK = ['starting', 'running', 'continued', 'stuck', 'blocked', 'needs you']
 const atWork = (agents) => agents.filter((a) => AT_WORK.includes(a.state))
 
+/**
+ * @param {{ stateDir: string, host: SessionHost, clock?: { now: () => number }, transcripts?: Partial<ReturnType<typeof sessionTranscripts>>, registry?: string, unpushed?: typeof worktreeUnpushed, alive?: typeof runnerAlive, resumeHost?: (() => unknown) | null, resumeHalted?: ((node: string | null) => unknown) | null, enter?: boolean, triage?: (() => unknown) | null, remove?: (() => ReturnType<typeof removeRun>) | null }} options
+ */
 export function runView({ stateDir, host, clock = { now: () => Date.now() }, transcripts = sessionTranscripts(), registry = REGISTRY_PATH, unpushed = worktreeUnpushed, alive = runnerAlive, resumeHost = null, resumeHalted = null, enter = false, triage = null, remove = null }) {
   const journalPath = join(stateDir, 'journal.jsonl')
   // name -> folded, only for phases the operator folded or unfolded.
@@ -634,6 +638,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   // alone. What it answers names the agent as `agent: { n, title }`, so a
   // confirmed retry goes to the agent refused, never to whatever row the
   // selection sits on by then: a refresh that folds its phase moves it.
+  /** @param {{ n?: number, force?: boolean, stop?: boolean }} [options] */
   async function reclaim({ n, force = false, stop = false } = {}) {
     if (hostAway()) return say(HOST_GONE)
     let a
@@ -1083,6 +1088,9 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
 // (arm.mjs runOrchestrator): an opened run's halt is triaged, and `?` on it
 // answers { enter: { session, close } } for a fresh orchestrator session the
 // renderer enters and closes on leaving it. The rest is as runView's.
+/**
+ * @param {{ host: SessionHost | null, hostOf?: (name: string) => SessionHost, clock?: { now: () => number }, registry?: string, transcripts?: Partial<ReturnType<typeof sessionTranscripts>>, unpushed?: typeof worktreeUnpushed, alive?: typeof runnerAlive, runner?: string, enter?: boolean, orchestrator?: ReturnType<typeof import('./arm.mjs').runOrchestrator> | null }} options
+ */
 export function runsView({ host, hostOf = () => host, clock = { now: () => Date.now() }, registry = REGISTRY_PATH, transcripts = sessionTranscripts(), unpushed = worktreeUnpushed, alive = runnerAlive, runner = RUNNER_PATH, enter = false, orchestrator = null }) {
   const folds = new Map()
   // runId -> { host, terminal, pid, starting }: the tab r opened, and the runner.pid

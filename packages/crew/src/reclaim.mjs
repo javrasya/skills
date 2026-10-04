@@ -96,6 +96,10 @@ export const keptRunning = (agent) => agent.state === 'failed' && agent.workerLe
 // then stops that worker before anything else. `open`: the terminal list's
 // handles, when the caller has already read it for a batch. A refusal
 // because Orca was not there at all (an outage, ADR-0015) is `unreachable`.
+// What a reclaim answers: refused with its reason, or done with its notes.
+/** @typedef {{ reclaimed: boolean, reason?: string, unreachable?: boolean, stoppable?: boolean, unpushed?: number, notes?: string[] }} Reclaim */
+
+/** @returns {Promise<Reclaim>} */
 export async function reclaimAgent(agent, { host, unpushed = worktreeUnpushed, force = false, stop = false, open = null }) {
   const refuse = (reason, e = null) => ({ reclaimed: false, reason, ...(hostUnreachable(host, e) && { unreachable: true }) })
   let stopFirst = false
@@ -184,6 +188,7 @@ const unknownDispatch = (e) => e?.code === 'dispatch_not_found' || e?.code === '
 // so a later whole-run reclaim leaves it be until a resume. Answers as
 // reclaimAgent does: { reclaimed: true, notes } or { reclaimed: false, reason },
 // with `unpushed` and `unreachable` alike.
+/** @returns {Promise<Reclaim>} */
 export async function reclaimChainAfter(kept, chain, { host, journaled, unpushed = worktreeUnpushed, force = false, registry = null }) {
   const refuse = (reason, e = null) => ({ reclaimed: false, reason, ...(hostUnreachable(host, e) && { unreachable: true }) })
   if (kept.length) return refuse('an agent of the run was kept')
@@ -229,7 +234,7 @@ export async function reclaimChainAfter(kept, chain, { host, journaled, unpushed
 // `{ agent: chainAgent(chain), reason }`, which keeps the run open too.
 // Returns { reclaimed: [agent], kept: [{ agent, reason }] }, a kept one also
 // `unreachable` when Orca was not there to reclaim it.
-export async function reclaimRun(agents, { host, unpushed = worktreeUnpushed, force = false, keep = () => null, registry = null, closeRun = true, runId = null, chain = null, journaled = agents, out = () => {} }) {
+export async function reclaimRun(agents, { host, unpushed = worktreeUnpushed, force = false, keep = /** @type {(agent: object) => string | null} */ (() => null), registry = null, closeRun = true, runId = null, chain = null, journaled = agents, out = /** @type {(line: string) => unknown} */ (() => {}) }) {
   const record = (entry) => {
     try {
       registry?.reclaimed(entry)

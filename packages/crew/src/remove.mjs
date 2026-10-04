@@ -30,7 +30,7 @@ export async function stopRunnerOf(stateDir, { waitMs = 5_000, sleep = (ms) => n
   for (let waited = 0; waited < waitMs && runnerAlive(stateDir) === true; waited += 100) await sleep(100)
 }
 
-export async function removeRun({ stateDir, runId, host, registry = null, unpushed = worktreeUnpushed, out = () => {}, stopRunner = stopRunnerOf }) {
+export async function removeRun({ stateDir, runId, host, registry = null, unpushed = worktreeUnpushed, out = /** @type {(line: string) => unknown} */ (() => {}), stopRunner = stopRunnerOf }) {
   await stopRunner(stateDir)
   const journalPath = join(stateDir, 'journal.jsonl')
   const agents = agentsOf(journalPath)

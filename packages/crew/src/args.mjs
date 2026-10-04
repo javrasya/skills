@@ -9,6 +9,13 @@ import { parseArgs } from 'node:util'
 // 'value'), unless `dashValues` lets a value start with --. The last of a
 // repeated flag wins. `lenient` throws nothing: a flag no one declared, or a
 // value flag with no value, is `true`.
+/**
+ * @template {string} S
+ * @template {string} B
+ * @param {string[]} argv
+ * @param {{ strings?: S[], booleans?: B[], dashValues?: boolean, lenient?: boolean }} [options]
+ * @returns {{ values: Partial<Record<S, string>> & Partial<Record<B, true>>, positionals: string[] }}
+ */
 export function parseFlags(argv, { strings = [], booleans = [], dashValues = false, lenient = false } = {}) {
   const options = Object.fromEntries([...strings.map((f) => [f.slice(2), { type: 'string' }]), ...booleans.map((f) => [f.slice(2), { type: 'boolean' }])])
   const { values, positionals, tokens } = parseArgs({ args: argv, options, strict: false, allowPositionals: true, tokens: true })
@@ -21,5 +28,7 @@ export function parseFlags(argv, { strings = [], booleans = [], dashValues = fal
     if (!type || (type === 'boolean' && t.inlineValue)) fail('unexpected', `unexpected ${t.rawName}`)
     if (type === 'string' && (t.value === undefined || (!dashValues && !t.inlineValue && t.value.startsWith('--')))) fail('value', `${t.rawName} needs a value`)
   }
-  return { values: Object.fromEntries(Object.entries(values).map(([k, v]) => [`--${k}`, v])), positionals }
+  // The checks above leave each declared flag its declared shape; parseArgs's own type cannot say so.
+  const declared = /** @type {Partial<Record<S, string>> & Partial<Record<B, true>>} */ (Object.fromEntries(Object.entries(values).map(([k, v]) => [`--${k}`, v])))
+  return { values: declared, positionals }
 }
