@@ -16,8 +16,9 @@ export const RUNNER_SETTINGS = Object.freeze({
   idleProbeMs: 1_000,
   // On the crew host, a worker's idle is its session transcript's to say
   // (its latest turn ended); where the transcript does not say, it is idle
-  // once its terminal has had no output for this long. A harness is also
-  // taken as ready for its first prompt once it has drawn and then been
+  // once its terminal has had no output for this long. A harness that
+  // neither shows its input prompt nor says it is ready (screens.mjs) is
+  // also taken as ready for its first prompt once it has drawn and then been
   // quiet this long.
   quietOutputMs: 5_000,
   // A worker idle, or exited, without submitting is nudged this many times;

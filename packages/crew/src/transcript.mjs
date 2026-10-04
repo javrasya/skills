@@ -237,8 +237,40 @@ function subagentBytes(dir, depth = 4) {
   return bytes
 }
 
+// A background process the session started writes its output to a file of
+// its own, and nothing to the session's transcript until it ends: its bytes
+// are the session's too, or a worker waiting on a background shell looks
+// idle and is nudged.
+//   Claude: <tmp>/claude-<uid>/<slug>/<id>/tasks/<task>.output, the tmp
+//           being CLAUDE_CODE_TMPDIR, else /tmp, as Claude 2.1.286 on macOS
+//           names it when a Bash call runs in the background ("Output is
+//           being written to: …"). Where there is no uid (Windows) the dir
+//           is not known to crew, and nothing is counted.
+//   pi:     <worktree>/.pi/tasks/<id>-<pid>/<task>.output (pi-background-tasks)
+function backgroundDirs({ harness, sessionId, worktree, env }) {
+  if (harness === 'pi') {
+    if (!worktree) return []
+    const root = join(worktree, '.pi', 'tasks')
+    return dirsIn(root).filter((d) => d.slice(root.length + 1).startsWith(`${sessionId}-`))
+  }
+  const uid = process.getuid?.()
+  if (uid === undefined || !worktree) return []
+  return [join(env.CLAUDE_CODE_TMPDIR || '/tmp', `claude-${uid}`, claudeSlug(worktree), sessionId, 'tasks')]
+}
+
+// A file gone between the listing and its stat is one that ended: no bytes.
+// Any other failure is the caller's (size's quiet): a signal missing.
+function outputBytes(dir) {
+  if (!existsSync(dir)) return 0
+  let bytes = 0
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (e.isFile() && e.name.endsWith('.output')) bytes += statSync(join(dir, e.name), { throwIfNoEntry: false })?.size ?? 0
+  }
+  return bytes
+}
+
 // size({ harness, sessionId, worktree }) is the transcript's length in bytes,
-// its subagents' added, or null while it has none; path(…) is where it is, or null; usage(…) is
+// its subagents' and its background processes' output added, or null while it has none; path(…) is where it is, or null; usage(…) is
 // { path, context, tokens }, context and tokens null until an assistant turn
 // is written, or null with no transcript; delivered({ …, needle }) is
 // promptDelivered on it, false with no transcript; idle(…) is turnEnded on its
@@ -273,7 +305,8 @@ export function sessionTranscripts({ home = homedir(), env = process.env, scanEv
   return {
     size: quiet((q) => {
       const path = locate(q)
-      return path ? statSync(path).size + subagentBytes(path.replace(/\.jsonl$/, '')) : null
+      if (!path) return null
+      return statSync(path).size + subagentBytes(path.replace(/\.jsonl$/, '')) + backgroundDirs({ ...q, env }).reduce((sum, dir) => sum + outputBytes(dir), 0)
     }),
     path: quiet(locate),
     delivered: quiet((q) => {

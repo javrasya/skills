@@ -17,7 +17,7 @@ This is the README of its code, the **crew** package, `packages/crew` in this re
 | `doctor.mjs` | a patient's doctors, in one place: the doctor's brief, nudge and continuation, the Run mailbox and what the runner does with each message (`mailAction`), the doctor rounds (`treat`) and their remedy, and the journal fold's reading of them (`foldMail`, `heldRounds`), so the runner and the fold share one set of round and mail rules; the lifecycle hands it a patient at its failure point |
 | `run-view-model.mjs` | the run view's model, with no terminal: one run's tree (header, phase and agent rows, the bottom pane), every run in the registry for standalone mode, and what each key and click does |
 | `run-view/` | the run view's terminal: `view.mjs`, the entry the runner starts in its tab and the `orca-runs` skill opens standalone, `draw.mjs`, the screen drawn from the model, and `package.json` for terminal-kit (below) |
-| `transcript.mjs` | where a Claude or pi session writes its transcript, found from its session id, how big it is, its context size and tokens, and whether a prompt reached it |
+| `transcript.mjs` | where a Claude or pi session writes its transcript, found from its session id, how big it is (its subagents' transcripts and its background processes' output counted in, so a worker waiting on either is still moving), its context size and tokens, and whether a prompt reached it |
 | `mcp-answers.mjs` | the operator's answers to Claude's project-MCP-server dialog, copied into a worker's child worktree before its agent starts |
 | `submit.mjs` | the worker's end of `agent()`: validates the payload, records it, sends `worker_done` |
 | `session-host.mjs` | the session host interface (ADR-0017): every call the runner, submit and the run view make on the host their sessions run in, and `hostUnreachable`, the one test of whether a host is there at all |
@@ -40,7 +40,7 @@ This is the README of its code, the **crew** package, `packages/crew` in this re
 | `console.mjs` | the run console and the debug console: a page drawn on the terminal, and entering a session from it |
 | `orchestrator.mjs` | the orchestrator: the agent crew hands one question at a time, each a fresh headless run in the project |
 | `headless.mjs` | a harness run once, headless (`claude -p`, `pi -p`): the orchestrator's questions, and `crew start`'s login and model check |
-| `screens.mjs` | each harness's screen reader: its ready screen, and the dialogs only the person answers (ADR-0019) |
+| `screens.mjs` | each harness's screen reader: its ready screen, or that it tells crew itself when it takes a prompt (ADR-0026), and the dialogs only the person answers (ADR-0019) |
 | `triage.mjs` | halt triage: each new halt a question to the orchestrator, for the run console's halt panel |
 | `daemon/` | the crew daemon: `daemon.mjs` (its sessions and requests, and parking a done agent's harness until it is entered again, ADR-0024; every agent's session restored parked after a restart, ADR-0025), `session.mjs` (one session in a pty and a headless terminal), `runs.mjs` (crew's Runs, dispatches and mailboxes), `modes.mjs` (a session's terminal modes), `client.mjs` and `transport.mjs` (a command's side, and where the daemon lives) |
 

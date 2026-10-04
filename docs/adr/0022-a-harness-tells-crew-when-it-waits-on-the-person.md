@@ -29,9 +29,9 @@ Both flags apply to that one session only. A `pi` or `claude` the operator start
   - **Set waiting:** `PermissionRequest` (`Claude asks permission to use <tool>: <command>`), `Elicitation`, `PreToolUse` of `AskUserQuestion`, and a `Notification` of `permission_prompt` or `elicitation_dialog` (with `keep`).
   - **Clear it:** the next `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionDenied`, `ElicitationResult`, `UserPromptSubmit` or `Stop`. Claude has no event for a dialog closing, so whatever comes next clears it.
   - The hook prints nothing and always exits 0.
-- **Before the first prompt, a session that waits is at a dialog.** `ready()` treats it as one: nothing is typed, `asking` hears of it, and the row **needs you**, whatever the screen shows. For pi, these events are the only dialog check. It is ready once it is quiet and waits on nothing. Claude's startup dialogs fire no hook, so its screen reader (ADR-0019) still guards them.
+- **Before the first prompt, a session that waits is at a dialog.** `ready()` treats it as one: nothing is typed, `asking` hears of it, and the row **needs you**, whatever the screen shows. For pi, these events are the only dialog check. It is ready once it is quiet and waits on nothing (amended by ADR-0026: once it has said so, and waits on nothing). Claude's startup dialogs fire no hook, so its screen reader (ADR-0019) still guards them.
 - **Mid-turn, a worker that waits is blocked on a human.** `worker.show` reports `waiting`, and the runner's existing handling applies, as for Orca: the agent is not nudged, its row shows **blocked** with the question, and the blocked limit counts.
-- **Outside a crew session it does nothing.** The relays send only when `CREW_SESSION` is set, and they swallow every error. A daemon that is gone never fails the harness.
+- **Outside a crew session it does nothing.** The relays send only when `CREW_SESSION` is set, and they swallow every error. A daemon that is gone never fails the harness. (Amended by ADR-0026: a failed request is reported, by the hook on stderr or by pi as an extension error, and still never fails the harness.)
 
 ## Considered options
 

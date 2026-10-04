@@ -8,8 +8,12 @@
 // Each harness has its own reader, since each CLI draws its own screens, and
 // each is a table to add to as a CLI's screens change or a new one is met:
 //   ready(lines)   whether the screen is the harness's input prompt, or null
-//                  for a harness whose ready screen crew cannot tell, which
-//                  is taken as ready once its terminal has gone quiet
+//                  for a harness whose ready screen crew cannot tell
+//   tells          true for a harness that tells crew itself when it takes a
+//                  prompt (hooks/, the daemon's session.ready), whose screen
+//                  then says nothing about it. With neither ready nor tells,
+//                  the harness is taken as ready once its terminal has gone
+//                  quiet
 //   dialogs        what the harness asks the person, checked before ready:
 //                  { name, match(text, lines), ask }, `ask` saying what the
 //                  person must do, shown as the agent's reason
@@ -54,9 +58,10 @@ export const SCREENS = Object.freeze({
   }),
   // pi is launched with --approve, so its trust prompt never shows, and its
   // extensions' dialogs are told by pi's own events (waiting.mjs), not read
-  // off its screen. Its ready screen is not one crew reads yet: pi is ready
-  // once quiet and waiting on nothing.
-  pi: Object.freeze({ ready: null, dialogs: Object.freeze([]) }),
+  // off its screen. Nor is its readiness: pi says so itself (hooks/crew-pi.mjs
+  // on session_start). Its terminal cannot be waited on to go quiet, as an
+  // extension's status line may redraw it every second for good.
+  pi: Object.freeze({ ready: null, tells: true, dialogs: Object.freeze([]) }),
 })
 
 // What `lines`, a screen of `harness`, shows: { state: 'ready' }, { state:
@@ -75,3 +80,4 @@ export function readScreen(harness, lines, screens = SCREENS) {
 
 // Whether crew can tell `harness`'s ready screen, rather than wait for quiet.
 export const readsReady = (harness, screens = SCREENS) => typeof screens[harness]?.ready === 'function'
+export const tellsReady = (harness, screens = SCREENS) => screens[harness]?.tells === true
