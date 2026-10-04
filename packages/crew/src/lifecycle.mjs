@@ -11,7 +11,6 @@
 // (doctor.mjs), which also hold the Run mailbox its doctors report over.
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { validate } from './schema.mjs'
 import { slug } from './util.mjs'
@@ -19,10 +18,10 @@ import { sessionTranscripts } from './transcript.mjs'
 import { agentId, extraLines, porcelainPaths, unionLines } from './git.mjs'
 import { chainEntry } from './journal.mjs'
 import { DOCTOR_NUDGE, doctorContinuePrompt, notePrompt, runMailbox, doctorRounds } from './doctor.mjs'
+import { tool } from './tools.mjs'
 
 export { doctorPrompt, notePrompt } from './doctor.mjs'
-
-export const SUBMIT = fileURLToPath(new URL('./submit.mjs', import.meta.url))
+export { SUBMIT } from './tools.mjs'
 
 const fileNames = (lines) => porcelainPaths(lines).join(', ')
 
@@ -87,7 +86,7 @@ export const NO_WORKFLOW = 'You may use subagents, in the foreground or the back
 // `attended`: a person joins it, so it is told to ask them, not that nobody answers.
 export function workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline = null, leftovers = [], note = null, attended = null }) {
   const what = schemaPath ? `Write your result to ${payloadPath} as one JSON object that matches the JSON Schema in ${schemaPath}.` : `Write your answer to ${payloadPath} as plain text.`
-  const command = [`node "${SUBMIT}"`, schemaPath && `--schema "${schemaPath}"`, `--result "${resultPath}"`, `--payload "${payloadPath}"`, '--from <worker_handle> --dispatch-capability <capability> --task-id <task_id> --dispatch-id <dispatch_id>'].filter(Boolean).join(' ')
+  const command = tool('submit').fallback({ schemaPath, resultPath, payloadPath })
   return `${prompt}${baselineSection(baseline, leftovers)}
 
 ---

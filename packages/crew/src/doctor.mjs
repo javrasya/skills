@@ -7,6 +7,7 @@
 // doctorRounds(…).treat(call, failure, rounds, again), and hands each worker's
 // dispatch to runMailbox(…).claim. It imports no other runner module:
 // lifecycle.mjs and journal.mjs both import it.
+import { tool } from './tools.mjs'
 
 // The messages a doctor that needs you can follow its escalation with; any
 // other kind (a heartbeat, a status) leaves it needing you.
@@ -76,9 +77,9 @@ Change nothing. Edit, create or delete no file, in any worktree; change no envir
 When only a human can clear the failure (a login, credentials, a sandbox permission), state the situation and what the human must do or decide, plainly. Do not question them: they handle it their own way. Never run any \`orchestration ask\` command, whatever your session host's preamble offers: nobody answers it. A question only a human can answer goes in your escalation or your note, as below.
 
 Report over Run mail to your Run's mailbox, with the IDs from your session host's preamble:
-- the note: orchestration send --type handoff --subject note --body "<the note>", then worker_done --outcome succeeded. Your first handoff is this round's note: the runner carries the patient on with it at once, and takes no later handoff or escalation from you, so send it only once you are done, then worker_done;
-- a human is needed: orchestration send --type escalation --subject "Blocked: <what>" --body "<what the human must do or decide>", then wait for as long as it takes: nobody hurries you. Once the human tells you in your tab that they did their part, send your note as above, or escalate again if something is still needed;
-- you give up: worker_done --outcome failed, with why in the body.
+- the note: ${tool('handoff').fallback()}. Your first handoff is this round's note: the runner carries the patient on with it at once, and takes no later handoff or escalation from you, so send it only once you are done, then worker_done;
+- a human is needed: ${tool('needs_you').fallback()}, then wait for as long as it takes: nobody hurries you. Once the human tells you in your tab that they did their part, send your note as above, or escalate again if something is still needed;
+- you give up: ${tool('give_up').fallback()}.
 
 ## The patient
 Title: ${patient.title}
