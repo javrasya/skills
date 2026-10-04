@@ -1,5 +1,9 @@
 export const meta = { name: 'runner-contract-orca', description: 'the guarantees only the Orca runner makes, checked with cheap agents', phases: [{ title: 'Contract' }] }
 
+// Not to be run: it throws before any agent starts. Same reason as the skipped
+// orca-cli: and fake orca: tests (packages/crew/test/test-orca-runner.mjs).
+throw new Error('Orca leg skipped: new work (#171) does not target Orca; Orca stays, its tests and contract are not run')
+
 // Orca-only guarantees, which scripts/runner-contract.workflow.js (byte-identical
 // under both runners) cannot hold. The expected object and the agent-driven
 // procedure: packages/crew/README.md.

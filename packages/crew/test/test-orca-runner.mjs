@@ -37,6 +37,9 @@ import { consoleRunsHelp, consoleTreeHelp, draw, drawRuns, helpLine, listRuns, s
 import { EventEmitter } from 'node:events'
 import { daemonGone } from '../src/daemon/client.mjs'
 
+// Every orca-cli: and fake orca: test is skipped for this reason; scripts/runner-contract-orca.workflow.js refuses to run for it.
+const ORCA_SKIPPED = 'Orca leg skipped: new work (#171) does not target Orca; Orca stays, its tests and contract are not run'
+
 const SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -1222,7 +1225,7 @@ const flag = (argv, name) => (argv.includes(name) ? argv[argv.indexOf(name) + 1]
 const verbsOf = (argvs) => argvs.map((a) => a.slice(0, 2).join(' '))
 const START = { run: 'run_1', prompt: 'p', title: '[Implement] impl:#1', sessionId: SID }
 
-test('orca-cli: a Claude worker with no permission mode starts from its own command line too, with its session id, never through --agent', async () => {
+test('orca-cli: a Claude worker with no permission mode starts from its own command line too, with its session id, never through --agent', { skip: ORCA_SKIPPED }, async () => {
   const { argvs, orca } = recordingCli()
   const w = await orca.workerStart({ ...START, harness: 'claude', model: 'opus', effort: 'low' })
   assert.deepEqual(verbsOf(argvs), ['terminal create', 'terminal wait', 'orchestration worker-start'])
@@ -1233,18 +1236,18 @@ test('orca-cli: a Claude worker with no permission mode starts from its own comm
   assert.equal(w.terminal, 'term_own')
 })
 
-test('orca-cli: a worker with no session id is refused before Orca is called', async () => {
+test('orca-cli: a worker with no session id is refused before Orca is called', { skip: ORCA_SKIPPED }, async () => {
   const { argvs, orca } = recordingCli()
   await assert.rejects(orca.workerStart({ ...START, sessionId: undefined }), /no session id/)
   assert.deepEqual(argvs, [])
 })
 
-test("orca-cli: a worker in the run's own worktree is named with that worktree's path, from its terminal", async () => {
+test("orca-cli: a worker in the run's own worktree is named with that worktree's path, from its terminal", { skip: ORCA_SKIPPED }, async () => {
   const { orca } = recordingCli({ 'terminal create': { terminal: { handle: 'term_own', worktreeId: 'repo::C:/wt/run' } } })
   assert.equal((await orca.workerStart(START)).worktree, 'C:/wt/run')
 })
 
-test('orca-cli: a Claude worker starts in the given permission mode, in a terminal worker-start then supervises', async () => {
+test('orca-cli: a Claude worker starts in the given permission mode, in a terminal worker-start then supervises', { skip: ORCA_SKIPPED }, async () => {
   const { argvs, orca } = recordingCli()
   const w = await orca.workerStart({ ...START, harness: 'claude', model: 'opus', effort: 'high', permissionMode: 'auto' })
   assert.deepEqual(verbsOf(argvs), ['terminal create', 'terminal wait', 'orchestration worker-start'])
@@ -1262,7 +1265,7 @@ test('orca-cli: a Claude worker starts in the given permission mode, in a termin
   assert.deepEqual(verbsOf(argvs.slice(3)), ['orchestration worker-release'])
 })
 
-test('orca-cli: a pi worker starts with project-local files trusted, its model and effort on its own command line', async () => {
+test('orca-cli: a pi worker starts with project-local files trusted, its model and effort on its own command line', { skip: ORCA_SKIPPED }, async () => {
   const { argvs, orca } = recordingCli()
   await orca.workerStart({ ...START, harness: 'pi', model: 'openai/gpt-5', effort: 'low' })
   assert.equal(flag(argvs[0], '--command'), `pi --approve --session-id ${SID} --model openai/gpt-5 --thinking low`)
@@ -1273,7 +1276,7 @@ test('orca-cli: a pi worker starts with project-local files trusted, its model a
   assert.equal(flag(bare.argvs[0], '--command'), `pi --approve --session-id ${SID}`)
 })
 
-test('orca-cli: an agent whose TUI never goes idle is not dispatched, and its terminal is closed', async () => {
+test('orca-cli: an agent whose TUI never goes idle is not dispatched, and its terminal is closed', { skip: ORCA_SKIPPED }, async () => {
   const { argvs, orca } = recordingCli({ 'terminal wait': { wait: { satisfied: false } } })
   await assert.rejects(orca.workerStart({ ...START, harness: 'pi' }), /agent_not_ready/)
   assert.deepEqual(verbsOf(argvs), ['terminal create', 'terminal wait', 'terminal wait', 'terminal close'])
@@ -1416,7 +1419,7 @@ for (const [what, launch, command] of [
   ['a Claude worker in a permission mode', { harness: 'claude', model: 'opus', permissionMode: 'auto' }, `claude --session-id ${SID} --permission-mode auto --model opus`],
   ['a pi worker', { harness: 'pi', model: 'openai/gpt-5' }, `pi --approve --session-id ${SID} --model openai/gpt-5`],
 ]) {
-  test(`orca-cli: ${what} isolated in a child worktree runs its terminal in that child, made first`, async () => {
+  test(`orca-cli: ${what} isolated in a child worktree runs its terminal in that child, made first`, { skip: ORCA_SKIPPED }, async () => {
     const { argvs, orca } = childCli()
     const w = await orca.workerStart({ ...START, ...launch, child: CHILD })
     assert.deepEqual(verbsOf(argvs), ['worktree create', 'terminal close', 'worktree set', 'terminal create', 'terminal wait', 'orchestration worker-start'])
@@ -1435,7 +1438,7 @@ for (const [what, launch, command] of [
   })
 }
 
-test("orca-cli: a doctor's child worktree is created with setup skipped; any other follows the repo's setup policy", async () => {
+test("orca-cli: a doctor's child worktree is created with setup skipped; any other follows the repo's setup policy", { skip: ORCA_SKIPPED }, async () => {
   for (const [child, setup] of [
     [{ ...CHILD, setup: 'skip' }, 'skip'],
     [CHILD, null],
@@ -1464,7 +1467,7 @@ function chainCli(create = () => ({ worktree: { id: `repo::${CHAIN}`, path: CHAI
   )
 }
 
-test("orca-cli: the run's chain worktree is made once, as <runId>-chain from the run's worktree under the repo's setup policy, its baseline taken; asked again, the same one", async () => {
+test("orca-cli: the run's chain worktree is made once, as <runId>-chain from the run's worktree under the repo's setup policy, its baseline taken; asked again, the same one", { skip: ORCA_SKIPPED }, async () => {
   const { argvs, orca } = chainCli()
   assert.deepEqual(await orca.chainWorktree({ runId: 'run_1' }), { path: CHAIN, made: true, baseline: ['?? setup.out'], warnings: [] })
   assert.deepEqual(verbsOf(argvs), ['worktree list', 'worktree create', 'terminal close'])
@@ -1475,7 +1478,7 @@ test("orca-cli: the run's chain worktree is made once, as <runId>-chain from the
   assert.deepEqual(verbsOf(argvs), ['worktree list'])
 })
 
-test('orca-cli: a chain create answered too late is taken up as made, with a warning and no baseline, its setup maybe still running', async () => {
+test('orca-cli: a chain create answered too late is taken up as made, with a warning and no baseline, its setup maybe still running', { skip: ORCA_SKIPPED }, async () => {
   const { orca } = chainCli(() => {
     throw new OrcaError('call_timeout', 'killed after 120s', 'worktree create')
   })
@@ -1483,7 +1486,7 @@ test('orca-cli: a chain create answered too late is taken up as made, with a war
   assert.deepEqual([r.path, r.made, r.baseline, r.warnings.length], [CHAIN, true, null, 1])
 })
 
-test('orca-cli: a worker started in the chain runs its terminal there, making and setting no worktree, and a failed start never names the chain as its own', async () => {
+test('orca-cli: a worker started in the chain runs its terminal there, making and setting no worktree, and a failed start never names the chain as its own', { skip: ORCA_SKIPPED }, async () => {
   const { argvs, orca } = chainCli()
   const w = await orca.workerStart({ ...START, harness: 'claude', chain: CHAIN })
   assert.deepEqual(verbsOf(argvs), ['terminal create', 'terminal wait', 'orchestration worker-start'])
@@ -1497,7 +1500,7 @@ test('orca-cli: a worker started in the chain runs its terminal there, making an
   assert.deepEqual([e.code, e.worktree, e.dispatched], ['boom', undefined, true])
 })
 
-test("orca-cli: the Run mailbox is checked from the runner's own terminal, each message tied to its dispatch by its payload, and an ack is answered with the next batch", async () => {
+test("orca-cli: the Run mailbox is checked from the runner's own terminal, each message tied to its dispatch by its payload, and an ack is answered with the next batch", { skip: ORCA_SKIPPED }, async () => {
   const row = (id, type, payload) => ({ id, run_id: 'run_1', delivery_contract: 'current_delivery', from_handle: 'term_d', to_handle: 'run:run_1', subject: 's', body: `body ${id}`, type, priority: 'normal', thread_id: null, payload, created_at: 'at', delivered_at: null })
   const { argvs, orca } = recordingCli({
     'orchestration check': (a) =>
@@ -1534,7 +1537,7 @@ test("orca-cli: the Run mailbox is checked from the runner's own terminal, each 
   assert.deepEqual([next.deliveryId, next.acknowledged, next.messages], [null, 'delivery_A', []])
 })
 
-test('orca-cli: a custom launch that fails after its child worktree was made names that worktree on the error', async () => {
+test('orca-cli: a custom launch that fails after its child worktree was made names that worktree on the error', { skip: ORCA_SKIPPED }, async () => {
   const { argvs, orca } = childCli({ 'terminal wait': { wait: { satisfied: false } } })
   const e = await orca.workerStart({ ...START, harness: 'pi', child: CHILD }).catch((x) => x)
   assert.match(e.message, /agent_not_ready/)
@@ -1543,7 +1546,7 @@ test('orca-cli: a custom launch that fails after its child worktree was made nam
   assert.equal(flag(argvs.at(-1), '--terminal'), 'term_own', 'its agent terminal is closed')
 })
 
-test('orca-cli: a call Orca never answers fails as call_timeout on the clock; a start it hangs closes its terminal and names its worktree', async () => {
+test('orca-cli: a call Orca never answers fails as call_timeout on the clock; a start it hangs closes its terminal and names its worktree', { skip: ORCA_SKIPPED }, async () => {
   const clock = fakeClock()
   const { argvs, orca } = childCli({ 'orchestration worker-start': () => new Promise(() => {}) }, { clock })
   const e = await orca.workerStart({ ...START, child: CHILD }).catch((x) => x)
@@ -1555,7 +1558,7 @@ test('orca-cli: a call Orca never answers fails as call_timeout on the clock; a 
   assert.deepEqual(verbsOf(argvs).slice(-2), ['orchestration worker-start', 'terminal close'])
 })
 
-test('orca-cli: a worktree create is bounded by its own timeout; one that runs out after Orca made the worktree finds it by name, and the start carries on in it', async () => {
+test('orca-cli: a worktree create is bounded by its own timeout; one that runs out after Orca made the worktree finds it by name, and the start carries on in it', { skip: ORCA_SKIPPED }, async () => {
   const clock = fakeClock()
   const hung = () => new Promise(() => {})
   const { argvs, orca } = childCli({ 'worktree create': hung, 'worktree list': { worktrees: [{ path: 'C:/wt/other' }, { path: CHILD_PATH, branch: 'refs/heads/u/run_1-3' }] } }, { clock })
@@ -1573,7 +1576,7 @@ test('orca-cli: a worktree create is bounded by its own timeout; one that runs o
   assert.deepEqual(verbsOf(none.argvs), ['worktree create', 'worktree list'])
 })
 
-test('orca-cli: a wait is bounded by the call timeout on top of the time it asks Orca to wait', async () => {
+test('orca-cli: a wait is bounded by the call timeout on top of the time it asks Orca to wait', { skip: ORCA_SKIPPED }, async () => {
   const clock = fakeClock()
   const { orca } = recordingCli({ 'terminal wait': () => new Promise(() => {}) }, { clock })
   await assert.rejects(orca.terminalIdle({ terminal: 'term_1', timeoutMs: 1_000 }), /call_timeout/)
@@ -1595,7 +1598,7 @@ const EARLIER = {
   'terminal list': { terminals: [{ handle: 'term_shell', title: 'Terminal 1', orphaned: false, connected: true }] },
 }
 
-test('orca-cli: a retried start takes up the clean worktree of its name, which a second create would have made <name>-2', async () => {
+test('orca-cli: a retried start takes up the clean worktree of its name, which a second create would have made <name>-2', { skip: ORCA_SKIPPED }, async () => {
   const g = gitStub({ status: '', 'rev-list': '0\n' })
   const { argvs, orca } = childCli(EARLIER, { git: g.git })
   const w = await orca.workerStart({ ...START, harness: 'pi', child: { ...CHILD, retry: true, dispatched: true } })
@@ -1614,7 +1617,7 @@ test('orca-cli: a retried start takes up the clean worktree of its name, which a
   assert.deepEqual(verbsOf(none.argvs).slice(0, 2), ['worktree list', 'worktree create'], 'a retry with no worktree of its name yet makes it')
 })
 
-test('orca-cli: a retry no earlier attempt of which sent its worker-start takes up its worktree whatever it holds, reading none of it', async () => {
+test('orca-cli: a retry no earlier attempt of which sent its worker-start takes up its worktree whatever it holds, reading none of it', { skip: ORCA_SKIPPED }, async () => {
   const g = gitStub({ status: '?? node_modules/\n?? package-lock.json\n', 'rev-list': '2\n' })
   const { argvs, orca } = childCli(EARLIER, { git: g.git })
   const w = await orca.workerStart({ ...START, child: { ...CHILD, retry: true, dispatched: false } })
@@ -1626,7 +1629,7 @@ test('orca-cli: a retry no earlier attempt of which sent its worker-start takes 
   assert.equal(e.code, 'worktree_held', 'one an agent runs in is still refused')
 })
 
-test('orca-cli: a retry after a worker-start was sent refuses a worktree of its name that holds work, for good, and one an agent still runs in, for this attempt', async () => {
+test('orca-cli: a retry after a worker-start was sent refuses a worktree of its name that holds work, for good, and one an agent still runs in, for this attempt', { skip: ORCA_SKIPPED }, async () => {
   const held = { ...EARLIER, 'terminal list': { terminals: [{ handle: 'term_x', agentIdentity: 'claude', orphaned: false }] } }
   for (const [replies, answers, code, final] of [
     [EARLIER, { status: '?? notes.txt\n', 'rev-list': '0' }, 'worktree_dirty', true],
@@ -1645,7 +1648,7 @@ test('orca-cli: a retry after a worker-start was sent refuses a worktree of its 
 // A setup hook's output, as `git status --porcelain` prints it.
 const SETUP = ['?? node_modules/', ' M package-lock.json']
 
-test("orca-cli: a child it creates has its porcelain taken as its baseline and handed on before the agent's terminal opens, and the prompt is made from it", async () => {
+test("orca-cli: a child it creates has its porcelain taken as its baseline and handed on before the agent's terminal opens, and the prompt is made from it", { skip: ORCA_SKIPPED }, async () => {
   const g = gitStub({ status: `${SETUP.join('\n')}\n` })
   const { argvs, orca } = childCli({}, { git: g.git })
   const handed = []
@@ -1666,7 +1669,7 @@ test("orca-cli: a child it creates has its porcelain taken as its baseline and h
   assert.equal(flag(late.argvs.at(-1), '--spec'), 'baseline: null')
 })
 
-test('orca-cli: a retry after a worker-start was sent takes up a worktree whose porcelain is still its baseline, and refuses one changed since, for good', async () => {
+test('orca-cli: a retry after a worker-start was sent takes up a worktree whose porcelain is still its baseline, and refuses one changed since, for good', { skip: ORCA_SKIPPED }, async () => {
   for (const [status, code] of [
     [` M package-lock.json\n?? node_modules/\n`, null],
     [`${SETUP.join('\n')}\n?? notes.txt\n`, 'worktree_dirty'],
@@ -1688,7 +1691,7 @@ test('orca-cli: a retry after a worker-start was sent takes up a worktree whose 
   assert.equal(e.code, 'worktree_has_commits', 'its baseline spares no commit')
 })
 
-test("orca-cli: a retry asks for Orca's whole worktree list, and a page still truncated fails the attempt, retryable, never read as 'not found'", async () => {
+test("orca-cli: a retry asks for Orca's whole worktree list, and a page still truncated fails the attempt, retryable, never read as 'not found'", { skip: ORCA_SKIPPED }, async () => {
   const { argvs, orca } = childCli({ 'worktree list': { worktrees: [{ path: 'C:/wt/other', branch: 'refs/heads/u/other' }], truncated: true } }, { git: gitStub().git })
   const e = await orca.workerStart({ ...START, child: { ...CHILD, retry: true } }).catch((x) => x)
   assert.equal(e.code, 'worktree_list_truncated')
@@ -1697,7 +1700,7 @@ test("orca-cli: a retry asks for Orca's whole worktree list, and a page still tr
   assert.deepEqual(argvs, [['worktree', 'list', '--limit', '10000']], 'no create, no terminal')
 })
 
-test('orca-cli: a create Orca answers with <name>-2 fails for good, naming the new worktree and the earlier one of its name', async () => {
+test('orca-cli: a create Orca answers with <name>-2 fails for good, naming the new worktree and the earlier one of its name', { skip: ORCA_SKIPPED }, async () => {
   const taken = `${CHILD_PATH}-2`
   const { argvs, orca } = childCli({ 'worktree create': { worktree: { id: `repo::${taken}`, path: taken }, startupTerminal: { handle: 'term_shell' } } })
   const e = await orca.workerStart({ ...START, child: CHILD }).catch((x) => x)
@@ -1709,7 +1712,7 @@ test('orca-cli: a create Orca answers with <name>-2 fails for good, naming the n
   assert.deepEqual(verbsOf(argvs), ['worktree create', 'terminal close'], 'its startup shell is closed; no agent terminal, no worker-start')
 })
 
-test('orca-cli: a display name Orca refuses is a warning the start returns, and the start goes on', async () => {
+test('orca-cli: a display name Orca refuses is a warning the start returns, and the start goes on', { skip: ORCA_SKIPPED }, async () => {
   const { orca } = childCli({
     'worktree set': () => {
       throw new OrcaError('selector_not_found', 'gone', 'worktree set')
@@ -1720,7 +1723,7 @@ test('orca-cli: a display name Orca refuses is a warning the start returns, and 
   assert.equal(w.terminal, 'term_own')
 })
 
-test("orca-cli: a worktree's board status is set by path", async () => {
+test("orca-cli: a worktree's board status is set by path", { skip: ORCA_SKIPPED }, async () => {
   const { argvs, orca } = recordingCli()
   await orca.worktreeStatus({ worktree: CHILD_PATH, status: 'in-review' })
   assert.deepEqual(argvs, [['worktree', 'set', '--worktree', `path:${CHILD_PATH}`, '--workspace-status', 'in-review']])
@@ -1733,7 +1736,7 @@ for (const [harness, launch, command] of [
   ['claude', { harness: 'claude', model: 'opus', permissionMode: 'auto' }, `claude --resume ${SID} --permission-mode auto --model opus`],
   ['pi', { harness: 'pi', model: 'openai/gpt-5', effort: 'low' }, `pi --approve --session-id ${SID} --model openai/gpt-5 --thinking low`],
 ]) {
-  test(`orca-cli: continuing a ${harness} session with its tab alive stops the process, then resumes the session in the same terminal and prompts it`, async () => {
+  test(`orca-cli: continuing a ${harness} session with its tab alive stops the process, then resumes the session in the same terminal and prompts it`, { skip: ORCA_SKIPPED }, async () => {
     const { argvs, orca } = recordingCli()
     const w = await orca.workerContinue({ ...CONTINUE, ...launch })
     assert.deepEqual(verbsOf(argvs), ['terminal send', 'terminal send', 'terminal send', 'terminal send', 'terminal wait', 'terminal send'])
@@ -1746,7 +1749,7 @@ for (const [harness, launch, command] of [
     assert.deepEqual(w, { dispatchId: 'ctx_old', terminal: 'term_old', worktree: CHILD_PATH, reopened: false })
   })
 
-  test(`orca-cli: continuing a ${harness} session with its tab gone resumes it in a new terminal in the same worktree, which worker-start adopts`, async () => {
+  test(`orca-cli: continuing a ${harness} session with its tab gone resumes it in a new terminal in the same worktree, which worker-start adopts`, { skip: ORCA_SKIPPED }, async () => {
     const { argvs, orca } = recordingCli()
     const w = await orca.workerContinue({ ...CONTINUE, ...launch, reopen: true })
     assert.deepEqual(verbsOf(argvs), ['terminal create', 'terminal wait', 'orchestration worker-start'])
@@ -1759,7 +1762,7 @@ for (const [harness, launch, command] of [
   })
 }
 
-test('orca-cli: a tab that refuses the continuation is taken for gone, and the session resumes in a new terminal', async () => {
+test('orca-cli: a tab that refuses the continuation is taken for gone, and the session resumes in a new terminal', { skip: ORCA_SKIPPED }, async () => {
   const { argvs, orca } = recordingCli({
     'terminal send': () => {
       throw new OrcaError('terminal_not_writable', '', 'terminal send')
@@ -2400,7 +2403,7 @@ return await agent('d', { harness: 'pi', label: 'pi-wt', schema: S, isolation: '
   }
 })
 
-test('fake orca: a worker start without a runner-assigned session id is refused', async () => {
+test('fake orca: a worker start without a runner-assigned session id is refused', { skip: ORCA_SKIPPED }, async () => {
   const orca = fakeOrca()
   await assert.rejects(orca.workerStart({ run: 'run_fake', prompt: '', title: 't' }), /without a runner-assigned --session-id/)
   assert.deepEqual(orca.calls, [])
@@ -3816,7 +3819,7 @@ test("doctor: a resume after a never-started patient's start was retried with a 
   )
 })
 
-test("fake orca: a Run's mailbox holds what its workers send, hands its coordinator the same batch until acknowledged, and a run-use delivers it again under a new id", async () => {
+test("fake orca: a Run's mailbox holds what its workers send, hands its coordinator the same batch until acknowledged, and a run-use delivers it again under a new id", { skip: ORCA_SKIPPED }, async () => {
   const orca = fakeOrca()
   const { runId } = await orca.runCreate({ objective: 'o' })
   await orca.workerStart({ run: runId, prompt: 'p', title: 't', sessionId: SID })
@@ -4756,7 +4759,7 @@ test('registry: two runs at once in one repo are two entries that never mix', as
   assert.deepEqual([runs.run_b1.project, runs.run_b1.runDir, runs.run_b1.runner.terminal, runs.run_b1.state], ['C:/repo', b.stateDir, 'term_b', 'partial'])
 })
 
-test('orca-cli: run-create reports the coordinator terminal the Run bound to', async () => {
+test('orca-cli: run-create reports the coordinator terminal the Run bound to', { skip: ORCA_SKIPPED }, async () => {
   const { orca } = recordingCli({ 'orchestration run-create': { run: { id: 'run_1', coordinator_handle: 'term_me' } } })
   assert.deepEqual(await orca.runCreate({ objective: 'o' }), { runId: 'run_1', terminal: 'term_me' })
 })
@@ -5143,7 +5146,7 @@ test('reclaim: unpushed counts commits no remote-tracking ref contains; uncommit
   assert.equal(await worktreeUnpushed(join(dir, 'gone')), 0, 'a worktree already gone holds none')
 })
 
-test('orca-cli: tab liveness is the terminal list without orphans; a reclaim closes the whole tab and force-removes the worktree by path', async () => {
+test('orca-cli: tab liveness is the terminal list without orphans; a reclaim closes the whole tab and force-removes the worktree by path', { skip: ORCA_SKIPPED }, async () => {
   const { argvs, orca } = recordingCli({
     'terminal list': {
       terminals: [
@@ -5562,7 +5565,7 @@ test("resume: every agent of the Run is named across resumes, once each in the r
   assert.equal(run().kept, 0)
 })
 
-test('fake orca: a Run takes worker-starts only from the terminal it is bound to, and run-use rebinds it', async () => {
+test('fake orca: a Run takes worker-starts only from the terminal it is bound to, and run-use rebinds it', { skip: ORCA_SKIPPED }, async () => {
   const orca = fakeOrca({ coordinator: 'term_a' })
   const { runId } = await orca.runCreate({ objective: 'o' })
   const b = orca.as('term_b')
@@ -5575,13 +5578,13 @@ test('fake orca: a Run takes worker-starts only from the terminal it is bound to
   await assert.rejects(start(orca), /consumer_fenced/)
 })
 
-test('orca-cli: run-use takes the Run over from this terminal and reports the terminal it is now bound to', async () => {
+test('orca-cli: run-use takes the Run over from this terminal and reports the terminal it is now bound to', { skip: ORCA_SKIPPED }, async () => {
   const { orca, argvs } = recordingCli({ 'orchestration run-use': { run: { id: 'run_1', coordinator_handle: 'term_new', consumer_generation: 2 } } })
   assert.deepEqual(await orca.runUse({ runId: 'run_1' }), { runId: 'run_1', terminal: 'term_new' })
   assert.deepEqual(argvs, [['orchestration', 'run-use', '--id', 'run_1']])
 })
 
-test('orca-cli: a worker taken up from an earlier runner is shown as Orca sees it, by worker-show, and a release leaves its tab to reclaim', async () => {
+test('orca-cli: a worker taken up from an earlier runner is shown as Orca sees it, by worker-show, and a release leaves its tab to reclaim', { skip: ORCA_SKIPPED }, async () => {
   const { orca, argvs } = recordingCli({ 'orchestration worker-show': { worker: { agentTerminalHandle: 'term_w', stage: 'running' }, terminal: { orphaned: false }, observation: { status: 'live' } } })
   const s = await orca.workerShow({ dispatch: 'ctx_9' })
   assert.deepEqual([s.settled, s.gone, s.exited, s.terminal], [false, false, false, 'term_w'])
@@ -7157,7 +7160,7 @@ viewTest("run view: l follows runner.log in a tab of its own, as Orca's editor o
   assert.deepEqual(await view.key('q'), { quit: true })
 })
 
-test('orca-cli: the view switches to a tab by handle, opens a file by path, and follows a log in a tab of its own', async () => {
+test('orca-cli: the view switches to a tab by handle, opens a file by path, and follows a log in a tab of its own', { skip: ORCA_SKIPPED }, async () => {
   const { argvs, orca } = recordingCli({ 'terminal switch': { focus: { handle: 'term_a', tabId: 't', worktreeId: 'repo::C:/wt', navigated: true } }, 'terminal create': { terminal: { handle: 'term_log' } } }, { platform: 'win32' })
   assert.deepEqual(await orca.terminalSwitch({ terminal: 'term_a' }), { terminal: 'term_a', worktreeId: 'repo::C:/wt' })
   await orca.fileOpen({ path: 'C:/wt/notes.md' })
@@ -7373,7 +7376,7 @@ viewTest("run view: the screen is the design's tree, a click lands on the row dr
   assert.match(lines.at(-3), /transcript —/)
 })
 
-test('orca-cli: a dispatch Orca failed because its tab closed is a gone worker, not a settled one; one that completed before its tab closed is settled', async () => {
+test('orca-cli: a dispatch Orca failed because its tab closed is a gone worker, not a settled one; one that completed before its tab closed is settled', { skip: ORCA_SKIPPED }, async () => {
   // As worker-show answers about 5 s after `terminal close` (live, Orca 1.4.209, #53).
   const closed = (status, stage) => ({
     worker: { agentTerminalHandle: 'term_w', stage, state: status === 'completed' ? 'succeeded' : 'failed' },
@@ -7842,7 +7845,7 @@ test("standalone: r on a run whose runner is dead opens one terminal in the run'
   assert.equal(resumes().length, 2)
 })
 
-test('orca-cli: resuming a runner creates a tab in its worktree running the runner with --resume, every path a quoted literal', async () => {
+test('orca-cli: resuming a runner creates a tab in its worktree running the runner with --resume, every path a quoted literal', { skip: ORCA_SKIPPED }, async () => {
   const { argvs, orca } = recordingCli({ 'terminal create': { terminal: { handle: 'term_r' } } }, { platform: 'win32' })
   const runner = "C:\\Users\\o'neil\\.claude\\skills\\implement-spec-in-workflow\\orca\\runner.mjs"
   const r = await orca.resumeRunner({ worktree: PROJECT, title: 'implement-spec-783 (resumed)', runner, script: 'C:/notes/workflow.js', stateDir: 'C:/notes/orca-run', permissionMode: 'auto' })
@@ -8444,7 +8447,7 @@ test('mcp answers: a source that is not JSON fails naming its path, never quotin
   assert.equal(e.message.includes(SECRET), false)
 })
 
-test("orca-cli: a child it creates gets the project's MCP answers before its baseline is taken; a failure to copy them is a warning, and the start goes on", async () => {
+test("orca-cli: a child it creates gets the project's MCP answers before its baseline is taken; a failure to copy them is a warning, and the start goes on", { skip: ORCA_SKIPPED }, async () => {
   const LOCAL = `${CHILD_PATH}/.claude/settings.local.json`
   const files = {
     'C:/proj/.claude/settings.local.json': JSON.stringify({ env: { TOKEN: SECRET }, enabledMcpjsonServers: ['docs'] }),
@@ -8475,7 +8478,7 @@ test("orca-cli: a child it creates gets the project's MCP answers before its bas
   assert.equal(bad.files.get(LOCAL), files[LOCAL], 'the worktree file is left as it was')
 })
 
-test("orca-cli: the delivery check's keys are a bare Enter, one Ctrl-U per line and never an interrupt, and the rendered screen's last lines", async () => {
+test("orca-cli: the delivery check's keys are a bare Enter, one Ctrl-U per line and never an interrupt, and the rendered screen's last lines", { skip: ORCA_SKIPPED }, async () => {
   const rows = Array.from({ length: 20 }, (_, i) => `row ${i}  `)
   const asked = []
   const { argvs, orca } = recordingCli({ 'terminal read': { terminal: { tail: rows } } }, { transcripts: { delivered: (q) => (asked.push(q), q.needle === 'Do a thing.') } })
