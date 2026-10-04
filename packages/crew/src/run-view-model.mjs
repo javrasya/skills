@@ -6,9 +6,9 @@
 // The model is read from the run's journal, its agents' session transcripts,
 // Orca's terminal list and the run registry; the actions go to Orca, and a
 // reclaim goes through reclaim.mjs, so the view keeps its rules.
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from 'fs'
-import { basename, dirname, join } from 'path'
-import { fileURLToPath } from 'url'
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { sessionTranscripts } from './transcript.mjs'
 import { pathKey, samePath } from './paths.mjs'
 import { agentName, agentsOf, chainAgent, reclaimAgent, reclaimChainAfter, reclaimRun, runWorktree } from './reclaim.mjs'

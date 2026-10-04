@@ -58,11 +58,11 @@
 // (#104): the runner continues every session lost with the old daemon. Such a
 // run is claimed before the daemon answers anyone, so a run view's r that
 // started this daemon cannot give the run a second runner.
-import net from 'net'
-import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync } from 'fs'
-import { join } from 'path'
-import { StringDecoder } from 'string_decoder'
-import { fileURLToPath } from 'url'
+import net from 'node:net'
+import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync } from 'node:fs'
+import { join } from 'node:path'
+import { StringDecoder } from 'node:string_decoder'
+import { fileURLToPath } from 'node:url'
 import { connect, crewPaths, lineDecoder, noDaemon, send } from './transport.mjs'
 import { runBook, runnerCommand, runnerTitle } from './runs.mjs'
 import { REGISTRY_PATH } from '../registry.mjs'

@@ -22,10 +22,10 @@
 // terminal-kit is installed beside this file on first use (npm ci), because
 // the skill may be a detached copy of the repo; npm's output goes to the log:
 // the run's runner.log attached, orca-runs-view.log beside the registry standalone.
-import { spawnSync } from 'child_process'
-import { appendFileSync, closeSync, openSync } from 'fs'
-import { dirname, join, resolve } from 'path'
-import { fileURLToPath } from 'url'
+import { spawnSync } from 'node:child_process'
+import { appendFileSync, closeSync, openSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { runView, runsView } from '../run-view-model.mjs'
 import { parseFlags } from '../args.mjs'
 import { REGISTRY_PATH } from '../registry.mjs'

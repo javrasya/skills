@@ -1,5 +1,5 @@
 // A command's --flags, by node:util's parseArgs.
-import { parseArgs } from 'util'
+import { parseArgs } from 'node:util'
 
 // argv's flags and positionals. `strings` are the flags that take a value,
 // `booleans` those that take none, each spelled in full ('--state-dir');

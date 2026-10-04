@@ -3,7 +3,7 @@
 // runner's resume (runner.mjs), reclaim (reclaim.mjs) and the run view
 // (run-view-model.mjs). One fold, so they never disagree about which lines
 // carry a worker, or about which agents the Run holds.
-import { existsSync, readFileSync } from 'fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { agentDir } from './lifecycle.mjs'
 import { foldMail, heldRounds, mailSupersedes } from './doctor.mjs'
 import { unionLines } from './git.mjs'

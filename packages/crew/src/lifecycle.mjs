@@ -9,10 +9,10 @@
 // A patient, one whose session died past its cap or blocked past the limit,
 // or whose start's retries are spent, is handed to its doctor rounds
 // (doctor.mjs), which also hold the Run mailbox its doctors report over.
-import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, renameSync } from 'fs'
-import { join } from 'path'
-import { fileURLToPath } from 'url'
-import { randomUUID } from 'crypto'
+import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, renameSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { randomUUID } from 'node:crypto'
 import { validate } from './schema.mjs'
 import { slug } from './util.mjs'
 import { sessionTranscripts } from './transcript.mjs'

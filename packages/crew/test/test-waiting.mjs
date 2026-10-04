@@ -6,7 +6,7 @@
 //   node packages/crew/test/test-waiting.mjs
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'fs'
+import { readFileSync } from 'node:fs'
 import { claudeWaiting, piWaiting } from '../src/waiting.mjs'
 
 const events = (name) =>

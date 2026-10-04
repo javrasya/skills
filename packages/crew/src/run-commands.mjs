@@ -1,7 +1,7 @@
 // crew pause, crew resume and crew rm: what p, r and x do in the run view,
 // from the command line, on a run named by its run id, its run folder (crew
 // start's runs/<id>) or its state dir.
-import { basename } from 'path'
+import { basename } from 'node:path'
 import { samePath } from './paths.mjs'
 import { REGISTRY_PATH, readRegistry, runRegistry } from './registry.mjs'
 import { alreadyPaused, notPaused, pauseRun, unpauseRun } from './pause.mjs'

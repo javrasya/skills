@@ -42,10 +42,10 @@
 //   mail.check { coordinator, ack }             → { deliveryId, acknowledged, replayed, messages }
 //   worktree.status { path, status }            → { path, status }
 //   worktree.statuses                           → { statuses: { <path>: <status> } }
-import { randomBytes } from 'crypto'
-import { existsSync, readFileSync } from 'fs'
-import { basename } from 'path'
-import { fileURLToPath } from 'url'
+import { randomBytes } from 'node:crypto'
+import { existsSync, readFileSync } from 'node:fs'
+import { basename } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { readRegistry } from '../registry.mjs'
 import { writeJsonAtomic } from '../fsutil.mjs'
 import { DEFAULT_HOST } from '../hosts.mjs'

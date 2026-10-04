@@ -5,9 +5,9 @@ import pty from 'node-pty'
 import xterm from '@xterm/headless'
 import { repaint, stripHostModes, trackModes } from './modes.mjs'
 import { resolveCommand } from '../command.mjs'
-import { chmodSync, statSync } from 'fs'
-import { createRequire } from 'module'
-import { dirname, join } from 'path'
+import { chmodSync, statSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
 
 const { Terminal } = xterm
 

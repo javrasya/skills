@@ -1,9 +1,9 @@
 // The helpers every module shares: args, paths, command, keys, fsutil, util.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'fs'
-import { tmpdir } from 'os'
-import { join } from 'path'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { parseFlags } from '../src/args.mjs'
 import { pathKey, samePath } from '../src/paths.mjs'
 import { childCommand } from '../src/command.mjs'

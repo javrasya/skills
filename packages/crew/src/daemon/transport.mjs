@@ -1,10 +1,10 @@
 // Where the crew daemon lives and how its clients talk to it: one daemon per
 // crew home (~/.crew/, or CREW_HOME), reached on a named pipe on Windows and a
 // Unix socket elsewhere, carrying newline-delimited JSON.
-import net from 'net'
-import { createHash } from 'crypto'
-import { homedir } from 'os'
-import { join, resolve } from 'path'
+import net from 'node:net'
+import { createHash } from 'node:crypto'
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
 
 export function crewPaths(env = process.env) {
   const home = resolve(env.CREW_HOME || join(homedir(), '.crew'))

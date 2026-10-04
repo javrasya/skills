@@ -16,7 +16,7 @@
 //                    the prompt as sent, for one that cannot take a schema
 //   answer(stdout, schema)
 //                    the value it answered, or a throw saying why none
-import { spawn } from 'child_process'
+import { spawn } from 'node:child_process'
 import { childCommand } from './command.mjs'
 import { validate } from './schema.mjs'
 import { nativeEnv } from './harness.mjs'

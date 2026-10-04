@@ -7,9 +7,9 @@
 // the repo's path) and pre-fill the next form, beating the harness's own
 // default. A model is remembered per harness, so switching harness never
 // carries Claude's model to pi.
-import { mkdirSync, readFileSync } from 'fs'
-import { homedir } from 'os'
-import { join } from 'path'
+import { mkdirSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { readCrewConfig } from './crew-config.mjs'
 import { parseFlags } from './args.mjs'
 import { writeJsonAtomic } from './fsutil.mjs'

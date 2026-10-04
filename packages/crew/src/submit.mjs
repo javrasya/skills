@@ -3,8 +3,8 @@
 // on its result: it validates the payload against the agent's schema and
 // exits 1 with every error, so the agent repairs its payload inside its own
 // turn. Only a valid payload is recorded, and only then is worker_done sent.
-import { readFileSync, realpathSync } from 'fs'
-import { fileURLToPath } from 'url'
+import { readFileSync, realpathSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { validate } from './schema.mjs'
 import { parseFlags } from './args.mjs'
 import { writeJsonAtomic } from './fsutil.mjs'

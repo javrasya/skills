@@ -8,8 +8,8 @@
 // shows and the prompt goes through (2 of 2).
 // The operator's checkout keeps its answers as an edit of that file, which
 // can hold secrets beside them: no message here ever carries its contents.
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
-import { join } from 'path'
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
 
 // The keys Claude records a project's MCP answers under.
 export const MCP_KEYS = Object.freeze(['enabledMcpjsonServers', 'disabledMcpjsonServers', 'enableAllProjectMcpServers'])

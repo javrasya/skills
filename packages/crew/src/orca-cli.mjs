@@ -2,7 +2,7 @@
 // talk to Orca (ADR-0011). Callers see only the plain shapes these methods
 // return; the JSON field names of Orca's `--json` output (as of 1.4.207) stay
 // in this file. fake-orca.mjs implements the same interface, offline.
-import { execFile } from 'child_process'
+import { execFile } from 'node:child_process'
 import { RUNNER_SETTINGS } from './settings.mjs'
 import { gitProbes, prepareChainWorktree, prepareWorktree, reuseWorktree, worktreeLines } from './worktree.mjs'
 import { sessionTranscripts } from './transcript.mjs'

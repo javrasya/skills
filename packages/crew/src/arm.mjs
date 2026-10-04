@@ -3,11 +3,11 @@
 // repo, its path and the notes directory, render the bundled template into a
 // new run's own folder under it, and launch the runner there as a crew
 // session, as `crew run` does.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
-import { randomBytes } from 'crypto'
-import { homedir } from 'os'
-import { dirname, join, resolve } from 'path'
-import { fileURLToPath } from 'url'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { homedir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { readCrewConfig, repoConfig } from './crew-config.mjs'
 import { runFolderOf, stateDirOf } from './run-layout.mjs'
 import { ensureDaemon, request } from './daemon/client.mjs'

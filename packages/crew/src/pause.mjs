@@ -6,8 +6,8 @@
 // call order. Unlike a halt (halt.mjs), a pause holds in-flight calls too:
 // nothing new launches. The calls it holds wait in the hold queue (hold.mjs),
 // the one a halt holds calls in too, so they go on in call order across both.
-import { existsSync, rmSync } from 'fs'
-import { join } from 'path'
+import { existsSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
 import { writeJsonAtomic } from './fsutil.mjs'
 import { holdQueue } from './hold.mjs'
 

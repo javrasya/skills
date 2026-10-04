@@ -1,8 +1,8 @@
 // The command lines a worker's harness starts and resumes from, whichever
 // host types them into its terminal, and the models each harness offers.
-import { readFileSync } from 'fs'
-import { homedir } from 'os'
-import { join } from 'path'
+import { readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { claudeDir, piAgentDir } from './transcript.mjs'
 import { childCommand } from './command.mjs'
 

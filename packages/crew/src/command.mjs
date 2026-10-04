@@ -1,6 +1,6 @@
 // A program by its name, found as a Windows shell would find it.
-import { existsSync } from 'fs'
-import { delimiter, extname, isAbsolute, join, resolve } from 'path'
+import { existsSync } from 'node:fs'
+import { delimiter, extname, isAbsolute, join, resolve } from 'node:path'
 
 // A bare name on Windows is looked up on Path with each PATHEXT extension
 // (conpty finds one only with its extension given: "node.exe", never "node");

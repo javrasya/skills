@@ -68,7 +68,7 @@
 // not from the runner, and still land. guardWith(outage) waits each call, and
 // each step of a start, on the runner's outage (outage.mjs), as the adapter
 // waits each command; probe() is the outage's look, recorded as `probe`.
-import { existsSync } from 'fs'
+import { existsSync } from 'node:fs'
 import { OrcaError, orcaUnreachable, afterCreateTimeout, resumeRunnerCommand, tailCommand, workerStartArgs, withTimeout, workerStatus } from './orca-cli.mjs'
 import { reuseWorktree } from './worktree.mjs'
 import { chainName } from './git.mjs'

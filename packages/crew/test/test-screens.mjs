@@ -5,7 +5,7 @@
 //   node packages/crew/test/test-screens.mjs
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'fs'
+import { readFileSync } from 'node:fs'
 import { SCREENS, readScreen, readsReady, tellsReady } from '../src/screens.mjs'
 import { foldJournal } from '../src/journal.mjs'
 

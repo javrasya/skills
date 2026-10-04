@@ -37,12 +37,12 @@
 // with the `orchestration send` its preamble names. Asked by crew's
 // orchestrator to draft a validation list, it answers FIXED_DRAFT, reading
 // nothing.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
-import { pathToFileURL } from 'url'
-import { spawnSync } from 'child_process'
-import { homedir } from 'os'
-import { dirname, join } from 'path'
-import { randomUUID } from 'crypto'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
+import { spawnSync } from 'node:child_process'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { claudeDir, claudeSlug, piDir, transcriptPath } from '../../../src/transcript.mjs'
 
 const FIXED_DRAFT = {

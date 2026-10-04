@@ -11,9 +11,9 @@
 //
 // Only a console asks: a run that halts while nobody has it open in `crew
 // view` is triaged when someone next opens it there (ADR-0018).
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { writeJsonAtomic } from './fsutil.mjs'
-import { dirname, join } from 'path'
+import { dirname, join } from 'node:path'
 import { TRIAGE_SCHEMA, triagePrompt } from './orchestrator.mjs'
 
 // A question still asking this long after it was claimed has no asker left:

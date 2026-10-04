@@ -1,8 +1,8 @@
 // A crew command's side of the daemon: one request per connection, and the
 // daemon started, detached, when none answers.
-import { spawn } from 'child_process'
-import { closeSync, mkdirSync, openSync, readFileSync } from 'fs'
-import { fileURLToPath } from 'url'
+import { spawn } from 'node:child_process'
+import { closeSync, mkdirSync, openSync, readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { connect, noDaemon, onMessages, send } from './transport.mjs'
 import { sleep } from '../util.mjs'
 

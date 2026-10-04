@@ -56,11 +56,11 @@
 //
 // No change to this directory is done until the runner contract test passes
 // under both runners (README.md). The offline tests do not replace it.
-import { mkdirSync, writeFileSync, readFileSync, rmSync, appendFileSync, realpathSync } from 'fs'
-import { spawn } from 'child_process'
-import { createHash } from 'crypto'
-import { basename, dirname, join, resolve } from 'path'
-import { fileURLToPath } from 'url'
+import { mkdirSync, writeFileSync, readFileSync, rmSync, appendFileSync, realpathSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { basename, dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { checkSchema } from './schema.mjs'
 import { parseFlags } from './args.mjs'
 import { sleep } from './util.mjs'

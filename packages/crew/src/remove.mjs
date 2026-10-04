@@ -7,8 +7,8 @@
 // the ones they say to; finish() forgets the run whatever was left, naming
 // each once, with why it was left. Each kept one carries `worktree`, its path:
 // the chain's is its run's, not its agent's, which chainAgent leaves unset.
-import { rmSync } from 'fs'
-import { join } from 'path'
+import { rmSync } from 'node:fs'
+import { join } from 'node:path'
 import { readJournal } from './journal.mjs'
 import { agentsOf, reclaimAgent, reclaimChainAfter, reclaimRun } from './reclaim.mjs'
 import { runnerAlive, runnerPid } from './run-view-model.mjs'

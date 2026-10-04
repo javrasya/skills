@@ -19,8 +19,8 @@
 //                          is entered (daemon.mjs); 0 never parks. Read when the
 //                          daemon starts. Longer than the runner's followUpMs,
 //                          which may still type into a done chain agent
-import { readFileSync } from 'fs'
-import { isAbsolute, resolve } from 'path'
+import { readFileSync } from 'node:fs'
+import { isAbsolute, resolve } from 'node:path'
 import { HARNESSES } from './harness.mjs'
 import { samePath } from './paths.mjs'
 

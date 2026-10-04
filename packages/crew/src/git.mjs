@@ -1,8 +1,8 @@
 // Git and bounded calls as the runner and every session host use them. No
 // host in here: a worktree is git's, whichever host made it.
-import { execFile } from 'child_process'
-import { existsSync } from 'fs'
-import { basename, dirname, resolve } from 'path'
+import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { basename, dirname, resolve } from 'node:path'
 import { RUNNER_SETTINGS } from './settings.mjs'
 
 // A clock's timer: resolves after ms unless cancelled first. The runner's

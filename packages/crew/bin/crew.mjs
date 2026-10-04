@@ -55,9 +55,9 @@
 // Each entry keeps its own argv parsing and its own "am I main" check, so this
 // hands it the argv it would have had launched directly, then loads it in this
 // process: a child process would split the terminal and its signals between two.
-import { existsSync, realpathSync } from 'fs'
-import { basename, resolve } from 'path'
-import { fileURLToPath, pathToFileURL } from 'url'
+import { existsSync, realpathSync } from 'node:fs'
+import { basename, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { HOST_NAMES as HOSTS } from '../src/hosts.mjs'
 import { crewPaths } from '../src/daemon/transport.mjs'
 import { ensureDaemon, request, stopDaemon } from '../src/daemon/client.mjs'
@@ -234,7 +234,7 @@ async function runCommand(verb, args) {
     const hosts = await openHosts({ paths, callMs: RUNNER_SETTINGS.viewCallMs })
     return hosts[run.host] ?? hosts[LEGACY_HOST]
   }
-  const { createInterface } = await import('readline/promises')
+  const { createInterface } = await import('node:readline/promises')
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   try {
     console.log(await removeCommand({ registry, target, openHost, yes: !!values['--yes'], ask: (q) => rl.question(q), out: (s) => console.error(s) }))

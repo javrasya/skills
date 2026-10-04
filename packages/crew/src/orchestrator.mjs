@@ -9,9 +9,9 @@
 // talk to: recorded in the run's state dir (CONSULT_FILE, #168), so the run
 // tree lists it under Orchestrator and the person can enter it again. It
 // never answers a scheduling question: the questions are crew's, and none is one.
-import { randomUUID } from 'crypto'
-import { appendFileSync, readFileSync } from 'fs'
-import { join } from 'path'
+import { randomUUID } from 'node:crypto'
+import { appendFileSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { checkSchema } from './schema.mjs'
 import { runHeadless } from './headless.mjs'
 import { validationLineProblem } from './validation-list.mjs'

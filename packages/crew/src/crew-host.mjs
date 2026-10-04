@@ -10,11 +10,11 @@
 // worker_done go through. Its session's environment names crew as its host
 // (CREW_HOST, CREW_HOME), so submit and that command reach this daemon with
 // no Orca installed.
-import { execFile } from 'child_process'
-import { existsSync } from 'fs'
-import { basename, dirname, extname, join, resolve } from 'path'
-import { randomBytes } from 'crypto'
-import { fileURLToPath } from 'url'
+import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { basename, dirname, extname, join, resolve } from 'node:path'
+import { randomBytes } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import { crewPaths } from './daemon/transport.mjs'
 import { daemonGone, ensureDaemon, request } from './daemon/client.mjs'
 import { runnerCommand } from './daemon/runs.mjs'

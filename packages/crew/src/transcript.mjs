@@ -6,9 +6,9 @@
 //   pi:     ~/.pi/agent/sessions/--<enc>--/<created-at>_<id>.jsonl, the enc
 //           being the cwd with '/', '\' and ':' as '-'. pi writes the file
 //           lazily, at its first assistant message.
-import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'fs'
-import { homedir } from 'os'
-import { join, resolve } from 'path'
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
 
 // The user's Claude directory: CLAUDE_CONFIG_DIR when set, else ~/.claude.
 // The one place it is resolved: Claude transcripts and the run registry

@@ -3,9 +3,9 @@
 //   node packages/crew/test/test-start-form.mjs
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'fs'
-import { tmpdir } from 'os'
-import { join } from 'path'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { crewPaths } from '../src/daemon/transport.mjs'
 import { DEFAULTS } from '../src/crew-config.mjs'
 import { piModels } from '../src/harness.mjs'

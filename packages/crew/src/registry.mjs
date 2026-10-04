@@ -31,8 +31,8 @@
 //              no agent, the whole run was reclaimed
 //   removed    the operator removed the run (remove.mjs): it is forgotten,
 //              dropped from every read of the registry, and its folder deleted
-import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync } from 'fs'
-import { dirname, join } from 'path'
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { claudeDir } from './transcript.mjs'
 import { LEGACY_HOST } from './hosts.mjs'
 import { chainName } from './git.mjs'
