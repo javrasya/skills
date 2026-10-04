@@ -6563,6 +6563,102 @@ test('sequential run: a resume that remakes a reclaimed chain and carries its no
   assert.deepEqual(reclaimedIn(run.registry).slice(-2), ['run_fake1-chain', null])
 })
 
+viewTest('run view: f cycles the filter off → running → done → off; a filter keeps every phase row and only its agents, unfolds a done phase while it is on, and the header names it', async (mode) => {
+  const { view } = await viewedRun(mode)
+  const press = pressOn(view)
+  const keys = () => view.model.rows.map((r) => r.key)
+  const all = ['phase:Discover', 'phase:Implement', 'agent:2', 'agent:3', 'agent:4', 'agent:5', 'agent:6', 'phase:Gate']
+  assert.deepEqual([view.model.filter, keys()], [null, all])
+  assert.equal(strip(draw(view.model, { width: 160, height: 30 }).lines[1]).includes('filter'), false)
+
+  assert.match((await press('f')).message, /^filter: running — 3 agents shown$/)
+  assert.equal(view.model.filter, 'running')
+  assert.deepEqual(keys(), ['phase:Discover', 'phase:Implement', 'agent:2', 'agent:3', 'agent:4', 'phase:Gate'], 'running is every agent at work: running, stuck and continued here; queued and failed are not')
+  assert.match(strip(draw(view.model, { width: 160, height: 30 }).lines[1]), /filter running/)
+
+  assert.match((await press('f')).message, /^filter: done — 2 agents shown$/)
+  assert.equal(view.model.filter, 'done')
+  assert.deepEqual(keys(), ['phase:Discover', 'agent:1', 'phase:Implement', 'phase:Gate', 'agent:7'], 'a phase folded for being all done unfolds while a filter is on, so what it keeps is seen')
+  assert.match(strip(draw(view.model, { width: 160, height: 30 }).lines[1]), /filter done/)
+
+  assert.match((await press('f')).message, /^filter off$/)
+  assert.deepEqual([view.model.filter, keys()], [null, all])
+
+  // The operator's own fold holds under a filter.
+  await press('f')
+  await press('f')
+  await view.click(view.model.rows.findIndex((r) => r.key === 'phase:Gate'))
+  assert.deepEqual(keys(), ['phase:Discover', 'agent:1', 'phase:Implement', 'phase:Gate'])
+})
+
+viewTest('run view: Ctrl+F opens a search dialog that takes every key; Enter keeps agents whose name contains the text, case blind, never a phase name; Esc keeps the last search; an empty search is off; it combines with f', async (mode) => {
+  const { view } = await viewedRun(mode)
+  const press = pressOn(view)
+  const keys = () => view.model.rows.map((r) => r.key)
+  const type = async (text) => {
+    for (const ch of text) await press(ch)
+  }
+  assert.equal(view.model.search, null)
+  await press('CTRL_F')
+  assert.deepEqual(view.model.dialog, { kind: 'search', title: 'Search agents', text: '' })
+  const drawn = () => draw(view.model, { width: 140, height: 30 }).lines.map(strip)
+  assert.ok(
+    drawn().some((l) => /Search agents/.test(l)),
+    'the dialog is drawn over the tree',
+  )
+  await type('Impl:B')
+  await press('BACKSPACE')
+  assert.equal(view.model.dialog.text, 'Impl:')
+  assert.ok(
+    drawn().some((l) => /Impl:▏/.test(l)),
+    'the text is drawn with a cursor after it',
+  )
+  // q, ?, r and the arrows are text or nothing while the dialog is open: none quits, consults or moves.
+  await type('q?')
+  await press('UP')
+  assert.deepEqual([view.model.dialog.text, view.model.selected], ['Impl:q?', 0])
+  await press('BACKSPACE')
+  await press('BACKSPACE')
+  assert.match((await press('ENTER')).message, /^search: Impl: — 5 agents shown$/)
+  assert.deepEqual([view.model.dialog, view.model.search], [null, 'Impl:'])
+  assert.deepEqual(keys(), ['phase:Discover', 'phase:Implement', 'agent:2', 'agent:3', 'agent:4', 'agent:5', 'agent:6', 'phase:Gate'])
+  assert.match(strip(draw(view.model, { width: 160, height: 30 }).lines[1]), /search Impl:/)
+
+  // Ctrl+F again starts from the last search; Esc cancels and keeps it.
+  await press('CTRL_F')
+  assert.equal(view.model.dialog.text, 'Impl:')
+  await type('zzz')
+  assert.match((await press('ESCAPE')).message, /^search kept: Impl:$/)
+  assert.deepEqual([view.model.dialog, view.model.search], [null, 'Impl:'])
+
+  // A phase's name is never searched: the phases stay, as the tree, and no agent is named by one.
+  await press('CTRL_F')
+  for (let i = 0; i < 5; i++) await press('BACKSPACE')
+  await type('Implement')
+  assert.match((await press('ENTER')).message, /^search: Implement — no agent shown$/)
+  assert.deepEqual(keys(), ['phase:Discover', 'phase:Implement', 'phase:Gate'])
+
+  // Search and filter are both applied.
+  await press('CTRL_F')
+  for (let i = 0; i < 9; i++) await press('BACKSPACE')
+  await type('impl:')
+  await press('ENTER')
+  await press('f')
+  assert.deepEqual([view.model.filter, view.model.search, keys()], ['running', 'impl:', ['phase:Discover', 'phase:Implement', 'agent:2', 'agent:3', 'agent:4', 'phase:Gate']])
+  await press('f')
+  assert.deepEqual(keys(), ['phase:Discover', 'phase:Implement', 'phase:Gate'], 'done agents, none of them named impl:')
+  assert.match((await press('f')).message, /^filter off — 5 agents shown$/, 'the search still on, the count is what the tree shows')
+
+  // Enter on an empty text turns the search off.
+  await press('CTRL_F')
+  for (let i = 0; i < 5; i++) await press('BACKSPACE')
+  await press('BACKSPACE')
+  assert.equal(view.model.dialog.text, '', 'a backspace on nothing is nothing')
+  assert.match((await press('ENTER')).message, /^search off$/)
+  assert.deepEqual([view.model.search, keys().length], [null, 8])
+  for (const help of [TREE_HELP, consoleTreeHelp('crew', 'f12'), consoleTreeHelp('orca', 'f12'), strip(draw(view.model, { width: 200, height: 30 }).lines.at(-1))]) assert.match(help, /f filter · Ctrl\+F search/)
+})
+
 // --- the run console: `crew view`, a crew run's sessions entered in place -----
 
 // The fake Orca as a host whose sessions are entered in place, as crew's are,
@@ -6827,7 +6923,7 @@ test("run console: the frames — no runner row, the key line naming the back ke
   assert.equal(screen.rowAt(discover + 1), 0, 'the first row is the first phase (rowAt takes a 1-based y)')
   assert.ok(!lines.some((l) => /runner {3}crew session|the runner {2}crew session/.test(l)), 'no runner row or pane')
   // Too long for 140 columns: cut with a ›, the rest a sideways scroll away.
-  assert.match(lines.at(-1), /^ ↑↓ move · ⏎\/→\/click enter · F12 out of a session · ← runs · Ctrl\+R reclaim · Ctrl\+P park · l log · .*›$/)
+  assert.match(lines.at(-1), /^ ↑↓ move · ⏎\/→\/click enter · F12 out of a session · ← runs · f filter · Ctrl\+F search · Ctrl\+R reclaim · Ctrl\+P park · l log · .*›$/)
   assert.match(strip(draw(view.model, { width: 140, height: 30, help: consoleTreeHelp('crew', 'f12'), helpOffset: 99 }).lines.at(-1)), /^‹.*x remove · \? orchestrator$/)
   assert.equal(consoleTreeHelp('orca', 'f12'), `${TREE_HELP} · ? orchestrator`, "an Orca run's agent is its tab; ? is crew's orchestrator whatever the host")
   const runs = listOf.get(view)
@@ -7350,7 +7446,7 @@ viewTest("run view: the screen is the design's tree, a click lands on the row dr
   assert.match(lines[10], /^ +6 +impl:e +✗ failed +░{10} +— +— /, 'an agent that never started')
   assert.ok(!lines.some((l) => /PROTOTYPE|Tab ▸|Timeline/.test(l)), 'no status bar')
   assert.match(lines.at(-2), /== Discover/)
-  assert.match(lines.at(-1), /↑↓ move · ⏎\/click a phase to fold · ⏎\/→\/click focus tab · Ctrl\+R reclaim · l log · q quit/)
+  assert.match(lines.at(-1), /↑↓ move · ⏎\/click a phase to fold · ⏎\/→\/click focus tab · f filter · Ctrl\+F search · Ctrl\+R reclaim · l log · q quit/)
 
   // The selected row is inverted; a selected phase's pane names its problems.
   await view.key('DOWN')
@@ -7561,7 +7657,7 @@ test('standalone: two concurrent runs in one repo are separate rows, and a hand-
     'the checkout is not named as its worktree',
   )
   assert.ok(!lines.some((l) => /my-feature/.test(l)))
-  assert.match(lines.at(-1), /← back to the runs · Ctrl\+R reclaim · l log · p pause · r resume · x remove/)
+  assert.match(lines.at(-1), /← back to the runs · f filter · Ctrl\+F search · Ctrl\+R reclaim · l log · p pause/)
   assert.deepEqual(
     orca.calls.filter((c) => MUTATING.includes(c.verb)),
     [],

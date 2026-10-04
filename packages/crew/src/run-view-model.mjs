@@ -247,6 +247,14 @@ function latestEvent(path) {
 //           a phase's problems being its blocked, needs-you, failed and stuck agents
 //   message the latest action's outcome, for the flash line, or null
 //   latest  the last line of runner.log, the run's latest event, or null
+//   filter  null, 'running' or 'done': what f cycles through, in that order.
+//           With one on, rows keeps every phase and only the agents the
+//           filter names (FILTERS): running is every agent at work, as a
+//           pause counts them; done is the done ones
+//   search  null, or the text Ctrl+F's dialog applied: rows then keeps only
+//           the agents whose name (label) contains it, case blind. A phase's
+//           name is never searched, and every phase row stays, so the tree
+//           keeps its shape under a filter or a search. Both apply at once
 //   alert   while any agent is blocked on a human, or a doctor needs you,
 //           the line naming each one, its tab and what it waits on (a
 //           doctor's escalation, its reason), which the flash line keeps over
@@ -258,6 +266,10 @@ function latestEvent(path) {
 //             only), highlight the index of the option Enter takes
 //           { kind: 'confirm', title, lines }
 //             a reclaim refused until the operator confirms it with `f`
+//           { kind: 'search', title, text }
+//             Ctrl+F's search box: a printable key types, Backspace erases,
+//             Enter applies `text` as model.search (empty for none), Esc
+//             keeps the search as it was
 // An agent is { n, origin, label, title, phase, state, continuations, reason,
 // replayed, launched, runId, dispatchId, harness, sessionId, worktree, terminal,
 // waiting, nextAt, workerLeft, patient, round, doctors, tabOpen, reclaimed, context, band, tokens,
@@ -312,6 +324,14 @@ export function outcomeOf(stateDir) {
 const AT_WORK = ['starting', 'running', 'continued', 'stuck', 'blocked', 'needs you']
 const atWork = (agents) => agents.filter((a) => AT_WORK.includes(a.state))
 
+// The filters f cycles through, in order, after none: the states each keeps.
+const FILTERS = Object.freeze({ running: AT_WORK, done: Object.freeze(['done']) })
+const FILTER_ORDER = [null, ...Object.keys(FILTERS)]
+// A key named as the character typed (terminal-kit and console.mjs both name
+// a printable key so, the space bar included), for the search box; a named
+// key (UP, CTRL_R) or a control character is none.
+const typed = (name) => ([...name].length === 1 && !/\p{Cc}/u.test(name) ? name : null)
+
 /**
  * @param {{ stateDir: string, host: SessionHost, clock?: { now: () => number }, transcripts?: Partial<ReturnType<typeof sessionTranscripts>>, registry?: string, unpushed?: typeof worktreeUnpushed, alive?: typeof runnerAlive, resumeHost?: (() => unknown) | null, resumeHalted?: ((node: string | null) => unknown) | null, enter?: boolean, triage?: (() => unknown) | null, remove?: (() => ReturnType<typeof removeRun>) | null }} options
  */
@@ -342,6 +362,9 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   // this one, each a reclaim's answer.
   let dialog = null
   let halt = null
+  // What the rows are cut down to: f's filter, and Ctrl+F's search text.
+  let filter = null
+  let search = null
   const triaged = new Set()
   const view = { model: null, refresh, key, click, highlight, focus, reclaim, openLog }
 
@@ -388,6 +411,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   function dialogModel(row) {
     if (!dialog) return null
     if (dialog.kind === 'confirm') return { kind: 'confirm', title: dialog.title, lines: dialog.lines }
+    if (dialog.kind === 'search') return { kind: 'search', title: 'Search agents', text: dialog.text }
     const options = optionsFor(row)
     if (options[dialog.highlight]?.disabled !== false)
       dialog.highlight = Math.max(
@@ -399,12 +423,29 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
 
   const allPhases = () => (consoles ? [consoles, ...phases] : phases)
 
+  // Whether the filter, the search, and so the tree, keep an agent's row.
+  const byFilter = (a) => filter === null || FILTERS[filter].includes(a.state)
+  const bySearch = (a) => search === null || a.label.toLowerCase().includes(search.toLowerCase())
+  const kept = (a) => byFilter(a) && bySearch(a)
+  const narrowed = () => filter !== null || search !== null
+  // How many agent rows the tree keeps, the `?` sessions among them, for the
+  // flash line: the figure the operator can check against the screen.
+  const showing = () => {
+    const n = allPhases()
+      .flatMap((p) => p.agents)
+      .filter(kept).length
+    return `${n === 0 ? 'no agent' : `${n} agent${n === 1 ? '' : 's'}`} shown`
+  }
+
   function layout() {
     const rows = []
     for (const phase of allPhases()) {
-      phase.folded = folds.get(phase.name) ?? (phase.total > 0 && phase.agents.every((a) => a.state === 'done' || a.state === 'reclaimed'))
+      // A phase all done folds itself, but not while a filter or a search is
+      // on: what they keep must be seen, and f or a search box is the
+      // operator asking to see it. Their own fold holds either way.
+      phase.folded = folds.get(phase.name) ?? (!narrowed() && phase.total > 0 && phase.agents.every((a) => a.state === 'done' || a.state === 'reclaimed'))
       rows.push({ kind: 'phase', key: `phase:${phase.name}`, phase })
-      if (!phase.folded) for (const { agent, depth } of treeOf(phase.agents)) rows.push({ kind: 'agent', key: agent.console ? `console:${agent.n}` : `agent:${agent.n}`, agent, phase, depth })
+      if (!phase.folded) for (const { agent, depth } of treeOf(phase.agents.filter(kept))) rows.push({ kind: 'agent', key: agent.console ? `console:${agent.n}` : `agent:${agent.n}`, agent, phase, depth })
     }
     const at = rows.findIndex((r) => r.key === selectedKey)
     selected = at >= 0 ? at : Math.max(0, Math.min(selected, rows.length - 1))
@@ -412,7 +453,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     selectedKey = row?.key ?? null
     if (shown.key !== selectedKey) shown = { key: selectedKey, at: clock.now() }
     const pane = !row ? null : row.kind === 'agent' ? { kind: 'agent', agent: row.agent } : { kind: 'phase', phase: row.phase, problems: problemsOf(row.phase.agents).map((agent) => ({ agent, reason: agent.reason })) }
-    view.model = { header, phases: allPhases(), rows, selected, selectedAt: shown.at, pane, message, latest, alert, dialog: dialogModel(row), halt }
+    view.model = { header, phases: allPhases(), rows, selected, selectedAt: shown.at, pane, message, latest, alert, dialog: dialogModel(row), halt, filter, search }
     return view.model
   }
 
@@ -848,8 +889,35 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     return say([`parked ${n} of ${list.length} done agent${list.length === 1 ? '' : 's'}`, ...kept].join('; '))
   }
 
+  // f: the next filter in the cycle; the search box's Enter: `text` applied,
+  // empty for none. Each says what the tree now shows, under both at once.
+  function cycleFilter() {
+    filter = FILTER_ORDER[(FILTER_ORDER.indexOf(filter) + 1) % FILTER_ORDER.length]
+    return say(filter === null ? `filter off${search === null ? '' : ` — ${showing()}`}` : `filter: ${filter} — ${showing()}`)
+  }
+  function applySearch(text) {
+    search = text === '' ? null : text
+    return say(search === null ? `search off${filter === null ? '' : ` — ${showing()}`}` : `search: ${search} — ${showing()}`)
+  }
+
   // A key while the dialog is open: the tree takes none.
   async function dialogKey(name) {
+    if (dialog.kind === 'search') {
+      const { text } = dialog
+      if (name === 'ENTER') {
+        dialog = null
+        return applySearch(text)
+      }
+      if (name === 'ESCAPE') {
+        dialog = null
+        return say(search === null ? 'search off' : `search kept: ${search}`)
+      }
+      const ch = typed(name)
+      if (name === 'BACKSPACE') dialog.text = [...text].slice(0, -1).join('')
+      else if (ch !== null) dialog.text = text + ch
+      layout()
+      return {}
+    }
     if (dialog.act === 'remove') {
       dialog = null
       if (name !== 'y') return say('nothing removed')
@@ -1011,6 +1079,12 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
         return {}
       case 'l':
         return openLog()
+      case 'f':
+        return cycleFilter()
+      case 'CTRL_F':
+        dialog = { kind: 'search', text: search ?? '' }
+        layout()
+        return {}
       case 'p': {
         if (!pauseRun(stateDir, new Date(clock.now()))) return say(alreadyPaused('r'))
         const n = atWork(agentsNow()).length

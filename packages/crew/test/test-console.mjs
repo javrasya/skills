@@ -338,7 +338,7 @@ test('console: keys typed while the enter is in flight reach the session in orde
 })
 
 test("run console keys: raw input as the run view's key names, and a left click as its row", () => {
-  assert.deepEqual(keyNames('\x1b[A\x1bOB\x1b[C\x1b[D\r\x1br R\x12\x03q'), ['UP', 'DOWN', 'RIGHT', 'LEFT', 'ENTER', 'ESCAPE', 'r', ' ', 'R', 'CTRL_R', 'CTRL_C', 'q'])
+  assert.deepEqual(keyNames('\x1b[A\x1bOB\x1b[C\x1b[D\r\x1br R\x12\x06\x7f\x03q😀'), ['UP', 'DOWN', 'RIGHT', 'LEFT', 'ENTER', 'ESCAPE', 'r', ' ', 'R', 'CTRL_R', 'CTRL_F', 'BACKSPACE', 'CTRL_C', 'q', '😀'])
   assert.deepEqual(keyNames('\x1b[<0;12;7M\x1b[<0;12;7m\x1b[<2;3;4M\x1b[<35;1;1M'), [{ click: { x: 12, y: 7 } }], 'a press of the left button, and nothing else')
   assert.deepEqual(
     keyNames('\x1b[<64;5;9M\x1b[<65;5;9M\x1b[<66;5;30M\x1b[<67;5;30M\x1b[<68;5;30M\x1b[<69;5;30M\x1b[<64;5;9m'),
@@ -483,7 +483,7 @@ test('crew view: ? on an opened run enters a fresh orchestrator session seeded w
   const row = () => tree().rows[tree().selected].key
   const before = keys()
   // Wide enough for the whole key line, ? orchestrator at its end.
-  const term = fakeTerminal(160, 30)
+  const term = fakeTerminal(190, 30)
   const crew = runsConsole({ paths, stdin: term.stdin, stdout: term.stdout, runs, refreshMs: 100 })
   quitAfter(t, term, crew)
   await until('the tree', async () => (await term.screen()).lines.some((l) => l.includes('AGENT')))

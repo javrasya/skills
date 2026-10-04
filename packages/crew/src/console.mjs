@@ -91,6 +91,8 @@ const KEYBOARD_RESET = '\x1b[=0;1u\x1b[>4;0m'
 // ESC O c / d are rxvt's Ctrl+Right / Ctrl+Left. A kitty keyboard protocol
 // release event (event type 3, after a colon) is no key at all.
 const CSI_KEYS = { A: 'UP', B: 'DOWN', C: 'RIGHT', D: 'LEFT', H: 'HOME', F: 'END', c: 'RIGHT', d: 'LEFT' }
+// A character with a name of its own; any other is the key it types.
+const CHAR_KEYS = { '\r': 'ENTER', '\n': 'ENTER', '\x1b': 'ESCAPE', '\x03': 'CTRL_C', '\x12': 'CTRL_R', '\x10': 'CTRL_P', '\x06': 'CTRL_F', '\x7f': 'BACKSPACE', '\b': 'BACKSPACE', '\t': 'TAB' }
 export function keyNames(text) {
   const keys = []
   for (let i = 0; i < text.length; ) {
@@ -110,9 +112,11 @@ export function keyNames(text) {
       if (name && !release) keys.push(name)
       i += csi[0].length
     } else {
-      const ch = rest[0]
-      keys.push(ch === '\r' || ch === '\n' ? 'ENTER' : ch === '\x1b' ? 'ESCAPE' : ch === '\x03' ? 'CTRL_C' : ch === '\x12' ? 'CTRL_R' : ch === '\x10' ? 'CTRL_P' : ch === '\x7f' || ch === '\b' ? 'BACKSPACE' : ch === '\t' ? 'TAB' : ch)
-      i += 1
+      // Whole code points: a character beyond the BMP, typed into the search
+      // box, is one key, never its two surrogates.
+      const ch = String.fromCodePoint(rest.codePointAt(0))
+      keys.push(CHAR_KEYS[ch] ?? ch)
+      i += ch.length
     }
   }
   return keys

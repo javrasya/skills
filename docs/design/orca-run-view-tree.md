@@ -43,6 +43,7 @@ The reference design for the Orca runner's [run view](../../CONTEXT.md) (spec #4
   - States have their own colours. Cumulative tokens are grey. The selected row is shown inverted.
 - **Exact spacing and column widths** are a guide, not a contract.
 - **The key-help line** lists the view's own keys (#51): `l` opens the log in a tab of its own that follows it; `R` resume, `e` and `s` all runs were the prototype's.
+- **Filter and search** cut the rows down without changing the tree's shape: `f` cycles off → running → done → off, `Ctrl+F` opens a search box over the middle of the screen (title, the text with a `▏` cursor, a key hint) that applies a case-blind contains match on agent names only. Every phase row stays, a filtered or searched tree unfolds its all-done phases, and the header's second line names what is on, `⊲ filter running` and `⊲ search <text>`, ahead of the counts. A doctor whose patient the filter or search drops stands at depth 0, as one whose patient is in another phase does; the flash line counts the rows the tree shows under both.
 
 ## Last design check
 

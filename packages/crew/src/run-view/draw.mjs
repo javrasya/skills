@@ -82,7 +82,11 @@ const outcomeLine = (o) => {
   return c(colour, `${label}${o.detail ? ` — ${o.detail}` : ''}${o.kind === 'halted' ? ' · r to resume' : ''}`)
 }
 
-function headerLines(h, W) {
+// The header's second line names what the rows are cut down to (f, Ctrl+F),
+// so a tree with agents missing is never read as a run without them.
+const narrowedBy = (model) => [model?.filter && c('36', `⊲ filter ${model.filter}`), model?.search && c('36', `⊲ search ${model.search}`)].filter(Boolean)
+
+function headerLines(h, W, narrowed) {
   if (!h) return [fit('', W), fit('', W)]
   const dot = grey(' · ')
   const run = [h.name && bold(h.name), h.project, h.runId && grey(h.runId), h.spec && `spec ${h.spec}`, h.outcome ? outcomeLine(h.outcome) : `runner ${h.alive === true ? c('32', '● alive') : h.alive === false ? c('31', '○ gone') : grey('? unknown')}`, duration(h.elapsedMs)].filter(Boolean).join(dot)
@@ -91,7 +95,7 @@ function headerLines(h, W) {
     .join('  ')
   const halted = h.halted ? c('1;33', `⏸ halted — ${h.halted.nodes.length} node${h.halted.nodes.length === 1 ? '' : 's'} need${h.halted.nodes.length === 1 ? 's' : ''} you · r to resume`) : null
   const paused = h.paused ? c('1;33', `⏸ paused${h.paused.finishing ? ` — ${h.paused.finishing} agent${h.paused.finishing === 1 ? '' : 's'} finishing` : ''} · r to resume`) : null
-  const lead = [h.outage && outageOf(h.outage), paused, halted].filter(Boolean)
+  const lead = [h.outage && outageOf(h.outage), paused, halted, ...narrowed].filter(Boolean)
   return [fit(' ' + run, W), fit(' ' + (lead.length ? lead.join(dot) + dot + counts : counts), W)]
 }
 
@@ -170,7 +174,7 @@ function phasePane(p, problems) {
   return lines
 }
 
-const HELP = ' ↑↓ move · ⏎/click a phase to fold · ⏎/→/click focus tab · Ctrl+R reclaim · l log · q quit'
+const HELP = ' ↑↓ move · ⏎/click a phase to fold · ⏎/→/click focus tab · f filter · Ctrl+F search · Ctrl+R reclaim · l log · q quit'
 const TOP = 4
 
 // An agent row's width: the halt panel takes what is right of it, or 30 columns.
@@ -241,6 +245,9 @@ function dialogBox(d, mw) {
   const plain = (l) => c('100', fit(' ' + l, mw))
   const head = c('7', fit(' ' + d.title, mw))
   if (d.kind === 'confirm') return { box: [head, ...d.lines.map(plain), plain('')], first: null }
+  // The search box: the text typed so far with a cursor after it, the ▏ a
+  // caret the hidden terminal cursor cannot draw.
+  if (d.kind === 'search') return { box: [head, plain(''), plain(`${d.text}▏`), plain(''), plain('type to search the agents by name · Backspace erases · Enter applies · Esc keeps the last search'), plain('')], first: null }
   const options = d.options.map((o, i) => (o.disabled ? c('100;90', fit(`   ${o.label} — ${o.reason}`, mw)) : i === d.highlight ? c('7', fit(` ▸ ${o.label} — ${o.detail}`, mw)) : plain(`  ${o.label} — ${o.detail}`)))
   return { box: [head, ...options, plain(''), plain(`↑↓ or the mouse moves · Enter ${d.verb ?? 'reclaims'} · Esc closes`), plain('')], first: 1 }
 }
@@ -262,7 +269,7 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
   const selected = model?.selected ?? 0
   const body = Math.max(1, H - TOP - 1 - PANE - 2)
   const top = Math.max(0, Math.min(selected - body + 1, rows.length - body))
-  const lines = [...headerLines(model?.header, W), fit(grey('─'.repeat(W)), W), fit(grey(`   #   ${'AGENT'.padEnd(NAME_W + 1)}  STATE              CONTEXT           TOKENS   ELAPSED`), W)]
+  const lines = [...headerLines(model?.header, W, narrowedBy(model)), fit(grey('─'.repeat(W)), W), fit(grey(`   #   ${'AGENT'.padEnd(NAME_W + 1)}  STATE              CONTEXT           TOKENS   ELAPSED`), W)]
   const since = model?.selectedAt ?? null
   const elapsed = now === null || since === null ? 0 : now - since
   const chosen = rows[selected]
@@ -333,13 +340,13 @@ export function helpLine(help, W, offset = 0) {
   return { text: (at > 0 ? c('36', '‹') : '') + grey(shown) + (cut ? c('36', '›') : ''), offset: at }
 }
 
-export const TREE_HELP = ' ↑↓ move · ⏎/→/click focus tab · ⏎/click a phase to fold · ← back to the runs · Ctrl+R reclaim · l log · p pause · r resume · x remove'
+export const TREE_HELP = ' ↑↓ move · ⏎/→/click focus tab · ⏎/click a phase to fold · ← back to the runs · f filter · Ctrl+F search · Ctrl+R reclaim · l log · p pause · r resume · x remove'
 const RUNS_HELP = ' ↑↓ move · ⏎/→/click open a run · ←→ fold a project · Ctrl+R reclaim the run · p pause · r resume · x remove · q quit'
 
 // The key lines of `crew view`, which enters a crew run's sessions in place
 // and comes back from one with `backKey`; an Orca run's agent is its tab.
 // `?` is crew's orchestrator whatever the run's host.
-export const consoleTreeHelp = (host, backKey) => (host === 'crew' ? ` ↑↓ move · ⏎/→/click enter · ${backKeyLabel(backKey)} out of a session · ← runs · Ctrl+R reclaim · Ctrl+P park · l log · p pause · r resume · x remove · ? orchestrator` : `${TREE_HELP} · ? orchestrator`)
+export const consoleTreeHelp = (host, backKey) => (host === 'crew' ? ` ↑↓ move · ⏎/→/click enter · ${backKeyLabel(backKey)} out of a session · ← runs · f filter · Ctrl+F search · Ctrl+R reclaim · Ctrl+P park · l log · p pause · r resume · x remove · ? orchestrator` : `${TREE_HELP} · ? orchestrator`)
 export const consoleRunsHelp = (backKey) => `${RUNS_HELP} · ${backKeyLabel(backKey)} leaves an entered session`
 
 export function age(ms) {
