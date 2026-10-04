@@ -14,6 +14,7 @@ import { appendFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { checkSchema } from './schema.mjs'
 import { runHeadless } from './headless.mjs'
+import { TOOLS } from './tools.mjs'
 import { validationLineProblem } from './validation-list.mjs'
 
 export const ORCHESTRATOR_PREFIX = 'orchestrator/'
@@ -164,8 +165,18 @@ Read what you need of those files, and nothing else: change nothing, and never r
 Answer with a short "summary" of the halt, and one entry per held node, in the order halted.json lists them: { "node": its name as halted.json has it, "reason": why it is held, "questions": the questions it left for the operator (empty when it left none), "decide": what the operator must decide before resuming it }.`
 
 // `?` in the run console: the orchestrator for a free conversation with the
-// operator about one run, seeded with its run directory.
-export const consultPrompt = (stateDir) => `You are crew's orchestrator, opened from the run console for a conversation with the operator about one workflow run. The run's state is ${runFiles(stateDir)}. Read what you need of it, then wait for the operator's questions. Change nothing unless the operator asks you to.`
+// operator about one run, seeded with its run directory, and told its tools
+// (#194, tools.mjs's orchestrator rows): the readers first, the acts only on
+// the operator's word, since they do to the run what the operator's own keys
+// do.
+const ORCHESTRATOR_TOOLS = TOOLS.filter((t) => t.who.includes('orchestrator')).map((t) => t.name)
+const list = (names) =>
+  names
+    .map((n) => `\`${n}\``)
+    .join(', ')
+    .replace(/, (`[^`]+`)$/, ' and $1')
+export const consultPrompt = (stateDir) =>
+  `You are crew's orchestrator, opened from the run console for a conversation with the operator about one workflow run. The run's state is ${runFiles(stateDir)}. Your session has crew's tools for this run: ${list(ORCHESTRATOR_TOOLS.slice(0, 3))} read it, and ${list(ORCHESTRATOR_TOOLS.slice(3))} act on it as the operator's p and r do in the run console. Start with run_status, read what else you need of the files, then wait for the operator's questions. Use pause, resume and decide only when the operator asks, and give decide only the answers they gave. Change nothing else unless the operator asks you to.`
 
 // The `?` sessions of a run, one JSON line each in its state dir, appended by
 // the console that opens one (never by the runner, whose journal a resume
