@@ -264,12 +264,14 @@ export function crewHost({
   // starts to go in, past which a worker may have it. With no `run` it is no
   // worker: no dispatch, no preamble, only the prompt.
   // `asking` is ready's: who hears of a dialog the person must answer first.
-  async function launch(line, { harness, dir, title, prompt, run, typing = () => {}, asking = null }) {
+  // `agent` is what its dispatch knows of its agent, for a submit by session
+  // (runs.mjs): { role, schema, resultPath }.
+  async function launch(line, { harness, dir, title, prompt, run, typing = () => {}, asking = null, agent = {} }) {
     const [program, ...args] = line
     const command = [...(harnesses[harness] ?? [program]), ...args, ...waitWords(harness)]
     const { session } = await call({ op: 'session.spawn', command, cwd: dir, env: sessionEnv, title })
     try {
-      const { worker } = run ? await call({ op: 'run.worker', run, session: session.id, coordinator }) : { worker: null }
+      const { worker } = run ? await call({ op: 'run.worker', run, session: session.id, coordinator, ...agent }) : { worker: null }
       await ready(session.id, command, { harness, asking })
       typing()
       await terminalSend({ terminal: session.id, text: (worker ? crewPreamble({ terminal: session.id, ...worker }) : '') + prompt })
@@ -370,7 +372,8 @@ export function crewHost({
     // (ready above), as workerContinue's does; the start waits it out.
     // With `chain`, chainWorktree's path, the worker runs in the run's chain
     // worktree, which is never this start's to make or name on its error.
-    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null, chain = null, asking = null }) {
+    // `role`, `schema` and `resultPath` go on its dispatch, as a continue's do.
+    async workerStart({ run, prompt, title, harness = 'claude', model, effort, permissionMode, sessionId, child = null, chain = null, asking = null, role, schema, resultPath }) {
       if (!sessionId) throw new Error(`workerStart: ${title} has no session id; the runner assigns one to every worker`)
       const warnings = []
       let worktree = chain ?? cwd
@@ -390,6 +393,7 @@ export function crewHost({
           prompt: text,
           run,
           asking,
+          agent: { role, schema, resultPath },
           typing: () => {
             dispatched = true
           },
@@ -417,7 +421,7 @@ export function crewHost({
     // one session id would both write its transcript), is closed once the new
     // one has its prompt. A pty whose program ended cannot take another, and a
     // harness run straight in its pty has no shell to type a resume line into.
-    async workerContinue({ run, dispatch, terminal = dispatch, worktree = null, title, prompt, harness = 'claude', model, effort, permissionMode, sessionId, asking = null }) {
+    async workerContinue({ run, dispatch, terminal = dispatch, worktree = null, title, prompt, harness = 'claude', model, effort, permissionMode, sessionId, asking = null, role, schema, resultPath }) {
       const line = resumeWords({ harness, model, effort, permissionMode, sessionId })
       const old = await sessionOf(terminal)
       if (old?.alive) {
@@ -429,7 +433,7 @@ export function crewHost({
         }
       }
       const dir = old?.cwd ?? worktree ?? cwd
-      const w = await launch(line, { harness, dir, title: old?.title ?? title, prompt, run, asking })
+      const w = await launch(line, { harness, dir, title: old?.title ?? title, prompt, run, asking, agent: { role, schema, resultPath } })
       if (old) await call({ op: 'session.close', id: old.id }).catch(() => {})
       return { dispatchId: w.terminal, taskId: w.taskId, terminal: w.terminal, worktree: dir, reopened: true }
     },

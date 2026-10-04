@@ -132,6 +132,10 @@ export const agentDir = (n, label) => `agents/${String(n).padStart(3, '0')}-${sl
 // script value can be mistaken for.
 const SICK = Symbol('needs a doctor')
 
+// What a call's dispatch knows of its agent, on every start and continue
+// (session-host.mjs): a session submits by its id alone with it.
+const agentOf = (call) => ({ role: call.patient != null ? 'doctor' : 'worker', schema: call.schema ?? null, resultPath: call.resultPath ?? null })
+
 // A worker whose session its host lost when the host itself died (workerShow's
 // `hostDied`, crew's after a crash): continued in a new session, uncounted.
 const HOST_DIED = Object.freeze({ dead: 'its session died with its session host', gone: true, hostDied: true })
@@ -676,6 +680,7 @@ export function agentLifecycle({
             prompt: patient != null ? prompt : (baseline) => (sent = workerPrompt(prompt, { schemaPath, resultPath, payloadPath, baseline: baseline ?? (chain ? (chainState?.baseline ?? null) : null), leftovers: chain ? (chainState?.leftovers ?? []) : [], note: again?.note ?? null, attended: call.attended ?? null })),
             title,
             ...launch,
+            ...agentOf(call),
             sessionId,
             ...(chain && { chain: chain.path }),
             child: isolation === 'worktree' ? { name: agentId(runId, call.origin ?? n), displayName: title, retry: attempt > 1 || !!again, dispatched, baseline, onBaseline, ...(setup && { setup }) } : null,
@@ -779,7 +784,7 @@ export function agentLifecycle({
         out(`>> ${title}: ${end.dead}; continuing session ${sessionId} (${end.hostDied ? 'not counted against the cap' : `continuation ${attempt} of ${limits.maxContinuations}`}) ${reopen ? `in a new terminal in ${w.worktree ?? 'its worktree'}` : `in terminal ${w.terminal}`}`)
         let next
         try {
-          next = await host.workerContinue({ run: runId, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: (patient != null ? doctorContinuePrompt : continuePrompt)(end.dead), ...launch, sessionId, reopen, asking: asking(call) })
+          next = await host.workerContinue({ run: runId, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: (patient != null ? doctorContinuePrompt : continuePrompt)(end.dead), ...launch, ...agentOf(call), sessionId, reopen, asking: asking(call) })
         } catch (e) {
           end = { dead: `${end.dead}, and continuing its session failed: ${e?.message ?? e}` }
           break
@@ -1027,6 +1032,7 @@ export function agentLifecycle({
         title,
         prompt: haltedPrompt(!!halted.needsDecision, chain?.made ? (chain.baseline ?? []) : null, !!call.attended),
         ...launch,
+        ...agentOf(call),
         sessionId: adopt.sessionId,
         reopen: gone || !!chain?.made,
         asking: asking(call),
@@ -1048,7 +1054,7 @@ export function agentLifecycle({
     out(`>> ${title}: doctor round ${round} handed off a note; continuing session ${sessionId} with it ${failure.gone ? `in a new terminal in ${w.worktree ?? 'its worktree'}` : `in terminal ${w.terminal}`}`)
     let next
     try {
-      next = await host.workerContinue({ run: failure.run, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: notePrompt(note), ...launch, sessionId, reopen: failure.gone, asking: asking(call) })
+      next = await host.workerContinue({ run: failure.run, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title, prompt: notePrompt(note), ...launch, ...agentOf(call), sessionId, reopen: failure.gone, asking: asking(call) })
     } catch (e) {
       return failAgent(call, { ...failure, reason: `${failure.reason}, and continuing its session with its doctor's note failed: ${e?.message ?? e}`, retained: keep(call, w) })
     }

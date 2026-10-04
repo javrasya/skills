@@ -14,6 +14,9 @@
 //   worker   workerStart, workerShow, workerStop, workerContinue, workerRelease
 //            (workerShow's `hostDied`, where a host can tell: the session was
 //            lost with the host itself, which is continued uncounted)
+//            (workerStart's and workerContinue's `role`, `schema` and
+//            `resultPath`: its agent's, which a host whose agents submit by
+//            session keeps on the dispatch, and another ignores)
 //   terminal terminalIdle, terminalSend, terminalEnter, terminalClearInput,
 //            terminalScreen, terminalList, terminalClose, terminalSwitch,
 //            terminalRename; logTail, resumeRunner (a tab of the view's)

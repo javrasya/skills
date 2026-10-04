@@ -728,6 +728,30 @@ test('crew host: a harness still in its turn is ended before its session is cont
   )
 })
 
+test("crew host: a worker's dispatch knows its agent's role, schema and result file from its start, and its continue's new dispatch from the continue: either submits by its session id alone (#174)", async () => {
+  const h = crewKind.open()
+  const dir = scratchDir()
+  const schema = { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } }
+  const resultPath = join(dir, 'result.json')
+  const w = await start(h, 'submits by session', { prompt: 'Contract prompt for submits by session. [die]', role: 'worker', schema, resultPath })
+  await assert.rejects(request(h.paths, { op: 'worker.submit', id: w.terminal, payload: { ok: 'yes' } }), /1 validation error\(s\)[\s\S]*\$\.ok: expected boolean, got string/)
+  assert.equal(existsSync(resultPath), false)
+  await request(h.paths, { op: 'worker.submit', id: w.terminal, payload: { ok: true } })
+  assert.deepEqual(JSON.parse(readFileSync(resultPath, 'utf8')), { ok: true })
+  const settled = await shown(h, w)
+  assert.deepEqual([settled.settled, settled.outcome], [true, 'succeeded'])
+  await eventually('the harness dead', () => h.dead(w))
+  const next = await h.host.workerContinue({ run: w.run, dispatch: w.dispatchId, terminal: w.terminal, worktree: w.worktree, title: 'submits by session', prompt: 'Carry on.', harness: 'claude', sessionId: w.sessionId, role: 'worker', schema, resultPath })
+  assert.notEqual(next.dispatchId, w.dispatchId)
+  await assert.rejects(request(h.paths, { op: 'worker.submit', id: next.terminal, payload: {} }), /missing required property "ok"/)
+  await request(h.paths, { op: 'worker.submit', id: next.terminal, payload: { ok: false } })
+  assert.deepEqual(await h.host.workerResult({ dispatch: next.dispatchId }), { result: { ok: false }, outcome: 'succeeded', submissions: 1 })
+  assert.deepEqual(JSON.parse(readFileSync(resultPath, 'utf8')), { ok: false })
+
+  const doctor = await start(h, 'a doctor', { role: 'doctor' })
+  await assert.rejects(request(h.paths, { op: 'worker.submit', id: doctor.terminal, payload: 'done' }), /is a doctor's: a doctor submits no result/)
+})
+
 test('crew host: an ended harness is idle, and a session the daemon does not hold is refused', async () => {
   const h = crewKind.open()
   const w = await start(h, 'ended idle', { prompt: 'Contract prompt for ended idle. [turn 600000]' })

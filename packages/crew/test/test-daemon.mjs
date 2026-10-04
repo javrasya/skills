@@ -4,7 +4,7 @@
 //   node packages/crew/test/test-daemon.mjs
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
@@ -483,6 +483,90 @@ test('daemon: every worker_done a dispatch sends is counted and taken as its out
   const second = await startDaemon({ paths, registry, spawnSession, parkAfterMs: 60_000, exit: () => {}, log: () => {} })
   try {
     assert.deepEqual([(await show()).submissions, shape(await result())], [4, { result: 'plain text', outcome: 'succeeded', submissions: 4 }])
+  } finally {
+    second.shutdown('test over')
+  }
+})
+
+test("daemon: a session submits and mails by its id alone, its result checked against the schema run.worker gave its dispatch, which the next daemon keeps; a session of no dispatch, a released one, and a doctor's submit are refused, saying why (#174)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const registry = join(dir, 'runs.jsonl')
+  const spawnSession = quietSession([], new Map())
+  const exits = []
+  await startDaemon({ paths, registry, spawnSession, parkAfterMs: 60_000, exit: () => exits.push(1), log: () => {} })
+  const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c', runner: null })
+  const spawn = async (title) => (await request(paths, { op: 'session.spawn', command: ['claude', '--session-id', `uuid-${title}`], cwd: dir, title })).session.id
+  const schema = { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } }, additionalProperties: false }
+  const resultPath = join(dir, 'result.json')
+  const [worker, text, doctor, released, bare] = [await spawn('worker'), await spawn('text'), await spawn('doctor'), await spawn('released'), await spawn('bare')]
+  const dispatch = (session, extra) => request(paths, { op: 'run.worker', run: run.id, session, coordinator: 'c', ...extra })
+  await assert.rejects(dispatch(worker, { role: 'boss' }), /not an agent role: "boss"; one of worker, doctor/)
+  await assert.rejects(dispatch(worker, { schema: ['x'] }), /not a result schema/)
+  await dispatch(worker, { role: 'worker', schema, resultPath })
+  await dispatch(text, {})
+  await dispatch(doctor, { role: 'doctor' })
+  await dispatch(released, { schema })
+  await request(paths, { op: 'worker.release', id: released })
+  const submit = (id, payload) => request(paths, { op: 'worker.submit', id, payload })
+  const mail = (id, m) => request(paths, { op: 'worker.mail', id, ...m })
+  const result = async (id) => {
+    const { result, outcome, submissions } = await request(paths, { op: 'worker.result', id })
+    return { result, outcome, submissions }
+  }
+
+  // Every error at once, nothing stored or settled.
+  await assert.rejects(submit(worker, { ok: 1, extra: true }), (e) => /2 validation error\(s\) against its schema\n {2}\$\.ok: expected boolean, got integer\n {2}\$: unexpected property "extra"\nFix the payload and submit again\./.test(e.message))
+  await assert.rejects(submit(worker, '{ not json'), /payload is not valid JSON/)
+  assert.deepEqual([existsSync(resultPath), (await request(paths, { op: 'worker.show', id: worker })).worker.settled], [false, false])
+  const accepted = await submit(worker, '{"ok": true}')
+  assert.deepEqual([/^msg_/.test(accepted.id), accepted.resultPath], [true, resultPath])
+  assert.deepEqual([JSON.parse(readFileSync(resultPath, 'utf8')), await result(worker)], [{ ok: true }, { result: { ok: true }, outcome: 'succeeded', submissions: 1 }])
+  await submit(worker, { ok: false })
+  assert.deepEqual(await result(worker), { result: { ok: false }, outcome: 'succeeded', submissions: 2 })
+  // A schemaless agent's result is text.
+  await assert.rejects(submit(text, { ok: true }), /this agent's result is text/)
+  await submit(text, 'plain words')
+  assert.deepEqual(await result(text), { result: 'plain words', outcome: 'succeeded', submissions: 1 })
+
+  await assert.rejects(submit(bare, 'x'), new RegExp(`no dispatch for session ${bare}: crew takes results only from a session it started for an agent`))
+  await assert.rejects(submit('nope', 'x'), /no dispatch for session nope/)
+  await assert.rejects(submit(released, { ok: true }), new RegExp(`session ${released}'s dispatch was released: its runner let its agent go, so it takes no more results`))
+  await assert.rejects(submit(doctor, 'done'), new RegExp(`session ${doctor} is a doctor's: a doctor submits no result`))
+  assert.equal((await result(doctor)).submissions, 0)
+
+  // Mail, fenced alike; a worker's result never goes as mail, a doctor's worker_done does.
+  await mail(doctor, { type: 'handoff', subject: 'note', body: 'carry on' })
+  await mail(doctor, { type: 'worker_done', outcome: 'failed', body: 'gave up' })
+  assert.deepEqual(await result(doctor), { result: null, outcome: 'failed', submissions: 1 })
+  await mail(worker, { type: 'escalation', body: 'stuck' })
+  await assert.rejects(mail(worker, { type: 'worker_done' }), new RegExp(`session ${worker} is a worker's: its result goes through submit`))
+  await assert.rejects(mail(worker, { type: 'chatter' }), /not a message type crew takes/)
+  await assert.rejects(mail(bare, { type: 'handoff' }), /no dispatch for session/)
+  await assert.rejects(mail(released, { type: 'handoff' }), /dispatch was released: its runner let its agent go, so it takes no more mail/)
+  const { messages } = await request(paths, { op: 'mail.check', coordinator: 'c' })
+  assert.deepEqual(
+    messages.map((m) => [m.type, m.dispatchId, m.body, m.outcome]),
+    [
+      ['worker_done', worker, 'Submitted a result that is valid against its schema. It is recorded at ' + resultPath + '. Nothing remains for this task.', 'succeeded'],
+      ['worker_done', worker, 'Submitted a result that is valid against its schema. It is recorded at ' + resultPath + '. Nothing remains for this task.', 'succeeded'],
+      ['worker_done', text, 'Submitted a result that is valid against its schema. Nothing remains for this task.', 'succeeded'],
+      ['handoff', doctor, 'carry on', null],
+      ['worker_done', doctor, 'gave up', 'failed'],
+      ['escalation', worker, 'stuck', null],
+    ],
+  )
+
+  await request(paths, { op: 'stop', force: true })
+  await until('the first daemon to stop', () => exits.length === 1)
+  const second = await startDaemon({ paths, registry, spawnSession, parkAfterMs: 60_000, exit: () => {}, log: () => {} })
+  try {
+    await assert.rejects(submit(worker, { ok: 'no' }), /expected boolean, got string/)
+    await submit(worker, { ok: true })
+    assert.deepEqual(await result(worker), { result: { ok: true }, outcome: 'succeeded', submissions: 3 })
+    await assert.rejects(submit(doctor, 'done'), /is a doctor's/)
+    await assert.rejects(submit(released, { ok: true }), /was released/)
   } finally {
     second.shutdown('test over')
   }

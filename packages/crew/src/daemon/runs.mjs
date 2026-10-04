@@ -23,6 +23,14 @@
 // The result is the value submit validated, sent along with the worker_done;
 // null for one that sent none (`crew orchestration send`).
 //
+// A dispatch also knows its agent's role (a worker, or a doctor), the schema
+// its result is checked against, null for a text result, and the file its
+// runner reads that result from: what the runner's run.worker named, so a
+// session can submit by its id alone (worker.submit), checked again here as
+// submit checks it, and send its mail (worker.mail). Either is refused a
+// session of no dispatch, or of one released; a doctor submits nothing, and
+// a worker's result goes only through submit.
+//
 // A Run whose objective is an orchestrator question's title (orchestrator.mjs)
 // is flagged `orchestrator` at its creation: it is crew's own question, no
 // workflow run, so it is never live, and it is dropped from the book, its
@@ -38,11 +46,13 @@
 //
 //   run.create { objective, coordinator, runner } → { run: { id, coordinator } }
 //   run.use { id, coordinator, runner }         → { run: { id, coordinator } }
-//   run.worker { run, session, coordinator }    → { worker: { taskId, capability } }
+//   run.worker { run, session, coordinator, role, schema, resultPath } → { worker: { taskId, capability } }
 //   worker.show { id }                          → { worker: { settled, outcome, submissions, gone, exited, waiting, terminal, hostDied? } }
 //   worker.result { id }                        → { result, outcome, submissions }: its last worker_done's
 //   worker.stop { id }                          → { worker }: its program ended, unsettled ones cancelled
 //   worker.release { id }                       → { worker }
+//   worker.submit { id, payload }               → { id, resultPath }: session id's result, sent as its worker_done
+//   worker.mail { id, type, subject, body, outcome } → { id }: as mail.send, from session id
 //   mail.send { from, capability, taskId, dispatchId, type, subject, body, outcome, result } → { id }
 //   mail.check { coordinator, ack }             → { deliveryId, acknowledged, replayed, messages }
 //   worktree.status { path, status }            → { path, status }
@@ -53,6 +63,8 @@ import { fileURLToPath } from 'node:url'
 import { readRegistry } from '../registry.mjs'
 import { DEFAULT_HOST } from '../hosts.mjs'
 import { isOrchestratorTitle } from '../orchestrator.mjs'
+import { validate } from '../schema.mjs'
+import { writeJsonAtomic } from '../fsutil.mjs'
 
 // The runner every launch of one starts: `crew run`, `crew start`, crew's own
 // recovery and the run views' r.
@@ -73,6 +85,7 @@ export const runnerTitle = (script) => `crew run ${basename(script)}`
 export const MAIL_TYPES = Object.freeze(['worker_done', 'handoff', 'escalation'])
 const OUTCOMES = new Set(['succeeded', 'failed'])
 const STATUSES = new Set(['todo', 'in-progress', 'in-review', 'completed'])
+export const ROLES = Object.freeze(['worker', 'doctor'])
 
 const hex = (n) => randomBytes(n).toString('hex')
 
@@ -139,6 +152,54 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
   }
   const shown = (r) => ({ id: r.id, coordinator: r.coordinator })
 
+  // The dispatch session `id` runs, for a message it sends by its id alone.
+  const sessionDispatch = (id, what) => {
+    const d = dispatches.get(String(id))
+    if (!d) throw new Error(`no dispatch for session ${id}: crew takes ${what} only from a session it started for an agent, under the dispatch its runner made`)
+    if (d.released) throw new Error(`session ${id}'s dispatch was released: its runner let its agent go, so it takes no more ${what}`)
+    return d
+  }
+
+  // A message to the dispatch's Run's mailbox; a worker_done settles it.
+  const post = (d, { type, subject = '', body = '', outcome = null, result = null }) => {
+    if (!MAIL_TYPES.includes(type)) throw new Error(`not a message type crew takes: ${JSON.stringify(type)}; one of ${MAIL_TYPES.join(', ')}`)
+    if (outcome != null && (type !== 'worker_done' || !OUTCOMES.has(outcome))) throw new Error(`not an outcome for ${type}: ${JSON.stringify(outcome)}`)
+    const m = {
+      id: `msg_${++messages}_${hex(3)}`,
+      type,
+      from: d.id,
+      subject: String(subject),
+      body: String(body),
+      taskId: d.taskId,
+      dispatchId: d.id,
+      outcome: type === 'worker_done' ? (outcome ?? 'succeeded') : null,
+      createdAt: now(),
+    }
+    runOf(d.run).pending.push(m)
+    if (type === 'worker_done') Object.assign(d, { settled: true, outcome: m.outcome, submissions: (d.submissions ?? 0) + 1, result })
+    return { id: m.id }
+  }
+
+  // The payload as its dispatch's result: a value valid against its schema
+  // (JSON text parsed first), or text when it has none.
+  const resultOf = (d, payload) => {
+    if (d.schema == null) {
+      if (typeof payload !== 'string') throw new Error(`submit rejected: this agent's result is text, not ${JSON.stringify(payload)?.slice(0, 80)}`)
+      return payload
+    }
+    let value = payload
+    if (typeof payload === 'string') {
+      try {
+        value = JSON.parse(payload)
+      } catch (e) {
+        throw new Error(`submit rejected: payload is not valid JSON: ${e.message}\nFix the payload and submit again.`)
+      }
+    }
+    const errors = validate(d.schema, value)
+    if (errors.length) throw new Error([`submit rejected: ${errors.length} validation error(s) against its schema`, ...errors.map((e) => `  ${e}`), 'Fix the payload and submit again.'].join('\n'))
+    return value
+  }
+
   // An unsettled agent's session restored from an earlier daemon and not yet
   // revived is, to its runner, the session that daemon lost: gone, its host died, so the runner
   // continues it as it would one never restored.
@@ -173,12 +234,15 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
       }
       return { run: shown(r) }
     },
-    'run.worker': ({ run, session, coordinator }) => {
+    'run.worker': ({ run, session, coordinator, role = 'worker', schema = null, resultPath = null }) => {
       const r = runOf(run)
+      if (!ROLES.includes(role)) throw new Error(`not an agent role: ${JSON.stringify(role)}; one of ${ROLES.join(', ')}`)
+      if (schema !== null && (typeof schema !== 'object' || Array.isArray(schema))) throw new Error(`not a result schema: ${JSON.stringify(schema)?.slice(0, 80)}`)
+      if (resultPath !== null) word(resultPath, 'result path')
       if (r.coordinator !== coordinator) throw new Error(`consumer_fenced: this coordinator is no longer bound to run ${r.id}`)
       if (!sessions.has(String(session))) throw new Error(`no session ${session}`)
       if (dispatches.has(String(session))) throw new Error(`session ${session} already runs a dispatch`)
-      const d = { id: String(session), run: r.id, taskId: `task_${hex(6)}`, capability: `cap_${hex(12)}`, settled: false, outcome: null, released: false, submissions: 0, result: null }
+      const d = { id: String(session), run: r.id, taskId: `task_${hex(6)}`, capability: `cap_${hex(12)}`, settled: false, outcome: null, released: false, submissions: 0, result: null, role, schema, resultPath }
       dispatches.set(d.id, d)
       return { worker: { taskId: d.taskId, capability: d.capability } }
     },
@@ -203,22 +267,27 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
       if (d.taskId !== taskId || (from != null && from !== d.id) || (capability != null && capability !== d.capability)) {
         throw new Error(`consumer_fenced: a message from ${dispatchId} does not match its preamble`)
       }
-      if (!MAIL_TYPES.includes(type)) throw new Error(`not a message type crew takes: ${JSON.stringify(type)}; one of ${MAIL_TYPES.join(', ')}`)
-      if (outcome != null && (type !== 'worker_done' || !OUTCOMES.has(outcome))) throw new Error(`not an outcome for ${type}: ${JSON.stringify(outcome)}`)
-      const m = {
-        id: `msg_${++messages}_${hex(3)}`,
-        type,
-        from: d.id,
-        subject: String(subject),
-        body: String(body),
-        taskId: d.taskId,
-        dispatchId: d.id,
-        outcome: type === 'worker_done' ? (outcome ?? 'succeeded') : null,
-        createdAt: now(),
-      }
-      runOf(d.run).pending.push(m)
-      if (type === 'worker_done') Object.assign(d, { settled: true, outcome: m.outcome, submissions: (d.submissions ?? 0) + 1, result })
-      return { id: m.id }
+      return post(d, { type, subject, body, outcome, result })
+    },
+    'worker.submit': ({ id, payload }) => {
+      const d = sessionDispatch(id, 'results')
+      if (d.role === 'doctor') throw new Error(`session ${id} is a doctor's: a doctor submits no result, it reports with a handoff or an escalation`)
+      const result = resultOf(d, payload)
+      // Written before it settles, whole or not at all: the runner reads this
+      // file once it sees the worker settle.
+      if (d.resultPath) writeJsonAtomic(d.resultPath, result)
+      const { id: message } = post(d, {
+        type: 'worker_done',
+        subject: 'result submitted',
+        body: d.resultPath ? `Submitted a result that is valid against its schema. It is recorded at ${d.resultPath}. Nothing remains for this task.` : 'Submitted a result that is valid against its schema. Nothing remains for this task.',
+        result,
+      })
+      return { id: message, resultPath: d.resultPath ?? null }
+    },
+    'worker.mail': ({ id, type, subject = '', body = '', outcome = null }) => {
+      const d = sessionDispatch(id, 'mail')
+      if (type === 'worker_done' && d.role !== 'doctor') throw new Error(`session ${id} is a worker's: its result goes through submit, which checks it against its schema, never as mail`)
+      return post(d, { type, subject, body, outcome })
     },
     'mail.check': ({ coordinator, ack = null }) => {
       const r = [...runs.values()].reverse().find((x) => x.coordinator === coordinator) ?? null
