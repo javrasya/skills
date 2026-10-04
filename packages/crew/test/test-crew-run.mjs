@@ -159,3 +159,40 @@ test('a harness dialog before the prompt: the agent needs you in the session sho
   )
   assert.equal(readJournal(journal).agents[0].state, 'done')
 })
+
+test('a resubmit on the crew host: a node whose result needs decisions is held, its agent submits again through the CLI, and the script gets the value with no resume request', async () => {
+  const cwd = join(root, 'resubmit-repo')
+  mkdirSync(cwd)
+  const host = sessionHost(crewHost({ paths, env, cwd, harnesses: { claude: [process.execPath, FAKE_HARNESS] }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
+  const stateDir = join(root, 'resubmit-state')
+  const said = []
+  const halts = []
+  const result = await runScript(fixture('resubmit.workflow.js'), { host, stateDir, out: (s) => said.push(s), settings: FAST, transcripts: sessionTranscripts({ env }), project: cwd, onHalt: (h) => halts.push(h) })
+  const log = said.join('\n')
+  assert.deepEqual(result, { word: 'carried' }, log)
+  assert.deepEqual(
+    halts.map((h) => h.node),
+    ['decide'],
+    log,
+  )
+  assert.ok(!existsSync(join(stateDir, 'resume-request.json')), 'no resume request was written')
+  const entries = readFileSync(join(stateDir, 'journal.jsonl'), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l))
+  const results = entries.filter((e) => e.type === 'result')
+  assert.deepEqual(
+    results.map((e) => [!!e.needsDecision, !!e.resubmitted]),
+    [
+      [true, false],
+      [false, true],
+    ],
+    log,
+  )
+  assert.deepEqual(
+    entries.filter((e) => ['continued', 'remedy'].includes(e.type)),
+    [],
+    'its session was never continued',
+  )
+  assert.equal(entries.filter((e) => e.type === 'unhalted').length, 1)
+})

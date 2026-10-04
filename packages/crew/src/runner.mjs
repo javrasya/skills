@@ -370,7 +370,7 @@ export async function runScript(
   for (const e of earlier.nodes.values()) {
     if (!e.failed && !e.needsDecision) continue
     const origin = e.last?.origin ?? e.origin
-    const carried = { key: e.key, n: e.n, node: e.node, title: e.title, carried: true, ...(Number.isInteger(origin) && { origin }), ...(e.last && { worker: e.last }) }
+    const carried = { key: e.key, n: e.n, node: e.node, title: e.title, carried: true, ...(Number.isInteger(origin) && { origin }), ...(e.last && { worker: e.last }), ...(e.workerLeft && { workerLeft: true }) }
     journal(e.failed ? { type: 'failed', ...carried, reason: e.reason ?? 'failed in an earlier run', attempts: 0 } : { type: 'result', ...carried, result: e.result, needsDecision: true })
   }
   // A patient's lines are the ones of its call or of its agent; its log lines
@@ -520,9 +520,12 @@ export async function runScript(
       const questions = v === null ? null : decisionsNeeded(v)
       if (v !== null && !questions) break
       wasHeld = true
-      const reason = questions ? questions.join(' · ') : (readJournal(journalPath).nodes.get(call.node)?.reason ?? 'it failed')
-      await halt.hold({ node: call.node, title: call.title, needsDecision: !!questions, reason, ...(questions && { questions }) })
-      v = await resumeNode(call, readJournal(journalPath).nodes.get(call.node) ?? {})
+      const e = readJournal(journalPath).nodes.get(call.node) ?? {}
+      const reason = questions ? questions.join(' · ') : (e.reason ?? 'it failed')
+      const stop = watchResubmit(call, e, !!questions)
+      const how = await halt.hold({ node: call.node, title: call.title, needsDecision: !!questions, reason, ...(questions && { questions }) })
+      stop()
+      v = await resumeNode(call, readJournal(journalPath).nodes.get(call.node) ?? {}, { resubmitted: how === 'resubmit' })
     }
     if (wasHeld) {
       // The worktree its failure retained is its agent's own again, reported.
@@ -534,12 +537,50 @@ export async function runScript(
     return v
   }
 
+  // While a node is held its worker may submit again with no r (#173): its
+  // host counts each worker_done, so a count above the one first seen while
+  // held is a resubmit. Its result is written to the agent's result.json, as
+  // its submit wrote it, and the node woken (halt.wake) to take it as r takes
+  // one. Only a worker still there is polled: a needs-decision node's, or a
+  // failed one's kept open; and only on a host that counts (crew's,
+  // workerResult). Returns what stops the polling.
+  function watchResubmit(call, e, needsDecision) {
+    const w = e.last ?? null
+    if (!host.workerResult || !w?.dispatchId || !w.dir || !(needsDecision || e.workerLeft)) return () => {}
+    let on = true
+    const at = join(stateDir, w.dir, 'result.json')
+    ;(async () => {
+      let seen = null
+      for (; on; await clock.sleep(limits.pollMs)) {
+        try {
+          const { submissions = 0 } = await host.workerShow({ dispatch: w.dispatchId })
+          if (!on) return
+          if (seen === null || submissions <= seen) {
+            seen ??= submissions
+            continue
+          }
+          const got = await host.workerResult({ dispatch: w.dispatchId })
+          seen = got.submissions
+          if (!on || got.result == null) continue
+          writeFileSync(at, JSON.stringify(got.result, null, 2))
+          const checked = readResult(at, call.schema)
+          if (checked.error) out(`!! ${call.title}: its worker submitted again while node ${call.node} was held, but ${checked.error}: it stays held`)
+          else if (halt.wake(call.node)) return
+        } catch {}
+      }
+    })()
+    return () => {
+      on = false
+    }
+  }
+
   // A held node carried on (ADR-0016), as the journal names it (the fold's
   // nodes entry): the result.json its worker submitted after the run gave up
   // on it, validated again; else its session continued in its own worktree
   // and tab (carryHalted); else, if its worker never started, a fresh start.
-  // A worker still out is taken up as a resume takes one up.
-  async function resumeNode(call, e) {
+  // A worker still out is taken up as a resume takes one up. resubmitted: its
+  // worker submitted again while it was held (watchResubmit), not r.
+  async function resumeNode(call, e, { resubmitted = false } = {}) {
     const { key, n, node, title, schema } = call
     if (e.worker) {
       aside.delete(e.worker.worktree)
@@ -551,8 +592,8 @@ export async function runScript(
       if (!got.error) {
         const questions = decisionsNeeded(got.value)
         if (questions) setAside(join(stateDir, last.dir, 'result.json'))
-        journal({ type: 'result', key, n, node, title, result: got.value, ...(questions && { needsDecision: true }), ...(Number.isInteger(last.origin) && { origin: last.origin }), resumedFrom: 'result.json' })
-        out(`<< ${title}: resuming node ${node}: took the result its worker submitted after the run gave up on it`)
+        journal({ type: 'result', key, n, node, title, result: got.value, ...(questions && { needsDecision: true }), ...(Number.isInteger(last.origin) && { origin: last.origin }), resumedFrom: 'result.json', ...(resubmitted && { resubmitted: true }) })
+        out(`<< ${title}: resuming node ${node}: took the result its worker submitted ${resubmitted ? 'again ' : ''}after the run gave up on it`)
         return got.value
       }
     }

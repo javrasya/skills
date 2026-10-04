@@ -558,7 +558,7 @@ export function foldJournal(entries) {
     if (typeof e.key !== 'string') continue
     if (!numbered && e.type !== 'result' && e.type !== 'failed') continue
     const callId = numbered ? e.n : `line ${i}`
-    if (!byCall.has(callId)) byCall.set(callId, { key: e.key, n: numbered ? e.n : null, order: numbered ? e.n : i, carried: false, worker: null, settled: null, origin: null, node: null, title: null, reason: null })
+    if (!byCall.has(callId)) byCall.set(callId, { key: e.key, n: numbered ? e.n : null, order: numbered ? e.n : i, carried: false, worker: null, settled: null, origin: null, node: null, title: null, reason: null, workerLeft: false })
     const c = byCall.get(callId)
     if (typeof e.node === 'string') c.node = e.node
     if (typeof e.title === 'string') c.title = e.title
@@ -570,6 +570,7 @@ export function foldJournal(entries) {
     } else if (e.type === 'failed') {
       if (!e.workerOut) c.settled = { failed: true }
       c.reason = e.reason ?? null
+      c.workerLeft = e.workerLeft === true
       if (Number.isInteger(e.origin)) c.origin = e.origin
     } else if (e.type === 'starting') {
       c.settled = null
@@ -634,6 +635,7 @@ export function foldJournal(entries) {
         title: c.title,
         ...(c.origin !== null && { origin: c.origin }),
         ...(settled?.failed && { reason: c.reason }),
+        ...(settled?.failed && c.workerLeft && { workerLeft: true }),
         ...(settled && c.worker && { last: c.worker }),
       })
     }

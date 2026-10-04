@@ -29,7 +29,7 @@ import { removeRun, stopRunnerOf } from '../src/remove.mjs'
 import { CONSULT_FILE } from '../src/orchestrator.mjs'
 import { findRun, pauseCommand, resumeCommand, removeCommand } from '../src/run-commands.mjs'
 import { holdQueue } from '../src/hold.mjs'
-import { runHalt } from '../src/halt.mjs'
+import { runHalt, RESUME_REQUEST } from '../src/halt.mjs'
 import { runPause, pauseRun as pauseRunIn, unpauseRun } from '../src/pause.mjs'
 import { runView, runsView, bandOf, STATES, RUNNER_PATH, runnerAlive, runEnded } from '../src/run-view-model.mjs'
 import { consoleRunsHelp, consoleTreeHelp, draw, drawRuns, helpLine, listRuns, strip, TREE_HELP, marqueeOffset, NAME_W } from '../src/run-view/draw.mjs'
@@ -8738,8 +8738,8 @@ const until = async (pred, what) => {
 // One Orca and one state dir for every runner of a run, each runner in its
 // own terminal; workers played by their prompt's first line (`plays`), the
 // rest submitting GOOD. go() starts a runner and does not wait on it.
-function nodeRig(plays = {}, { faults = {}, setupLeaves = [] } = {}) {
-  const orca = fakeOrca({ worker: (w) => (plays[w.prompt.split('\n')[0]] ?? submitGood)(w), faults, setupLeaves })
+function nodeRig(plays = {}, { faults = {}, setupLeaves = [], crew = false } = {}) {
+  const orca = fakeOrca({ worker: (w) => (plays[w.prompt.split('\n')[0]] ?? submitGood)(w), faults, setupLeaves, crew })
   const stateDir = tmp()
   const registry = join(stateDir, 'orca-runs.jsonl')
   const lines = []
@@ -9163,6 +9163,148 @@ test('halt: a node whose result needs decisions is held as needs you with its qu
   const [c] = rig.orca.calls.filter((x) => x.verb === 'workerContinue')
   assert.match(c.text, /operator has answered them\. Re-read the ticket, its body and its comments/)
   assert.equal(c.reopened, true, 'its dispatch settled, so it continues under a new one')
+})
+
+// --- a resubmit carries a held node on (#173) --------------------------------
+
+// A worker that submits `first`, and is kept (`w`) to submit again from the
+// test, as an agent of a held node does on its own.
+const keepsWorker = (first) => {
+  const kept = { w: null }
+  kept.play = async (w) => {
+    kept.w = w
+    return submitsValue(first)(w)
+  }
+  return kept
+}
+// The verbs from the latest worker_done on: the runner's next look sees it.
+const afterLastSubmit = (rig) => {
+  const at = rig.orca.calls.findLastIndex((c) => c.verb === 'workerDone')
+  return rig.orca.calls.slice(at + 1).map((c) => c.verb)
+}
+
+test('resubmit: a held needs-decision node whose worker submits a result without decisions returns to the script within one poll, with no r and no session continued', async () => {
+  const kept = keepsWorker(ASKS)
+  const rig = nodeRig({ 'Do a.': kept.play }, { crew: true })
+  const run = rig.go(`return await ${nodeCall('a')}`)
+  await until(() => rig.halts.length, 'the halt')
+  await submitsValue(ANSWERED)(kept.w)
+  assert.deepEqual(await run.p, ANSWERED)
+  assert.deepEqual(
+    afterLastSubmit(rig)
+      .filter((v) => ['workerShow', 'workerResult'].includes(v))
+      .slice(0, 2),
+    ['workerShow', 'workerResult'],
+    'the first look after it took it',
+  )
+  assert.deepEqual(
+    rig.orca.calls.filter((c) => ['workerStart', 'workerContinue'].includes(c.verb)).map((c) => c.verb),
+    ['workerStart'],
+  )
+  assert.ok(!existsSync(join(rig.stateDir, RESUME_REQUEST)))
+  const j = rig.journal()
+  assertEntries(j)
+  const taken = ofType(j, 'result').at(-1)
+  assert.deepEqual([taken.resumedFrom, taken.resubmitted, taken.needsDecision], ['result.json', true, undefined])
+  assert.equal(ofType(j, 'unhalted').length, 1)
+  assert.ok(
+    rig.lines.some((l) => l.endsWith('resuming node n/a: took the result its worker submitted again after the run gave up on it')),
+    rig.lines.join('\n'),
+  )
+  assert.deepEqual(JSON.parse(readFileSync(join(rig.stateDir, ofType(j, 'started')[0].dir, 'result.json'), 'utf8')), ANSWERED, 'the runner wrote it to its result file')
+})
+
+test('resubmit: one still naming decisions holds the node again, its row showing the new questions', async () => {
+  const kept = keepsWorker(ASKS)
+  const rig = nodeRig({ 'Do a.': kept.play }, { crew: true })
+  const run = rig.go(`return await ${nodeCall('a')}`)
+  await until(() => rig.halts.length, 'the halt')
+  const ASKS_AGAIN = { ...GOOD, decisions_needed: ['Which region first?'] }
+  await submitsValue(ASKS_AGAIN)(kept.w)
+  await until(() => rig.halts.length === 2, 'the second hold')
+  assert.equal(run.settled, null)
+  const a = foldJournal(rig.journal()).agents[0]
+  assert.equal(a.state, 'needs you')
+  assert.match(a.reason, /Which region first\?/)
+  const notice = JSON.parse(readFileSync(join(rig.stateDir, 'halted.json'), 'utf8'))
+  assert.deepEqual(notice.nodes[0].questions, ['Which region first?'])
+  await submitsValue(ANSWERED)(kept.w)
+  assert.deepEqual(await run.p, ANSWERED)
+  assert.deepEqual(
+    ofType(rig.journal(), 'result').map((e) => [!!e.needsDecision, !!e.resubmitted]),
+    [
+      [true, false],
+      [true, true],
+      [false, true],
+    ],
+  )
+})
+
+test('resubmit: a failed node whose worker was kept open is carried on by its submit the same way; one whose worker is gone is never polled', async () => {
+  const kept = { w: null }
+  const rig = nodeRig(
+    {
+      'Do a.': async (w) => {
+        kept.w = w
+        w.state.waiting = '{"evidence":"prompt-text","text":"Allow this command?"}'
+      },
+      'Do b.': async ({ state }) => {
+        state.onContinue = submitGood
+        throw new Error('agent died')
+      },
+    },
+    { crew: true },
+  )
+  const run = rig.go(`return await parallel([() => ${nodeCall('a')}, () => ${nodeCall('b')}])`, { settings: { blockedFailMs: 20 } })
+  await until(() => rig.halts.length === 2, 'both held')
+  const heldSince = rig.orca.calls.length
+  const failed = ofType(rig.journal(), 'failed')
+  assert.deepEqual(failed.map((e) => [e.node, !!e.workerLeft]).sort(), [
+    ['n/a', true],
+    ['n/b', false],
+  ])
+  const dispatchOf = (node) => ofType(rig.journal(), 'started').find((e) => e.node === node).dispatchId
+  const [da, db] = [dispatchOf('n/a'), dispatchOf('n/b')]
+  await until(() => rig.orca.calls.filter((c) => c.verb === 'workerShow' && c.dispatchId === da).length > 3, 'a polled')
+  kept.w.state.waiting = null
+  await submitsValue(GOOD)(kept.w)
+  await until(() => ofType(rig.journal(), 'result').some((e) => e.node === 'n/a'), 'a delivered')
+  assert.equal(ofType(rig.journal(), 'result').find((e) => e.node === 'n/a').resubmitted, true)
+  assert.deepEqual(
+    rig.orca.calls.slice(heldSince).filter((c) => ['workerShow', 'workerResult'].includes(c.verb) && c.dispatchId === db),
+    [],
+  )
+  assert.equal(run.settled, null, 'b is still held')
+  await run.control.resume({ node: 'n/b' })
+  assert.deepEqual(await run.p, [GOOD, GOOD])
+})
+
+test('resubmit: a held node with none still waits for r; a resubmit and r together act once', async () => {
+  const kept = keepsWorker(ASKS)
+  const rig = nodeRig({ 'Do a.': async (w) => ((w.state.onContinue = submitsValue(ANSWERED)), kept.play(w)) }, { crew: true })
+  const run = rig.go(`return await ${nodeCall('a')}`)
+  await until(() => rig.halts.length, 'the halt')
+  await new Promise((r) => setTimeout(r, 30))
+  assert.equal(run.settled, null, 'no resubmit: still held')
+  await submitsValue(GOOD)(kept.w)
+  await run.control.resume({ node: 'n/a' })
+  assert.deepEqual(await run.p, GOOD)
+  const j = rig.journal()
+  assert.equal(ofType(j, 'result').filter((e) => e.resumedFrom).length, 1)
+  assert.deepEqual(
+    rig.orca.calls.filter((c) => c.verb === 'workerContinue'),
+    [],
+  )
+  assert.equal(ofType(j, 'unhalted').length, 1)
+
+  // With none, r carries it on as before: its session told the operator answered.
+  const rig2 = nodeRig({ 'Do a.': async (w) => ((w.state.onContinue = submitsValue(ANSWERED)), submitsValue(ASKS)(w)) }, { crew: true })
+  const run2 = rig2.go(`return await ${nodeCall('a')}`)
+  await until(() => rig2.halts.length, 'the halt')
+  await run2.control.resume({})
+  assert.deepEqual(await run2.p, ANSWERED)
+  assert.equal(rig2.orca.calls.filter((c) => c.verb === 'workerContinue').length, 1)
+  assert.equal(ofType(rig2.journal(), 'result').at(-1).resubmitted, undefined)
 })
 
 test('halt: an attended node that could not clear its blockers is held; r continues its session with the person, still needs you', async () => {

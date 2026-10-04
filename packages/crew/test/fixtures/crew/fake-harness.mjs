@@ -31,7 +31,11 @@
 // prompts of the transcript it resumed included. Given the runner's submit
 // command and a preamble's IDs (the latest one), it submits at the end of
 // every turn, before its reply: the note of the latest doctor's note prompt,
-// else the text of the latest [answer <text>], else `done`. Told it is a
+// else the text of the latest [answer <text>], else `done`; with
+// [decide <question>] that turn's [answer <json>] goes with
+// decisions_needed: [<question>], and with [resubmit <ms>] it submits again,
+// its [answer] alone, that long after the runner set its result aside as
+// result.needs-decision.json, as an agent of a held node may. Told it is a
 // doctor, it plays nothing else: it sends the text of the patient's
 // [cure <text>] as its handoff, `no note` without one, then its worker_done,
 // with the `orchestration send` its preamble names. Asked by crew's
@@ -158,14 +162,14 @@ async function tui() {
     run([bin, 'orchestration', 'send', ...ids, '--type', 'worker_done', '--subject', 'diagnosed', '--body', 'note sent', '--outcome', 'succeeded'])
   }
 
-  function submit() {
+  function submit(payload = null) {
     const command = latest(/node "([^"]*submit\.mjs)".*/)
     const ids = idsOf()
     if (!command || !ids) return
     const flag = (name) => new RegExp(`--${name} "([^"]+)"`).exec(command[0])?.[1] ?? null
     const note = latest(/## The doctor's note\n([\s\S]*)$/)?.[1].trim()
     const draft = latest(/You are crew's orchestrator\. [\s\S]*no validation list/) && JSON.stringify(FIXED_DRAFT)
-    writeFileSync(flag('payload'), note ?? latest(/\[answer ([^\]]*)\]/)?.[1] ?? draft ?? 'done')
+    writeFileSync(flag('payload'), payload ?? note ?? latest(/\[answer ([^\]]*)\]/)?.[1] ?? draft ?? 'done')
     run([command[1], ...(flag('schema') ? ['--schema', flag('schema')] : []), '--result', flag('result'), '--payload', flag('payload'), ...ids])
   }
 
@@ -272,7 +276,16 @@ async function tui() {
     } else if (how === 'turn') await sleep(Number(ms))
     const ask = /\[ask ([^\]]+)\]/.exec(prompt)?.[1]
     if (ask) await waitOn(ask)
-    submit()
+    const decide = /\[decide ([^\]]*)\]/.exec(prompt)?.[1]
+    const answer = /\[answer ([^\]]*)\]/.exec(prompt)?.[1]
+    submit(decide && answer ? JSON.stringify({ ...JSON.parse(answer), decisions_needed: [decide] }) : null)
+    const again = /\[resubmit (\d+)\]/.exec(prompt)?.[1]
+    const aside = latest(/--result "([^"]+)\.json"/)?.[1]
+    if (again && aside) {
+      while (!existsSync(`${aside}.needs-decision.json`)) await sleep(50)
+      await sleep(Number(again))
+      submit()
+    }
     reply(prompt, recorded)
   }
 
