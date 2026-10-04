@@ -46,7 +46,7 @@ export function foldMail(d, e) {
 
 // How a doctor reports, as its brief says: it has no submit command, so its
 // nudge and continuation prompt never name one.
-const REPORT = 'report over Run mail as your instructions say: send your note as a handoff, then worker_done; escalate if only a human can clear the failure; or give up with worker_done --outcome failed. If you already sent your note, send worker_done'
+const REPORT = `report as your instructions say, with crew's tools when your session has them, else over Run mail: hand off your note (\`${tool('handoff').name}\`, or send it as a handoff, then worker_done); say a human is needed (\`${tool('needs_you').name}\`, or an escalation) if only a human can clear the failure; or give up (\`${tool('give_up').name}\`, or worker_done --outcome failed). If you already sent your note as mail, send worker_done`
 export const DOCTOR_NUDGE = `The workflow has not received your report: your final message is not read. Finish your diagnosis, then ${REPORT}.`
 
 // The doctor's whole brief: it gets no submit command, since its only output
@@ -76,9 +76,14 @@ Change nothing. Edit, create or delete no file, in any worktree; change no envir
 
 When only a human can clear the failure (a login, credentials, a sandbox permission), state the situation and what the human must do or decide, plainly. Do not question them: they handle it their own way. Never run any \`orchestration ask\` command, whatever your session host's preamble offers: nobody answers it. A question only a human can answer goes in your escalation or your note, as below.
 
-Report over Run mail to your Run's mailbox, with the IDs from your session host's preamble:
-- the note: ${tool('handoff').fallback()}. Your first handoff is this round's note: the runner carries the patient on with it at once, and takes no later handoff or escalation from you, so send it only once you are done, then worker_done;
-- a human is needed: ${tool('needs_you').fallback()}, then wait for as long as it takes: nobody hurries you. Once the human tells you in your tab that they did their part, send your note as above, or escalate again if something is still needed;
+Report with crew's tools, when your session has them:
+- the note: call \`${tool('handoff').name}\` with it. Your first handoff is this round's note: the runner carries the patient on with it at once, and takes no later handoff or escalation from you, so send it only once you are done;
+- a human is needed: call \`${tool('needs_you').name}\` with what the human must do or decide, then wait for as long as it takes: nobody hurries you. Once the human tells you in your tab that they did their part, send your note as above, or call it again if something is still needed;
+- you give up: call \`${tool('give_up').name}\` with why.
+
+Without those tools, or if one says crew's daemon is not reachable, report over Run mail to your Run's mailbox instead, with the IDs from your session host's preamble:
+- the note: ${tool('handoff').fallback()}, only once you are done, as above;
+- a human is needed: ${tool('needs_you').fallback()}, then wait as above, and escalate again if something is still needed once the human did their part;
 - you give up: ${tool('give_up').fallback()}.
 
 ## The patient

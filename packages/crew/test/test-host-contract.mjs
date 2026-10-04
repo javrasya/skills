@@ -762,7 +762,7 @@ function stubPi(env) {
   return { tools, start: () => on.get('session_start')({ type: 'session_start', reason: 'startup' }, {}) }
 }
 
-test("crew host: crew's pi extension gives a worker's session `status`, `needs_you` and `submit`, the table's descriptions and its schema as parameters, which submits by session; a doctor's gets `status` and `needs_you`, one of no dispatch and an operator's own pi none; a daemon gone is named (#174, #175)", async () => {
+test("crew host: crew's pi extension gives a worker's session `status`, `needs_you` and `submit`, the table's descriptions and its schema as parameters, which submits by session; a doctor's gets `status`, `needs_you`, `handoff` and `give_up`, one of no dispatch and an operator's own pi none; a daemon gone is named (#174, #175, #176)", async () => {
   const h = crewKind.open()
   const schema = { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } }
   const resultPath = join(scratchDir(), 'result.json')
@@ -805,12 +805,24 @@ test("crew host: crew's pi extension gives a worker's session `status`, `needs_y
   const doctorPi = stubPi({ CREW_HOME: h.paths.home, CREW_SESSION: doctor.terminal })
   await doctorPi.start()
   assert.deepEqual(
-    doctorPi.tools.map((t) => t.name),
-    ['status', 'needs_you'],
+    doctorPi.tools.map((t) => [t.name, t.description]),
+    ['status', 'needs_you', 'handoff', 'give_up'].map((name) => [name, tool(name).description]),
   )
   // A doctor's needs_you is its escalation, as mail; its row's needs-you is the runner's.
   await doctorPi.tools[1].execute('call_1', { reason: 'grant the sandbox' })
   assert.equal((await kept(doctor)).needsYou, null)
+  // handoff and give_up each end its round in one op: its dispatch settles.
+  assert.match((await doctorPi.tools[2].execute('call_2', { note: 'read the lockfile first' })).content[0].text, /^Handed off: the runner carries the patient on with your note, and your round is over\. Nothing remains for you: stop and idle\.$/)
+  assert.deepEqual(await h.host.workerResult({ dispatch: doctor.dispatchId }), { result: null, outcome: 'succeeded', submissions: 1 })
+  const quitter = await start(h, 'stub pi quitter', { prompt: 'Contract prompt for stub pi quitter. [turn 600000]', role: 'doctor' })
+  const quitterEnv = { CREW_HOME: h.paths.home, CREW_SESSION: quitter.terminal }
+  const quitterPi = stubPi(quitterEnv)
+  await quitterPi.start()
+  assert.match((await quitterPi.tools[3].execute('call_1', { reason: 'only a human can fix it' })).content[0].text, /^Gave up: your round is over, with no note\. Nothing remains for you: stop and idle\.$/)
+  assert.deepEqual(await h.host.workerResult({ dispatch: quitter.dispatchId }), { result: null, outcome: 'failed', submissions: 1 })
+  quitterEnv.CREW_HOME = join(crewScratch().root, 'no-daemon-here')
+  await assert.rejects(quitterPi.tools[2].execute('call_2', { note: 'x' }), (e) => e.message.endsWith(`Your note was not sent. Send it over Run mail instead, with the IDs your instructions give: ${tool('handoff').fallback()}`))
+  await assert.rejects(quitterPi.tools[3].execute('call_2', { reason: 'x' }), (e) => e.message.endsWith(`The run was not told. Send it over Run mail instead, with the IDs your instructions give: ${tool('give_up').fallback()}`))
   for (const none of [{ CREW_HOME: h.paths.home, CREW_SESSION: 'no-such-session' }, { CREW_HOME: h.paths.home }]) {
     const other = stubPi(none)
     // Its ready is pi's to report, for a session the daemon does not hold.

@@ -80,6 +80,78 @@ test('a doctor round on the crew host: the patient dies, its doctor hands off a 
   assert.equal(fold.agents.find((a) => a.n === doctor.n)?.state, 'done', JSON.stringify(fold.agents))
 })
 
+// A run whose doctor is a pi (the recover role's harness), journal and the
+// doctor's tool results from its pi transcript.
+async function piDoctorRun(name, script) {
+  const cwd = repo(`${name}-repo`)
+  const host = sessionHost(crewHost({ paths, env, cwd, harnesses: { claude: [process.execPath, FAKE_HARNESS], pi: [process.execPath, FAKE_HARNESS] }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
+  const stateDir = join(root, `${name}-state`)
+  const said = []
+  const result = await runScript(fixture(script), { host, stateDir, out: (s) => said.push(s), settings: FAST, transcripts: sessionTranscripts({ env }), project: cwd })
+  const entries = readFileSync(join(stateDir, 'journal.jsonl'), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l))
+  const of = (type) => entries.filter((e) => e.type === type)
+  const [doctor] = of('doctor')
+  const doctorStart = of('started').find((e) => e.n === doctor?.doctor)
+  const toolCalls = doctorStart
+    ? readFileSync(transcriptPath({ harness: 'pi', sessionId: doctorStart.sessionId, worktree: doctorStart.worktree, env }), 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .map((l) => JSON.parse(l).message)
+        .filter((m) => m?.role === 'toolResult')
+        .map((m) => [m.toolName, m.isError])
+    : []
+  return { result, of, doctor, doctorStart, toolCalls, log: said.join('\n') }
+}
+
+test("a pi doctor ends its round with crew's handoff tool: its note is the remedy and its patient carries on with it; a second handoff acts on nothing (#176)", async () => {
+  const { result, of, doctorStart, toolCalls, log } = await piDoctorRun('handoff-tool', 'doctor-handoff-tool.workflow.js')
+  assert.deepEqual(result, { patient: 'the note carried it on' }, log)
+  assert.equal(doctorStart?.harness, 'pi', log)
+  assert.deepEqual(toolCalls[0], ['handoff', false], log)
+  const remedies = of('mail').filter((m) => m.action === 'remedy')
+  assert.deepEqual(
+    remedies.map((m) => m.body),
+    ['the note carried it on'],
+    log,
+  )
+  const [remedy] = of('remedy')
+  assert.equal(remedy?.how, 'continue', log)
+  assert.equal(remedy.messageId, remedies[0].messageId)
+  assert.equal(of('remedy').length, 1)
+  // The second note, if the daemon took it before the runner let its doctor go, acted on nothing.
+  assert.deepEqual(
+    of('mail')
+      .filter((m) => m.kind === 'handoff' && m.action !== 'remedy')
+      .map((m) => m.action)
+      .filter((a) => a !== 'none'),
+    [],
+    log,
+  )
+  assert.equal(of('gaveUp').length, 0, log)
+})
+
+test("a pi doctor ends its round with crew's give_up tool: no remedy, the reason journaled, and its patient's agent() fails once its rounds are spent (#176)", async () => {
+  const { result, of, doctor, toolCalls, log } = await piDoctorRun('give-up-tool', 'doctor-give-up-tool.workflow.js')
+  assert.deepEqual(result, { patient: null }, log)
+  assert.deepEqual(toolCalls, [['give_up', false]], log)
+  const gaveUp = of('mail').filter((m) => m.action === 'gaveUp')
+  assert.deepEqual(
+    gaveUp.map((m) => [m.kind, m.outcome, m.body]),
+    [['worker_done', 'failed', 'only a human can fix this']],
+    log,
+  )
+  assert.deepEqual(
+    of('gaveUp').map((e) => [e.round, e.doctor, e.reason]),
+    [[1, doctor.doctor, 'it gave up: only a human can fix this']],
+    log,
+  )
+  assert.equal(of('remedy').length, 0, log)
+  assert.equal(of('mail').filter((m) => m.action === 'remedy').length, 0, log)
+})
+
 test('a sequential run on the crew host: its code agents one after another in <runId>-chain, its setup hook run once, and a doctor in a <runId>-<n> of its own, setup skipped', async () => {
   const cwd = repo('chain-repo')
   const hook = join(root, 'chain-setup.mjs')

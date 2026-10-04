@@ -29,7 +29,11 @@
 // session can submit by its id alone (worker.submit), checked again here as
 // submit checks it, and send its mail (worker.mail). Either is refused a
 // session of no dispatch, or of one released; a doctor submits nothing, and
-// a worker's result goes only through submit.
+// a worker's result goes only through submit. A doctor ends its round by its
+// id too (#176): worker.handoff sends its note as a handoff, then its
+// worker_done succeeded, and worker.giveUp its worker_done failed, the reason
+// its body: the mail its prompt's CLI line sends, each in one op. A worker
+// has no round, so either refuses it.
 //
 // A session may also set a note, what it is doing now, cut to NOTE_MAX
 // (worker.status), and say it needs the person, and why (worker.needsYou), both
@@ -61,6 +65,8 @@
 //   worker.schema { id }                        → { agent: { role, schema } | null }: session id's, null for one of no dispatch or a released one
 //   worker.submit { id, payload }               → { id, resultPath }: session id's result, sent as its worker_done
 //   worker.mail { id, type, subject, body, outcome } → { id }: as mail.send, from session id
+//   worker.handoff { id, note }                 → { id }: a doctor's note, as a handoff and its worker_done; id the handoff's
+//   worker.giveUp { id, reason }                → { id }: a doctor's worker_done failed, the reason its body
 //   worker.status { id, note }                  → { note }: session id's note, as kept
 //   worker.needsYou { id, reason }              → { needsYou }: session id's reason
 //   mail.send { from, capability, taskId, dispatchId, type, subject, body, outcome, result } → { id }
@@ -306,6 +312,19 @@ export function runBook({ sessions, now = () => new Date().toISOString(), store 
       const d = sessionDispatch(id, 'mail')
       if (type === 'worker_done' && d.role !== 'doctor') throw new Error(`session ${id} is a worker's: its result goes through submit, which checks it against its schema, never as mail`)
       return post(d, { type, subject, body, outcome })
+    },
+    'worker.handoff': ({ id, note }) => {
+      const d = sessionDispatch(id, 'handoffs')
+      if (d.role !== 'doctor') throw new Error(`session ${id} is a worker's: a handoff is a doctor's note, which ends its round, and a worker has no round to end; it finishes with submit`)
+      const body = word(typeof note === 'string' ? note.trim() : note, 'note')
+      const handoff = post(d, { type: 'handoff', subject: 'note', body })
+      post(d, { type: 'worker_done', subject: 'note handed off', body: 'Handed off its note.', outcome: 'succeeded' })
+      return handoff
+    },
+    'worker.giveUp': ({ id, reason }) => {
+      const d = sessionDispatch(id, 'give-ups')
+      if (d.role !== 'doctor') throw new Error(`session ${id} is a worker's: give_up ends a doctor's round, and a worker has no round to end; it finishes with submit, or says it needs the person`)
+      return post(d, { type: 'worker_done', subject: 'gave up', body: word(typeof reason === 'string' ? reason.trim() : reason, 'reason'), outcome: 'failed' })
     },
     'worker.status': ({ id, note }) => {
       const d = sessionDispatch(id, 'notes')

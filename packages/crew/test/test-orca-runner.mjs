@@ -27,6 +27,7 @@ import { transcriptPath, sessionTranscripts, claudeSlug, piDir, promptDelivered,
 import { agentsOf, reclaimAgent, reclaimRun } from '../src/reclaim.mjs'
 import { removeRun, stopRunnerOf } from '../src/remove.mjs'
 import { CONSULT_FILE } from '../src/orchestrator.mjs'
+import { tool } from '../src/tools.mjs'
 import { findRun, pauseCommand, resumeCommand, removeCommand } from '../src/run-commands.mjs'
 import { holdQueue } from '../src/hold.mjs'
 import { runHalt, RESUME_REQUEST } from '../src/halt.mjs'
@@ -3290,6 +3291,44 @@ test('doctor: a worker_done --outcome failed over mail ends its round with no re
     false,
   )
   assert.equal(r.continues.length, 3, 'only the continuations before the cap')
+})
+
+// What crew's handoff tool sends (daemon worker.handoff, #176): the note as a
+// handoff, then worker_done succeeded, in one op; called twice here.
+const handsOffByToolTwice = (note, again) => async (w) => {
+  await handsOff(note)(w)
+  await handsOff(again)(w)
+}
+
+test("doctor: crew's handoff tool, called twice, carries the patient on with its first note alone: the second acts on nothing (#176)", async () => {
+  const AGAIN = 'A second thought.'
+  const r = await runOne(withDoctor(curedBy(NOTE, 'gone'), handsOffByToolTwice(NOTE, AGAIN)), { script: ISOLATED })
+  assert.deepEqual(r.result, GOOD)
+  assertEntries(r.journal)
+  assert.deepEqual(
+    ofType(r.journal, 'mail')
+      .filter((e) => e.kind === 'handoff')
+      .map((e) => [e.action, e.body]),
+    [
+      ['remedy', NOTE],
+      ['none', AGAIN],
+    ],
+  )
+  assert.equal(ofType(r.journal, 'remedy').length, 1)
+  assert.deepEqual(ofType(r.journal, 'gaveUp'), [])
+  assert.equal(r.continues.filter((c) => c.text.includes(AGAIN)).length, 0)
+})
+
+test("doctor: its prompt names crew's tools first, from the tool table, and the Run mail lines after as the fallback (#176)", () => {
+  const p = doctorPrompt({ patient: { title: 't', prompt: 'p' }, reason: 'r', round: 1, rounds: 1, transcript: 'x', worktree: null, entries: [], log: [] })
+  const at = (s) => {
+    const i = p.indexOf(s)
+    assert.ok(i >= 0, s)
+    return i
+  }
+  const tools = ['handoff', 'needs_you', 'give_up'].map((name) => at(`call \`${name}\``))
+  const fallbacks = ['handoff', 'needs_you', 'give_up'].map((name) => at(tool(name).fallback()))
+  assert.ok(Math.max(...tools) < at('Without those tools') && at('Without those tools') < Math.min(...fallbacks), p)
 })
 
 // --- a doctor that needs a human: "? needs you" -----------------------------------

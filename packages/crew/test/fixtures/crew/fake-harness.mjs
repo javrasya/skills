@@ -44,7 +44,10 @@
 // result.needs-decision.json, as an agent of a held node may. Told it is a
 // doctor, it plays nothing else: it sends the text of the patient's
 // [cure <text>] as its handoff, `no note` without one, then its worker_done,
-// with the `orchestration send` its preamble names. Asked by crew's
+// with the `orchestration send` its preamble names; with the patient's
+// [give up <why>] it sends only its worker_done failed, why its body. A pi
+// doctor crew's extension gave `handoff` and `give_up` calls them instead,
+// handoff once for each [cure], in order. Asked by crew's
 // orchestrator to draft a validation list, it answers FIXED_DRAFT, reading
 // nothing.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -161,12 +164,19 @@ async function tui() {
     said.push(`$ exit ${r.status}: ${`${r.stdout}${r.stderr}`.replace(/\s+/g, ' ').trim()}`.slice(0, 200))
   }
 
-  function doctor(prompt) {
+  async function doctor(prompt, recorded) {
+    const why = /\[give up ([^\]]*)\]/.exec(prompt)?.[1]
+    const cures = [...prompt.matchAll(/\[cure ([^\]]*)\]/g)].map((m) => m[1])
+    if (tools.has('handoff') && tools.has('give_up')) {
+      if (why != null) await call('give_up', { reason: why }, recorded)
+      else for (const note of cures.length ? cures : ['no note']) await call('handoff', { note }, recorded)
+      return
+    }
     const bin = /node "([^"]+)" orchestration send/.exec(prompt)?.[1]
     const ids = idsOf()
     if (!bin || !ids) return
-    const note = /\[cure ([^\]]*)\]/.exec(prompt)?.[1] ?? 'no note'
-    run([bin, 'orchestration', 'send', ...ids, '--type', 'handoff', '--subject', 'note', '--body', note])
+    if (why != null) return run([bin, 'orchestration', 'send', ...ids, '--type', 'worker_done', '--subject', 'gave up', '--body', why, '--outcome', 'failed'])
+    run([bin, 'orchestration', 'send', ...ids, '--type', 'handoff', '--subject', 'note', '--body', cures[0] ?? 'no note'])
     run([bin, 'orchestration', 'send', ...ids, '--type', 'worker_done', '--subject', 'diagnosed', '--body', 'note sent', '--outcome', 'succeeded'])
   }
 
@@ -265,7 +275,7 @@ async function tui() {
     told.push(prompt)
     if (recorded) asked(prompt)
     if (/You are a doctor in a workflow run/.test(prompt)) {
-      doctor(prompt)
+      await doctor(prompt, recorded)
       return reply(prompt, recorded)
     }
     if (/\[draw\]/.test(prompt)) tick()
@@ -306,32 +316,36 @@ async function tui() {
 
   async function calls(prompt, recorded) {
     for (const [, name, json] of prompt.matchAll(/\[call (\S+) ([^\]]*)\]/g)) {
-      const t = tools.get(name)
-      const id = `call_${randomUUID().slice(0, 8)}`
       let args
       try {
         args = JSON.parse(json)
       } catch {
         args = json
       }
-      let text
-      let isError = true
-      const errors = t ? validate(t.parameters, args) : []
-      if (!t) text = `Tool ${name} not found`
-      else if (errors.length) text = `Validation failed for tool "${name}":\n${errors.map((e) => `  - ${e}`).join('\n')}`
-      else {
-        try {
-          text = (await t.execute(id, args, undefined, undefined, {})).content.map((c) => c.text ?? '').join('')
-          isError = false
-        } catch (e) {
-          text = e?.message ?? String(e)
-        }
+      await call(name, args, recorded)
+    }
+  }
+
+  async function call(name, args, recorded) {
+    const t = tools.get(name)
+    const id = `call_${randomUUID().slice(0, 8)}`
+    let text
+    let isError = true
+    const errors = t ? validate(t.parameters, args) : []
+    if (!t) text = `Tool ${name} not found`
+    else if (errors.length) text = `Validation failed for tool "${name}":\n${errors.map((e) => `  - ${e}`).join('\n')}`
+    else {
+      try {
+        text = (await t.execute(id, args, undefined, undefined, {})).content.map((c) => c.text ?? '').join('')
+        isError = false
+      } catch (e) {
+        text = e?.message ?? String(e)
       }
-      said.push(`tool ${name}${isError ? ' error' : ''}: ${text.replace(/\s+/g, ' ')}`.slice(0, 200))
-      if (harness === 'pi' && recorded) {
-        piMessage({ role: 'assistant', content: [{ type: 'toolCall', id, name, arguments: args }], stopReason: 'toolUse', usage: PI_USAGE })
-        piMessage({ role: 'toolResult', toolCallId: id, toolName: name, content: [{ type: 'text', text }], isError })
-      }
+    }
+    said.push(`tool ${name}${isError ? ' error' : ''}: ${text.replace(/\s+/g, ' ')}`.slice(0, 200))
+    if (harness === 'pi' && recorded) {
+      piMessage({ role: 'assistant', content: [{ type: 'toolCall', id, name, arguments: args }], stopReason: 'toolUse', usage: PI_USAGE })
+      piMessage({ role: 'toolResult', toolCallId: id, toolName: name, content: [{ type: 'text', text }], isError })
     }
   }
 

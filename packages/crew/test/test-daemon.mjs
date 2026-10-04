@@ -642,6 +642,64 @@ test("daemon: a session's note and needs-you reason are kept on its dispatch, fo
   }
 })
 
+test("daemon: a doctor's session hands off its note as a handoff then its worker_done succeeded, and gives up as its worker_done failed, the reason its body, each in one op; a worker's session is refused either, saying why (#176)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
+  const paths = crewPaths({ CREW_HOME: join(dir, 'home') })
+  homes.push(paths)
+  const spawnSession = quietSession([], new Map())
+  const daemon = await startDaemon({ paths, registry: join(dir, 'runs.jsonl'), spawnSession, parkAfterMs: 60_000, exit: () => {}, log: () => {} })
+  try {
+    const { run } = await request(paths, { op: 'run.create', objective: 'o', coordinator: 'c', runner: null })
+    const spawn = async (title) => (await request(paths, { op: 'session.spawn', command: ['pi', '--session-id', `uuid-${title}`], cwd: dir, title })).session.id
+    const [healer, quitter, worker, released, bare] = [await spawn('healer'), await spawn('quitter'), await spawn('worker'), await spawn('released'), await spawn('bare')]
+    for (const [session, role] of [
+      [healer, 'doctor'],
+      [quitter, 'doctor'],
+      [worker, 'worker'],
+      [released, 'doctor'],
+    ])
+      await request(paths, { op: 'run.worker', run: run.id, session, coordinator: 'c', role })
+    await request(paths, { op: 'worker.release', id: released })
+    const handoff = (id, note) => request(paths, { op: 'worker.handoff', id, note })
+    const giveUp = (id, reason) => request(paths, { op: 'worker.giveUp', id, reason })
+    const result = async (id) => {
+      const { outcome, submissions } = await request(paths, { op: 'worker.result', id })
+      return { outcome, submissions }
+    }
+
+    const sent = await handoff(healer, '  read the lockfile first  ')
+    assert.match(sent.id, /^msg_/)
+    assert.deepEqual(await result(healer), { outcome: 'succeeded', submissions: 1 })
+    // A second is taken as mail as any is: the runner acts on no later handoff.
+    await handoff(healer, 'another note')
+    await giveUp(quitter, 'only a human can grant the sandbox')
+    assert.deepEqual(await result(quitter), { outcome: 'failed', submissions: 1 })
+
+    await assert.rejects(handoff(quitter, '  '), /not a note/)
+    await assert.rejects(giveUp(quitter, 3), /not a reason: 3/)
+    await assert.rejects(handoff(worker, 'x'), new RegExp(`session ${worker} is a worker's: a handoff is a doctor's note, which ends its round, and a worker has no round to end; it finishes with submit`))
+    await assert.rejects(giveUp(worker, 'x'), new RegExp(`session ${worker} is a worker's: give_up ends a doctor's round, and a worker has no round to end; it finishes with submit, or says it needs the person`))
+    assert.deepEqual(await result(worker), { outcome: null, submissions: 0 })
+    await assert.rejects(handoff(bare, 'x'), new RegExp(`no dispatch for session ${bare}: crew takes handoffs only from a session it started for an agent`))
+    await assert.rejects(giveUp(released, 'x'), /dispatch was released: its runner let its agent go, so it takes no more give-ups/)
+
+    const { messages } = await request(paths, { op: 'mail.check', coordinator: 'c' })
+    assert.deepEqual(
+      messages.map((m) => [m.type, m.dispatchId, m.subject, m.body, m.outcome]),
+      [
+        ['handoff', healer, 'note', 'read the lockfile first', null],
+        ['worker_done', healer, 'note handed off', 'Handed off its note.', 'succeeded'],
+        ['handoff', healer, 'note', 'another note', null],
+        ['worker_done', healer, 'note handed off', 'Handed off its note.', 'succeeded'],
+        ['worker_done', quitter, 'gave up', 'only a human can grant the sandbox', 'failed'],
+      ],
+    )
+    assert.equal(messages[0].id, sent.id)
+  } finally {
+    daemon.shutdown('test over')
+  }
+})
+
 test("daemon: session.revive starts a parked session's harness again in place and holds it unparked until written to; a live one is left as it is", async () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-'))
   const paths = crewPaths({ CREW_HOME: join(dir, 'home') })

@@ -6,7 +6,8 @@
 // daemon holds it on the session's dispatch, so pi itself rejects a payload
 // that does not match, in the turn. A worker's or a doctor's session gets
 // `status` and `needs_you` (#175); a doctor's needs_you is its escalation,
-// sent as mail. A session of no agent, or one outside crew, gets no tool.
+// sent as mail. A doctor's also gets `handoff` and `give_up`, which end its
+// round (#176). A session of no agent, or one outside crew, gets no tool.
 // Nothing else of pi's is changed.
 import { request, daemonGone } from '../daemon/client.mjs'
 import { crewPaths } from '../daemon/transport.mjs'
@@ -87,7 +88,29 @@ export default function crewPi(pi, env = process.env) {
         return text('The operator is told you need them, and why. Wait for them in this session, for as long as they take.')
       },
     })
-    if (agent.role !== 'worker') return
+    if (agent.role === 'doctor') {
+      pi.registerTool({
+        name: 'handoff',
+        label: 'Hand off',
+        description: tool('handoff').description,
+        parameters: { type: 'object', required: ['note'], properties: { note: { type: 'string', description: 'Your note: the guidance the patient carries on with.' } } },
+        async execute(_toolCallId, { note }) {
+          await ask({ op: 'worker.handoff', note }, `Your note was not sent. Send it over Run mail instead, with the IDs your instructions give: ${tool('handoff').fallback()}`)
+          return text('Handed off: the runner carries the patient on with your note, and your round is over. Nothing remains for you: stop and idle.')
+        },
+      })
+      pi.registerTool({
+        name: 'give_up',
+        label: 'Give up',
+        description: tool('give_up').description,
+        parameters: { type: 'object', required: ['reason'], properties: { reason: { type: 'string', description: 'Why no note of yours can cure the patient.' } } },
+        async execute(_toolCallId, { reason }) {
+          await ask({ op: 'worker.giveUp', reason }, `The run was not told. Send it over Run mail instead, with the IDs your instructions give: ${tool('give_up').fallback()}`)
+          return text('Gave up: your round is over, with no note. Nothing remains for you: stop and idle.')
+        },
+      })
+      return
+    }
     const shape = submitShape(agent.schema)
     pi.registerTool({
       name: 'submit',
