@@ -130,28 +130,34 @@ export function starMap(tm, { width: W, height: H, now = null }) {
   const by = byNumber(tm.list)
   const centre = (t) => [Math.round(cellX(t) * 2) + 1, Math.round(cellY(t) * 4) + 2]
 
-  // A line from each blocker to what it blocks, a curve that leaves and
-  // arrives level, fading from one star's colour to the other's; lit while
-  // either end is selected, dashed out of a ticket that cannot move.
+  // A line from each blocker to what it blocks, through the waypoints the
+  // layout gave it in the columns it skips: a curve from point to point that
+  // leaves and arrives level, fading from one star's colour to the other's;
+  // lit while either end is selected, dashed out of a ticket that cannot move.
   for (const b of tm.list) {
     for (const n of b.deps) {
       const a = by.get(n)
       const k = a === sel || b === sel ? 1 : 0.33
       const dashed = cannotMove(a) || a.held
-      const [x1, y1] = centre(a)
-      const [x2, y2] = centre(b)
-      const len = Math.hypot(x2 - x1, y2 - y1)
-      if (len < 1) continue
-      const gap = 5 / len
-      const steps = Math.ceil(len * 1.5)
-      const dx = (x2 - x1) * 0.5
-      for (let i = 0; i <= steps; i++) {
-        const t = i / steps
-        if (t < gap || t > 1 - gap || (dashed && Math.floor(i / 4) % 2)) continue
-        const u = 1 - t
-        const px = u ** 3 * x1 + 3 * u * u * t * (x1 + dx) + 3 * u * t * t * (x2 - dx) + t ** 3 * x2
-        const py = u ** 3 * y1 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t ** 3 * y2
-        dot(px, py, scale(mix(STAGE[a.stage].rgb, STAGE[b.stage].rgb, t), k))
+      const pts = [centre(a), ...(b.via?.get(n) ?? []).map(centre), centre(b)]
+      const legs = pts.slice(1).map((p, j) => [pts[j], p, Math.hypot(p[0] - pts[j][0], p[1] - pts[j][1])])
+      const total = legs.reduce((s, l) => s + l[2], 0)
+      if (total < 1) continue
+      let done = 0
+      let i = 0
+      for (const [[x1, y1], [x2, y2], len] of legs) {
+        const steps = Math.max(1, Math.ceil(len * 1.5))
+        const dx = (x2 - x1) * 0.5
+        for (let s = 0; s <= steps; s++, i++) {
+          const t = s / steps
+          const along = done + t * len
+          if (along < 5 || along > total - 5 || (dashed && Math.floor(i / 4) % 2)) continue
+          const u = 1 - t
+          const px = u ** 3 * x1 + 3 * u * u * t * (x1 + dx) + 3 * u * t * t * (x2 - dx) + t ** 3 * x2
+          const py = u ** 3 * y1 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t ** 3 * y2
+          dot(px, py, scale(mix(STAGE[a.stage].rgb, STAGE[b.stage].rgb, along / total), k))
+        }
+        done += len
       }
     }
   }

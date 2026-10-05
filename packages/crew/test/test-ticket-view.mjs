@@ -142,6 +142,45 @@ test('ticket layout: depth a column apart and a column’s stars a row apart, in
   )
 })
 
+test('ticket layout: a line that skips columns passes through a row of its own in each, never a star’s, and depth stays the column', () => {
+  // A real run's graph (spec #1232): #1235's lines to #1236 and #1237 skip columns.
+  const graph = graphOf([[1235], [1233, [1235]], [1234, [1235]], [1236, [1235, 1234]], [1237, [1235, 1236]]])
+  const tickets = layoutTickets(ticketsOf(graph, []))
+  const by = new Map(tickets.map((t) => [t.n, t]))
+  assert.deepEqual(
+    tickets.map((t) => [t.n, t.depth]),
+    [
+      [1235, 0],
+      [1233, 1],
+      [1234, 1],
+      [1236, 2],
+      [1237, 3],
+    ],
+  )
+  assert.deepEqual(
+    by
+      .get(1237)
+      .via.get(1235)
+      .map((p) => p.x),
+    [1, 2],
+  )
+  assert.deepEqual(
+    by
+      .get(1236)
+      .via.get(1235)
+      .map((p) => p.x),
+    [1],
+  )
+  assert.equal(by.get(1237).via.has(1236), false)
+  for (const t of tickets) {
+    for (const via of t.via.values()) {
+      for (const p of via) {
+        for (const s of tickets.filter((s) => s.depth === p.x)) assert.ok(Math.abs(s.y - p.y) > 0.5, `#${s.n} on a line's waypoint at column ${p.x}`)
+      }
+    }
+  }
+})
+
 test('ticket spread: a screen with room spreads the map to fill it, up to a most; a small one keeps the least and the camera moves', () => {
   const tickets = layoutTickets(ticketsOf(graphOf([[1], [2, [1]], [3, [1]], [4, [2, 3]]]), []))
   const wide = mapScale(tickets, 280, 30)

@@ -137,23 +137,94 @@ function jitter(n, salt) {
   return (h % 1000) / 1000 - 0.5
 }
 
-// Sets each ticket's x and y in the map's own units, a column and a row: depth
-// across, each column centred on row 0, its stars in the order of their
-// blockers' rows (so lines cross less), a root's by its number. mapScale
-// turns them into cells for a screen.
+// How many times the orderings are swept, each way, looking for fewer crossings.
+const SWEEPS = 12
+
+// Sets each ticket's x and y in the map's own units, a column and a row, and
+// its via: for each blocker a line skips columns from, the points it passes
+// through in those columns. Depth across, never moved: it is the order work is
+// picked up in. A layered layout down each column: a line that skips columns
+// holds a row in each one it crosses, so it runs between stars rather than
+// through them, and each column is ordered by its neighbours' mean row, swept
+// back and forth, keeping the order with the fewest crossings. Each column is
+// centred on row 0. mapScale turns it all into cells for a screen.
 export function layoutTickets(tickets) {
-  const cols = []
-  for (const t of tickets) (cols[t.depth] ??= []).push(t)
   const by = byNumber(tickets)
-  const meanY = (t) => (t.deps.length ? t.deps.reduce((s, n) => s + (by.get(n).y ?? 0), 0) / t.deps.length : 0)
-  for (const col of cols) {
-    if (!col) continue
-    col.sort((a, b) => meanY(a) - meanY(b) || a.n - b.n)
-    col.forEach((t, i) => {
-      t.x = t.depth + (jitter(t.n, 1) * 3) / COLUMN
-      t.y = i - (col.length - 1) / 2 + (jitter(t.n, 2) * 2) / ROW
+  // A slot is a ticket or a line's waypoint; up and down, the slots it joins
+  // in the columns either side.
+  const cols = []
+  const slot = (depth, s) => {
+    Object.assign(s, { depth, up: [], down: [] })
+    ;(cols[depth] ??= []).push(s)
+    return s
+  }
+  const slots = new Map(tickets.map((t) => [t.n, slot(t.depth, { t, key: t.n })]))
+  const join = (a, b) => {
+    a.down.push(b)
+    b.up.push(a)
+  }
+  const ways = []
+  for (const t of tickets) {
+    for (const n of t.deps) {
+      const a = by.get(n)
+      let prev = slots.get(a.n)
+      const via = []
+      for (let d = a.depth + 1; d < t.depth; d++) {
+        const w = slot(d, { key: n + (t.n - n) / (t.n + n + 1) })
+        via.push(w)
+        join(prev, w)
+        prev = w
+      }
+      join(prev, slots.get(t.n))
+      ways.push([t, n, via])
+    }
+  }
+  const all = cols.filter(Boolean)
+  const pos = new Map()
+  const rows = (col) => {
+    col.forEach((s, i) => {
+      pos.set(s, i - (col.length - 1) / 2)
     })
   }
+  const place = () => {
+    for (const col of all) rows(col)
+  }
+  const crossings = () => {
+    let c = 0
+    for (const col of all) {
+      const edges = col.flatMap((s) => s.down.map((d) => [pos.get(s), pos.get(d)]))
+      for (let i = 0; i < edges.length; i++) for (let j = i + 1; j < edges.length; j++) if ((edges[i][0] - edges[j][0]) * (edges[i][1] - edges[j][1]) < 0) c++
+    }
+    return c
+  }
+  const mean = (list, own) => (list.length ? list.reduce((s, x) => s + pos.get(x), 0) / list.length : own)
+  for (const col of all) col.sort((a, b) => a.key - b.key)
+  place()
+  let best = all.map((col) => [...col])
+  let fewest = crossings()
+  for (let i = 0; i < SWEEPS && fewest > 0; i++) {
+    const down = i % 2 === 0
+    for (const col of down ? all : [...all].reverse()) {
+      const want = new Map(col.map((s) => [s, mean(down ? s.up : s.down, pos.get(s))]))
+      col.sort((a, b) => want.get(a) - want.get(b) || a.key - b.key)
+      rows(col)
+    }
+    const c = crossings()
+    if (c < fewest) [best, fewest] = [all.map((col) => [...col]), c]
+  }
+  for (const [k, col] of all.entries()) col.splice(0, col.length, ...best[k])
+  place()
+  for (const t of tickets) {
+    t.x = t.depth + (jitter(t.n, 1) * 3) / COLUMN
+    t.y = pos.get(slots.get(t.n)) + (jitter(t.n, 2) * 2) / ROW
+    t.via = new Map()
+  }
+  for (const [t, n, via] of ways)
+    if (via.length)
+      t.via.set(
+        n,
+        via.map((s) => ({ x: s.depth, y: pos.get(s) })),
+      )
   return tickets
 }
 
@@ -184,8 +255,9 @@ export function stepTicket(tickets, from, dir) {
 // to their most; fits, along each axis, whether the whole map is on screen
 // at that spacing; centre, the map's middle, in map units.
 export function mapScale(tickets, W, H) {
-  const xs = tickets.map((t) => t.x)
-  const ys = tickets.map((t) => t.y)
+  const points = tickets.flatMap((t) => [t, ...[...(t.via?.values() ?? [])].flat()])
+  const xs = points.map((p) => p.x)
+  const ys = points.map((p) => p.y)
   const span = (vs) => Math.max(...vs) - Math.min(...vs)
   const middle = (vs) => (Math.max(...vs) + Math.min(...vs)) / 2
   const [wide, high] = [span(xs), span(ys)]
