@@ -19,7 +19,7 @@ import { writeJsonAtomic } from '../fsutil.mjs'
 import { RESUME_REQUEST, decisionsOf } from '../halt.mjs'
 import { pauseRun, pausedAt, unpauseRun } from '../pause.mjs'
 import { agentReport, runReport, runnerLogTail } from '../run-report.mjs'
-import { RUNNER_PATH, runnerAlive } from '../run-view-model.mjs'
+import { relaunchRunner, runnerAlive } from '../run-view-model.mjs'
 import { NOTE_MAX, submitShape, tool } from '../tools.mjs'
 import { haltNoticeOf } from '../triage.mjs'
 import { sleep } from '../util.mjs'
@@ -149,18 +149,15 @@ function orchestratorTools(stateDir, env) {
     return { send: (request) => writeJsonAtomic(join(stateDir, RESUME_REQUEST), request) }
   }
   // A new runner for the run, with --resume, in a crew session in its
-  // project, as the standalone view's r starts one (run-view-model.mjs
-  // resume), from the run's registry record; the daemon refuses it while the
-  // run has a runner already. Returns its crew session's id.
+  // project, as the standalone view's r starts one (relaunchRunner), from the
+  // run's registry record; the daemon refuses it while the run has a runner
+  // already. Returns its crew session's id.
   const relaunch = async () => {
     const run = readRegistry(join(claudeDir({ env }), 'orca-runs.jsonl')).find((r) => r.runDir && resolve(r.runDir) === resolve(stateDir))
     if (!run) throw new Error("the run has no record in crew's run registry, so its runner cannot be started again: the operator resumes it with r in `crew view`.")
     if (run.reclaimed) throw new Error('the run is reclaimed: its agents are gone and the registry closed it, so there is nothing to resume.')
     if (!run.project) throw new Error('the run has no project recorded to resume it in.')
-    const script = run.script ?? join(resolve(stateDir, '..'), 'workflow.js')
-    const paths = crewPaths(env)
-    const t = await crewHost({ paths, env, cwd: run.project }).resumeRunner({ worktree: run.project, title: `${run.spec ?? run.runId} (resumed)`, runner: RUNNER_PATH, script, stateDir, permissionMode: run.permissionMode })
-    return t.terminal
+    return (await relaunchRunner(crewHost({ paths: crewPaths(env), env, cwd: run.project }), run)).terminal
   }
   return [
     {

@@ -192,6 +192,15 @@ export function runnerAlive(stateDir) {
   }
 }
 
+// A new runner for `run`, a registry run, with --resume, in a new tab or
+// session of `host` in its project, which takes the Run over: the standalone
+// view's r and the orchestrator's resume of a run whose runner is gone
+// (ADR-0032) both start one this way. A run armed before the registry named
+// its script was launched by the skill, whose state dir is orca-run/ beside
+// the rendered workflow.js. Answers as host.resumeRunner does.
+export const relaunchRunner = (host, run, runner = RUNNER_PATH) =>
+  host.resumeRunner({ worktree: run.project, title: `${run.name ?? run.spec ?? run.runId} (resumed)`, runner, script: run.script ?? join(dirname(run.runDir), 'workflow.js'), stateDir: run.runDir, permissionMode: run.permissionMode })
+
 // Whether a run has ended, which is not whether its runner lives: once the
 // script ends the runner writes summary.json and waits on its attached view
 // until the operator quits it (runner.mjs), live all the while. `run` is its
@@ -1500,12 +1509,9 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
     if (run.alive === true) return say(run.host === 'crew' ? `${label}'s runner is alive: nothing to resume` : `${label}'s runner is alive, in ${where(run)}: nothing to resume`)
     if (run.alive === null) return say(`could not tell whether ${label}'s runner is alive: its runner.pid, or Orca's list of the tab r opened, did not answer`)
     if (!run.project || !run.runDir) return say(`${label} has no ${run.project ? 'run directory' : 'worktree'} recorded to resume in`)
-    // A run armed before the registry named its script was launched by the
-    // skill, whose state dir is orca-run/ beside the rendered workflow.js.
-    const script = run.script ?? join(dirname(run.runDir), 'workflow.js')
     let t
     try {
-      t = await hostOf(run.host).resumeRunner({ worktree: run.project, title: `${run.name ?? run.runId} (resumed)`, runner, script, stateDir: run.runDir, permissionMode: run.permissionMode })
+      t = await relaunchRunner(hostOf(run.host), run, runner)
     } catch (e) {
       if (hostUnreachable(hostOf(run.host), e)) return say(HOST_GONE)
       return say(`could not resume ${label}: ${e?.message ?? e}`)
