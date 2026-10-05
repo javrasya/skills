@@ -21,7 +21,6 @@ function render(runner, runOrder = 'parallel', startRef = 'main') {
     .replace(/__STACK_MODE__/g, 'native')
     .replace(/__RUN_ORDER__/g, runOrder)
     .replace(/__RUNNER__/g, runner)
-    .replace(/__VALIDATION__/g, SIM_CHECK)
   return s
 }
 
@@ -49,7 +48,8 @@ function completeToSchema(result, opts, label) {
   const filled = { ...result }
   for (const key of schema.required || []) {
     if (key in filled) continue
-    if (key === 'checks') filled.checks = [{ command: SIM_CHECK, passed: true, runs: 1, seconds: 1 }]
+    if (key === 'checks') filled.checks = [{ command: SIM_CHECK, passed: true }]
+    else if (key === 'validation') filled.validation = [SIM_CHECK]
     else if (key === 'validated_sha') filled.validated_sha = 'simsha'
     else if (key === 'worktree') filled.worktree = '/wt/' + label
     else {
@@ -92,7 +92,6 @@ async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel',
     integration: () => ({ pr_url: 'https://pr/int', pr_number: 999, branch: 'spec/224-integration', worktree: '/wt/int', worktrees_removed: 0, worktrees_kept: [] }),
     finalize: () => 'stack registered, 2 PRs ready, 0 worktrees',
     reclaim: () => ({ worktrees_removed: 0, worktrees_kept: [] }),
-    retrospective: () => ({ summary: 'sim', report_path: '/tmp/n/retrospective.md', proposals: [] }),
   }
   const h = { ...defaults, ...overrides }
 
@@ -111,7 +110,6 @@ async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel',
     if (label.startsWith('review')) return 'review'
     if (label === 'finalize') return 'finalize'
     if (label === 'reclaim') return 'reclaim'
-    if (label === 'retrospective') return 'retrospective'
     throw new Error('unrouted label: ' + label)
   }
 
@@ -164,9 +162,10 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('A: slices move the ref instead of pushing', calls.find((c) => c.label === 'impl:#10').prompt.includes('git update-ref refs/heads/ticket/10 HEAD') && calls.find((c) => c.label === 'impl:#10').prompt.includes('Push nothing'), '')
   check('A: the lane pushes once, creating the ref', calls.find((c) => c.label === 'publish:#10').prompt.includes('git push origin ticket/10') && calls.find((c) => c.label === 'publish:#10').prompt.includes('CREATES the branch'), '')
   check('A: publish #10 needs no rebase (tip unmoved)', !calls.find((c) => c.label === 'publish:#10').prompt.includes('git rebase --onto'), '')
+  check('A: finalize is the last agent', seq[seq.length - 1] === 'finalize', seq.join(' | '))
   check('A: complete state', result.state.startsWith('complete'), result.state)
   check('A: not halted, reviewed and finalized', result.halted === false && seq.includes('review:spec-224') && seq.includes('finalize'), seq.join(' | '))
-  check('A: nodes are named for what they are', ['graph', 'explore/area-a', 'ticket/10/dispatch', 'ticket/10/impl/r1/s1', 'ticket/10/gate/r1', 'ticket/10/publish', 'ticket/11/publish', 'review', 'finalize', 'retrospective'].every((n) => nodesOf(calls).includes(n)), nodesOf(calls).join(' | '))
+  check('A: nodes are named for what they are', ['graph', 'explore/area-a', 'ticket/10/dispatch', 'ticket/10/impl/r1/s1', 'ticket/10/gate/r1', 'ticket/10/publish', 'ticket/11/publish', 'review', 'finalize'].every((n) => nodesOf(calls).includes(n)), nodesOf(calls).join(' | '))
   check('A: no call is marked in flight when nothing halts', !calls.some((c) => c.opts.inFlight), '')
   check('A: explore effort low / dispatch high / publish low', calls.find((c) => c.label.startsWith('explore')).effort === 'low' && calls.find((c) => c.label === 'dispatch:#10').effort === 'high' && calls.find((c) => c.label === 'publish:#10').effort === 'low', '')
   check('A: slice effort taken from dispatcher verdict', calls.find((c) => c.label === 'impl:#10').effort === 'medium', '')
@@ -362,7 +361,7 @@ const withBlockers = (blockers) => () => ({
   check('C: exactly MAX_DISPATCH_ROUNDS slice rounds', rounds === 6, String(rounds))
   check('C: unmet after the cap halts the run', result.halted === true && result.tickets.length === 1 && result.tickets[0].state === 'unmet' && result.tickets[0].detail.includes('criterion Z'), JSON.stringify(result.tickets))
   check('C: an unmet ticket is neither gated nor published', !seq.some((l) => l.startsWith('gate') || l.startsWith('publish')), seq.join(' | '))
-  check('C: a halted run has no review and no finalize', !seq.some((l) => l.startsWith('review') || l === 'finalize' || l === 'reclaim' || l === 'retrospective'), seq.join(' | '))
+  check('C: a halted run has no review and no finalize', !seq.some((l) => l.startsWith('review') || l === 'finalize' || l === 'reclaim'), seq.join(' | '))
   check('C: the halted summary names its reason and what published', /#10/.test(result.reason) && Array.isArray(result.published) && result.published.length === 0, JSON.stringify(result))
   check('C: local-only refs are named for recovery', result.local_only_branches && result.local_only_branches.refs.includes('ticket/10'), JSON.stringify(result.local_only_branches))
 }

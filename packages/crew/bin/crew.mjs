@@ -9,9 +9,9 @@
 //   crew start <spec#> [--harness h] [--model m] [--base b] [--start-ref r] [--stack-mode s] [--run-order o] [--permission-mode p]
 //                     arms a run of the implement-spec workflow from a form,
 //                     each row a flag (every one of them with no terminal),
-//                     and launches it as `crew run` does; a spec with no
-//                     validation.md gets the orchestrator's draft as the
-//                     form's last step, and is an error with no terminal.
+//                     and launches it as `crew run` does; a spec with a
+//                     ready-for-agent ticket lacking its Validation section
+//                     (## Validation, ### Run per change) is refused.
 //                     At a terminal it then opens the run's view, as
 //                     `crew view <run dir>` does; with none it prints that
 //   crew ls [--registry <file>]

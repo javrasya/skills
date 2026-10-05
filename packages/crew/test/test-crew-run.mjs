@@ -16,6 +16,7 @@ import { crewHost, crewWorktrees } from '../src/crew-host.mjs'
 import { sessionHost } from '../src/session-host.mjs'
 import { sessionTranscripts, transcriptPath } from '../src/transcript.mjs'
 import { readJournal } from '../src/journal.mjs'
+import { renderTemplate, templatePath } from '../src/arm.mjs'
 import { runView } from '../src/run-view-model.mjs'
 import { draw, strip } from '../src/run-view/draw.mjs'
 import { crewPaths } from '../src/daemon/transport.mjs'
@@ -493,3 +494,58 @@ for (const [harness, prefix, ticket, answer, calls] of [
     assert.ok(tool !== -1 && tool < prompt.indexOf('submit.mjs'), 'the prompt names the tool before the CLI line')
   })
 }
+
+// The skill's own template, rendered as `crew start` renders it, run on the
+// crew host: its prompts hold no [answer], so each agent's answer is keyed by
+// its label (CREW_FAKE_ANSWERS). What a fake dispatcher copies out of the
+// ticket's `## Validation` is what the implementer and the whole-stack review
+// are told, word for word.
+test("the skill's template on the crew host: a dispatcher's validation reaches the implementer's prompt verbatim, its review_validation the whole-stack review's", async () => {
+  const cwd = repo('template-repo')
+  const perChange = ['cd packages/app && node --test test/test-a.mjs "test/b c.mjs"', "npm run lint -- --max-warnings=0 'src/**/*.js'"]
+  const atReview = ['cd packages/app && npm test -- --coverage']
+  const checks = perChange.map((command) => ({ command, passed: true }))
+  const answers = join(root, 'template-answers.json')
+  writeFileSync(
+    answers,
+    JSON.stringify({
+      '^graph': { tickets: [{ number: 101, title: 'The ticket', blocked_by: [], needs_human: false, human_reason: '' }] },
+      '^dispatch': { ticket_brief: 'the ticket in brief', validation: perChange, review_validation: atReview, slices: [{ title: 'all of it', brief: 'do it', effort: 'medium' }] },
+      '^impl': { branch: 'ticket/101', summary: 'done', checks, validated_sha: 'abc123' },
+      '^gate': { checks, validated_sha: 'abc123' },
+      '^publish': { published: true, pr_url: 'https://github.com/acme/app/pull/201', pr_number: 201, checks, validated_sha: 'abc123', stack_link: 'registered' },
+      '^finalize': { summary: 'stack ready' },
+    }),
+  )
+  const template = readFileSync(templatePath(), 'utf8')
+  const script = renderTemplate(template, { SPEC: 94, REPO: 'acme/app', REPO_DIR: cwd, NOTES_DIR: join(root, 'template-notes'), BASE_REF: 'main', START_REF: 'main', STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session' })
+  const fake = [process.execPath, FAKE_HARNESS]
+  const host = sessionHost(crewHost({ paths, env: { ...env, CREW_FAKE_MCP: '0', CREW_FAKE_ANSWERS: answers }, cwd, harnesses: { claude: fake, pi: fake }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
+  const stateDir = join(root, 'template-state')
+  const said = []
+  await runScript(script, { host, stateDir, out: (s) => said.push(s), settings: FAST, transcripts: sessionTranscripts({ env }), project: cwd })
+  const log = said.join('\n')
+
+  const started = readFileSync(join(stateDir, 'journal.jsonl'), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l))
+    .filter((e) => e.type === 'started')
+  // The prompt a label's session was told, from its transcript.
+  const promptOf = (label) => {
+    const s = started.find((e) => e.title?.includes(label))
+    assert.ok(s, `no agent ${label} started: ${started.map((e) => e.title).join(', ')}\n${log}`)
+    return readFileSync(transcriptPath({ harness: s.harness, sessionId: s.sessionId, worktree: s.worktree, env }), 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l))
+      .filter((e) => e.type === 'user' && typeof e.message?.content === 'string')
+      .map((e) => e.message.content)
+      .join('\n')
+  }
+  const impl = promptOf('impl:#101')
+  for (const command of perChange) assert.ok(impl.includes(command), `the implementer is told ${command}`)
+  for (const command of atReview) assert.ok(!impl.includes(command), `the implementer is not told the at-review ${command}`)
+  const review = promptOf('review:spec-94')
+  for (const command of atReview) assert.ok(review.includes(command), `the whole-stack review is told ${command}`)
+})

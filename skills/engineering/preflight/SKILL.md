@@ -32,7 +32,7 @@ Done when all six have reported. An audit that returns nothing states what it ch
 
 Turn every claim the audits make about the environment into a drill. Run them yourself or by sub-agent; record the command, its output and wall time.
 
-- **Validation recipe** — for each ticket, pick per layer the narrowest form the Validation audit found: format and lint on changed files, incremental typecheck, tests for the modules the ticket touches, e2e for the ticket's own flow only. Run the whole recipe end to end against the code the ticket will touch, under `timeout 8m`; over 7 minutes fails the budget. Cut a failing recipe until it fits — narrower scope, test filters or tags, a build reused across steps, parallel runs, caching — and move what still doesn't fit (full suites, full e2e) to the review stage, run once per run, not per ticket.
+- **Validation recipe** — for each ticket, pick per layer the narrowest form the Validation audit found: format and lint on changed files, incremental typecheck, tests for the modules the ticket touches, e2e for the ticket's own flow only. Run the whole recipe end to end against the code the ticket will touch, under `timeout 8m`; over 7 minutes fails the budget. Cut a failing recipe until it fits — narrower scope, test filters or tags, a build reused across steps, parallel runs, caching — and move what still doesn't fit (full suites, full e2e) to the ticket's `### Run at review`, run once on the stack tip, not per change.
 - **Smoke e2e** — the thinnest end-to-end path the repo already supports: build, launch, one interaction, one assertion. If none exists, that is a finding, not a pass. An offline harness that drives the whole system with fakes at its edges (a fake agent in a real pty, a fake upstream) counts as the e2e the tickets run per ticket; name it.
 - **Absent check kinds** — for each kind the Validation audit reports absent, run the cheapest fitting tool once on today's code and record its baseline: error count by rule, wall time. That baseline is the prefactor ticket's finish line.
 - **UI driving** — when the app has a UI, prove an agent can drive it with the chosen tool (a browser automation MCP, a toolkit-specific MCP, an accessibility driver): launch, send input, read state, take a screenshot. If the real app can't be launched yet, build a throwaway app on the **same UI toolkit** in the scratchpad and drill that.
@@ -62,17 +62,22 @@ Settled architecture or vocabulary goes into an ADR or `CONTEXT.md` as `domain-m
 
 Show the operator the full change set before touching the tracker: per ticket, the body diff; every new ticket; every edge added or removed; the new sub-issue order. Publish only on their approval.
 
-Every ticket leaves preflight with a **Validation** section beside its acceptance criteria:
+Every ticket leaves preflight with its validation recipe written as a **Validation** section beside its acceptance criteria, in two subsections. `### Run per change` holds the commands every implementer, fixer, gate reviewer and publisher of the ticket runs on its commit. `### Run at review` holds the full suites the whole-stack review runs once on the stack tip. Each command is one line holding one backticked command. Prose lines — "absent: …", "not applicable: …", "Recipe measured …", "Needs: …", a deferred repo gate — are allowed in either subsection and are never run as commands.
 
 ```
 ## Validation
+
+### Run per change
 - Format/lint: `<command scoped to changed files>` — or "absent: added by #<prefactor ticket>"
 - Typecheck: `<command>` — or "absent: added by #<prefactor ticket>"
 - Tests: `<command scoped to this ticket's modules>`
-- E2E: `<command or tool + steps for this ticket's flow>` — or "absent: added by #<prefactor ticket>", or "not applicable: <reason the operator accepted>"
+- E2E: `<command for this ticket's flow>` — or "absent: added by #<prefactor ticket>", or "not applicable: <reason the operator accepted>"
 - Recipe measured <m:ss> in total, budget 7m
-- Leave to review: `<full suites>` — never run per ticket; a repo gate deferred here says so and names the decision date
 - Needs: <blockers this ticket depends on, each with its check command>
+
+### Run at review
+- `<full suite>` — one line per suite; or "not applicable: <reason>"
+- Deferred repo gate: <gate>, decided <date>
 ```
 
 Then wire the changes on the tracker: new tickets as sub-issues of the spec labelled `ready-for-agent` (or `ready-for-human` where the work itself needs a person), native `blocked_by` edges, sub-issue order matching dependency order.
@@ -85,8 +90,9 @@ Walk the operator through every blocker, one at a time: explain it, guide them, 
 
 Preflight is done when every line below holds — check each and report it:
 
-- Every ticket has a Validation section whose recipe was run end to end, in total under the 7-minute budget.
-- Every kind of check exists in the repo or has its prefactor ticket; no Validation line reads "none" without a reason the operator accepted, and every deferred repo gate is named as a deferral.
+- Every ticket has a Validation section with both `### Run per change` and `### Run at review`; a ticket without `### Run per change` will not arm — `crew start` refuses the spec and names the ticket.
+- Every ticket's `### Run per change` was run end to end, in total under the 7-minute budget.
+- Every kind of check exists in the repo or has its prefactor ticket; no Validation line reads "none" without a reason the operator accepted, and every deferred repo gate is named as a deferral in `### Run at review`.
 - Every ticket's `blocked_by` names every ticket its e2e path needs, and sub-issue order respects the edges.
 - Every external dependency has a decision, and every chosen mock has its ticket.
 - Every confirmed elevation prompt has a workaround or a cleared blocker.

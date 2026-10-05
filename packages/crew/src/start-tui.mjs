@@ -1,9 +1,7 @@
 // The `crew start` form at a terminal: the rows of start-form.mjs's model, one
 // focused. Enter moves to the next row and, on the last, answers the form, so
 // Enter all the way through takes every default. Resolves to the form's
-// answers, or null when the operator cancels (Esc, Ctrl+C). A spec with no
-// validation list gets one more step, the orchestrator's draft (runDraftStep).
-import { validationListProblem } from './validation-list.mjs'
+// answers, or null when the operator cancels (Esc, Ctrl+C).
 import { ARROW_KEYS, ENTER_KEYS, decodeKeys } from './keys.mjs'
 
 const KEYS = [...ARROW_KEYS, ['\x1b[Z', 'up'], ...ENTER_KEYS, ['\t', 'down'], [' ', 'right'], ['\x7f', 'backspace'], ['\b', 'backspace'], ['\x03', 'interrupt']]
@@ -156,114 +154,4 @@ export function runStartForm({ form, stdin, stdout, heading = '' }) {
       }
     },
   })
-}
-
-// The form's last step when the spec has no validation list (#102): the
-// orchestrator's draft, as text to edit. Ctrl+S confirms it; Esc or Ctrl+C
-// cancels, and then nothing is written.
-const EDIT_KEYS = [...ARROW_KEYS, ['\x1b[H', 'home'], ['\x1bOH', 'home'], ['\x1b[1~', 'home'], ['\x1b[F', 'end'], ['\x1bOF', 'end'], ['\x1b[4~', 'end'], ['\x1b[3~', 'delete'], ...ENTER_KEYS, ['\x7f', 'backspace'], ['\b', 'backspace'], ['\x13', 'confirm'], ['\x03', 'cancel']]
-
-// The keys in one chunk of raw input to the draft: each a name, or { char }
-// for a character typed. A tab is typed as a space.
-export const editKeysOf = (chunk) => decodeKeys(chunk, EDIT_KEYS, { char: (c) => (c === '\t' ? { char: ' ' } : c >= ' ' ? { char: c } : null) })
-
-// The draft as lines and a cursor. text() is validation.md's content: its
-// lines, each ended, or '' when every line is blank.
-export function draftEditor(text) {
-  const lines = text.replace(/\r/g, '').replace(/\n$/, '').split('\n')
-  let row = 0
-  let col = 0
-  const at = (r) => Math.min(col, lines[r].length)
-  const editor = {
-    lines: () => [...lines],
-    cursor: () => ({ row, col: at(row) }),
-    text: () => (lines.some((l) => l.trim()) ? `${lines.join('\n')}\n` : ''),
-    key(k) {
-      col = at(row)
-      if (typeof k === 'object') {
-        lines[row] = lines[row].slice(0, col) + k.char + lines[row].slice(col)
-        col += k.char.length
-      } else if (k === 'enter') {
-        lines.splice(row + 1, 0, lines[row].slice(col))
-        lines[row] = lines[row].slice(0, col)
-        row++
-        col = 0
-      } else if (k === 'backspace') {
-        if (col > 0) {
-          lines[row] = lines[row].slice(0, col - 1) + lines[row].slice(col)
-          col--
-        } else if (row > 0) {
-          col = lines[row - 1].length
-          lines[row - 1] += lines[row]
-          lines.splice(row, 1)
-          row--
-        }
-      } else if (k === 'delete') {
-        if (col < lines[row].length) lines[row] = lines[row].slice(0, col) + lines[row].slice(col + 1)
-        else if (row < lines.length - 1) lines.splice(row, 2, lines[row] + lines[row + 1])
-      } else if (k === 'left') {
-        if (col > 0) col--
-        else if (row > 0) col = lines[--row].length
-      } else if (k === 'right') {
-        if (col < lines[row].length) col++
-        else if (row < lines.length - 1) {
-          row++
-          col = 0
-        }
-      } else if (k === 'up' && row > 0) row--
-      else if (k === 'down' && row < lines.length - 1) row++
-      else if (k === 'home') col = 0
-      else if (k === 'end') col = lines[row].length
-      return editor
-    },
-  }
-  return editor
-}
-
-export const NO_CHECKS = "The orchestrator found no checks in this repo's CI config, workflow files, Makefile or package scripts, so the list is empty. Add the commands a change must pass, or confirm an empty list."
-
-// `file` is where the list is written once confirmed; `empty` whether the
-// orchestrator found no checks, which the step says; `problem` why the last
-// confirm was refused, if it was.
-export function drawDraft(editor, { heading = '', file = 'validation.md', empty = false, problem = null } = {}) {
-  const { row, col } = editor.cursor()
-  const lines = heading ? [BOLD(heading), ''] : []
-  lines.push(`Validation list, drafted by crew's orchestrator; confirming writes it to ${file}`)
-  lines.push(DIM("One command a line, run from the repo's root; # starts a comment."))
-  if (empty) lines.push(NO_CHECKS)
-  lines.push('')
-  editor.lines().forEach((l, i) => {
-    lines.push(i === row ? `> ${l.slice(0, col)}${INVERSE(l[col] ?? ' ')}${l.slice(col + 1)}` : `  ${l}`)
-  })
-  if (problem) lines.push('', `Not confirmed: the list's ${problem}. The workflow holds the list in a template literal; write the command without it.`)
-  lines.push('', DIM('Arrows: move   Enter: new line   Ctrl+S: confirm, write it and arm   Esc: cancel, nothing written or armed'))
-  return lines
-}
-
-// Resolves to the confirmed text, or null when the operator cancels. A text
-// the rendered workflow.js cannot hold (validation-list.mjs) is not
-// confirmed: the step stays, saying why.
-export function runDraftStep({ editor, stdin, stdout, heading = '', file, empty = false }) {
-  let problem = null
-  return interact({
-    stdin,
-    draw: () => paint(stdout, drawDraft(editor, { heading, file, empty, problem })),
-    onData(chunk, done) {
-      for (const key of editKeysOf(chunk)) {
-        if (key === 'cancel') return done(null)
-        if (key === 'confirm') {
-          problem = validationListProblem(editor.text())
-          if (problem) return
-          return done(editor.text())
-        }
-        problem = null
-        editor.key(key)
-      }
-    },
-  })
-}
-
-// What the terminal shows while the orchestrator drafts.
-export function drawDrafting(stdout, { heading = '', file }) {
-  paint(stdout, [...(heading ? [BOLD(heading), ''] : []), `The spec has no validation list (${file}).`, "Crew's orchestrator is drafting one from the repo's CI config, workflow files, Makefile and package scripts…"])
 }

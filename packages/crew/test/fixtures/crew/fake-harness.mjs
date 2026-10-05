@@ -60,25 +60,23 @@
 // [give up <why>] it sends only its worker_done failed, why its body. A pi
 // doctor crew's extension gave `handoff` and `give_up`, or a Claude doctor
 // crew's MCP server gave them, calls them instead, handoff once for each
-// [cure], in order. Asked by crew's
-// orchestrator to draft a validation list, it answers FIXED_DRAFT, reading
-// nothing.
+// [cure], in order.
+//
+// CREW_FAKE_ANSWERS names a JSON file of { <pattern>: <answer> }, for a
+// script whose prompts it cannot put words in, as the skill's template: an
+// agent whose prompt holds no [answer] submits the answer of the first
+// pattern matching the label of its agent dir (agents/NNN-<label>), each
+// required field its answer leaves out filled empty from its schema, as a
+// harness enforcing that schema would make a model fill it.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { claudeDir, claudeSlug, piDir, transcriptPath } from '../../../src/transcript.mjs'
 import { validate } from '../../../src/schema.mjs'
-
-const FIXED_DRAFT = {
-  checks: [
-    { command: 'npm test', source: 'package.json scripts.test' },
-    { command: 'npm run lint', source: '.github/workflows/ci.yml job lint' },
-  ],
-}
 
 const argv = process.argv.slice(2)
 const after = (flag) => (argv.includes(flag) ? argv[argv.indexOf(flag) + 1] : null)
@@ -93,8 +91,7 @@ const transcript = harness === 'pi' ? (earlier ?? join(process.env.PI_CODING_AGE
 // Headless (-p), as crew's orchestrator and preflight run it: the prompt on
 // stdin, one answer printed, then it exits. Claude's is its --output-format
 // json result, the answer its structured_output; pi's is text ending in the
-// answer. Asked for a validation list it answers FIXED_DRAFT; a prompt's
-// [answer <json>] is its answer, [error <text>] an error result, and [hang]
+// answer. A prompt's [answer <json>] is its answer, [error <text>] an error result, and [hang]
 // never answers. Anything else is answered `ok`.
 if (argv.includes('-p')) {
   let prompt = ''
@@ -103,7 +100,7 @@ if (argv.includes('-p')) {
   process.stdin.on('end', () => {
     if (/\[hang\]/.test(prompt)) return setInterval(() => {}, 1000)
     const error = /\[error ([^\]]*)\]/.exec(prompt)?.[1]
-    const answer = /You are crew's orchestrator\. [\s\S]*no validation list/.test(prompt) ? FIXED_DRAFT : /\[answer ([^\]]*)\]/.exec(prompt) ? JSON.parse(/\[answer ([^\]]*)\]/.exec(prompt)[1]) : null
+    const answer = /\[answer ([^\]]*)\]/.exec(prompt) ? JSON.parse(/\[answer ([^\]]*)\]/.exec(prompt)[1]) : null
     if (harness === 'pi') {
       process.stdout.write(answer ? `Here it is:\n${JSON.stringify(answer)}\n` : 'ok\n')
       return process.exit(error ? 1 : 0)
@@ -241,9 +238,21 @@ async function tui() {
     if (!command || !ids) return
     const flag = (name) => new RegExp(`--${name} "([^"]+)"`).exec(command[0])?.[1] ?? null
     const note = latest(/## The doctor's note\n([\s\S]*)$/)?.[1].trim()
-    const draft = latest(/You are crew's orchestrator\. [\s\S]*no validation list/) && JSON.stringify(FIXED_DRAFT)
-    writeFileSync(flag('payload'), payload ?? note ?? latest(/\[answer ([^\]]*)\]/)?.[1] ?? draft ?? 'done')
+    writeFileSync(flag('payload'), payload ?? note ?? latest(/\[answer ([^\]]*)\]/)?.[1] ?? scripted(flag('result'), flag('schema')) ?? 'done')
     run([command[1], ...(flag('schema') ? ['--schema', flag('schema')] : []), '--result', flag('result'), '--payload', flag('payload'), ...ids])
+  }
+
+  function scripted(result, schemaPath) {
+    const file = process.env.CREW_FAKE_ANSWERS
+    if (!file) return null
+    const label = basename(dirname(result)).replace(/^\d+-/, '')
+    const answer = Object.entries(JSON.parse(readFileSync(file, 'utf8'))).find(([pattern]) => new RegExp(pattern).test(label))?.[1]
+    if (!schemaPath) return typeof answer === 'string' ? answer : null
+    const schema = JSON.parse(readFileSync(schemaPath, 'utf8'))
+    const empty = { array: [], string: '', boolean: false, integer: 0, number: 0, object: {} }
+    const filled = { ...answer }
+    for (const key of schema.required ?? []) if (!(key in filled)) filled[key] = empty[schema.properties?.[key]?.type] ?? null
+    return JSON.stringify(filled)
   }
 
   function asked(prompt) {
