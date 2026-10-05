@@ -31,18 +31,14 @@ export function templatePath(candidates = TEMPLATES) {
   return found
 }
 
-export const PLACEHOLDERS = ['SPEC', 'REPO', 'REPO_DIR', 'NOTES_DIR', 'BASE_REF', 'START_REF', 'STACK_MODE', 'RUN_ORDER', 'RUNNER', 'VALIDATION']
+export const PLACEHOLDERS = ['SPEC', 'REPO', 'REPO_DIR', 'NOTES_DIR', 'BASE_REF', 'START_REF', 'STACK_MODE', 'RUN_ORDER', 'RUNNER']
 const PLACEHOLDER = new RegExp(`__(${PLACEHOLDERS.join('|')})__`, 'g')
 
 // SKILL.md step 3: substitute, never rewrite. One pass, so a value that
-// happens to hold a placeholder's text (a validation comment, say) is left as
-// the operator wrote it. A validation list the template's String.raw literal
-// cannot hold is refused, never rendered into a workflow.js that dies on load.
+// happens to hold a placeholder's text (a path, say) is left as written.
 export function renderTemplate(template, values) {
   const missing = PLACEHOLDERS.filter((k) => values[k] === undefined || values[k] === null)
   if (missing.length) throw new Error(`no value for ${missing.map((k) => `__${k}__`).join(', ')}`)
-  const problem = validationListProblem(values.VALIDATION)
-  if (problem) throw new Error(`the validation list cannot be armed: its ${problem}`)
   return template.replace(PLACEHOLDER, (_, k) => String(values[k]))
 }
 
@@ -214,7 +210,7 @@ async function draftStep({ target, answers, orchestrate, paths, stdin, stdout, h
 // id (newRunId). A run folder that exists already is another run's: a new id
 // is drawn, `attempts` times in all, before the start is refused.
 export async function armRun({ target, answers, roles, newId, attempts = 5, template = readFileSync(templatePath(), 'utf8'), launch }) {
-  const { spec, repo, repoDir, notesDir, title, validation } = target
+  const { spec, repo, repoDir, notesDir, title } = target
   const render = (runFolder) =>
     renderRoles(
       renderTemplate(template, {
@@ -227,7 +223,6 @@ export async function armRun({ target, answers, roles, newId, attempts = 5, temp
         STACK_MODE: answers.stackMode,
         RUN_ORDER: answers.runOrder,
         RUNNER: 'session',
-        VALIDATION: validation,
       }),
       { runDefault: answers, roles },
     )

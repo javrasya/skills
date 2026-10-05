@@ -63,12 +63,7 @@ const START_REF = '__START_REF__'                  // prior work the operator na
 const STACK_MODE = '__STACK_MODE__'                // 'native' (gh-stack + stacks API) or 'chain' (plain --base chain)
 const RUN_ORDER = '__RUN_ORDER__'                  // 'parallel' (the frontier at once) or 'sequential' (one ticket at a time, session runner only; ADR-0020)
 const RUNNER = '__RUNNER__'                        // 'session' on the session runner (crew, on Orca), and 'orca', its value before, still; anything else is the Workflow runner. The one line the two renderings differ in
-// The project's mechanical checks — format, lint, test — one command per line,
-// confirmed by the user before launch and saved in <notes-dir>/validation.md.
-// Empty is honest: readiness then reduces to "the tests you ran are green".
-const VALIDATION_RAW = String.raw`__VALIDATION__`
 // -------------------------------------------------------------------------
-const VALIDATION = VALIDATION_RAW.split('\n').map((s) => s.trim()).filter((s) => s && !s.startsWith('#'))
 
 const POINTERS = `Repo ${REPO}, checkout ${REPO_DIR}. Spec: \`gh issue view ${SPEC}\`. Research notes: ${NOTES_DIR}.`
 // Every agent in this run works in a worktree LINKED to one clone — one object
@@ -238,15 +233,17 @@ const RUNNING = `Running checks:
 // three hold the same definition of done.
 const CONTRACT = `The acceptance contract for this ticket is its own acceptance criteria, the spec's decisions that bear on it, and any ADR the spec itself creates or amends. Nothing else binds: existing ADRs and repo conventions are guidance, not criteria — follow them where cheap, never re-prove them.`
 
-// Readiness is the validation list green on the exact commit under review.
-// Running a command is not the self-assessment ADR-0004 forbids — the agent
-// does not judge, the exit code does — so the implementer runs it, and the
-// reviewer establishes it first: by inheriting the implementer's result when
-// the sha is unchanged (ADR-0009), else by re-running. The list comes from
-// the project, never hardcoded.
-const validationLine = `${VALIDATION.length
-  ? `Validation list — run EVERY command below on your final commit and return one result per command, the command copied verbatim:\n${VALIDATION.map((c) => `- \`${c}\``).join('\n')}`
-  : `This project confirmed no validation list. Run the repo's tests for what you touched and return each command you ran with its result.`}
+// Readiness is the ticket's per-change commands green on the exact commit
+// under review. Running a command is not the self-assessment ADR-0004 forbids
+// — the agent does not judge, the exit code does — so the implementer runs
+// it, and the reviewer establishes it first: by inheriting the implementer's
+// result when the sha is unchanged (ADR-0009), else by re-running. The
+// commands are the ticket's own `### Run per change`, copied by its dispatcher
+// (ADR-0029); its `### Run at review` half runs once, on the stack tip, in the
+// whole-stack review, and never reaches a per-ticket role.
+const validationLine = (cmds) => `${cmds.length
+  ? `Ticket validation — run per change. Run EVERY command below on your final commit and return one result per command, the command copied verbatim:\n${cmds.map((c) => `- \`${c}\``).join('\n')}`
+  : `This ticket's validation recipe has no per-change commands. Run the repo's tests for what you touched and return each command you ran with its result.`}
 ${RUNNING}`
 // A green result travels with the sha it was green on (ADR-0009). The agent
 // downstream checks the sha itself — one rev-parse — and inherits the result
@@ -259,7 +256,7 @@ const inherit = (v) => v && v.sha
 // The commands a result set leaves red or missing. Whitespace-insensitive,
 // because agents copy imperfectly; anything looser would credit the wrong run.
 const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim()
-const readinessRed = (checks) => VALIDATION.filter((c) => !(checks || []).some((k) => norm(k.command) === norm(c) && k.passed))
+const readinessRed = (checks, cmds) => cmds.filter((c) => !(checks || []).some((k) => norm(k.command) === norm(c) && k.passed))
 // One result per command. A single green boolean is what let a fixer report
 // "tests, clippy, docs green" while fmt was never run (#344). Seconds and runs
 // feed the retrospective; a hang shows up as a timed-out entry in other_runs.
@@ -458,9 +455,11 @@ const IMPL_SCHEMA = {
 const DISPATCH_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['ticket_brief', 'slices'],
+  required: ['ticket_brief', 'validation', 'review_validation', 'slices'],
   properties: {
     ticket_brief: { type: 'string', description: 'one short paragraph on the whole ticket, for later fix agents — they read this instead of the issue' },
+    validation: { type: 'array', items: { type: 'string' }, description: "every command the ticket's `### Run per change` subsection lists, each copied verbatim; empty when it lists none" },
+    review_validation: { type: 'array', items: { type: 'string' }, description: "every command the ticket's `### Run at review` subsection lists, each copied verbatim; empty when it lists none" },
     slices: {
       type: 'array',
       minItems: 1,
@@ -899,12 +898,14 @@ Default to ONE slice. Slice only when one agent plausibly cannot finish in rough
 
 Each brief is under 3,000 characters and has four sections, nothing else: (1) the acceptance criteria this slice owns, copied verbatim from the ticket; (2) the files you expect it to touch; (3) which of these research notes to read — ${notes.length ? notes.map((n) => n.path).join(', ') : 'none exist'} — by filename, the ones whose subject bears on its criteria; (4) what is out of scope because another slice owns it. Every criterion of the ticket is owned by exactly one slice, including any test the ticket demands. Set each slice's effort: 'high' for the gnarly ones, 'medium' otherwise.
 
-Also return ticket_brief: one short paragraph on the whole ticket, for later fix agents.`,
+Also return ticket_brief: one short paragraph on the whole ticket, for later fix agents.
+
+And return the ticket's validation recipe. Read exactly two subsections of the ticket's \`## Validation\` section, and nothing else for it — no CI config, no package scripts, no other ticket: \`### Run per change\` into \`validation\`, and \`### Run at review\` into \`review_validation\`. One array entry per command the subsection lists in backticks, copied character for character — never rewritten, merged, split, reordered or invented. A line that names no command ("absent: …", "not applicable: …", a measured time, "Needs: …") adds nothing. A subsection that is missing or lists no command is an empty array.`,
     { ...ROLES.dispatch, effort: 'high', phase: 'Implement', schema: DISPATCH_SCHEMA, label: `dispatch:#${t.number}${remainder ? ':re' : ''}`, node },
   )
 }
 
-async function runSlices(t, slices, { cutFrom, started, tag, node }) {
+async function runSlices(t, slices, { cutFrom, started, tag, node, validation }) {
   const out = { started, summaries: [], last: null, unmet: [], decisions: [], decided: [], stopped: null }
   for (let i = 0; i < slices.length; i++) {
     const s = slices[i]
@@ -935,7 +936,7 @@ Past roughly 70 tool calls this slice has outgrown one agent's context. Stop cle
 
 When running the code shows the ticket silent, or contradicting itself or its spec: if the fix stays inside what the ticket leaves open, decide it yourself and record it in \`decided\` — it goes on the PR. If the fix would break something the ticket, its spec or an ADR explicitly says to keep, stop that criterion, leave no code for it, and put it in \`decisions_needed\` naming the constraint and the evidence — never in \`unmet\`: it halts this ticket for the operator, and blocked work handed out again as remainder cannot move. Then go on to the next criterion.
 
-${validationLine}
+${validationLine(validation)}
 Every command must pass on the commit you return. Commit, then move the ticket branch onto your work: \`git update-ref refs/heads/ticket/${t.number} HEAD\`. Push nothing — this branch reaches origin exactly once, when the stack lane publishes it.
 
 ${WORKTREE}
@@ -956,7 +957,7 @@ Return the branch, a one-line summary, one result per validation command with it
     if (r.decisions_needed.length) { out.decisions.push(...r.decisions_needed); break }
     // A red or missing validation result is a remainder like any other: the
     // brief asked for a green list and did not get one.
-    const red = readinessRed(r.checks)
+    const red = readinessRed(r.checks, validation)
     const unmet = [...r.unmet, ...red.map((c) => `validation red or not run: ${c}`)]
     if (unmet.length) {
       // Later slices may depend on the unfinished part: stop the round and let
@@ -1031,10 +1032,10 @@ Stack so far, bottom to top: ${stacked.length ? stacked.map((s) => `#${s.number}
    This comes before any rebase on purpose: the check is that a worktree's HEAD sits on its branch, and a rebase would orphan every one of them from the branch they built.` : ''}
 3. \`git switch --detach ${impl.branch}\`. Then \`git rev-list --count ${ref(base)}..${impl.branch}\`: if it is 0 the branch adds nothing to \`${base}\` — the ticket's work was already there — and there is no PR to open. Stop here: return \`published: false\`, \`nothing_to_publish: true\`, an empty \`decisions_needed\`, and in \`note\` what \`git log --oneline -5 ${impl.branch}\` shows. Push nothing, remove nothing beyond step 2.
 ${cutFrom !== base ? `4. The tip moved since this ticket was cut. Replay its commits onto the tip: \`git rebase --onto ${ref(base)} ${ref(cutFrom)}\`. This rewrites only local commits that have never left this clone, so it needs no force and destroys nothing. Resolve any conflict in favour of keeping BOTH tickets' behaviour.
-5. The rebase produced a tree nobody has validated. ${validationLine}
+5. The rebase produced a tree nobody has validated. ${validationLine(impl.validation)}
    Get every command green, committing any fix.
 6. Move the branch onto the rebased work: \`git update-ref refs/heads/${impl.branch} HEAD\`.` : `4. The tip has not moved: the branch already sits on \`${ref(base)}\`. No rebase.
-5. ${validationLine}
+5. ${validationLine(impl.validation)}
    ${inherit(impl.validated)}
 6. The branch already points at the work; nothing to move.`}
 7. Put it on origin for the first time. First \`git ls-remote --exit-code --heads origin ${impl.branch}\`: exit 0 means the branch is ALREADY on origin — an earlier run's, or someone's — and this run may not move it, not even fast-forward (publish-once, ADR-0005): stop, return \`published: false\`, and put in \`decisions_needed\` the branch, its origin sha and this run's sha, and that the operator must delete or rename the origin branch before the run can publish. Exit 2 (no such ref): \`git push origin ${impl.branch}\`. This CREATES the branch there — it overwrites nothing and needs no force. A rejected push means something you do not know about is going on: stop and report it.
@@ -1150,7 +1151,7 @@ Every finding above belongs to exactly one slice: none dropped, none in two. Eac
   )
 }
 
-async function runFixSlices(slices, { subject, branch, cutFrom, started, phase: ph, tag, node, guard, ledgerKey, validated }) {
+async function runFixSlices(slices, { subject, branch, cutFrom, started, phase: ph, tag, node, guard, ledgerKey, validated, validation }) {
   const out = { verdicts: [], unfinished: [], landed: started, died: null, stopped: false, validated: validated || null }
   for (let i = 0; i < slices.length; i++) {
     const s = slices[i]
@@ -1177,7 +1178,7 @@ Past roughly 70 tool calls this slice has outgrown one agent's context. Stop cle
 
 Run the repo's tests, get them green, commit, then move the branch onto your work: \`git update-ref refs/heads/${branch} HEAD\`. Push nothing.
 
-${validationLine}
+${validationLine(validation)}
 ${inherit(out.validated)}
 Every command must pass on the commit you return — a fix that leaves one red is not fixed; it is the next round's first finding, and a round costs two agents.
 
@@ -1199,7 +1200,7 @@ Return one verdict per finding in your brief you fixed or rejected, the \`locati
     // A fixer that left the validation list red has not fixed anything it
     // claims: the next reviewer's readiness check will catch it, but the log
     // should say why before it does.
-    const red = readinessRed(r.checks)
+    const red = readinessRed(r.checks, validation)
     if (red.length) log(`${subject}: fix slice "${s.title}" left validation red: ${red.join('; ')}`)
   }
   return out
@@ -1274,7 +1275,7 @@ async function fixFindings(findings, opts) {
 // falls to the next round's reviewer, which re-derives what is still broken
 // from the branch. One cap governs the gate, not two multiplying ones.
 const GATE_MAX_ROUNDS = 4
-const BLOCKING = `What may block this ticket is exactly three things: an acceptance criterion of the ticket that the diff does not meet; a validation command that is red on the branch; and a correctness bug — a panic or crash reachable from input, an unhandled variant, silent data loss or a check that only runs in debug builds. Mark those \`blocker\` or \`major\`. Everything else — ADR fit, architecture, naming, style, a convention the repo documents — is \`minor\`, which passes the gate: it was settled when the spec was designed, or it is the whole-stack review's to judge across tickets.`
+const BLOCKING = `What may block this ticket is exactly four things: an acceptance criterion of the ticket that the diff does not meet; a validation command that is red on the branch; a command the ticket's \`### Run per change\` lists that this prompt's per-change commands omit; and a correctness bug — a panic or crash reachable from input, an unhandled variant, silent data loss or a check that only runs in debug builds. Mark those \`blocker\` or \`major\`. Everything else — ADR fit, architecture, naming, style, a convention the repo documents — is \`minor\`, which passes the gate: it was settled when the spec was designed, or it is the whole-stack review's to judge across tickets.`
 // `tk` is the ticket's own state: `single` for goOn, and `gates`, which numbers
 // its gate rounds across every gate it runs (a readiness red sends the ticket
 // back to dispatch and a later gate goes on counting), so each round's node
@@ -1299,9 +1300,11 @@ ${GIT}
 Branch \`${impl.branch}\`, reviewed against \`${ref(cutFrom)}\` — that diff is the whole of this ticket's work.
 What the ticket asked for: \`gh issue view ${t.number}\`. What the implementer says it did: ${impl.summary}
 
-\`git fetch origin && git switch --detach ${impl.branch}\`. Before you read a line of the diff, establish readiness. ${validationLine}
+\`git fetch origin && git switch --detach ${impl.branch}\`. Before you read a line of the diff, establish readiness. ${validationLine(impl.validation)}
 ${inherit(validated)}
 Return one result per command in \`checks\`, and the sha they hold for in \`validated_sha\`. If any is red, stop there and return no findings — the branch is not ready for review and goes back to implementation, not to a fixer.
+
+The per-change commands above (${impl.validation.length ? `${impl.validation.length} of them` : 'none'}) are this run's copy of the ticket's recipe. Compare them with the commands the ticket's \`### Run per change\` subsection lists, under \`## Validation\` in \`gh issue view ${t.number}\`: for each command the ticket has that this prompt omits, return a \`blocker\` finding naming that command.
 
 ${CONTRACT}
 ${round === 1
@@ -1340,7 +1343,7 @@ ${WORKTREE}`,
       if (round === GATE_MAX_ROUNDS) return { unfixed: [{ severity: 'blocker', location: 'gate', issue: 'no review completed', fix: 'review the PR by hand' }], validated }
       continue
     }
-    const red = readinessRed(r.checks)
+    const red = readinessRed(r.checks, impl.validation)
     if (red.length) {
       log(`#${t.number} gate round ${round}: not ready — validation red: ${red.join('; ')}`)
       return { readiness: red }
@@ -1368,6 +1371,7 @@ ${WORKTREE}`,
       guard: () => goOn(tk.single),
       ledgerKey: t.number,
       validated,
+      validation: impl.validation,
     })
     if (out.stopped) return { stopped: `the run halted during gate round ${round}'s fixes` }
     validated = out.validated
@@ -1426,6 +1430,10 @@ async function implementTicket(t) {
   const plan = await dispatch(t, null, `ticket/${t.number}/dispatch`)
   if (!plan) throw new Error(`dispatcher for #${t.number} died`)
   if (plan.slices.length > 1) log(`#${t.number} dispatched as ${plan.slices.length} slices`)
+  // The first dispatch's copy of the recipe holds for the whole ticket, as its
+  // ticket_brief does: a re-dispatch re-slices, it does not re-read the ticket.
+  const validation = plan.validation || []
+  const reviewValidation = plan.review_validation || []
   const tk = { single: false, gates: 0 }
   const stop = (detail) => {
     log(`#${t.number} stopped — ${detail}`)
@@ -1443,7 +1451,7 @@ async function implementTicket(t) {
   let gate = null
   for (let round = 1; ; round++) {
     tk.single = slices.length === 1
-    const out = await runSlices(t, slices, { cutFrom, started, tag: `impl:#${t.number}${round > 1 ? `:r${round}` : ''}`, node: `ticket/${t.number}/impl/r${round}` })
+    const out = await runSlices(t, slices, { cutFrom, started, tag: `impl:#${t.number}${round > 1 ? `:r${round}` : ''}`, node: `ticket/${t.number}/impl/r${round}`, validation })
     started = out.started
     if (out.last) last = out.last
     summaries.push(...out.summaries)
@@ -1452,7 +1460,7 @@ async function implementTicket(t) {
     if (out.stopped) return stop(out.stopped)
     let unmet = out.unmet
     if (!unmet.length) {
-      gate = await reviewGate(t, { branch: `ticket/${t.number}`, summary: summaries.join(' '), decided, validated: last.validated_sha ? { sha: last.validated_sha, by: 'the implementer' } : null }, cutFrom, plan.ticket_brief, tk)
+      gate = await reviewGate(t, { branch: `ticket/${t.number}`, summary: summaries.join(' '), decided, validated: last.validated_sha ? { sha: last.validated_sha, by: 'the implementer' } : null, validation }, cutFrom, plan.ticket_brief, tk)
       if (gate.stopped) return stop(gate.stopped)
       if (!gate.readiness) break
       unmet = gate.readiness.map((c) => `validation red at the gate: ${c}`)
@@ -1473,6 +1481,8 @@ async function implementTicket(t) {
     // what the publisher inherits or invalidates by rebasing.
     validated: gate.validated || (last.validated_sha ? { sha: last.validated_sha, by: 'the implementer' } : null),
     decided,
+    validation,
+    review_validation: reviewValidation,
   }
   const pub = await enqueuePublish(t, impl, cutFrom, tk.single)
   if (pub.stopped) return stop('the run halted before its publish')
@@ -1531,6 +1541,12 @@ if (unpublished.length) {
 }
 
 // --- step 7: review the whole stack; fixes land as the top PR -------------
+// Every published ticket's `### Run at review` commands, once each, on the
+// stack tip: the full suites no per-ticket role runs (ADR-0029).
+const reviewValidation = []
+for (const c of outcomes.filter((o) => o.state === 'published').flatMap((o) => o.review_validation || [])) {
+  if (!reviewValidation.some((k) => norm(k) === norm(c))) reviewValidation.push(c)
+}
 phase('Review')
 const review = await agent(
   `Review the whole stack for spec #${SPEC}.
@@ -1543,6 +1559,12 @@ Review \`${ref(BASE_REF)}...${ref(tip)}\` — everything the stack adds.
 Invoke the \`code-review\` skill with \`${ref(BASE_REF)}\` as the fixed point and spec #${SPEC} as the spec — both its axes: this repo's documented standards, and whether the stack matches what the spec and its tickets asked for.
 
 Every ticket was already reviewed alone on its own branch, so look hardest at what that could not see: two implementations of one helper, abstractions that contradict each other, a contract one ticket relies on that another changed. Return every finding; change no code yourself.
+
+${reviewValidation.length
+    ? `Run at review — the deduplicated union of every published ticket's \`### Run at review\` commands. Run each once, on the stack tip (\`git switch --detach ${ref(tip)}\`), in the foreground and exactly as written, never as a background job and never with a build-cache clean:
+${reviewValidation.map((c) => `- \`${c}\``).join('\n')}
+Each command that exits red is a \`blocker\` finding: the command in \`location\`, what failed in \`issue\`.`
+    : `No published ticket lists a command to run at review.`}
 
 ${WORKTREE}`,
   { ...ROLES.review, phase: 'Review', schema: REVIEW_SCHEMA, isolation: ISOLATION, label: `review:spec-${SPEC}`, node: 'review' },
@@ -1574,6 +1596,7 @@ if (findings.length) {
     tag: 'integration',
     node: 'review/fix',
     ledgerKey: 'integration',
+    validation: reviewValidation,
   })
   integrationVerdicts = out.verdicts
   integrationUnaccounted = out.unaccounted
@@ -1714,8 +1737,8 @@ const retrospective = validationLog.length
 
 ${POINTERS}
 
-The validation list this run carried:
-${VALIDATION.length ? VALIDATION.map((c) => `- \`${c}\``).join('\n') : '- (none confirmed — agents ran what they judged fit)'}
+The per-change validation commands each ticket carried:
+${outcomes.filter((o) => o.validation).map((o) => `- #${o.number}: ${o.validation.length ? o.validation.map((c) => `\`${c}\``).join(', ') : '(none — agents ran what they judged fit)'}`).join('\n') || '- (no ticket carried any)'}
 
 What the run's agents reported, summed by the script (seconds are wall time; \`runs\` counts invocations; \`timed_out\` counts agents that reported a hang for that key):
 ${JSON.stringify(validation)}

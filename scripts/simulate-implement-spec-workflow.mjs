@@ -21,7 +21,6 @@ function render(runner, runOrder = 'parallel', startRef = 'main') {
     .replace(/__STACK_MODE__/g, 'native')
     .replace(/__RUN_ORDER__/g, runOrder)
     .replace(/__RUNNER__/g, runner)
-    .replace(/__VALIDATION__/g, SIM_CHECK)
   return s
 }
 
@@ -50,6 +49,7 @@ function completeToSchema(result, opts, label) {
   for (const key of schema.required || []) {
     if (key in filled) continue
     if (key === 'checks') filled.checks = [{ command: SIM_CHECK, passed: true, runs: 1, seconds: 1 }]
+    else if (key === 'validation') filled.validation = [SIM_CHECK]
     else if (key === 'validated_sha') filled.validated_sha = 'simsha'
     else if (key === 'worktree') filled.worktree = '/wt/' + label
     else {

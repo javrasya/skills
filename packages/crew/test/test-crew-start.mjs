@@ -33,10 +33,12 @@ const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '')
 // as scripts/simulate-implement-spec-workflow.mjs renders it.
 const skillRender = (template, v) => PLACEHOLDERS.reduce((s, k) => s.split(`__${k}__`).join(String(v[k])), template)
 
-const VALUES = { SPEC: 94, REPO: 'acme/app', REPO_DIR: 'C:\\work\\app', NOTES_DIR: 'C:\\Users\\me\\.claude\\spec-notes\\app-94', BASE_REF: 'develop', START_REF: 'develop', STACK_MODE: 'native', RUN_ORDER: 'parallel', VALIDATION: 'npm test\n# lint\nnpm run lint\n' }
+const VALUES = { SPEC: 94, REPO: 'acme/app', REPO_DIR: 'C:\\work\\app', NOTES_DIR: 'C:\\Users\\me\\.claude\\spec-notes\\app-94', BASE_REF: 'develop', START_REF: 'develop', STACK_MODE: 'native', RUN_ORDER: 'parallel' }
 
-test('render: the template with the ten values is what the skill renders, RUNNER session', () => {
+test('render: the template with the nine values is what the skill renders, RUNNER session', () => {
+  assert.deepEqual(PLACEHOLDERS, ['SPEC', 'REPO', 'REPO_DIR', 'NOTES_DIR', 'BASE_REF', 'START_REF', 'STACK_MODE', 'RUN_ORDER', 'RUNNER'])
   const template = readFileSync(templatePath(), 'utf8')
+  assert.doesNotMatch(template, /__VALIDATION__|VALIDATION_RAW|\bVALIDATION\b/)
   assert.equal(templatePath(), SKILL_TEMPLATE, "in a checkout the skill folder's template is the one rendered")
   const rendered = renderTemplate(template, { ...VALUES, RUNNER: 'session' })
   assert.equal(rendered, skillRender(template, { ...VALUES, RUNNER: 'session' }))
@@ -48,27 +50,9 @@ test('render: the template with the ten values is what the skill renders, RUNNER
   assert.throws(() => renderTemplate(template, { ...VALUES }), /no value for __RUNNER__/)
 })
 
-test('render: a validation list is substituted as written, whatever it holds', () => {
-  const out = renderTemplate('A=`__VALIDATION__` B=__SPEC__', { ...VALUES, RUNNER: 'session', VALIDATION: "echo $& __SPEC__ $'x'" })
-  assert.equal(out, "A=`echo $& __SPEC__ $'x'` B=94")
-})
-
-test("render: a validation list the template's String.raw literal cannot hold is refused, naming the line, not rendered into a workflow.js that dies on load", () => {
-  const template = readFileSync(templatePath(), 'utf8')
-  const BS = '\\'
-  for (const [list, why] of [
-    ['npm test\necho `date`\n', /line 2 holds a backtick: "echo `date`"/],
-    ['npm test -- ${{ matrix.x }}\n', /line 1 holds \$\{/],
-    [`make ${BS}\nnpm test\n`, /line 1 ends in a backslash/],
-    [`npm test ${BS}`, /line 1 ends in a backslash/],
-  ]) {
-    assert.throws(
-      () => renderTemplate(template, { ...VALUES, RUNNER: 'session', VALIDATION: list }),
-      (e) => /the validation list cannot be armed/.test(e.message) && why.test(e.message),
-      list,
-    )
-  }
-  assert.doesNotThrow(() => renderTemplate(template, { ...VALUES, RUNNER: 'session', VALIDATION: `# a ${BS} in the middle is held\nnpm test -- a${BS}b $HOME\n` }))
+test('render: a value is substituted as written, whatever it holds', () => {
+  const out = renderTemplate('A=`__REPO_DIR__` B=__SPEC__', { ...VALUES, RUNNER: 'session', REPO_DIR: "C:\\x $& __SPEC__ $'x'" })
+  assert.equal(out, "A=`C:\\x $& __SPEC__ $'x'` B=94")
 })
 
 test('form keys: arrows, Enter, Tab, Esc and Ctrl+C from raw input', () => {
@@ -301,7 +285,7 @@ test('crew start with no terminal: a spec with no validation.md is an error, nev
   assert.ok(!existsSync(w.notesDir), 'nothing written')
 })
 
-test("crew start at a terminal, no validation.md: the orchestrator's draft is the form's last step; edited and confirmed, it is written and armed with", async () => {
+test("crew start at a terminal, no validation.md: the orchestrator's draft is the form's last step; edited and confirmed, it is written", async () => {
   const w = world({ validation: null })
   await w.ready
   const out = fakeStdout()
@@ -318,7 +302,6 @@ test("crew start at a terminal, no validation.md: the orchestrator's draft is th
   const validation = `${FIXED_DRAFT}make check\n`
   assert.equal(readFileSync(join(w.notesDir, 'validation.md'), 'utf8'), validation)
   assert.equal(armed.target.validation, validation)
-  assert.ok(readFileSync(armed.script, 'utf8').includes(validation), 'the run is armed with the confirmed list')
   assert.equal(w.launches.length, 1)
 })
 
@@ -426,7 +409,7 @@ test('crew start at a terminal: Enter through the form renders workflow.js into 
   assert.ok(!existsSync(join(runDir, 'validation.md')), "the validation list is read from the spec's notes dir, never copied into the run")
   const template = readFileSync(templatePath(), 'utf8')
   // Its research notes are its own too; the validation list stays the spec's.
-  assert.equal(readFileSync(script, 'utf8'), skillRender(template, { SPEC: 94, REPO: 'acme/app', REPO_DIR: w.repoDir, NOTES_DIR: runDir, BASE_REF: 'develop', START_REF: 'develop', STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session', VALIDATION: 'npm t\n' }))
+  assert.equal(readFileSync(script, 'utf8'), skillRender(template, { SPEC: 94, REPO: 'acme/app', REPO_DIR: w.repoDir, NOTES_DIR: runDir, BASE_REF: 'develop', START_REF: 'develop', STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session' }))
   assert.deepEqual(rememberedAnswers(w.paths, w.repoDir), { harness: 'claude', base: 'develop', stackMode: 'native', runOrder: 'parallel', permissionMode: 'auto', models: { claude: 'opus' } }, 'prior work is never remembered')
   assert.ok(!w.calls.some((c) => c.startsWith('gh extension install')), 'the extension is installed only when chosen')
 })
