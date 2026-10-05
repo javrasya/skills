@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-08-30. Extends the dispatcher introduced for `implement-spec-in-workflow`'s implementation phase to every fix the run makes. Amends nothing in ADR-0003; publish-once, the serial lane and the integration PR all stand.
+Accepted — 2026-08-30. Extends the dispatcher introduced for `implement-spec-in-workflow`'s implementation phase to every fix the run makes. Amends nothing in ADR-0003; publish-once, the serial lane and the integration PR all stand. Amended 2026-10-05 by ADR-0030: a check returns its exit code, and a non-zero one may be judged green by the role only when every failure in it is pre-existing against the run's baseline record — a **waived check**; a zero exit code still decides a green with no judgement.
 
 ## Context
 

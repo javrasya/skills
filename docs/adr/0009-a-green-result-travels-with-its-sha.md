@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-09-13. Amended 2026-10-05 by ADR-0029: the list every role runs is the ticket's per-change validation recipe, not a spec-wide `validation.md`; the timing fields, the ledger and the retrospective report in the last paragraph of the decision are removed. Amends the readiness rule of ADR-0008 — "the reviewer's first act is to re-run the validation list" — into "the reviewer's first act is to establish readiness, by inheritance when the sha is unchanged". Everything else in ADR-0008 stands; ADR-0004's rule that no agent judges its own work is untouched, because a sha match is an exit code, not a judgement.
+Accepted — 2026-09-13. Amended 2026-10-05 by ADR-0029: the list every role runs is the ticket's per-change validation recipe, not a spec-wide `validation.md`; the timing fields, the ledger and the retrospective report in the last paragraph of the decision are removed. Amends the readiness rule of ADR-0008 — "the reviewer's first act is to re-run the validation list" — into "the reviewer's first act is to establish readiness, by inheritance when the sha is unchanged". Everything else in ADR-0008 stands; ADR-0004's rule that no agent judges its own work is untouched, because a sha match is an exit code, not a judgement. Amended 2026-10-05 by ADR-0030: a waived check is never inherited — the next role re-runs it and judges it itself whatever its HEAD, while every other green still inherits by sha; the publisher lists each waived check with its exit code beside the `Validated green at` line.
 
 ## Context
 

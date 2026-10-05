@@ -327,7 +327,8 @@ equals the validated sha and it edited nothing — one `rev-parse` proves the tr
 proven. A rebase produces a tree nobody has validated, so the publisher always runs the recipe after one.
 The proof is the sha match, never the upstream agent's word: an agent that edited anything, or whose
 HEAD differs, runs the recipe. A **waived check** is never inherited: the next role re-runs it and
-judges it itself (ADR-0030). See ADR-0009.
+judges it itself (ADR-0030), and the PR body lists each one with its exit code under the provenance
+line. See ADR-0009.
 
 ### Pre-existing failure
 

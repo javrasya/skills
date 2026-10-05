@@ -529,7 +529,7 @@ test("the skill's template on the crew host: a dispatcher's validation reaches t
   const atReview = ['cd packages/app && npm test -- --coverage']
   const respaced = 'cd  packages/app &&  npm test -- --coverage '
   const e2e = 'npm run e2e'
-  const checks = perChange.map((command) => ({ command, passed: true }))
+  const checks = perChange.map((command) => ({ command, passed: true, exit_code: 0 }))
   const answers = join(root, 'template-answers.json')
   const slices = [{ title: 'all of it', brief: 'do it', effort: 'medium' }]
   const published = (n) => ({ published: true, pr_url: `https://github.com/acme/app/pull/${n + 100}`, pr_number: n + 100, checks, validated_sha: 'abc123', stack_link: 'registered' })
@@ -595,7 +595,7 @@ test("the skill's template on the crew host: two tickets started after origin/<b
   assert.notEqual(moved, pinned)
 
   const validation = ['npm test']
-  const checks = validation.map((command) => ({ command, passed: true }))
+  const checks = validation.map((command) => ({ command, passed: true, exit_code: 0 }))
   const slices = [{ title: 'all of it', brief: 'do it', effort: 'medium' }]
   const ticket = (n) => ({ ticket_brief: `#${n} in brief`, validation, review_validation: [], slices })
   const impl = (n) => ({ branch: `ticket/${n}`, summary: 'done', checks, validated_sha: 'abc123' })
@@ -659,7 +659,7 @@ test("the skill's template on the crew host: the baseline runs beside the explor
   writeFileSync(paths.config, JSON.stringify({ repos: { [cwd]: { setup: hook } } }))
 
   const perChange = ['npm test', 'npm run lint -- --max-warnings=0']
-  const checks = perChange.map((command) => ({ command, passed: true }))
+  const checks = perChange.map((command) => ({ command, passed: true, exit_code: 0 }))
   const green = perChange.map((command) => ({ command, exit_code: 0, masked_command: '', failures: { tests: [], diagnostics: [] } }))
   const notesDir = join(root, 'baseline-notes')
   const answers = join(root, 'baseline-answers.json')
@@ -753,7 +753,7 @@ test("the skill's template on the crew host: a masked command replaces its origi
   const notesDir = join(root, 'masked-notes')
   const record = join(notesDir, 'pre-existing-failures.json')
   const none = { tests: [], diagnostics: [] }
-  const ok = (...commands) => commands.map((command) => ({ command, passed: true }))
+  const ok = (...commands) => commands.map((command) => ({ command, passed: true, exit_code: 0 }))
   const slices = [{ title: 'all of it', brief: 'do it', effort: 'medium' }]
   const published = (n) => ({ published: true, pr_url: `https://github.com/acme/app/pull/${n}`, pr_number: n, checks: ok(masked, lint), validated_sha: 'abc123', stack_link: 'registered' })
   const finding = { severity: 'blocker', location: 'src/a.js:1', issue: 'wrong sum', fix: 'add them' }
@@ -817,3 +817,79 @@ test("the skill's template on the crew host: a masked command replaces its origi
   assert.match(promptOf('gate:#101:r1'), /A command shown above in its masked form stands for the ticket's unmasked one/)
 })
 
+// ADR-0030: a non-zero check judged pre-existing is a waived check. Readiness
+// counts it green, so the ticket goes on to its gate with no re-dispatch; the
+// gate reviewer, its HEAD on the validated sha, still re-runs it rather than
+// inheriting it; and the publisher is told to list it, with its exit code,
+// beside the provenance line. A check that omits its exit code is refused.
+test("the skill's template on the crew host: a waived check counts green, the gate re-runs it rather than inheriting it, and the publisher lists it in the PR body", async () => {
+  const cwd = repo('waived-repo')
+  const pinned = spawnSync('git', ['-C', cwd, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim()
+  const perChange = ['npm test', 'npm run lint']
+  const notesDir = join(root, 'waived-notes')
+  const record = join(notesDir, 'pre-existing-failures.json')
+  const lintRed = { tool: 'biome', rule: 'lint/style/useConst', file: 'src/a.js', snippet: 'let a = 1\n', message: 'use const' }
+  const baseline = [
+    { command: perChange[0], exit_code: 0, masked_command: '', failures: { tests: [], diagnostics: [] } },
+    { command: perChange[1], exit_code: 1, masked_command: '', failures: { tests: [], diagnostics: [lintRed] } },
+  ]
+  const checks = [
+    { command: perChange[0], passed: true, exit_code: 0 },
+    { command: perChange[1], passed: true, exit_code: 1 },
+  ]
+  const answers = join(root, 'waived-answers.json')
+  writeFileSync(
+    answers,
+    JSON.stringify({
+      '^graph': { tickets: [{ number: 101, title: 'One', blocked_by: [], needs_human: false, human_reason: '' }] },
+      '^baseline': { commands: baseline },
+      '^dispatch_101': { ticket_brief: '#101 in brief', validation: perChange, review_validation: [], slices: [{ title: 'all of it', brief: 'do it', effort: 'medium' }] },
+      '^impl_101': { branch: 'ticket/101', summary: 'done', checks, validated_sha: 'abc123' },
+      '^gate': { checks, validated_sha: 'abc123' },
+      '^publish_101': { published: true, pr_url: 'https://github.com/acme/app/pull/101', pr_number: 101, checks, validated_sha: 'abc123', stack_link: 'registered' },
+      '^finalize': { summary: 'stack ready' },
+    }),
+  )
+  const script = renderTemplate(readFileSync(templatePath(), 'utf8'), { SPEC: 94, REPO: 'acme/app', REPO_DIR: cwd, NOTES_DIR: notesDir, BASE_REF: 'main', START_REF: 'main', BASE_SHA: pinned, STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session', PER_CHANGE_COMMANDS: JSON.stringify(perChange), AT_REVIEW_COMMANDS: '[]' })
+  const fake = [process.execPath, FAKE_HARNESS]
+  const host = sessionHost(crewHost({ paths, env: { ...env, CREW_FAKE_MCP: '0', CREW_FAKE_ANSWERS: answers }, cwd, harnesses: { claude: fake, pi: fake }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
+  const stateDir = join(root, 'waived-state')
+  const said = []
+  await runScript(script, { host, stateDir, out: (s) => said.push(s), settings: FAST, transcripts: sessionTranscripts({ env }), project: cwd })
+  const log = said.join('\n')
+  const entries = readFileSync(join(stateDir, 'journal.jsonl'), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l))
+  const started = (label) => entries.filter((e) => e.type === 'started' && e.title?.includes(label))
+  const promptOf = promptsOf(stateDir, log)
+
+  const impl = promptOf('impl:#101')
+  assert.ok(impl.includes(record), `the implementer judges a red against the record:\n${impl}`)
+  assert.match(impl, /A zero exit is `passed: true`, with no judgement/)
+  assert.match(impl, /only when every failure in its output is pre-existing/)
+
+  assert.equal(started('impl:#101').length, 1, `the waived check counts green: no remainder, no second implementer:\n${log}`)
+  assert.ok(!log.includes('validation red'), `nothing reads it red:\n${log}`)
+  assert.equal(started('gate:#101').length, 1, 'one gate round')
+
+  const gate = promptOf('gate:#101')
+  assert.ok(gate.includes('validated green at `abc123` by the implementer'), `the gate may inherit by sha:\n${gate}`)
+  assert.match(gate, /report every other check with `passed: true`, `exit_code` 0/)
+  assert.ok(gate.includes('Never inherit a waived check: whatever your HEAD, re-run each one below'), `but not the waived one:\n${gate}`)
+  assert.ok(gate.includes('- `npm run lint` exited 1'), 'the waived check is named with its exit code')
+  assert.ok(!gate.includes('- `npm test` exited'), 'a green over exit 0 is inherited')
+
+  const publish = promptOf('publish:#101')
+  assert.ok(publish.includes('- `npm run lint` exited 1'), `the publisher re-runs it too:\n${publish}`)
+  assert.ok(publish.includes('Directly under it, one line per waived check you return'), 'and lists it in the PR body beside the provenance line')
+  assert.ok(publish.includes('`Waived: <command> exited <exit_code>`'))
+  assert.ok(publish.includes('with none, add nothing'), 'a ticket with none lists nothing extra')
+  assert.ok(log.includes('stacked #101'), `the ticket published:\n${log}`)
+
+  // The schema the implementer submitted against, as submit checks it.
+  const schema = JSON.parse(readFileSync(join(stateDir, started('impl:#101')[0].dir, 'schema.json'), 'utf8'))
+  const accepted = { branch: 'ticket/101', summary: 'done', checks, validated_sha: 'abc123', unmet: [], decisions_needed: [], decided: [], worktree: cwd }
+  assert.deepEqual(validate(schema, accepted), [])
+  assert.notDeepEqual(validate(schema, { ...accepted, checks: [{ command: 'npm test', passed: true }] }), [], 'a check without its exit code is refused')
+})

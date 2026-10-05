@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-10-05. Amends ADR-0009: its rules on the validated sha, inheritance, foreground checks and no cache clean stand; its "validation list" is now the ticket's per-change recipe, and its timing fields, ledger and retrospective report are gone. Amends ADR-0018 and ADR-0019: the orchestrator no longer drafts a validation list, so that question, its confirm step in the arming form and its headless run are removed; halt triage and the `?` session stay. The preflight skill's Validation section is the format this ADR depends on.
+Accepted — 2026-10-05. Amends ADR-0009: its rules on the validated sha, inheritance, foreground checks and no cache clean stand; its "validation list" is now the ticket's per-change recipe, and its timing fields, ledger and retrospective report are gone. Amends ADR-0018 and ADR-0019: the orchestrator no longer drafts a validation list, so that question, its confirm step in the arming form and its headless run are removed; halt triage and the `?` session stay. The preflight skill's Validation section is the format this ADR depends on. Amended 2026-10-05 by ADR-0030: each result is `{command, passed, exit_code}`, and readiness reads `passed` — a waived check is green, a `passed: false` red whatever its exit code.
 
 ## Context
 

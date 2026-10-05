@@ -257,17 +257,32 @@ const CONTRACT = `The acceptance contract for this ticket is its own acceptance 
 const validationLine = (cmds) => `${cmds.length
   ? `Ticket validation — run per change. Run EVERY command below on your final commit and return one result per command, the command copied verbatim:\n${cmds.map((c) => `- \`${maskOf(c)}\``).join('\n')}${unmasking(cmds)}`
   : `This ticket's validation recipe has no per-change commands. Run the repo's tests for what you touched and return each command you ran with its result.`}
+${JUDGING}
 ${RUNNING}`
+// The exit code decides every green; only a red is judged, and only against
+// the baseline record (ADR-0030). A non-zero exit judged green is a waived
+// check, and its exit code travels with it as the trace of that judgement.
+const JUDGING = `Each result carries the command's \`exit_code\`. A zero exit is \`passed: true\`, with no judgement. A non-zero exit is \`passed: true\` only when every failure in its output is pre-existing against the run's baseline record, \`${BASELINE_RECORD}\` — listed there for that command, a test by its id, a diagnostic by its tool, rule, file and snippet — and your work was not meant to fix it: that is a waived check. Any failure the record lacks, or a command it has no entry for, is \`passed: false\`.`
+// The checks a result judged green over a non-zero exit. They travel with the
+// validated sha, so the next role knows which ones it may not inherit.
+const waivedOf = (checks) => (checks || []).filter((k) => k.passed && k.exit_code !== 0).map((k) => ({ command: k.command, exit_code: k.exit_code }))
+const validatedBy = (r, by) => r.validated_sha ? { sha: r.validated_sha, by, waived: waivedOf(r.checks) } : null
 // A green result travels with the sha it was green on (ADR-0009). The agent
 // downstream checks the sha itself — one rev-parse — and inherits the result
 // when nothing changed, so the run pays for each tree once. Re-running on an
 // unchanged tree was 36 of 153 measured full-suite runs, provably; the same
-// rule is what ECONOMY asks for and could not enforce.
-const inherit = (v) => v && v.sha
-  ? `The branch was validated green at \`${v.sha}\` by ${v.by}. Run \`git rev-parse HEAD\`: if it matches and you have edited nothing, inherit that result — report every check with \`passed: true\` and \`validated_sha\` = \`${v.sha}\` — instead of re-running. If it differs, or you edited anything, run the recipe.`
-  : ''
+// rule is what ECONOMY asks for and could not enforce. A waived check is the
+// exception (ADR-0030): it is one agent's judgement, not an exit code, so the
+// next role re-runs it and judges it again — the cheapest second opinion.
+const inherit = (v) => {
+  if (!v || !v.sha) return ''
+  const waived = v.waived || []
+  return `The branch was validated green at \`${v.sha}\` by ${v.by}. Run \`git rev-parse HEAD\`: if it matches and you have edited nothing, inherit that result — report ${waived.length ? 'every other' : 'every'} check with \`passed: true\`, \`exit_code\` 0 and \`validated_sha\` = \`${v.sha}\` — instead of re-running.${waived.length ? ` Never inherit a waived check: whatever your HEAD, re-run each one below and judge it yourself against the record:\n${waived.map((k) => `- \`${k.command}\` exited ${k.exit_code}`).join('\n')}\n` : ''} If it differs, or you edited anything, run the recipe.`
+}
 // The commands a result set leaves red or missing. Whitespace-insensitive,
 // because agents copy imperfectly; anything looser would credit the wrong run.
+// It reads `passed` alone: a waived check is green, a `passed: false` red
+// whatever its exit code (ADR-0030).
 const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim()
 // The baseline's masked forms, by the normalized original (ADR-0030): a
 // command that already failed at the pinned base reaches every role with
@@ -301,10 +316,11 @@ const CHECKS_FIELD = {
     items: {
       type: 'object',
       additionalProperties: false,
-      required: ['command', 'passed'],
+      required: ['command', 'passed', 'exit_code'],
       properties: {
         command: { type: 'string', description: 'the exact command, copied verbatim from the validation recipe' },
         passed: { type: 'boolean' },
+        exit_code: { type: 'integer', description: 'the exit code the command returned; 0 for a result inherited by sha' },
       },
     },
     description: 'one entry per validation command run on the final commit',
@@ -1108,7 +1124,7 @@ ${cutFrom !== base ? `4. The tip moved since this ticket was cut. Replay its com
 
    ${layerLine(layers.length)}
 
-   and must also contain the line \`Closes #${t.number}\`, state that it is part of the stack for spec #${SPEC}, and carry one provenance line — \`Validated green at <sha> by <role>\` — naming the sha the validation recipe last passed on and who ran it (you, or the role you inherited it from).${impl.decided.length ? ` Under a heading "Decided during implementation", list what the implementer settled itself where the ticket left it open:
+   and must also contain the line \`Closes #${t.number}\`, state that it is part of the stack for spec #${SPEC}, and carry one provenance line — \`Validated green at <sha> by <role>\` — naming the sha the validation recipe last passed on and who ran it (you, or the role you inherited it from). Directly under it, one line per waived check you return — \`passed: true\` over a non-zero \`exit_code\` — as \`Waived: <command> exited <exit_code>\`, the command in code formatting; with none, add nothing.${impl.decided.length ? ` Under a heading "Decided during implementation", list what the implementer settled itself where the ticket left it open:
 ${impl.decided.map((d) => `   - ${d}`).join('\n')}
   ` : ''} Leave it a DRAFT — every layer stays draft until the run finalizes, which is how the operator can tell the stack is still being built.
 ${canLink
@@ -1256,7 +1272,7 @@ Return one verdict per finding in your brief you fixed or rejected, the \`locati
     // branch may be mid-change, so the round stops rather than building on it.
     if (!r) { out.died = s.title; break }
     noteWorktree(ledgerKey, branch, r)
-    out.validated = r.validated_sha ? { sha: r.validated_sha, by: 'a fix slice' } : null
+    out.validated = validatedBy(r, 'a fix slice')
     out.landed = true
     out.verdicts.push(...r.verdicts)
     out.unfinished.push(...r.unfinished)
@@ -1417,7 +1433,7 @@ ${WORKTREE}`,
       if (missing.length) log(`#${t.number} gate round ${round}: not ready — the recipe omits the ticket's ${missing.join('; ')}`)
       return { readiness: red, missing }
     }
-    if (r.validated_sha) validated = { sha: r.validated_sha, by: validated && validated.sha === r.validated_sha ? validated.by : 'the gate reviewer' }
+    if (r.validated_sha) validated = validatedBy(r, validated && validated.sha === r.validated_sha ? validated.by : 'the gate reviewer')
     const blocking = r.findings.filter((f) => f.severity !== 'minor')
     if (!blocking.length) {
       log(`#${t.number} gate clean${round > 1 ? ` after ${round} rounds` : ''}${rejected.length ? `, ${rejected.length} finding(s) rejected` : ''}`)
@@ -1531,7 +1547,7 @@ async function implementTicket(t) {
     if (out.stopped) return stop(out.stopped)
     let unmet = out.unmet
     if (!unmet.length) {
-      gate = await reviewGate(t, { branch: `ticket/${t.number}`, summary: summaries.join(' '), decided, validated: last.validated_sha ? { sha: last.validated_sha, by: 'the implementer' } : null, validation }, cutFrom, plan.ticket_brief, tk)
+      gate = await reviewGate(t, { branch: `ticket/${t.number}`, summary: summaries.join(' '), decided, validated: validatedBy(last, 'the implementer'), validation }, cutFrom, plan.ticket_brief, tk)
       if (gate.stopped) return stop(gate.stopped)
       if (!gate.readiness) break
       unionInto(validation, gate.missing)
@@ -1554,7 +1570,7 @@ async function implementTicket(t) {
     checks: last.checks,
     // The gate's fixers may have moved the branch; the newest green sha is
     // what the publisher inherits or invalidates by rebasing.
-    validated: gate.validated || (last.validated_sha ? { sha: last.validated_sha, by: 'the implementer' } : null),
+    validated: gate.validated || validatedBy(last, 'the implementer'),
     decided,
     validation,
     review_validation: reviewValidation,

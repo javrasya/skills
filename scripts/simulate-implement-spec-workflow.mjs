@@ -53,7 +53,7 @@ function completeToSchema(result, opts, label) {
   const schema = opts.schema
   if (!schema || !result || typeof result !== 'object') return result
   return fillRequired(schema, result, {
-    checks: [{ command: SIM_CHECK, passed: true }],
+    checks: [{ command: SIM_CHECK, passed: true, exit_code: 0 }],
     validation: [SIM_CHECK],
     validated_sha: 'simsha',
     worktree: '/wt/' + label,
@@ -338,7 +338,7 @@ const withBlockers = (blockers) => () => ({
 // so the omission would be re-raised every round and never run (ADR-0029).
 {
   const LINT = 'npm run lint -- --max-warnings=0'
-  const green = (prompt) => [SIM_CHECK, ...(prompt.includes(LINT) ? [LINT] : [])].map((command) => ({ command, passed: true }))
+  const green = (prompt) => [SIM_CHECK, ...(prompt.includes(LINT) ? [LINT] : [])].map((command) => ({ command, passed: true, exit_code: 0 }))
   const { result, calls, logs } = await run({
     graph: () => ({ tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }], explorations: [] }),
     impl: (label, prompt) => ({ branch: 'ticket/10', summary: 's', unmet: [], checks: green(prompt) }),
