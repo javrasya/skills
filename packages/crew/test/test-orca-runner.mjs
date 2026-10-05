@@ -31,6 +31,7 @@ import { tool } from '../src/tools.mjs'
 import { findRun, pauseCommand, resumeCommand, removeCommand } from '../src/run-commands.mjs'
 import { holdQueue } from '../src/hold.mjs'
 import { runHalt, RESUME_REQUEST } from '../src/halt.mjs'
+import { reopenNode } from '../src/reopen.mjs'
 import { runPause, pauseRun as pauseRunIn, unpauseRun } from '../src/pause.mjs'
 import { runView, runsView, bandOf, STATES, RUNNER_PATH, runnerAlive, runEnded } from '../src/run-view-model.mjs'
 import { consoleRunsHelp, consoleTreeHelp, draw, drawRuns, helpLine, listRuns, strip, TREE_HELP, marqueeOffset, NAME_W } from '../src/run-view/draw.mjs'
@@ -9480,6 +9481,65 @@ test("halt: a resume that carries the operator's decisions (the orchestrator's d
     rig.lines.some((l) => l.endsWith('>> r: resuming n/a, with 1 decision from the operator')),
     rig.lines.join('\n'),
   )
+})
+
+// --- reopen: a settled node carried on by a journal line ----------------------
+
+const REOPEN_NOTE = 'CodeBuild is checked once the stack is published: do not count it unmet.'
+const REDONE = { ...GOOD, count: 3 }
+
+test("reopen: a node of an ended run reopened by a journal line is carried on in its own session with the operator's note on --resume, every other node replayed, and the script gets its new result", async () => {
+  const rig = nodeRig({
+    'Do b.': async (w) => {
+      w.state.onContinue = submitsValue(REDONE)
+      return submitsValue(GOOD)(w)
+    },
+  })
+  const script = `const a = await ${nodeCall('a')}\nconst b = await ${nodeCall('b')}\nreturn [a, b]`
+  assert.deepEqual(await rig.go(script).p, [GOOD, GOOD])
+  const bDir = foldJournal(rig.journal()).nodes.get('n/b').last.dir
+
+  assert.deepEqual(reopenNode(rig.stateDir, { node: 'n/b', note: REOPEN_NOTE }, { alive: () => false }), { node: 'n/b', title: '[P] b' })
+  const second = rig.go(script, { resume: true })
+  assert.deepEqual(await second.p, [GOOD, REDONE])
+
+  assert.deepEqual(rig.started(second), [], 'a is replayed, b carries on in its session: no worker started')
+  const [c] = second.calls().filter((x) => x.verb === 'workerContinue')
+  assert.ok(c.text.startsWith(`The workflow run ended, and the operator reopened your task with a note: ${REOPEN_NOTE} Take it as final`), c.text)
+  const j = rig.journal()
+  assertEntries(j)
+  assert.deepEqual(
+    ofType(j, 'result')
+      .filter((e) => !e.carried)
+      .map((e) => [e.node, !!e.replayed]),
+    [
+      ['n/a', true],
+      ['n/b', false],
+    ],
+  )
+  assert.deepEqual(JSON.parse(readFileSync(join(rig.stateDir, bDir, 'result.reopened.json'), 'utf8')), GOOD, 'the result it was reopened from is set aside')
+  assert.equal(foldJournal(j).nodes.get('n/b').reopened, undefined, 'its new result settles the reopen')
+})
+
+test('reopen: a resume that ends before it reaches the reopened node carries the reopen forward, and the next resume carries the node on', async () => {
+  const rig = nodeRig({
+    'Do b.': async (w) => {
+      w.state.onContinue = submitsValue(REDONE)
+      return submitsValue(GOOD)(w)
+    },
+  })
+  const script = `const a = await ${nodeCall('a')}\nconst b = await ${nodeCall('b')}\nreturn [a, b]`
+  await rig.go(script).p
+  reopenNode(rig.stateDir, { node: 'n/b', note: REOPEN_NOTE }, { alive: () => false })
+  assert.deepEqual(await rig.go(`return [await ${nodeCall('a')}]`, { resume: true }).p, [GOOD])
+  assert.deepEqual(
+    foldJournal(rig.journal()).reopened.map(({ node, note }) => [node, note]),
+    [['n/b', REOPEN_NOTE]],
+  )
+  const third = rig.go(script, { resume: true })
+  assert.deepEqual(await third.p, [GOOD, REDONE])
+  assert.equal(third.calls().filter((x) => x.verb === 'workerContinue').length, 1)
+  assert.deepEqual(foldJournal(rig.journal()).reopened, [])
 })
 
 // --- a resubmit carries a held node on (#173) --------------------------------

@@ -133,6 +133,12 @@ import { unionLines } from './git.mjs'
 // worktree beyond what it was told was there before it, and was sent back
 // once to commit or remove them; leftover: the `lines` still there after,
 // which every later chain agent is told never to commit.
+// reopen: the operator reopened `node`, a node whose result an ended run
+// took, with `note`, what was fixed and how its agent finishes (the
+// orchestrator's reopen tool, reopen.mjs). Only appended, never by a runner
+// at work: the next resume carries that node on in its own session, told the
+// note, instead of replaying its result, and carries the line forward until
+// the node settles again. It has no n and no key.
 export const JOURNAL_ENTRIES = Object.freeze({
   queued: ['at', 'key', 'n', 'title'],
   starting: ['at', 'key', 'n', 'title', 'run'],
@@ -171,6 +177,7 @@ export const JOURNAL_ENTRIES = Object.freeze({
   chain: ['at', 'runId', 'worktree', 'lines'],
   followUp: ['at', 'key', 'n', 'title', 'worktree', 'lines'],
   leftover: ['at', 'key', 'n', 'title', 'worktree', 'lines'],
+  reopen: ['at', 'node', 'note'],
 })
 
 // A needs-decision result's questions, for the run view.
@@ -308,6 +315,20 @@ export function chainEntry({ runId, worktree, baseline, leftovers = [] }) {
 // it also holds as `decisions`; a held call is queued, its reason saying so.
 // A failed agent of a node that a later agent of the same node carried on
 // has `superseded: true`: the run view draws the node's latest attempt alone.
+// A node whose latest call settled with a result, which a `reopen` line names
+// after that result, is `reopened`, { note, at }, and its `last` is its
+// agent's worker even when the result was replayed: the resume carries it on
+// in that worker's session. reopened: every such node, { node, title, note,
+// at }, in call order.
+// An agent's worker, in a call's worker's shape, from its fold record: a
+// replayed result names none, but the agent it replays does (its `earlier`
+// line). Null for one that never started a session.
+function workerOf(a) {
+  if (!a?.dispatchId || !a.sessionId) return null
+  const label = a.title?.replace(/^\[[^\]]*\] /, '') || `agent-${a.origin}`
+  return { n: a.origin, title: a.title, dir: agentDir(a.origin, label), run: a.runId, dispatchId: a.dispatchId, harness: a.harness, sessionId: a.sessionId, terminal: a.terminal, worktree: a.worktree, continuations: a.continuations, origin: a.origin }
+}
+
 export function foldJournal(entries) {
   const calls = new Map()
   const nodes = new Map()
@@ -319,6 +340,8 @@ export function foldJournal(entries) {
   let outage = null
   let halted = null
   let chain = null
+  // node -> the latest reopen line naming it: { note, at, i }, i its place.
+  const reopens = new Map()
   // One per call, by its n: a call's lines share it, and no two calls do.
   const byCall = new Map()
   // The call id of each outstanding line, by its dispatch.
@@ -579,6 +602,7 @@ export function foldJournal(entries) {
     if (e.type === 'unhalted') halted = null
     if (e.type === 'chain' && typeof e.worktree === 'string' && typeof e.runId === 'string') chain = { runId: e.runId, worktree: e.worktree, baseline: Array.isArray(e.lines) ? e.lines : null, leftovers: Array.isArray(e.leftovers) ? e.leftovers : [] }
     if (e.type === 'leftover' && chain && Array.isArray(e.lines)) chain = { ...chain, leftovers: unionLines(chain.leftovers, e.lines) }
+    if (e.type === 'reopen' && typeof e.node === 'string' && typeof e.note === 'string') reopens.set(e.node, { note: e.note, at: e.at ?? null, i })
     // Read as the runner acted on it (doctor.mjs).
     if (e.type === 'mail' && typeof e.messageId === 'string' && mailSupersedes(e, mail.get(e.messageId))) {
       mail.set(e.messageId, e)
@@ -589,7 +613,7 @@ export function foldJournal(entries) {
     if (typeof e.key !== 'string') continue
     if (!numbered && e.type !== 'result' && e.type !== 'failed') continue
     const callId = numbered ? e.n : `line ${i}`
-    if (!byCall.has(callId)) byCall.set(callId, { key: e.key, n: numbered ? e.n : null, order: numbered ? e.n : i, carried: false, worker: null, settled: null, origin: null, node: null, title: null, reason: null, workerLeft: false, submissions: null })
+    if (!byCall.has(callId)) byCall.set(callId, { key: e.key, n: numbered ? e.n : null, order: numbered ? e.n : i, carried: false, worker: null, settled: null, origin: null, node: null, title: null, reason: null, workerLeft: false, submissions: null, resultAt: -1 })
     const c = byCall.get(callId)
     if (typeof e.node === 'string') c.node = e.node
     if (typeof e.title === 'string') c.title = e.title
@@ -598,6 +622,7 @@ export function foldJournal(entries) {
     if (e.type === 'result' || e.type === 'failed') c.submissions = Number.isInteger(e.submissions) ? e.submissions : null
     if (e.type === 'result') {
       c.settled = { result: e.result, ...(e.needsDecision === true && { needsDecision: true }) }
+      c.resultAt = i
       if (Number.isInteger(e.origin)) c.origin = e.origin
     } else if (e.type === 'failed') {
       if (!e.workerOut) c.settled = { failed: true }
@@ -659,6 +684,9 @@ export function foldJournal(entries) {
     const entry = settled ?? { ...(c.worker ? { worker: c.worker } : { unsettled: true }), ...(p?.rounds.length && heldRounds(p, { agents, mail, agentDir })) }
     calls.get(c.key).push(c.node ? { ...entry, node: c.node } : entry)
     if (c.node) {
+      const r = reopens.get(c.node)
+      const reopened = r && settled && 'result' in settled && !settled.needsDecision && r.i > c.resultAt ? { note: r.note, at: r.at } : null
+      const last = c.worker ?? (reopened ? workerOf(agents.get(c.origin)) : null)
       nodes.set(c.node, {
         ...entry,
         key: c.key,
@@ -668,8 +696,9 @@ export function foldJournal(entries) {
         ...(c.origin !== null && { origin: c.origin }),
         ...(settled?.failed && { reason: c.reason }),
         ...(settled?.failed && c.workerLeft && { workerLeft: true }),
-        ...(settled && c.worker && { last: c.worker }),
+        ...(settled && last && { last }),
         ...(settled && Number.isInteger(c.submissions) && { submissions: c.submissions }),
+        ...(reopened && { reopened }),
       })
     }
   }
@@ -681,5 +710,9 @@ export function foldJournal(entries) {
   for (const a of agents.values()) if (a.node && a.patient == null && (latestOfNode.get(a.node)?.n ?? -Infinity) < a.n) latestOfNode.set(a.node, a)
   for (const a of agents.values()) if (a.node && a.patient == null && a.state === 'failed' && latestOfNode.get(a.node) !== a) a.superseded = true
   const outstandingNodes = [...nodes.values()].filter((x) => x.failed || x.needsDecision).map((x) => x.node)
-  return { calls, nodes, retained, run, lastN, phases, agents: [...agents.values()].sort((x, y) => x.n - y.n), mail: [...mail.values()], outage, chain, halted: halted && { ...halted, nodes: outstandingNodes } }
+  const reopened = [...nodes.values()]
+    .filter((x) => x.reopened)
+    .sort((x, y) => x.n - y.n)
+    .map((x) => ({ node: x.node, title: x.title, ...x.reopened }))
+  return { calls, nodes, retained, run, lastN, phases, agents: [...agents.values()].sort((x, y) => x.n - y.n), mail: [...mail.values()], outage, chain, halted: halted && { ...halted, nodes: outstandingNodes }, reopened }
 }

@@ -559,7 +559,7 @@ test("crew host: the harness starts from the runner's launch line word for word,
 
 test("crew host: a Claude session's settings allow crew's tools without a prompt per call, beside its hooks, and its MCP config starts crew's server with the session's own ids; the repo's servers stay (#177)", () => {
   const settings = JSON.parse(claudeSettings())
-  assert.deepEqual(settings.permissions, { allow: ['submit', 'status', 'needs_you', 'handoff', 'give_up', 'run_status', 'agent_result', 'runner_log', 'pause', 'resume', 'decide'].map((name) => `mcp__crew-agent-tools__${name}`) })
+  assert.deepEqual(settings.permissions, { allow: ['submit', 'status', 'needs_you', 'handoff', 'give_up', 'run_status', 'agent_result', 'runner_log', 'pause', 'resume', 'decide', 'reopen'].map((name) => `mcp__crew-agent-tools__${name}`) })
   assert.equal(settings.hooks.PreToolUse?.[0].hooks[0].command, `"${process.execPath}" "${CLAUDE_HOOK}"`)
   assert.deepEqual(JSON.parse(crewMcpConfig()), {
     mcpServers: { 'crew-agent-tools': { type: 'stdio', command: process.execPath, args: [CREW_MCP], env: { CREW_SESSION: '${CREW_SESSION}', CREW_HOME: '${CREW_HOME}', CREW_AGENT: '${CREW_AGENT:-}' } } },
@@ -889,7 +889,7 @@ test("crew host: crew's pi extension gives a `?` session the orchestrator's tool
   const { terminal } = await consultSession({ host: h.host, stateDir, harness: 'claude', dir: crewScratch().cwd })
   const pi = stubPi({ CREW_HOME: h.paths.home, CREW_SESSION: terminal })
   await pi.start()
-  const NAMES = ['run_status', 'agent_result', 'runner_log', 'pause', 'resume', 'decide']
+  const NAMES = ['run_status', 'agent_result', 'runner_log', 'pause', 'resume', 'decide', 'reopen']
   assert.deepEqual(
     pi.tools.map((t) => [t.name, t.description]),
     NAMES.map((name) => [name, tool(name).description]),
@@ -908,6 +908,7 @@ test("crew host: crew's pi extension gives a `?` session the orchestrator's tool
     paused: null,
     halted: { since: at(12), nodes: held.map(({ tab, ...n }) => ({ questions: null, ...n })) },
     outage: null,
+    reopened: [],
     phases: [
       { name: 'Discover', agents: [agent(1, '[Discover] discover', null, 'done', null, { from: at(0), to: at(5) })] },
       {
@@ -948,7 +949,7 @@ test("crew host: crew's pi extension gives a `?` session the orchestrator's tool
   rmSync(join(stateDir, 'halted.json'))
   await call('pause')
   writeFileSync(join(stateDir, 'runner.pid'), '999999')
-  assert.equal(await call('resume'), 'Lifted the pause, as r in the run console does: the agents it held start.')
+  assert.equal(await call('resume'), "Lifted the pause, as r in the run console does: the agents it held start. The run's runner is not running: resume again starts it.")
   assert.deepEqual([existsSync(join(stateDir, PAUSE_FILE)), existsSync(join(stateDir, RESUME_REQUEST))], [false, false])
   writeFileSync(join(stateDir, 'halted.json'), JSON.stringify({ at: at(12), runId: 'run_fake9', terminal: 'term_runner', nodes: held }))
   writeFileSync(join(stateDir, 'runner.pid'), String(process.pid))
@@ -959,16 +960,15 @@ test("crew host: crew's pi extension gives a `?` session the orchestrator's tool
   assert.deepEqual(requested(), { node: 'impl_a', decisions: [{ question: 'which database?', answer: 'Postgres, as the other services use' }] })
   rmSync(join(stateDir, RESUME_REQUEST))
 
-  // A halt is the runner's to carry on: with the runner dead, resume and decide refuse and write nothing.
+  // Answers are the runner's to hand on: with the runner dead, decide refuses and writes nothing.
   writeFileSync(join(stateDir, 'runner.pid'), '999999')
-  const noRunner = /^Error: the run's runner is not running, so nothing would take the request\. The operator resumes it with r in `crew view run_fake9`, which starts a runner again\.$/
-  await assert.rejects(call('resume', { node: 'impl_b' }), noRunner)
-  await assert.rejects(call('decide', { node: 'impl_a', decisions: [{ question: 'which database?', answer: 'Postgres' }] }), noRunner)
+  await assert.rejects(call('decide', { node: 'impl_a', decisions: [{ question: 'which database?', answer: 'Postgres' }] }), /^Error: the run's runner is not running, so nothing would take the answers\. resume starts it again, and once the node is held again decide answers it\.$/)
   assert.equal(existsSync(join(stateDir, RESUME_REQUEST)), false)
   assert.deepEqual([(await json('run_status')).state, (await json('run_status')).alive], ['runner gone', false])
-  // Nothing to resume on a run neither paused nor halted.
+  // Nothing to resume on a run that ended, neither paused nor halted, with no node reopened.
   rmSync(join(stateDir, 'halted.json'))
-  assert.equal(await call('resume'), 'Nothing to resume: the run is neither paused nor halted.')
+  writeFileSync(join(stateDir, 'summary.json'), JSON.stringify({ runner: 'session', host: 'crew', ok: true, result: null }))
+  assert.equal(await call('resume'), 'Nothing to resume: the run ended, and no node of it is reopened. reopen one first, once the operator has agreed its fix with you.')
   assert.equal(existsSync(join(stateDir, RESUME_REQUEST)), false)
 
   // A `?` session about no run has no tools.
@@ -977,6 +977,71 @@ test("crew host: crew's pi extension gives a `?` session the orchestrator's tool
   await nonePi.start()
   assert.deepEqual(nonePi.tools, [])
   for (const id of [terminal, none.terminal]) await request(h.paths, { op: 'session.close', id })
+})
+
+test("crew host: a `?` session's reopen appends one reopen line for a settled node of a run whose runner has ended, refusing anything else, and its resume then starts the run's runner again with --resume, as r in the run console does (ADR-0032)", async () => {
+  const h = crewKind.open()
+  const { env, cwd } = crewScratch()
+  const folder = scratchDir()
+  const stateDir = join(folder, 'orca-run')
+  mkdirSync(stateDir)
+  const at = (min) => new Date(Date.UTC(2026, 9, 5, 0, min)).toISOString()
+  const line = (type, n, title, min, more = {}) => ({ type, at: at(min), key: `k${n}`, n, title, ...more })
+  const started = (n, title, min, more = {}) => line('started', n, title, min, { run: 'run_reopen', dispatchId: `ctx${n}`, harness: 'pi', sessionId: `sid-${n}`, worktree: `C:/wt/${n}`, terminal: `t${n}`, dir: `agents/00${n}-x`, ...more })
+  const journal = [
+    { type: 'run', at: at(0), runId: 'run_reopen', terminal: 'term_runner' },
+    started(1, '[Implement] impl:a', 1, { node: 'impl_a' }),
+    line('result', 1, '[Implement] impl:a', 2, { node: 'impl_a', result: { unmet: ['CodeBuild green on the PR'] } }),
+    started(2, '[Implement] impl:b', 3, { node: 'impl_b' }),
+    line('result', 2, '[Implement] impl:b', 4, { node: 'impl_b', result: { decisions_needed: ['which database?'] }, needsDecision: true }),
+    started(3, '[Implement] impl:c', 5, { node: 'impl_c' }),
+  ]
+  const journalText = journal.map((e) => JSON.stringify(e)).join('\n') + '\n'
+  writeFileSync(join(stateDir, 'journal.jsonl'), journalText)
+  writeFileSync(join(stateDir, 'summary.json'), JSON.stringify({ runner: 'session', host: 'crew', ok: true, result: { halted: true } }))
+  writeFileSync(join(stateDir, 'runner.pid'), String(process.pid))
+  // The script a resume relaunches: one that calls no agent, so its runner ends at once.
+  const script = join(folder, 'workflow.js')
+  writeFileSync(script, "export const meta = { name: 'reopen-fixture', description: 'a run its resume ends at once' }\nreturn 'resumed'\n")
+  mkdirSync(env.CLAUDE_CONFIG_DIR, { recursive: true })
+  writeFileSync(join(env.CLAUDE_CONFIG_DIR, 'orca-runs.jsonl'), `${JSON.stringify({ type: 'armed', runId: 'run_reopen', at: at(0), project: cwd, runDir: stateDir, spec: 'reopen-fixture', script, host: 'crew' })}\n`)
+
+  const { terminal } = await consultSession({ host: h.host, stateDir, harness: 'claude', dir: cwd })
+  const pi = stubPi({ ...env, CREW_SESSION: terminal })
+  await pi.start()
+  const call = async (name, args = {}) => (await pi.tools.find((t) => t.name === name).execute('call', args)).content[0].text
+  const NOTE = 'CodeBuild is checked once the stack is published: report it met.'
+
+  // A live runner owns the journal.
+  await assert.rejects(call('reopen', { node: 'impl_a', note: NOTE }), /^Error: the run's runner is alive: it owns the journal, so nothing was reopened\./)
+  writeFileSync(join(stateDir, 'runner.pid'), '999999')
+  await assert.rejects(call('reopen', { node: 'impl_a', note: '  ' }), /^Error: reopen needs a note: what was fixed, and how its agent finishes\.$/)
+  await assert.rejects(call('reopen', { node: 'impl_z', note: NOTE }), /^Error: no node impl_z in this run's journal: run_status names each agent's node\. Nothing was reopened\.$/)
+  await assert.rejects(call('reopen', { node: 'impl_b', note: NOTE }), /^Error: impl_b is held, needing decisions: a resume carries it on as it is, so it needs no reopen\. Nothing was reopened\.$/)
+  await assert.rejects(call('reopen', { node: 'impl_c', note: NOTE }), /^Error: impl_c has not settled: its worker is still out, and a resume takes it up\. Nothing was reopened\.$/)
+  assert.equal(readFileSync(join(stateDir, 'journal.jsonl'), 'utf8'), journalText, 'a refusal writes nothing')
+
+  assert.equal(await call('reopen', { node: 'impl_a', note: NOTE }), "Reopened node impl_a ([Implement] impl:a): the next resume carries it on in its own session with your note, instead of replaying its result, and replays every other node that succeeded. resume starts the run's runner again.")
+  const lines = readFileSync(join(stateDir, 'journal.jsonl'), 'utf8').split('\n').filter(Boolean)
+  assert.equal(lines.slice(0, -1).join('\n') + '\n', journalText, 'every earlier line kept as it was')
+  const { at: when, ...added } = JSON.parse(lines.at(-1))
+  assert.deepEqual(added, { type: 'reopen', node: 'impl_a', note: NOTE })
+  assert.match(when, /^\d{4}-\d\d-\d\dT/)
+  assert.deepEqual(
+    JSON.parse(await call('run_status')).reopened.map(({ node, note }) => [node, note]),
+    [['impl_a', NOTE]],
+  )
+
+  // resume, on a run whose runner is gone, starts it again with --resume.
+  rmSync(join(stateDir, 'summary.json'))
+  const said = await call('resume')
+  const [, id] = /^Started the run's runner again with --resume, in crew session (\S+), as r in the run console does: it replays every node that succeeded, and carries on impl_a \(reopened\)\.$/.exec(said) ?? []
+  assert.ok(id, said)
+  const runner = (await request(h.paths, { op: 'session.list' })).sessions.find((s) => s.id === id)
+  assert.ok(runner.command.includes('--resume') && runner.command.includes(script), JSON.stringify(runner.command))
+  const summary = await eventually('the resumed runner to end', () => existsSync(join(stateDir, 'summary.json')) && JSON.parse(readFileSync(join(stateDir, 'summary.json'), 'utf8')))
+  assert.deepEqual([summary.ok, summary.result], [true, 'resumed'])
+  for (const s of [terminal, id]) await request(h.paths, { op: 'session.close', id: s }).catch(() => {})
 })
 
 test("crew host: a pi worker calls crew's submit tool: pi rejects a payload that fails its schema in the turn, and the one it repairs settles its dispatch (#174)", async () => {
