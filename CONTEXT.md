@@ -310,7 +310,8 @@ never one green boolean; a missing result is a schema failure, not a pass. **Rea
 half green on the exact commit under review: the reviewer's first act is to establish it — by
 [[inherited-result]] when the sha is unchanged, else by re-running — and a red there is a **remainder**
 sent back to dispatch, not a finding sent to gate-fix. Running a command is not the self-assessment
-ADR-0004 forbids — the agent does not judge, the exit code does. A check is run **in the foreground, as
+ADR-0004 forbids — a zero exit code decides a green with no judgement; only a red made entirely of
+[[pre-existing failure]]s may be judged green by the role, a **waived check** (ADR-0030). A check is run **in the foreground, as
 written, once after the last edit**; while iterating an agent runs the narrowest scope its build tool
 supports, and no agent ever cleans a build cache.
 
@@ -325,7 +326,18 @@ is a downstream agent reporting that recipe green without re-running it, because
 equals the validated sha and it edited nothing — one `rev-parse` proves the tree is the one already
 proven. A rebase produces a tree nobody has validated, so the publisher always runs the recipe after one.
 The proof is the sha match, never the upstream agent's word: an agent that edited anything, or whose
-HEAD differs, runs the recipe. See ADR-0009.
+HEAD differs, runs the recipe. A **waived check** is never inherited: the next role re-runs it and
+judges it itself (ADR-0030). See ADR-0009.
+
+### Pre-existing failure
+
+A **pre-existing failure** is a check in a ticket's [[validation recipe]] that already fails on the run's base
+commit, before any agent has changed anything: a failing test, named by its id, or a lint, typecheck or
+format error, named by its rule and the few lines of code it points at rather than a line number, since
+lines move as agents edit. A red made only of pre-existing failures is not the change's red. A role still
+decides whether its own work is meant to fix one, as when the ticket names that test.
+
+_Avoid_: baseline failure, known failure — a worktree's **baseline** is its setup's leftover files.
 
 ### Reporting to a screen
 
