@@ -64,7 +64,7 @@ test('ask: close() ends every run still asked, which is given up as stopped, and
 test('graph: a journal naming an orchestrator session shows no row for it, in any phase', async () => {
   const stateDir = scratch('run')
   const started = (n, title) => ({ type: 'started', n, title, at: new Date(0).toISOString(), run: 'run_1', dispatchId: `ctx_${n}`, harness: 'claude', sessionId: `sid-${n}`, worktree: null, terminal: `term_${n}` })
-  writeFileSync(join(stateDir, 'journal.jsonl'), [started(1, '[Implement] impl:a'), started(2, 'orchestrator/validation-list'), started(3, '[Implement] orchestrator/x')].map((e) => `${JSON.stringify(e)}\n`).join(''))
+  writeFileSync(join(stateDir, 'journal.jsonl'), [started(1, '[Implement] impl:a'), started(2, 'orchestrator/triage'), started(3, '[Implement] orchestrator/x')].map((e) => `${JSON.stringify(e)}\n`).join(''))
   writeFileSync(join(stateDir, 'runner.log'), '')
   const view = runView({ stateDir, host: { terminalList: async () => [] }, registry: null, transcripts: { usage: () => null }, alive: () => false })
   await view.refresh()

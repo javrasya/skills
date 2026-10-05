@@ -140,19 +140,20 @@ export function hasValidationRecipe(body) {
   return false
 }
 
-// The spec's `ready-for-agent` sub-issues whose body lacks the recipe, as
-// [{ number, title }]; ready-for-human ones are never the run's to take.
-// Each sub-issue is one line of JSON (`@json`), so a paginated answer
-// parses page by page alike.
+// The spec's open `ready-for-agent` sub-issues whose body lacks the recipe, as
+// [{ number, title }]; ready-for-human ones are never the run's to take, and
+// nor are closed ones — a partly delivered spec's tickets from before
+// preflight existed must not refuse the start. Each sub-issue is one line of
+// JSON (`@json`), so a paginated answer parses page by page alike.
 export async function ticketsWithoutRecipe({ spec, repo, repoDir, run = execProgram }) {
-  const jq = '.[] | {number, title, body, labels: [.labels[].name]} | @json'
+  const jq = '.[] | {number, title, state, body, labels: [.labels[].name]} | @json'
   const res = await run('gh', ['api', `repos/${repo}/issues/${spec}/sub_issues?per_page=100`, '--paginate', '--jq', jq], { cwd: repoDir })
   if (res.code !== 0) throw new Error(`cannot read spec #${spec}'s tickets: ${res.stderr.trim() || `gh exited ${res.code}`}`)
   const tickets = res.stdout
     .split('\n')
     .filter((l) => l.trim())
     .map((l) => JSON.parse(l))
-  return tickets.filter((t) => t.labels.includes('ready-for-agent') && !hasValidationRecipe(t.body)).map(({ number, title }) => ({ number, title }))
+  return tickets.filter((t) => t.state !== 'closed' && t.labels.includes('ready-for-agent') && !hasValidationRecipe(t.body)).map(({ number, title }) => ({ number, title }))
 }
 
 // The words crew's config starts `harness` with in place of its name, or null.

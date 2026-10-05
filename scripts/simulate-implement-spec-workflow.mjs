@@ -3,6 +3,7 @@
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { loadScript } from '../packages/crew/src/runner.mjs'
+import { fillRequired } from './fill-required.mjs'
 
 const TPL = fileURLToPath(new URL('../skills/engineering/implement-spec-in-workflow/workflow.template.js', import.meta.url))
 
@@ -41,23 +42,17 @@ const issueFor = (loc) => ISSUES.get(loc) || '?'
 // The harness enforces each call's schema, so a real agent never omits a
 // required field. Stubs state only what a scenario is about; this fills the
 // rest the way a green, well-behaved agent would. A null result (an agent that
-// died) stays null.
+// died) stays null. The empty values come from fill-required.mjs, shared with
+// crew's fake harness; only the green-run values below are the simulator's.
 function completeToSchema(result, opts, label) {
   const schema = opts.schema
   if (!schema || !result || typeof result !== 'object') return result
-  const filled = { ...result }
-  for (const key of schema.required || []) {
-    if (key in filled) continue
-    if (key === 'checks') filled.checks = [{ command: SIM_CHECK, passed: true }]
-    else if (key === 'validation') filled.validation = [SIM_CHECK]
-    else if (key === 'validated_sha') filled.validated_sha = 'simsha'
-    else if (key === 'worktree') filled.worktree = '/wt/' + label
-    else {
-      const type = (schema.properties[key] || {}).type
-      filled[key] = type === 'array' ? [] : type === 'string' ? '' : type === 'boolean' ? false : type === 'integer' || type === 'number' ? 0 : null
-    }
-  }
-  return filled
+  return fillRequired(schema, result, {
+    checks: [{ command: SIM_CHECK, passed: true }],
+    validation: [SIM_CHECK],
+    validated_sha: 'simsha',
+    worktree: '/wt/' + label,
+  })
 }
 
 async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel', startRef = 'main' } = {}) {
@@ -326,6 +321,29 @@ const withBlockers = (blockers) => () => ({
   check('B: remainder slice gets dispatcher effort high', calls.find((c) => c.label === 'impl:#10:r2').effort === 'high', '')
   check('B: run completes, not halted', result.halted === false && result.state.startsWith('complete'), result.state)
   check('B: a re-dispatch and its slices are nodes of their round', ['ticket/10/impl/r1/s1', 'ticket/10/dispatch/r2', 'ticket/10/impl/r2/s1'].every((n) => nodesOf(calls).includes(n)) && !nodesOf(calls).includes('ticket/10/impl/r1/s2'), nodesOf(calls).join(' | '))
+}
+
+// --- scenario V: a per-change command the dispatcher dropped costs one round --
+// The gate's cross-check cannot go to a fixer: no fixer can change the recipe,
+// so the omission would be re-raised every round and never run (ADR-0029).
+{
+  const LINT = 'npm run lint -- --max-warnings=0'
+  const green = (prompt) => [SIM_CHECK, ...(prompt.includes(LINT) ? [LINT] : [])].map((command) => ({ command, passed: true }))
+  const { result, calls, logs } = await run({
+    graph: () => ({ tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }], explorations: [] }),
+    impl: (label, prompt) => ({ branch: 'ticket/10', summary: 's', unmet: [], checks: green(prompt) }),
+    gate: (label, prompt) => ({ checks: green(prompt), missing_validation: prompt.includes(LINT) ? [] : [LINT, `  ${LINT} `], findings: [] }),
+  })
+  const seq = calls.map((c) => c.label)
+  const gates = calls.filter((c) => c.label.startsWith('gate:#10'))
+  const lists = (c) => c.prompt.split('\n').filter((l) => l === `- \`${LINT}\``).length === 1
+  check('V: the omission goes to no fixer', !seq.some((l) => l.startsWith('gate-fix')), seq.join(' | '))
+  check('V: it goes back to dispatch, naming the command', seq.includes('dispatch:#10:re') && calls.find((c) => c.label === 'dispatch:#10:re').prompt.includes(LINT), seq.join(' | '))
+  check('V: the next round runs it, once in the recipe', lists(calls.find((c) => c.label === 'impl:#10:r2')), calls.find((c) => c.label === 'impl:#10:r2').prompt.slice(-1500))
+  check('V: the gate clears in one extra round, running the full recipe', gates.length === 2 && lists(gates[1]), String(gates.length))
+  check('V: the publisher runs the full recipe', lists(calls.find((c) => c.label === 'publish:#10')), '')
+  check('V: the gate logs the omission as not ready', logs.some((l) => l.includes('the recipe omits') && l.includes(LINT)), logs.join(' | '))
+  check('V: run completes with nothing unfixed', result.halted === false && result.state.startsWith('complete') && !(result.gate_unfixed || []).length, JSON.stringify(result.gate_unfixed))
 }
 
 // --- scenario B2: two independent tickets — the tip moves under the second --
