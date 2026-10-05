@@ -587,8 +587,8 @@ test("run default: the orchestrator of an armed run runs on the harness and mode
   assert.ok(s.prompt.includes(runDir), 'seeded with the run directory')
   assert.match(s.prompt, /halted\.json.*journal\.jsonl.*agents\/\*\/result\.json.*summary\.json/)
   // Its tools (#194), named from the table: what it reads first, and what it does only when asked.
-  assert.match(s.prompt, /Your session has crew's tools for this run: `run_status`, `agent_result` and `runner_log` read it, and `pause`, `resume` and `decide` act on it as the operator's p and r do in the run console\. Start with run_status/)
-  assert.match(s.prompt, /Use pause, resume and decide only when the operator asks, and give decide only the answers they gave/)
+  assert.match(s.prompt, /Your session has crew's tools for this run: `run_status`, `agent_result` and `runner_log` read it, and `pause`, `resume`, `decide` and `reopen` act on it as the operator's p and r do in the run console\. Start with run_status/)
+  assert.match(s.prompt, /Use pause, resume, decide and reopen only when the operator asks, give decide only the answers they gave, and reopen a node only once the operator has agreed with you what was wrong and that it is fixed, its note in their words\./)
   await orch.consult({ runDir, script: join(dir, 'gone.js'), project: null, permissionMode: null })
   assert.deepEqual([starts[1].harness, starts[1].model, starts[1].dir], ['claude', null, runDir], 'a script it cannot read runs it on Claude')
 })

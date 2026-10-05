@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-09-27. Amends ADR-0013 (Resume run) and ADR-0014 (what follows a patient's final null). Applies to the shared workflow script and to the **Orca runner**; the Workflow runner keeps its own resume.
+Accepted — 2026-09-27. Amends ADR-0013 (Resume run) and ADR-0014 (what follows a patient's final null). Applies to the shared workflow script and to the **Orca runner**; the Workflow runner keeps its own resume. Amended by ADR-0032: a node that succeeded is carried on again, in its own session, once a `reopen` line names it after its result.
 
 ## Context
 

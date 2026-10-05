@@ -118,7 +118,7 @@ const list = (tools) =>
     .join(', ')
     .replace(/, (`[^`]+`)$/, ' and $1')
 export const consultPrompt = (stateDir) =>
-  `You are crew's orchestrator, opened from the run console for a conversation with the operator about one workflow run. The run's state is ${runFiles(stateDir)}. Your session has crew's tools for this run: ${list(ORCHESTRATOR_TOOLS.filter((t) => !t.acts))} read it, and ${list(ORCHESTRATOR_TOOLS.filter((t) => t.acts))} act on it as the operator's p and r do in the run console. Start with run_status, read what else you need of the files, then wait for the operator's questions. Use pause, resume and decide only when the operator asks, and give decide only the answers they gave. Change nothing else unless the operator asks you to.`
+  `You are crew's orchestrator, opened from the run console for a conversation with the operator about one workflow run. The run's state is ${runFiles(stateDir)}. Your session has crew's tools for this run: ${list(ORCHESTRATOR_TOOLS.filter((t) => !t.acts))} read it, and ${list(ORCHESTRATOR_TOOLS.filter((t) => t.acts))} act on it as the operator's p and r do in the run console. Start with run_status, read what else you need of the files, then wait for the operator's questions. Use ${list(ORCHESTRATOR_TOOLS.filter((t) => t.acts)).replaceAll('`', '')} only when the operator asks, give decide only the answers they gave, and reopen a node only once the operator has agreed with you what was wrong and that it is fixed, its note in their words. Change nothing else unless the operator asks you to.`
 
 // The `?` sessions of a run, one JSON line each in its state dir, appended by
 // the console that opens one (never by the runner, whose journal a resume

@@ -193,16 +193,19 @@ const continuePrompt = (why) => `You were interrupted: the workflow runner stopp
 // question with its answer, to take as final. `remade`: the baseline of the
 // run's chain worktree, made again because it was reclaimed while the run was
 // halted (ADR-0020). `attended`: a person joins it (ADR-0021), so its answers
-// come from them.
-export const haltedPrompt = (needsDecision, remade = null, attended = false, decisions = null) =>
+// come from them. `reopened`: the operator's note for a node reopened after
+// the run ended (ADR-0032), which its session takes as final.
+export const haltedPrompt = (needsDecision, remade = null, attended = false, decisions = null, reopened = null) =>
   `${
-    attended
-      ? 'The workflow run was halted here and has been resumed. The person is back in this session: pick up with them where you stopped, and finish the task'
-      : needsDecision
-        ? decisions?.length
-          ? `The workflow run was halted here: your result named decisions only the operator can make, and the operator has answered them here, each question with its answer. ${decisions.map((d) => `Q: ${d.question} A: ${d.answer}`).join(' ')} Take these answers as final, and finish the task`
-          : 'The workflow run was halted here: your result named decisions only the operator can make, and the operator has answered them. Re-read the ticket, its body and its comments, for the answers, then finish the task'
-        : 'The workflow run was halted here, and the operator has resumed it. Carry on from where you are and finish the task'
+    reopened
+      ? `The workflow run ended, and the operator reopened your task with a note: ${reopened} Take it as final, carry on from where you are, and finish the task`
+      : attended
+        ? 'The workflow run was halted here and has been resumed. The person is back in this session: pick up with them where you stopped, and finish the task'
+        : needsDecision
+          ? decisions?.length
+            ? `The workflow run was halted here: your result named decisions only the operator can make, and the operator has answered them here, each question with its answer. ${decisions.map((d) => `Q: ${d.question} A: ${d.answer}`).join(' ')} Take these answers as final, and finish the task`
+            : 'The workflow run was halted here: your result named decisions only the operator can make, and the operator has answered them. Re-read the ticket, its body and its comments, for the answers, then finish the task'
+          : 'The workflow run was halted here, and the operator has resumed it. Carry on from where you are and finish the task'
   }, then ${SUBMIT_THEN}. ${NEW_IDS}${remade ? ` Your worktree was reclaimed while the run was halted and has been made again, its setup hook run again: anything you left uncommitted in it is gone, and it is no longer on the ref you were on, so switch back to your work's ref first.${baselineSection(remade)}` : ''}`
 
 // The convention a result needs the operator by (ADR-0016): a non-empty
@@ -211,9 +214,9 @@ export const decisionsNeeded = (v) => (v && typeof v === 'object' && Array.isArr
 
 // A needs-decision result is journaled and held, and its result.json set
 // aside, so a resume that finds a result.json knows it for a new one.
-export function setAside(resultPath) {
+export function setAside(resultPath, as = 'needs-decision') {
   try {
-    if (existsSync(resultPath)) renameSync(resultPath, resultPath.replace(/\.json$/, '.needs-decision.json'))
+    if (existsSync(resultPath)) renameSync(resultPath, resultPath.replace(/\.json$/, `.${as}.json`))
   } catch {}
 }
 
@@ -1117,7 +1120,7 @@ export function agentLifecycle({
         terminal: w.terminal,
         worktree: w.worktree,
         title,
-        prompt: haltedPrompt(!!halted.needsDecision, chain?.made ? (chain.baseline ?? []) : null, !!call.attended, halted.decisions ?? null),
+        prompt: haltedPrompt(!!halted.needsDecision, chain?.made ? (chain.baseline ?? []) : null, !!call.attended, halted.decisions ?? null, halted.reopened ?? null),
         ...launch,
         agent: dispatchAgent(call),
         sessionId: adopt.sessionId,

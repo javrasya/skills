@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-10-05. Amends ADR-0027, whose tool table named workers and doctors only, and ADR-0026, whose `?` session the daemon knew by its title alone. Applies to the **crew host only**: `?` is the run console's. Issue #194.
+Accepted — 2026-10-05. Amends ADR-0027, whose tool table named workers and doctors only, and ADR-0026, whose `?` session the daemon knew by its title alone. Applies to the **crew host only**: `?` is the run console's. Issue #194. Amended by ADR-0032: `resume` starts a runner that is gone again, as the tree's `r` does, instead of refusing, and a seventh tool, `reopen`, acts on the run.
 
 ## Context
 

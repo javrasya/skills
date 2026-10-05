@@ -5,15 +5,21 @@
 // words, and a daemon gone throws them named, with what the agent does
 // instead. The orchestrator's, a `?` session's (#194), read the run's state
 // dir (run-report.mjs) and write the files the operator's p and r write
-// (pause.mjs, halt.mjs's RESUME_REQUEST), the daemon asked nothing.
-import { join } from 'node:path'
+// (pause.mjs, halt.mjs's RESUME_REQUEST), the daemon asked nothing, but for
+// reopen's journal line (reopen.mjs) and a resume of a run whose runner is
+// gone, which starts it again as the console's r does (ADR-0032).
+import { join, resolve } from 'node:path'
 import { request, daemonGone } from '../daemon/client.mjs'
 import { crewPaths } from '../daemon/transport.mjs'
+import { crewHost } from '../crew-host.mjs'
+import { readRegistry } from '../registry.mjs'
+import { reopenNode } from '../reopen.mjs'
+import { claudeDir } from '../transcript.mjs'
 import { writeJsonAtomic } from '../fsutil.mjs'
 import { RESUME_REQUEST, decisionsOf } from '../halt.mjs'
 import { pauseRun, pausedAt, unpauseRun } from '../pause.mjs'
 import { agentReport, runReport, runnerLogTail } from '../run-report.mjs'
-import { runnerAlive } from '../run-view-model.mjs'
+import { relaunchRunner, runnerAlive } from '../run-view-model.mjs'
 import { NOTE_MAX, submitShape, tool } from '../tools.mjs'
 import { haltNoticeOf } from '../triage.mjs'
 import { sleep } from '../util.mjs'
@@ -48,7 +54,7 @@ export async function sessionAgent(env = process.env) {
 // answers the agent's text.
 /** @returns {Array<{ name: string, label: string, description: string, parameters: object, call: (args: any) => Promise<string> }>} */
 export function crewTools(agent, env = process.env) {
-  const all = agent.role === 'orchestrator' ? orchestratorTools(agent.stateDir) : agentTools(agent, env)
+  const all = agent.role === 'orchestrator' ? orchestratorTools(agent.stateDir, env) : agentTools(agent, env)
   return all.filter((t) => tool(t.name).who.includes(agent.role)).map((t) => ({ ...t, description: tool(t.name).description }))
 }
 
@@ -131,13 +137,27 @@ const named = (nodes) => nodes.map((n) => `${n.node} (${heldFor(n)})`).join(', '
 // it finds the file gone; a halt it asks the runner about, through the file
 // its watchResumeRequests takes (runner.mjs), so a node is carried on by the
 // runner itself. `decide` asks the same way. Neither writes the file for a
-// runner that is not there to take it.
-function orchestratorTools(stateDir) {
+// runner that is not there to take it: a resume of a run whose runner is gone
+// starts it again instead, as the tree's r does (ADR-0032), and that runner
+// carries on every held and reopened node; `reopen` writes the one journal
+// line that makes the next resume carry a settled node on (reopen.mjs).
+function orchestratorTools(stateDir, env) {
   // The runner a request is for, refused when none is there to take it.
   const runner = () => {
     const report = runReport(stateDir, { alive: runnerAlive })
-    if (report.alive === false) throw new Error(`the run's runner is not running, so nothing would take the request. The operator resumes it with r in \`crew view ${report.runId ?? '<run id>'}\`, which starts a runner again.`)
+    if (report.alive === false) throw new Error("the run's runner is not running, so nothing would take the answers. resume starts it again, and once the node is held again decide answers it.")
     return { send: (request) => writeJsonAtomic(join(stateDir, RESUME_REQUEST), request) }
+  }
+  // A new runner for the run, with --resume, in a crew session in its
+  // project, as the standalone view's r starts one (relaunchRunner), from the
+  // run's registry record; the daemon refuses it while the run has a runner
+  // already. Returns its crew session's id.
+  const relaunch = async () => {
+    const run = readRegistry(join(claudeDir({ env }), 'orca-runs.jsonl')).find((r) => r.runDir && resolve(r.runDir) === resolve(stateDir))
+    if (!run) throw new Error("the run has no record in crew's run registry, so its runner cannot be started again: the operator resumes it with r in `crew view`.")
+    if (run.reclaimed) throw new Error('the run is reclaimed: its agents are gone and the registry closed it, so there is nothing to resume.')
+    if (!run.project) throw new Error('the run has no project recorded to resume it in.')
+    return (await relaunchRunner(crewHost({ paths: crewPaths(env), env, cwd: run.project }), run)).terminal
   }
   return [
     {
@@ -180,6 +200,22 @@ function orchestratorTools(stateDir) {
       async call({ node = null } = {}) {
         const held = heldNodes(stateDir)
         const paused = pausedAt(stateDir)
+        const report = runReport(stateDir, { alive: runnerAlive })
+        if (report.alive !== true) {
+          // As the tree's r on a run with no runner: a pause is lifted, and
+          // only then is a runner started again.
+          const pending = held.length || report.reopened.length || report.state === 'runner gone'
+          if (paused) {
+            unpauseRun(stateDir)
+            return `Lifted the pause, as r in the run console does: the agents it held start.${pending ? " The run's runner is not running: resume again starts it." : ''}`
+          }
+          if (report.alive === null) throw new Error("whether the run's runner is alive cannot be told (its runner.pid did not answer), so nothing was started.")
+          if (!pending) return 'Nothing to resume: the run ended, and no node of it is reopened. reopen one first, once the operator has agreed its fix with you.'
+          const carried = [...held.map((n) => `${n.node} (${heldFor(n)})`), ...report.reopened.map((n) => `${n.node} (reopened)`)]
+          if (node !== null && !carried.some((c) => c.startsWith(`${node} (`))) throw new Error(`${node} is neither held nor reopened: ${carried.length ? `the run's are ${carried.join(', ')}` : 'the run has none'}. Nothing was started.`)
+          const id = await relaunch()
+          return `Started the run's runner again with --resume, in crew session ${id}, as r in the run console does: it replays every node that succeeded${carried.length ? `, and carries on ${carried.join(', ')}` : ', and goes on from where its last runner stopped'}.`
+        }
         if (!held.length && !paused) return 'Nothing to resume: the run is neither paused nor halted.'
         if (node !== null && !held.some((n) => n.node === node)) throw new Error(`${node} is not held: ${held.length ? `the held nodes are ${named(held)}` : 'the run is not halted'}. Nothing was asked of the runner.`)
         // A halt is the runner's to carry on: refused before anything is done when it is gone.
@@ -225,6 +261,22 @@ function orchestratorTools(stateDir) {
         if (heldFor(it) !== 'needs decisions') throw new Error(`${node} is held because it failed, not for decisions: resume carries it on. ${asking.length ? `The nodes that need decisions are ${asking.map((n) => n.node).join(', ')}.` : 'No node needs decisions.'}`)
         send({ node, decisions: given })
         return `Answered ${given.length} decision${given.length === 1 ? '' : 's'} for node ${node} and asked the runner to carry it on: its worker is told your answers and finishes with them.`
+      },
+    },
+    {
+      name: 'reopen',
+      label: 'Reopen',
+      parameters: {
+        type: 'object',
+        required: ['node', 'note'],
+        properties: {
+          node: { type: 'string', description: 'The node to reopen, as run_status names it: one that settled with a result.' },
+          note: { type: 'string', description: 'What was fixed, and how its agent finishes, as agreed with the operator. Its agent takes it as final.' },
+        },
+      },
+      async call({ node, note }) {
+        const { title } = reopenNode(stateDir, { node, note })
+        return `Reopened node ${node}${title ? ` (${title})` : ''}: the next resume carries it on in its own session with your note, instead of replaying its result, and replays every other node that succeeded. resume starts the run's runner again.`
       },
     },
   ]

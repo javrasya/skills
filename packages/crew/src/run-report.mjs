@@ -27,7 +27,8 @@ const agentsOf = (fold) => agentsIn(fold).filter((a) => !a.superseded)
 // no summary), 'halted', 'paused', 'outage', 'running'. `halted` is halted.json's notice while there is one, { since,
 // nodes: [{ node, title, reason, questions }] }, questions null for a node
 // held because it failed; `paused` { since } from paused.json; `outage` the
-// fold's. `phases` are the script's declared phases first, then any the
+// fold's. `reopened` every node reopened since its result (ADR-0032), { node,
+// title, note, at }, which the next resume carries on. `phases` are the script's declared phases first, then any the
 // agents name, each with its agents in call order. `alive` is runnerAlive's,
 // injected for tests.
 export function runReport(stateDir, { alive = runnerAlive } = {}) {
@@ -46,7 +47,7 @@ export function runReport(stateDir, { alive = runnerAlive } = {}) {
   const paused = pausedAt(stateDir) ? { since: pausedSince(stateDir) } : null
   const outcome = isAlive === true ? null : outcomeOf(stateDir)
   const state = ended === true && existsSync(join(stateDir, 'summary.json')) ? 'ended' : isAlive === false ? 'runner gone' : halted ? 'halted' : paused ? 'paused' : fold.outage ? 'outage' : 'running'
-  return { runId: fold.run?.runId ?? [...agents].reverse().find((a) => a.runId)?.runId ?? null, stateDir, state, alive: isAlive, ended, outcome, paused, halted, outage: fold.outage, phases }
+  return { runId: fold.run?.runId ?? [...agents].reverse().find((a) => a.runId)?.runId ?? null, stateDir, state, alive: isAlive, ended, outcome, paused, halted, outage: fold.outage, reopened: fold.reopened, phases }
 }
 
 // How the run names its agents, for a tool told one it has not: `discover

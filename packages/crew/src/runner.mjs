@@ -370,10 +370,17 @@ export async function runScript(
   // Every node an earlier run halted on, failed or needing decisions, as its
   // failed or result line, so a resume that stops before its call is made
   // still leaves it to the next one to carry on.
+  // A reopened node (ADR-0032) likewise, as its result line and then its
+  // reopen line, until its call carries it on.
   for (const e of earlier.nodes.values()) {
-    if (!e.failed && !e.needsDecision) continue
+    if (!e.failed && !e.needsDecision && !e.reopened) continue
     const origin = e.last?.origin ?? e.origin
     const carried = { key: e.key, n: e.n, node: e.node, title: e.title, carried: true, ...(Number.isInteger(origin) && { origin }), ...(e.last && { worker: e.last }), ...(e.workerLeft && { workerLeft: true }), ...(Number.isInteger(e.submissions) && { submissions: e.submissions }) }
+    if (e.reopened) {
+      journal({ type: 'result', ...carried, result: e.result })
+      journal({ type: 'reopen', node: e.node, note: e.reopened.note })
+      continue
+    }
     journal(e.failed ? { type: 'failed', ...carried, reason: e.reason ?? 'failed in an earlier run', attempts: 0 } : { type: 'result', ...carried, result: e.result, needsDecision: true })
   }
   // A patient's lines are the ones of its call or of its agent; its log lines
@@ -461,8 +468,9 @@ export async function runScript(
       if (e && e.key !== key) {
         if (nodeReplay) out(`>> ${title}: node ${node} changed since the last run; this call and every one after it run live`)
         nodeReplay = replaying = false
-      } else if (e && nodeReplay && 'result' in e && !e.needsDecision) return replayed(e)
-      else if (e && nodeReplay && (e.failed || e.needsDecision)) carried = e
+      } else if (e && nodeReplay && 'result' in e && !e.needsDecision && !e.reopened) return replayed(e)
+      // A reopened node (ADR-0032) is carried on as a held one is.
+      else if (e && nodeReplay && (e.failed || e.needsDecision || e.reopened)) carried = e
       else if (e && (e.worker || nodeReplay)) entry = e
       else if (resume && nodeReplay) out(`>> ${title}: node ${node} is not in the journal; it runs live`)
     } else {
@@ -605,6 +613,15 @@ export async function runScript(
       return life({ ...call, adopt: e.worker })
     }
     const last = e.last ?? null
+    // A reopened node (ADR-0032) is carried on from its session, never from
+    // the result it was reopened from, which is set aside so the watch does
+    // not take it for a new one.
+    if (e.reopened) {
+      if (last?.dir) setAside(join(stateDir, last.dir, 'result.json'), 'reopened')
+      if (last?.sessionId && last.dispatchId) return life({ ...call, adopt: last, halted: { needsDecision: false, decisions: null, reopened: e.reopened.note } })
+      out(`>> ${title}: reopening node ${node}: its session is not known, so it starts now`)
+      return life({ ...call, startAgain: { made: [], dispatched: false, baseline: null } })
+    }
     if (last?.dir) {
       const got = readResult(join(stateDir, last.dir, 'result.json'), schema)
       if (!got.error) {

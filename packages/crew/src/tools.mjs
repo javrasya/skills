@@ -86,7 +86,8 @@ export const TOOLS = Object.freeze([
     name: 'resume',
     who: ['orchestrator'],
     acts: true,
-    description: 'Resumes the run, as r in the run console does: lifts a pause, and carries one held node on, or every held node. A node held for decisions is better resumed with decide. Use it only when the operator asks.',
+    description:
+      'Resumes the run, as r in the run console does: lifts a pause, and carries one held node on, or every held node. On a run whose runner is gone, it starts the runner again with --resume, which replays every node that succeeded and carries on every held and reopened node. A node held for decisions is better resumed with decide. Use it only when the operator asks.',
     fallback: () => null,
   },
   {
@@ -94,6 +95,14 @@ export const TOOLS = Object.freeze([
     who: ['orchestrator'],
     acts: true,
     description: "Answers the decisions a held node asked for and carries it on: its worker is told the answers and finishes with them. Give only answers the operator gave you, in the operator's words.",
+    fallback: () => null,
+  },
+  {
+    name: 'reopen',
+    who: ['orchestrator'],
+    acts: true,
+    description:
+      'Reopens a node that settled with a result, on a run whose runner has ended: adds one line to its journal, changing none, so the next resume carries that node on in its own session with your note instead of replaying its result, and replays every other node. Use it only once the operator has agreed with you what was wrong and that it is fixed, the note in their words; then resume starts the runner.',
     fallback: () => null,
   },
 ])
