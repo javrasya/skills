@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-09-28. Its orchestrator's questions run headless since ADR-0019.
+Accepted — 2026-09-28. Its orchestrator's questions run headless since ADR-0019. Amended 2026-10-05 by ADR-0029: the orchestrator no longer drafts a validation list, and the form has no confirm step for one; each ticket's Validation section is checked by a deterministic heading match at arm.
 
 ## Context
 
