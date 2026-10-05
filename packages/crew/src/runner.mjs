@@ -313,6 +313,53 @@ export async function runScript(
     const unpaused = pause.lift()
     return { ...(unpaused && !halt.on() ? { resumed: [] } : halt.resume(node, decisions)), unpaused }
   }
+  // Replayed nodes are handed back in the order the run first finished them,
+  // not all at once in call order: a script that builds a prompt from what
+  // finished first (the publish lane's stack tip) builds the same prompt
+  // again, so its key still matches. Each macrotask hands back the earliest
+  // queued one, once the script's microtasks have made every call they can;
+  // the queue is drained only after a macrotask in which none was queued.
+  // A script that awaits real I/O between calls may still see another order.
+  // Only a node the script asks for is queued, so one that diverges never hangs.
+  // Node results this resume may still replay: none once replay has ended.
+  let unreplayed = [...earlier.nodes.values()].filter((e) => Number.isInteger(e.resultAt) && !e.needsDecision && !e.reopened).length
+  const queuedReplays = []
+  const onDrained = []
+  let draining = false
+  const handBackNext = () => {
+    if (!queuedReplays.length) {
+      draining = false
+      for (const f of onDrained.splice(0)) f()
+      return
+    }
+    queuedReplays.sort((x, y) => x.at - y.at)
+    queuedReplays.shift().handBack()
+    unreplayed--
+    setImmediate(handBackNext)
+  }
+  const inJournalOrder = (at, handBack) =>
+    new Promise((resolve) => {
+      queuedReplays.push({ at, handBack: () => resolve(handBack()) })
+      if (!draining) {
+        draining = true
+        setImmediate(handBackNext)
+      }
+    })
+  const replaysDrained = () => new Promise((resolve) => (draining ? onDrained.push(resolve) : resolve(undefined)))
+  // Live work came after every journaled result, so on a resume a live call
+  // starts, and its result is handed back, only once the queued replays are
+  // out. It first yields a macrotask, so the replays its own batch of calls
+  // asked for are queued. With nothing left to replay it awaits nothing
+  // extra, and a run's timing is unchanged.
+  const afterReplays = (work) => {
+    if (!unreplayed && !draining) return work()
+    return (async () => {
+      if (unreplayed) await new Promise((resolve) => setImmediate(resolve)).then(replaysDrained)
+      const value = await work()
+      await replaysDrained()
+      return value
+    })()
+  }
   // How many calls with each key this run has made.
   const seen = new Map()
   let replaying = resume
@@ -451,10 +498,13 @@ export async function runScript(
     const key = journalKey(prompt, opts)
     const node = typeof opts.node === 'string' && opts.node ? opts.node : null
     const replayed = (entry) => {
-      // Its origin makes it the agent the journal already names, not another.
-      journal({ type: 'result', key, n, ...(node && { node }), title, result: entry.result, replayed: true, ...(entry.origin != null && { origin: entry.origin }) })
-      out(`<< ${title}: replayed from the journal`)
-      return entry.result
+      const handBack = () => {
+        // Its origin makes it the agent the journal already names, not another.
+        journal({ type: 'result', key, n, ...(node && { node }), title, result: entry.result, replayed: true, ...(entry.origin != null && { origin: entry.origin }) })
+        out(`<< ${title}: replayed from the journal`)
+        return entry.result
+      }
+      return Number.isInteger(entry.resultAt) ? inJournalOrder(entry.resultAt, handBack) : handBack()
     }
 
     let entry = null
@@ -468,6 +518,7 @@ export async function runScript(
       if (e && e.key !== key) {
         if (nodeReplay) out(`>> ${title}: node ${node} changed since the last run; this call and every one after it run live`)
         nodeReplay = replaying = false
+        unreplayed = 0
       } else if (e && nodeReplay && 'result' in e && !e.needsDecision && !e.reopened) return replayed(e)
       // A reopened node (ADR-0032) is carried on as a held one is.
       else if (e && nodeReplay && (e.failed || e.needsDecision || e.reopened)) carried = e
@@ -512,12 +563,12 @@ export async function runScript(
     // halted or not.
     if (entry?.worker) {
       aside.delete(entry.worker.worktree)
-      return settle(call, await life({ ...call, ...treated, adopt: entry.worker }))
+      return settle(call, await afterReplays(() => life({ ...call, ...treated, adopt: entry.worker })))
     }
     // While the run is halted (unless it is in flight) or paused, a new call
     // waits in the hold queue.
     await holds.gate(call, { inFlight: !!opts.inFlight })
-    return settle(call, await (carried ? resumeNode(call, carried) : life({ ...call, ...treated })))
+    return settle(call, await afterReplays(() => (carried ? resumeNode(call, carried) : life({ ...call, ...treated }))))
   }
 
   // What a call returns to the script. A node that failed, or whose result

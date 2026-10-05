@@ -9315,6 +9315,76 @@ return [a, b, c]`
   assert.deepEqual(rig.started(same), [])
 })
 
+// The spec #212 run: gates 216, 217 and 215 finished in that order, and each
+// publish prompt names the stack tip the one before it left. On the resume
+// every gate came back at once, in script order, so publish:#215 read a tip
+// it never had, its key changed, and replay ended for the rest of the run.
+test('resume by node: replayed nodes come back in the order the run first finished them, so a prompt built from that order keeps its key', async () => {
+  const rig = nodeRig({ 'Do a.': async (w) => (await new Promise((r) => setTimeout(r, 50)), submitGood(w)) })
+  const script = `const order = []
+const done = (id) => (r) => (order.push(id), r)
+await parallel([() => ${nodeCall('a')}.then(done('a')), () => ${nodeCall('b')}.then(done('b'))])
+const pub = await agent('Publish ' + order.join(' then ') + '.', { label: 'pub', phase: 'P', schema: ${JSON.stringify(DSCHEMA)}, node: 'n/pub' })
+return [order, pub]`
+  assert.deepEqual(await rig.go(script).p, [['b', 'a'], GOOD])
+  const again = rig.go(script, { resume: true })
+  assert.deepEqual(await again.p, [['b', 'a'], GOOD])
+  assert.deepEqual(rig.started(again), [], 'every node replays; none runs live')
+  assert.ok(!rig.lines.some((l) => l.includes('changed since the last run')), rig.lines.join('\n'))
+  // Journaled again in that order, so the resume after this one sees it too.
+  const replayed = ofType(rig.journal(), 'result').filter((e) => e.replayed && e.node !== 'n/pub')
+  assert.deepEqual(
+    replayed.map((e) => e.node),
+    ['n/b', 'n/a'],
+  )
+})
+
+// The rest of that run: impl:#218 was still at work when the runner died. Its
+// dispatch replays, so the resume takes its worker up and starts no other.
+test('resume by node: after nodes that finished out of call order, a worker still out when its runner died is taken up, and nothing runs live', async () => {
+  const clock = fakeClock()
+  const stateDir = tmp()
+  const first = mortalOn(clock)
+  let built = null
+  const orca = fakeOrca({
+    clock,
+    worker: async (w) => {
+      const id = w.prompt.split('\n')[0]
+      if (id === 'Do a.') return clock.at(clock.now() + MIN, () => submitGood(w))
+      if (id.startsWith('Build')) {
+        built = w
+        first.dead = true
+        return
+      }
+      return submitGood(w)
+    },
+  })
+  const script = `const order = []
+const done = (id) => (r) => (order.push(id), r)
+await parallel([() => ${nodeCall('a')}.then(done('a')), () => ${nodeCall('b')}.then(done('b'))])
+await agent('Publish ' + order.join(' then ') + '.', { label: 'pub', phase: 'P', schema: ${JSON.stringify(DSCHEMA)}, node: 'n/pub' })
+const d = await ${nodeCall('d')}
+return [order, await agent('Build ' + d.name + '.', { label: 'impl', phase: 'P', schema: ${JSON.stringify(DSCHEMA)}, node: 'n/impl' })]`
+  const opts = { stateDir, out: () => {}, transcripts: fakeTranscripts(orca), settings: NO_DOCTOR }
+  runScript(script, { ...opts, host: orca.as('term_1'), clock: first }).catch(() => {})
+  await first.hung
+  const before = orca.calls.length
+  clock.at(clock.now() + 2 * MIN, () => submitGood(built))
+  const lines = []
+  assert.deepEqual(await runScript(script, { ...opts, out: (s) => lines.push(s), host: orca.as('term_2'), clock, resume: true }), [['b', 'a'], GOOD])
+  const after = orca.calls.slice(before)
+  assert.deepEqual(
+    after.filter((c) => c.verb === 'workerStart').map((c) => c.title),
+    [],
+    'no node runs live: the dispatch replays and the build is taken up',
+  )
+  assert.ok(!lines.some((l) => l.includes('changed since the last run')), lines.join('\n'))
+  assert.deepEqual(
+    ofType(journalOf(stateDir), 'reattached').map((e) => e.title),
+    ['[P] impl'],
+  )
+})
+
 test('resume: calls with no node keep the prefix rule: a failed call returns null, and it and every call after it run live on a resume', async () => {
   let dies = true
   const rig = nodeRig({

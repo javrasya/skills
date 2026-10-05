@@ -699,6 +699,9 @@ export function foldJournal(entries) {
         ...(settled && last && { last }),
         ...(settled && Number.isInteger(c.submissions) && { submissions: c.submissions }),
         ...(reopened && { reopened }),
+        // Its result line's place in the journal: a resume hands results back
+        // in this order (runner.mjs).
+        ...(settled && 'result' in settled && { resultAt: c.resultAt }),
       })
     }
   }
