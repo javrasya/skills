@@ -499,21 +499,35 @@ for (const [harness, prefix, ticket, answer, calls] of [
 // crew host: its prompts hold no [answer], so each agent's answer is keyed by
 // its label (CREW_FAKE_ANSWERS). What a fake dispatcher copies out of the
 // ticket's `## Validation` is what the implementer and the whole-stack review
-// are told, word for word.
-test("the skill's template on the crew host: a dispatcher's validation reaches the implementer's prompt verbatim, its review_validation the whole-stack review's", async () => {
+// are told, word for word — the review each at-review command once, however
+// many tickets list it and however they space it.
+test("the skill's template on the crew host: a dispatcher's validation reaches the implementer's prompt verbatim, the union of every ticket's review_validation the whole-stack review's", async () => {
   const cwd = repo('template-repo')
   const perChange = ['cd packages/app && node --test test/test-a.mjs "test/b c.mjs"', "npm run lint -- --max-warnings=0 'src/**/*.js'"]
   const atReview = ['cd packages/app && npm test -- --coverage']
+  const respaced = 'cd  packages/app &&  npm test -- --coverage '
+  const e2e = 'npm run e2e'
   const checks = perChange.map((command) => ({ command, passed: true }))
   const answers = join(root, 'template-answers.json')
+  const slices = [{ title: 'all of it', brief: 'do it', effort: 'medium' }]
+  const published = (n) => ({ published: true, pr_url: `https://github.com/acme/app/pull/${n + 100}`, pr_number: n + 100, checks, validated_sha: 'abc123', stack_link: 'registered' })
   writeFileSync(
     answers,
     JSON.stringify({
-      '^graph': { tickets: [{ number: 101, title: 'The ticket', blocked_by: [], needs_human: false, human_reason: '' }] },
-      '^dispatch': { ticket_brief: 'the ticket in brief', validation: perChange, review_validation: atReview, slices: [{ title: 'all of it', brief: 'do it', effort: 'medium' }] },
-      '^impl': { branch: 'ticket/101', summary: 'done', checks, validated_sha: 'abc123' },
+      '^graph': {
+        tickets: [
+          { number: 101, title: 'The ticket', blocked_by: [], needs_human: false, human_reason: '' },
+          { number: 102, title: 'Another ticket', blocked_by: [101], needs_human: false, human_reason: '' },
+        ],
+      },
+      // Agent dirs are slugged labels: `dispatch:#101` is `dispatch_101`.
+      '^dispatch_101': { ticket_brief: 'the ticket in brief', validation: perChange, review_validation: atReview, slices },
+      '^dispatch_102': { ticket_brief: 'another ticket in brief', validation: [perChange[0]], review_validation: [respaced, e2e], slices },
+      '^impl_101': { branch: 'ticket/101', summary: 'done', checks, validated_sha: 'abc123' },
+      '^impl_102': { branch: 'ticket/102', summary: 'done', checks, validated_sha: 'abc123' },
       '^gate': { checks, validated_sha: 'abc123' },
-      '^publish': { published: true, pr_url: 'https://github.com/acme/app/pull/201', pr_number: 201, checks, validated_sha: 'abc123', stack_link: 'registered' },
+      '^publish_101': published(101),
+      '^publish_102': published(102),
       '^finalize': { summary: 'stack ready' },
     }),
   )
@@ -547,5 +561,8 @@ test("the skill's template on the crew host: a dispatcher's validation reaches t
   for (const command of perChange) assert.ok(impl.includes(command), `the implementer is told ${command}`)
   for (const command of atReview) assert.ok(!impl.includes(command), `the implementer is not told the at-review ${command}`)
   const review = promptOf('review:spec-94')
-  for (const command of atReview) assert.ok(review.includes(command), `the whole-stack review is told ${command}`)
+  const listed = (command) => review.split('\n').filter((l) => l === `- \`${command}\``).length
+  assert.equal(listed(atReview[0]), 1, `the whole-stack review is told ${atReview[0]} once:\n${review}`)
+  assert.equal(listed(respaced), 0, 'the respaced copy is the same command')
+  assert.equal(listed(e2e), 1, `the whole-stack review is told the second ticket's ${e2e}`)
 })
