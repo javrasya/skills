@@ -43,7 +43,6 @@ const ROLES = {
   publish: RUN_DEFAULT,       // Stack, Review: a ticket's PR, or the integration PR
   review: RUN_DEFAULT,        // Review: code-review the whole stack
   finalize: RUN_DEFAULT,      // Finalize: reconcile and ready the stack
-  retrospective: RUN_DEFAULT, // Finalize: the validation report
   recover: RUN_DEFAULT,       // any phase: a doctor for an agent that failed (session runner only)
 }
 // Two more opts every agent() call may carry, both for the runner (ADR-0016):
@@ -221,8 +220,7 @@ const ECONOMY = `Context economy — your context is re-read every turn, so neve
 const RUNNING = `Running checks:
 - While iterating, run the narrowest scope your build tool supports (one package, one crate, one test file). Run the validation list once, after your last edit, before you return.
 - Run every check in the foreground, exactly as written. Never launch a check in the background. If the harness moves a long command to the background on its own, wait on it once with the harness's wait primitive — never with a sleep, pgrep or polling loop.
-- Never run a build-cache clean (\`cargo clean\` or its equivalent). The worktree remove at reclaim is the only disk reclaim this run does.
-- Time every command: \`date +%s\` before and after, and report the wall seconds and how many times you ran it.`
+- Never run a build-cache clean (\`cargo clean\` or its equivalent). The worktree remove at reclaim is the only disk reclaim this run does.`
 
 // --- the acceptance contract and readiness ---------------------------------
 // What a ticket owes is the ticket's criteria, the spec, and any ADR the spec
@@ -251,99 +249,29 @@ ${RUNNING}`
 // unchanged tree was 36 of 153 measured full-suite runs, provably; the same
 // rule is what ECONOMY asks for and could not enforce.
 const inherit = (v) => v && v.sha
-  ? `The branch was validated green at \`${v.sha}\` by ${v.by}. Run \`git rev-parse HEAD\`: if it matches and you have edited nothing, inherit that result — report every check with \`passed: true\`, \`runs: 0\`, \`seconds: 0\`, and \`validated_sha\` = \`${v.sha}\` — instead of re-running. If it differs, or you edited anything, run the list.`
+  ? `The branch was validated green at \`${v.sha}\` by ${v.by}. Run \`git rev-parse HEAD\`: if it matches and you have edited nothing, inherit that result — report every check with \`passed: true\` and \`validated_sha\` = \`${v.sha}\` — instead of re-running. If it differs, or you edited anything, run the list.`
   : ''
 // The commands a result set leaves red or missing. Whitespace-insensitive,
 // because agents copy imperfectly; anything looser would credit the wrong run.
 const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim()
 const readinessRed = (checks, cmds) => cmds.filter((c) => !(checks || []).some((k) => norm(k.command) === norm(c) && k.passed))
 // One result per command. A single green boolean is what let a fixer report
-// "tests, clippy, docs green" while fmt was never run (#344). Seconds and runs
-// feed the retrospective; a hang shows up as a timed-out entry in other_runs.
+// "tests, clippy, docs green" while fmt was never run (#344).
 const CHECKS_FIELD = {
   checks: {
     type: 'array',
     items: {
       type: 'object',
       additionalProperties: false,
-      required: ['command', 'passed', 'seconds', 'runs'],
+      required: ['command', 'passed'],
       properties: {
         command: { type: 'string', description: 'the exact command, copied verbatim from the validation list' },
         passed: { type: 'boolean' },
-        seconds: { type: 'number', description: 'wall seconds this command took in total, over every time you ran it; 0 when inherited' },
-        runs: { type: 'integer', description: 'how many times you ran this command; 0 when inherited' },
       },
     },
     description: 'one entry per validation command run on the final commit',
   },
-  other_runs: {
-    type: 'array',
-    items: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['command', 'runs', 'seconds', 'timed_out'],
-      properties: {
-        command: { type: 'string', description: 'a build or test command you ran that is NOT on the validation list, e.g. a scoped test while iterating' },
-        runs: { type: 'integer' },
-        seconds: { type: 'number', description: 'wall seconds in total over every run' },
-        timed_out: { type: 'boolean', description: 'true if any run hung or hit a timeout' },
-      },
-    },
-    description: 'every build or test command you ran that is not on the list — scoped runs while iterating, and anything that hung',
-  },
   validated_sha: { type: 'string', description: '`git rev-parse HEAD` of the commit the whole validation list last passed on; empty if it never passed' },
-}
-
-// --- the validation ledger -------------------------------------------------
-// Every agent that carries the list reports what it ran and for how long; the
-// script keeps one row per agent and sums them at the end for the
-// retrospective. Kept in the script because the runtime has no clock and no
-// filesystem: agents measure, the script adds, one agent writes the report.
-const validationLog = []
-const recordValidation = (role, ticket, r, upstream) => {
-  if (!r) return
-  validationLog.push({ role, ticket, checks: r.checks || [], other_runs: r.other_runs || [], validated_sha: r.validated_sha || '', upstream_sha: (upstream && upstream.sha) || '' })
-}
-const aggregateValidation = () => {
-  const perCommand = new Map()
-  const perRole = new Map()
-  const perTicket = new Map()
-  const bump = (m, k, seconds, runs, timedOut) => {
-    const e = m.get(k) || { runs: 0, seconds: 0, timed_out: 0 }
-    e.runs += runs; e.seconds += seconds; e.timed_out += timedOut ? 1 : 0
-    m.set(k, e)
-  }
-  let inherited = 0
-  let reranUnchanged = 0
-  let agents = 0
-  for (const row of validationLog) {
-    agents++
-    const tk = row.ticket ? `#${row.ticket}` : row.role
-    const all = [
-      ...row.checks.map((c) => ({ command: c.command, runs: c.runs || 0, seconds: c.seconds || 0, timed_out: false, listed: true })),
-      ...row.other_runs.map((c) => ({ command: c.command, runs: c.runs || 0, seconds: c.seconds || 0, timed_out: !!c.timed_out, listed: false })),
-    ]
-    if (row.checks.length && row.checks.every((c) => !c.runs)) inherited++
-    if (row.upstream_sha && row.validated_sha === row.upstream_sha && row.checks.some((c) => c.runs)) reranUnchanged++
-    for (const c of all) {
-      bump(perCommand, norm(c.command), c.seconds, c.runs, c.timed_out)
-      bump(perRole, row.role, c.seconds, c.runs, c.timed_out)
-      bump(perTicket, tk, c.seconds, c.runs, c.timed_out)
-    }
-  }
-  const rows = (m) => [...m.entries()].map(([k, v]) => ({ key: k, ...v })).sort((a, b) => b.seconds - a.seconds)
-  return { agents, inherited, reran_unchanged: reranUnchanged, per_command: rows(perCommand), per_role: rows(perRole), per_ticket: rows(perTicket) }
-}
-
-const RETRO_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['summary', 'report_path', 'proposals'],
-  properties: {
-    summary: { type: 'string', description: 'two or three sentences: total validation seconds, the costliest command family, and the single biggest saving proposed' },
-    report_path: { type: 'string' },
-    proposals: { type: 'array', items: { type: 'string' }, description: 'each a concrete line for validation.md or a concrete rule change, one per entry' },
-  },
 }
 
 // What discovery finds missing from the environment (ADR-0021): something a
@@ -941,12 +869,11 @@ Every command must pass on the commit you return. Commit, then move the ticket b
 
 ${WORKTREE}
 
-Return the branch, a one-line summary, one result per validation command with its seconds and runs, every other build or test command you ran in \`other_runs\`, the sha the list passed on in \`validated_sha\`, anything from the brief you did not reach in \`unmet\`, what you settled yourself in \`decided\`, any contradiction for the operator in \`decisions_needed\`, and your worktree.`,
+Return the branch, a one-line summary, one result per validation command, the sha the list passed on in \`validated_sha\`, anything from the brief you did not reach in \`unmet\`, what you settled yourself in \`decided\`, any contradiction for the operator in \`decisions_needed\`, and your worktree.`,
       { ...ROLES.impl, effort: s.effort, phase: 'Implement', schema: IMPL_SCHEMA, isolation: ISOLATION, label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}`, node: `${node}/s${i + 1}`, ...go },
     )
     if (!r) throw new Error(`slice implementer for #${t.number} died (${s.title})`)
     noteWorktree(t.number, `ticket/${t.number}`, r)
-    recordValidation('impl', t.number, r, null)
     out.started = true
     out.summaries.push(r.summary)
     out.last = r
@@ -1070,10 +997,9 @@ If you cannot publish — the base branch is not on origin, a push or the PR is 
 
 ${WORKTREE}
 
-Return whether it published, the PR url and number, what you resolved, one result per validation command with its seconds and runs plus the sha they hold for, how the stack link went, any note, the reclaim count and kept list, and your worktree.`,
+Return whether it published, the PR url and number, what you resolved, one result per validation command plus the sha they hold for, how the stack link went, any note, the reclaim count and kept list, and your worktree.`,
       { ...ROLES.publish, effort: 'low', phase: 'Stack', schema: PUBLISH_SCHEMA, isolation: ISOLATION, label: `publish:#${t.number}`, node: `ticket/${t.number}/publish`, ...go },
     ).then((r) => {
-      recordValidation('publish', t.number, r, cutFrom !== base ? null : impl.validated)
       if (r && !r.published && r.nothing_to_publish) {
         // Nothing to stack: the tip stays, and the ticket is recorded as
         // subsumed rather than published, failed or held.
@@ -1184,7 +1110,7 @@ Every command must pass on the commit you return — a fix that leaves one red i
 
 ${WORKTREE}
 
-Return one verdict per finding in your brief you fixed or rejected, the \`location\` of any you did not reach, one result per validation command with its seconds and runs, every other build or test command you ran in \`other_runs\`, the sha the list passed on in \`validated_sha\`, and your worktree.`,
+Return one verdict per finding in your brief you fixed or rejected, the \`location\` of any you did not reach, one result per validation command, the sha the list passed on in \`validated_sha\`, and your worktree.`,
       { ...ROLES.fix, effort: s.effort, phase: ph, schema: FIX_SLICE_SCHEMA, isolation: ISOLATION, label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}`, node: `${node}/s${i + 1}`, ...go },
     )
     // A dead fixer is not fatal — it is the next reviewer's problem, and that
@@ -1192,7 +1118,6 @@ Return one verdict per finding in your brief you fixed or rejected, the \`locati
     // branch may be mid-change, so the round stops rather than building on it.
     if (!r) { out.died = s.title; break }
     noteWorktree(ledgerKey, branch, r)
-    recordValidation('fix', typeof ledgerKey === 'number' ? ledgerKey : null, r, out.validated)
     out.validated = r.validated_sha ? { sha: r.validated_sha, by: 'a fix slice' } : null
     out.landed = true
     out.verdicts.push(...r.verdicts)
@@ -1335,7 +1260,6 @@ ${WORKTREE}`,
       { ...ROLES.gate, phase: 'Gate', schema: GATE_REVIEW_SCHEMA, isolation: ISOLATION, label: `gate:#${t.number}:r${round}`, node, ...go },
     )
     noteWorktree(t.number, impl.branch, r)
-    recordValidation('gate', t.number, r, validated)
     // Fail closed: a reviewer that died is not a clean review. Its round is
     // spent, and the next reviewer sees the same branch.
     if (!r) {
@@ -1536,7 +1460,6 @@ if (unpublished.length) {
       : null,
     worktrees_kept: worktreesKept,
     notes: NOTES_DIR,
-    validation: aggregateValidation(),
   }
 }
 
@@ -1726,37 +1649,6 @@ Return one line on the stack — whether it registered and how many PRs went rea
 )
 if (finalize) markReclaimed(finalReclaim, finalize)
 
-// --- the retrospective: what validation cost, and what would cost less -----
-// The script sums; one agent writes. Nothing here changes the repo or the
-// validation list — the report is for a human, or a later session the human
-// points at it, and the next run still reads validation.md as it stands.
-const validation = aggregateValidation()
-const retrospective = validationLog.length
-  ? await agent(
-    `Write the validation retrospective for this run of spec #${SPEC} to \`${NOTES_DIR}/validation-report.md\`. Change nothing in the repo.
-
-${POINTERS}
-
-The per-change validation commands each ticket carried:
-${outcomes.filter((o) => o.validation).map((o) => `- #${o.number}: ${o.validation.length ? o.validation.map((c) => `\`${c}\``).join(', ') : '(none — agents ran what they judged fit)'}`).join('\n') || '- (no ticket carried any)'}
-
-What the run's agents reported, summed by the script (seconds are wall time; \`runs\` counts invocations; \`timed_out\` counts agents that reported a hang for that key):
-${JSON.stringify(validation)}
-
-You may read repo config to ground a proposal — build manifests, package scripts, CI workflow files: config, never source. Read nothing else.
-
-Write the report in this order:
-1. **Numbers** — three tables: per command (runs, seconds, timed_out, seconds per run), per role, per ticket; then one line each for agents counted, results inherited without a re-run, and checks re-run on a tree whose sha had not changed.
-2. **Proposals for validation.md** — concrete lines, one per proposal, each with the number that motivates it: a scoped variant of the costliest command for iteration, a timeout wrapper sized from its seconds per run, a runner with per-test timeouts where a hang was reported, a check that never failed and might not need every role to run it. Say what each proposal would have saved in this run.
-3. **Waiting and hangs** — every command reported \`timed_out\`, and every command whose seconds per run is over 5x the median, with the role and ticket it happened in.
-
-Nothing applies these proposals: a human decides, and validation.md is theirs to edit.
-
-Return two or three sentences of summary, the report path, and the proposals as a list.`,
-    { ...ROLES.retrospective, effort: 'low', phase: 'Finalize', label: 'retrospective', node: 'retrospective', schema: RETRO_SCHEMA },
-  )
-  : null
-
 return {
   spec: SPEC,
   // A run that started native and lost the stacks API mid-run is NOT a native
@@ -1805,10 +1697,4 @@ return {
   // operator, neither for --force.
   worktrees_kept: worktreesKept,
   finalize,
-  // What validation cost this run, and where the report with proposals is.
-  // The proposals are for the operator: nothing in the next run reads them.
-  validation,
-  retrospective: retrospective
-    ? { summary: retrospective.summary, report: retrospective.report_path, proposals: retrospective.proposals }
-    : { summary: 'no validation results were reported', report: null, proposals: [] },
 }

@@ -504,7 +504,7 @@ test("the skill's template on the crew host: a dispatcher's validation reaches t
   const cwd = repo('template-repo')
   const perChange = ['cd packages/app && node --test test/test-a.mjs "test/b c.mjs"', "npm run lint -- --max-warnings=0 'src/**/*.js'"]
   const atReview = ['cd packages/app && npm test -- --coverage']
-  const checks = perChange.map((command) => ({ command, passed: true, seconds: 1, runs: 1 }))
+  const checks = perChange.map((command) => ({ command, passed: true }))
   const answers = join(root, 'template-answers.json')
   writeFileSync(
     answers,
