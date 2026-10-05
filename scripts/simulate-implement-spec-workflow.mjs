@@ -22,6 +22,8 @@ function render(runner, runOrder = 'parallel', startRef = 'main') {
     .replace(/__STACK_MODE__/g, 'native')
     .replace(/__RUN_ORDER__/g, runOrder)
     .replace(/__RUNNER__/g, runner)
+    .replace(/__PER_CHANGE_COMMANDS__/g, JSON.stringify([SIM_CHECK]))
+    .replace(/__AT_REVIEW_COMMANDS__/g, '[]')
   return s
 }
 

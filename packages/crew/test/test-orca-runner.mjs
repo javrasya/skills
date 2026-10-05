@@ -491,6 +491,7 @@ test('one run: the rendered workflow template names its spec in the Run objectiv
   const text = readFileSync(TEMPLATE, 'utf8')
     .replace(/__SPEC__/g, '227')
     .replace(/__RUN_ORDER__/g, 'parallel')
+    .replace(/__(?:PER_CHANGE|AT_REVIEW)_COMMANDS__/g, '[]')
     .replace(/__[A-Z_]+__/g, 'x')
   const orca = fakeOrca({
     worker: async () => {
@@ -510,6 +511,7 @@ test("RUNNER: a script rendered with 'orca', RUNNER's value before 'session', ru
       .replace(/__RUNNER__/g, runner)
       .replace(/__SPEC__/g, '227')
       .replace(/__RUN_ORDER__/g, 'parallel')
+      .replace(/__(?:PER_CHANGE|AT_REVIEW)_COMMANDS__/g, '[]')
       .replace(/__[A-Z_]+__/g, 'x')
   const trace = (orca) => orca.calls.filter((c) => ['runCreate', 'runUse', 'workerStart'].includes(c.verb)).map((c) => [c.verb, c.title ?? c.objective ?? null, c.placement ?? null])
   const runOn = async (runner, { clock = fakeClock(), orca = fakeOrca({ worker: withDoctor(diesPastCap), clock }), stateDir = tmp(), resume = false } = {}) => {
@@ -565,6 +567,7 @@ test("doctor: the rendered template's recover row is the doctor's harness and mo
     .replace(/__RUNNER__/g, 'orca')
     .replace(/__SPEC__/g, '227')
     .replace(/__RUN_ORDER__/g, 'parallel')
+    .replace(/__(?:PER_CHANGE|AT_REVIEW)_COMMANDS__/g, '[]')
     .replace(/__[A-Z_]+__/g, 'x')
   const clock = fakeClock()
   const orca = fakeOrca({ worker: withDoctor(diesPastCap), clock })

@@ -62,6 +62,8 @@ const START_REF = '__START_REF__'                  // prior work the operator na
 const STACK_MODE = '__STACK_MODE__'                // 'native' (gh-stack + stacks API) or 'chain' (plain --base chain)
 const RUN_ORDER = '__RUN_ORDER__'                  // 'parallel' (the frontier at once) or 'sequential' (one ticket at a time, session runner only; ADR-0020)
 const RUNNER = '__RUNNER__'                        // 'session' on the session runner (crew, on Orca), and 'orca', its value before, still; anything else is the Workflow runner. The one line the two renderings differ in
+const PER_CHANGE_COMMANDS = __PER_CHANGE_COMMANDS__ // every takeable ticket's `### Run per change` commands, each once: a JSON array of strings, rendered bare so no command text breaks the literal (ADR-0030)
+const AT_REVIEW_COMMANDS = __AT_REVIEW_COMMANDS__   // the same for `### Run at review`
 // -------------------------------------------------------------------------
 
 const POINTERS = `Repo ${REPO}, checkout ${REPO_DIR}. Spec: \`gh issue view ${SPEC}\`. Research notes: ${NOTES_DIR}.`

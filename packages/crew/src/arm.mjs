@@ -30,7 +30,7 @@ export function templatePath(candidates = TEMPLATES) {
   return found
 }
 
-export const PLACEHOLDERS = ['SPEC', 'REPO', 'REPO_DIR', 'NOTES_DIR', 'BASE_REF', 'START_REF', 'STACK_MODE', 'RUN_ORDER', 'RUNNER']
+export const PLACEHOLDERS = ['SPEC', 'REPO', 'REPO_DIR', 'NOTES_DIR', 'BASE_REF', 'START_REF', 'STACK_MODE', 'RUN_ORDER', 'RUNNER', 'PER_CHANGE_COMMANDS', 'AT_REVIEW_COMMANDS']
 const PLACEHOLDER = new RegExp(`__(${PLACEHOLDERS.join('|')})__`, 'g')
 
 // SKILL.md step 3: substitute, never rewrite. One pass, so a value that
@@ -140,12 +140,55 @@ export function hasValidationRecipe(body) {
   return false
 }
 
-// The spec's open `ready-for-agent` sub-issues whose body lacks the recipe, as
-// [{ number, title }]; ready-for-human ones are never the run's to take, and
-// nor are closed ones — a partly delivered spec's tickets from before
-// preflight existed must not refuse the start. Each sub-issue is one line of
-// JSON (`@json`), so a paginated answer parses page by page alike.
-export async function ticketsWithoutRecipe({ spec, repo, repoDir, run = execProgram }) {
+// A ticket's recipe commands (ADR-0029, ADR-0030): under `## Validation`,
+// each `### Run per change` and `### Run at review` line's first code span.
+// A line with none, or labelled as prose ("absent: …", "Tests: not
+// applicable: …"), is no command. String work only, as the heading check is.
+const PROSE = /^(absent|not applicable|recipe measured|needs|deferred repo gate)\b/i
+const SUBSECTIONS = { '### Run per change': 'perChange', '### Run at review': 'atReview' }
+const CODE_SPAN = /(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)/
+export function recipeCommands(body) {
+  const found = { perChange: [], atReview: [] }
+  let inValidation = false
+  let into = null
+  for (const raw of String(body ?? '').split(/\r?\n/)) {
+    const line = raw.trim()
+    if (/^##?\s/.test(line)) {
+      inValidation = line === '## Validation'
+      into = null
+    } else if (inValidation && /^#{3,}\s/.test(line)) into = SUBSECTIONS[line] ?? null
+    else if (into) {
+      const text = line.replace(/^(?:[-*+]|\d+[.)])\s+/, '')
+      if (PROSE.test(text) || PROSE.test(text.replace(/^[^:`]*:\s*/, ''))) continue
+      const command = CODE_SPAN.exec(text)?.[2].trim()
+      if (command) found[into].push(command)
+    }
+  }
+  return found
+}
+
+// The per-change and the at-review commands of all `tickets`, each command
+// once whichever tickets list it, kept as first written; two that differ only
+// in whitespace are one.
+export function recipeCommandSets(tickets) {
+  const sets = { perChange: new Map(), atReview: new Map() }
+  for (const { body } of tickets) {
+    const commands = recipeCommands(body)
+    for (const [k, set] of Object.entries(sets))
+      for (const c of commands[k]) {
+        const key = c.split(/\s+/).join(' ')
+        if (!set.has(key)) set.set(key, c)
+      }
+  }
+  return { perChange: [...sets.perChange.values()], atReview: [...sets.atReview.values()] }
+}
+
+// The spec's open `ready-for-agent` sub-issues, as [{ number, title, body }];
+// ready-for-human ones are never the run's to take, and nor are closed ones —
+// a partly delivered spec's tickets from before preflight existed must not
+// refuse the start. Each sub-issue is one line of JSON (`@json`), so a
+// paginated answer parses page by page alike.
+export async function takeableTickets({ spec, repo, repoDir, run = execProgram }) {
   const jq = '.[] | {number, title, state, body, labels: [.labels[].name]} | @json'
   const res = await run('gh', ['api', `repos/${repo}/issues/${spec}/sub_issues?per_page=100`, '--paginate', '--jq', jq], { cwd: repoDir })
   if (res.code !== 0) throw new Error(`cannot read spec #${spec}'s tickets: ${res.stderr.trim() || `gh exited ${res.code}`}`)
@@ -153,7 +196,7 @@ export async function ticketsWithoutRecipe({ spec, repo, repoDir, run = execProg
     .split('\n')
     .filter((l) => l.trim())
     .map((l) => JSON.parse(l))
-  return tickets.filter((t) => t.state !== 'closed' && t.labels.includes('ready-for-agent') && !hasValidationRecipe(t.body)).map(({ number, title }) => ({ number, title }))
+  return tickets.filter((t) => t.state !== 'closed' && t.labels.includes('ready-for-agent')).map(({ number, title, body }) => ({ number, title, body }))
 }
 
 // The words crew's config starts `harness` with in place of its name, or null.
@@ -194,10 +237,11 @@ export function runOrchestrator({ paths, host = (cwd) => crewHost({ paths, cwd }
 
 // Renders the template into a new run's own folder and launches it there.
 // `answers` are the form's, stackMode settled to the template's value; `roles`
-// the per-role overrides of crew's per-repo config; `newId()` draws the run's
-// id (newRunId). A run folder that exists already is another run's: a new id
+// the per-role overrides of crew's per-repo config; `recipe` the tickets'
+// recipeCommandSets, rendered as JSON array literals, which no command text can
+// break out of; `newId()` draws the run's id (newRunId). A run folder that exists already is another run's: a new id
 // is drawn, `attempts` times in all, before the start is refused.
-export async function armRun({ target, answers, roles, newId, attempts = 5, template = readFileSync(templatePath(), 'utf8'), launch }) {
+export async function armRun({ target, answers, roles, recipe, newId, attempts = 5, template = readFileSync(templatePath(), 'utf8'), launch }) {
   const { spec, repo, repoDir, notesDir, title } = target
   const render = (runFolder) =>
     renderRoles(
@@ -211,6 +255,8 @@ export async function armRun({ target, answers, roles, newId, attempts = 5, temp
         STACK_MODE: answers.stackMode,
         RUN_ORDER: answers.runOrder,
         RUNNER: 'session',
+        PER_CHANGE_COMMANDS: JSON.stringify(recipe.perChange),
+        AT_REVIEW_COMMANDS: JSON.stringify(recipe.atReview),
       }),
       { runDefault: answers, roles },
     )
@@ -275,7 +321,8 @@ export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdi
     if (missing.length) throw new StartError(`no terminal to show the form at, so every row needs its flag: missing ${missing.join(', ')}`, 2)
   }
   const target = await resolveArming({ repoDir, spec, repo: facts.repo, run, home })
-  const bare = await ticketsWithoutRecipe({ spec, repo: target.repo, repoDir, run })
+  const tickets = await takeableTickets({ spec, repo: target.repo, repoDir, run })
+  const bare = tickets.filter((t) => !hasValidationRecipe(t.body))
   if (bare.length) {
     const named = bare.map((t) => `#${t.number} (${t.title})`).join(', ')
     throw new StartError(`spec #${spec}: ${bare.length > 1 ? 'tickets' : 'ticket'} ${named} ${bare.length > 1 ? 'have' : 'has'} no "## Validation" section holding "### Run per change"; run preflight on the spec to write each ticket's validation recipe, then crew start again; nothing armed`)
@@ -293,5 +340,5 @@ export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdi
   }
   const settled = { ...answers, stackMode: await settleStackMode(answers, run) }
   rememberAnswers(paths, repo, settled)
-  return { ...(await armRun({ target, answers: settled, roles, newId: () => runIdFor(spec), launch })), target, answers: settled }
+  return { ...(await armRun({ target, answers: settled, roles, recipe: recipeCommandSets(tickets), newId: () => runIdFor(spec), launch })), target, answers: settled }
 }
