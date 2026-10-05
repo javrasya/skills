@@ -15,7 +15,6 @@ import { join } from 'node:path'
 import { checkSchema } from './schema.mjs'
 import { runHeadless } from './headless.mjs'
 import { TOOLS } from './tools.mjs'
-import { validationLineProblem } from './validation-list.mjs'
 
 export const ORCHESTRATOR_PREFIX = 'orchestrator/'
 export const orchestratorTitle = (name) => `${ORCHESTRATOR_PREFIX}${name}`
@@ -42,9 +41,8 @@ const STOPPED = 'its asker stopped asking, and its run was ended'
 // state dir). `program` is the words the harness starts with (crew's config
 // `harnesses`), its own name by default. A question is answered within
 // `answerMs`. close() gives up every question still asked, its run ended,
-// and asks no more: what its asker calls before it goes (a `crew view` quit,
-// a Ctrl+C at `crew start`'s draft), so no orchestrator run outlives the
-// command that asked.
+// and asks no more: what its asker calls before it goes (a `crew view`
+// quit), so no orchestrator run outlives the command that asked.
 export function orchestrator({ harness = 'claude', model = null, effort = null, permissionMode = null, cwd, env = process.env, program = null, answerMs = 15 * 60_000, run = runHeadless }) {
   const pending = new Set()
   let closed = false
@@ -73,62 +71,6 @@ export function orchestrator({ harness = 'claude', model = null, effort = null, 
   }
 
   return { ask, close }
-}
-
-// The first question (#102): the validation list of a spec armed without
-// one, drafted from how the repo checks itself, never from its source.
-export const VALIDATION_SCHEMA = Object.freeze({
-  type: 'object',
-  required: ['checks'],
-  additionalProperties: false,
-  properties: {
-    checks: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['command', 'source'],
-        additionalProperties: false,
-        properties: { command: { type: 'string' }, source: { type: 'string' } },
-      },
-    },
-  },
-})
-
-export const validationPrompt = (repoDir) => `You are crew's orchestrator. Crew is arming a workflow run in the repo at ${repoDir}, and the run has no validation list: the commands every change must pass before it is done, each run from the repo's root. Draft that list.
-
-Find the checks the repo already runs, and nothing else: read its CI config and workflow files (.github/workflows, .gitlab-ci.yml, azure-pipelines.yml and the like), its Makefile or justfile, and its package scripts (package.json scripts, pyproject.toml, Cargo.toml, and their kin). Never read source files, and never run anything.
-
-Answer with every check you found, in the order CI runs them, each as { "command": the one-line command as run from the repo's root, "source": the file, and the job or script in it, you found it in }. A repo with no discoverable checks is answered with an empty checks list: never invent one.
-
-Each command must be one a shell runs as written: resolve every CI expression (a GitHub Actions \${{ matrix.x }} or \${{ env.X }}, say) to the concrete value it takes, one command per value, and write no command holding a backtick, a \${ or a trailing backslash.`
-
-// validation.md's text for an answer: each check under a comment naming its
-// source; '' for none. A command that is not one line, or one the rendered
-// workflow.js cannot hold (validation-list.mjs), is no answer. A source is
-// only a comment, so what the workflow cannot hold is dropped from it.
-export function validationText({ checks }) {
-  const bad = checks.find((c) => !c.command.trim() || /[\r\n]/.test(c.command))
-  if (bad) throw new Error(`a check's command is not one line: ${JSON.stringify(bad.command)}`)
-  const unheld = checks.find((c) => validationLineProblem(c.command))
-  if (unheld) throw new Error(`a check's command ${validationLineProblem(unheld.command)}: ${JSON.stringify(unheld.command)}`)
-  const comment = (s) =>
-    s
-      .replace(/[\r\n]+/g, ' ')
-      .replace(/`/g, "'")
-      .replace(/\$\{/g, '$ {')
-      .replace(/[\\\s]+$/, '')
-  return checks.map((c) => `# ${comment(c.source)}\n${c.command.trim()}\n`).join('')
-}
-
-// The orchestrator's draft of a spec's validation list: { text, empty }.
-export async function draftValidation(orch, { repoDir }) {
-  const name = 'validation-list'
-  const answer = await orch.ask({ name, prompt: validationPrompt(repoDir), schema: VALIDATION_SCHEMA })
-  try {
-    return { text: validationText(answer), empty: answer.checks.length === 0 }
-  } catch (e) {
-    throw new OrchestratorError(name, e.message)
-  }
 }
 
 // The halt triage question (#103), asked once per halted.json `at`

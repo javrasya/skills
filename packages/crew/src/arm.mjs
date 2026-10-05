@@ -14,11 +14,10 @@ import { ensureDaemon, request } from './daemon/client.mjs'
 import { runnerCommand } from './daemon/runs.mjs'
 import { execProgram, repoOf } from './git.mjs'
 import { flagsToAnswers, probeStart, rememberAnswers, rememberedAnswers, settleStackMode, startForm } from './start-form.mjs'
-import { draftEditor, drawDrafting, runDraftStep, runStartForm } from './start-tui.mjs'
+import { runStartForm } from './start-tui.mjs'
 import { crewHost } from './crew-host.mjs'
-import { consultSession, draftValidation, orchestrator } from './orchestrator.mjs'
+import { consultSession, orchestrator } from './orchestrator.mjs'
 import { triageHalt } from './triage.mjs'
-import { validationListProblem } from './validation-list.mjs'
 import { preflight } from './headless.mjs'
 
 // The copy `npm pack` bundles (scripts/pack-template.mjs), else, in a checkout
@@ -89,7 +88,7 @@ export const notesDirOf = (repo, spec, home = homedir()) => join(home, '.claude'
 // Every crew start arms a run of its own, never one an earlier start made: its
 // own folder under the spec's notes dir, named by its spec and a part of its
 // own (UTC time and a random tail), holding its workflow.js, its research
-// notes and its state dir. Only validation.md is the spec's, shared by its runs.
+// notes and its state dir.
 // Two ids of one second may match; armRun's exclusive mkdir draws again then.
 export function newRunId(spec, at = new Date()) {
   const stamp = `${spec}-${at.toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)}`
@@ -117,26 +116,49 @@ export async function repoDirOf(cwd, run = execProgram) {
 }
 
 // What arming needs beyond the form, each a refusal when it cannot be had:
-// the repo gh knows the checkout as and the spec's title. `validation` is the
-// list the notes dir keeps at `validationFile`, null when it keeps none.
+// the repo gh knows the checkout as and the spec's title.
 export async function resolveArming({ repoDir, spec, repo, run = execProgram, home = homedir() }) {
   if (!repo) throw new Error('gh knows no GitHub repo for this checkout, so there is no spec to arm')
   const issue = await run('gh', ['issue', 'view', String(spec), '--repo', repo, '--json', 'title', '-q', '.title'], { cwd: repoDir })
   if (issue.code !== 0) throw new Error(`no spec #${spec} in ${repo}: ${issue.stderr.trim() || `gh exited ${issue.code}`}`)
-  const notesDir = notesDirOf(repo, spec, home)
-  const validationFile = join(notesDir, 'validation.md')
-  const validation = existsSync(validationFile) ? readFileSync(validationFile, 'utf8') : null
-  return { spec, repo, repoDir, notesDir, title: issue.stdout.trim(), validationFile, validation }
+  return { spec, repo, repoDir, notesDir: notesDirOf(repo, spec, home), title: issue.stdout.trim() }
+}
+
+// Whether a ticket's body carries its validation recipe (ADR-0029): a
+// `## Validation` heading whose section holds a `### Run per change` one.
+// Headings only, matched as strings; what the section says is preflight's.
+export function hasValidationRecipe(body) {
+  const lines = String(body ?? '')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+  const at = lines.indexOf('## Validation')
+  if (at < 0) return false
+  for (const line of lines.slice(at + 1)) {
+    if (line === '### Run per change') return true
+    if (/^##?\s/.test(line)) return false
+  }
+  return false
+}
+
+// The spec's `ready-for-agent` sub-issues whose body lacks the recipe, as
+// [{ number, title }]; ready-for-human ones are never the run's to take.
+// Each sub-issue is one line of JSON (`@json`), so a paginated answer
+// parses page by page alike.
+export async function ticketsWithoutRecipe({ spec, repo, repoDir, run = execProgram }) {
+  const jq = '.[] | {number, title, body, labels: [.labels[].name]} | @json'
+  const res = await run('gh', ['api', `repos/${repo}/issues/${spec}/sub_issues?per_page=100`, '--paginate', '--jq', jq], { cwd: repoDir })
+  if (res.code !== 0) throw new Error(`cannot read spec #${spec}'s tickets: ${res.stderr.trim() || `gh exited ${res.code}`}`)
+  const tickets = res.stdout
+    .split('\n')
+    .filter((l) => l.trim())
+    .map((l) => JSON.parse(l))
+  return tickets.filter((t) => t.labels.includes('ready-for-agent') && !hasValidationRecipe(t.body)).map(({ number, title }) => ({ number, title }))
 }
 
 // The words crew's config starts `harness` with in place of its name, or null.
 const programOf = (paths, harness) => readCrewConfig(paths).harnesses?.[harness] ?? null
 
-// The orchestrator `crew start` drafts a missing validation list with: in the
-// checkout, on the harness and model the form answered.
-export const crewOrchestrator = ({ paths, repoDir, harness, model, permissionMode }) => orchestrator({ harness, model, permissionMode, cwd: repoDir, program: programOf(paths, harness) })
-
-// `crew start`'s check, before it drafts or arms anything, that the harness
+// `crew start`'s check, before it arms anything, that the harness
 // the form answered is logged in and reaches its model: one headless turn in
 // the checkout (headless.mjs preflight).
 export const crewPreflight = ({ paths, repoDir, harness, model }) => preflight({ harness, model, cwd: repoDir, program: programOf(paths, harness) })
@@ -167,41 +189,6 @@ export function runOrchestrator({ paths, host = (cwd) => crewHost({ paths, cwd }
     consult: (run) => consultSession({ host: host(cwdOf(run)), stateDir: run.runDir, dir: cwdOf(run), ...launchOf(run) }),
     close: () => Promise.all([...asking].map((orch) => orch.close())),
   }
-}
-
-// Ctrl+C at a terminal not in raw mode: `on()` is called on each, and the
-// returned function stops listening.
-const sigint = (on) => {
-  process.on('SIGINT', on)
-  return () => process.off('SIGINT', on)
-}
-
-// The orchestrator's draft of the list, shown as the form's last step, and
-// written only once the operator confirms it. Null when they cancel. A
-// Ctrl+C while it drafts gives the question up, its session closed, before
-// crew start ends: no orchestrator session outlives it.
-async function draftStep({ target, answers, orchestrate, paths, stdin, stdout, heading, interrupt = sigint }) {
-  drawDrafting(stdout, { heading, file: target.validationFile })
-  const orch = orchestrate({ paths, repoDir: target.repoDir, ...answers })
-  let interrupted = false
-  const unlisten = interrupt(() => {
-    interrupted = true
-    orch.close?.()
-  })
-  let draft
-  try {
-    draft = await draftValidation(orch, { repoDir: target.repoDir })
-  } catch (e) {
-    if (interrupted) throw new StartError('cancelled while the orchestrator drafted; its session closed, no validation list written, nothing armed', 130)
-    throw new StartError(`${e.message}; no validation list written, nothing armed`)
-  } finally {
-    unlisten()
-  }
-  const text = await runDraftStep({ editor: draftEditor(draft.text), stdin, stdout, heading, file: target.validationFile, empty: draft.empty })
-  if (text === null) return null
-  mkdirSync(target.notesDir, { recursive: true })
-  writeFileSync(target.validationFile, text)
-  return text
 }
 
 // Renders the template into a new run's own folder and launches it there.
@@ -255,13 +242,14 @@ export class StartError extends Error {
 }
 
 // `crew start <spec#> [--harness h] [--model m] [--base b] [--start-ref r] [--stack-mode s]
-// [--run-order o] [--permission-mode p]`. With no terminal each row's flag is required, and so
-// is the spec's validation list, since nobody is there to confirm a draft of
-// one; at one, the form shows, pre-filled from the flags and the repo's
-// remembered answers, then the orchestrator's draft of a missing list. The
+// [--run-order o] [--permission-mode p]`. With no terminal each row's flag is required; at
+// one, the form shows, pre-filled from the flags and the repo's remembered
+// answers. Either way every `ready-for-agent` ticket of the spec must carry
+// its validation recipe first, else nothing is armed. A `validation.md` left
+// in the notes dir from before ADR-0029 is ignored, said once to `warn`. The
 // repo's config and remembered answers are its main checkout's, whichever of
 // its worktrees crew start runs in; the run itself is armed in this one.
-export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdin, stdout, run = execProgram, home = homedir(), env = process.env, launch, orchestrate = crewOrchestrator, check = crewPreflight, newRunId: runIdFor = newRunId, interrupt = sigint }) {
+export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdin, stdout, run = execProgram, home = homedir(), env = process.env, launch, check = crewPreflight, newRunId: runIdFor = newRunId, warn = (line) => process.stderr.write(`${line}\n`) }) {
   let parsed
   try {
     parsed = flagsToAnswers(argv)
@@ -285,24 +273,22 @@ export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdi
     const missing = form.missingFlags()
     if (missing.length) throw new StartError(`no terminal to show the form at, so every row needs its flag: missing ${missing.join(', ')}`, 2)
   }
-  let target = await resolveArming({ repoDir, spec, repo: facts.repo, run, home })
-  const problem = target.validation === null ? null : validationListProblem(target.validation)
-  if (problem) throw new StartError(`${target.validationFile} cannot be armed: its ${problem}; the workflow holds the list in a template literal, so write the command without it; nothing armed`)
-  if (!tty && target.validation === null) {
-    throw new StartError(`spec #${spec} has no validation list, and with no terminal nobody can confirm the orchestrator's draft of one: write the project's checks to ${target.validationFile}, one command per line (# for comments), or run crew start at a terminal`)
+  const target = await resolveArming({ repoDir, spec, repo: facts.repo, run, home })
+  const bare = await ticketsWithoutRecipe({ spec, repo: target.repo, repoDir, run })
+  if (bare.length) {
+    const named = bare.map((t) => `#${t.number} (${t.title})`).join(', ')
+    throw new StartError(`spec #${spec}: ${bare.length > 1 ? 'tickets' : 'ticket'} ${named} ${bare.length > 1 ? 'have' : 'has'} no "## Validation" section holding "### Run per change"; run preflight on the spec to write each ticket's validation recipe, then crew start again; nothing armed`)
   }
   const heading = `crew start: ${target.repo} #${spec}: ${target.title}`
   const answers = tty ? await runStartForm({ form, stdin, stdout, heading }) : form.flagAnswers()
   if (!answers) throw new StartError('cancelled; nothing armed', 130)
+  // Said after the form, whose screen would wipe it at a terminal.
+  const stray = join(target.notesDir, 'validation.md')
+  if (existsSync(stray)) warn(`crew start: ignoring ${stray}: validation recipes live on the tickets now, in their "## Validation" sections`)
   try {
     await check({ paths, repoDir, harness: answers.harness, model: answers.model })
   } catch (e) {
     throw new StartError(`${answers.harness}${answers.model ? ` on ${answers.model}` : ''} cannot run here: ${e?.message ?? e}; nothing armed`)
-  }
-  if (target.validation === null) {
-    const validation = await draftStep({ target, answers, orchestrate, paths, stdin, stdout, heading, interrupt })
-    if (validation === null) throw new StartError('cancelled; no validation list written, nothing armed', 130)
-    target = { ...target, validation }
   }
   const settled = { ...answers, stackMode: await settleStackMode(answers, run) }
   rememberAnswers(paths, repo, settled)

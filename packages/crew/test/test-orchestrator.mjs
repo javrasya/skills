@@ -1,7 +1,6 @@
 // Offline tests for the orchestrator (#102): a question with a schema, its
-// answer validated or reported, its sessions out of every run's graph, and
-// the validation-list draft, on a stand-in host and on the crew host running
-// the fake harness.
+// answer validated or reported, and its sessions out of every run's graph, on
+// a stand-in host and on the crew host running the fake harness.
 //   node packages/crew/test/test-orchestrator.mjs
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
@@ -11,7 +10,7 @@ import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { preflight, runHeadless } from '../src/headless.mjs'
-import { CONSULT_FILE, CONSULT_START_MS, OrchestratorError, closeConsult, consultSession, consultSessions, draftValidation, isOrchestratorTitle, orchestrator, validationText } from '../src/orchestrator.mjs'
+import { CONSULT_FILE, CONSULT_START_MS, OrchestratorError, closeConsult, consultSession, consultSessions, isOrchestratorTitle, orchestrator } from '../src/orchestrator.mjs'
 import { STATES, runView, runsView } from '../src/run-view-model.mjs'
 import { TRIAGE_STALE_MS, readTriage, triageHalt } from '../src/triage.mjs'
 import { runDefaultOf, runOrchestrator } from '../src/arm.mjs'
@@ -36,7 +35,6 @@ function standIn(answer = () => ({ n: 1 })) {
   return { run, calls }
 }
 const ask = (run, over = {}) => orchestrator({ run, harness: 'pi', model: 'lm/qwen', cwd: 'C:/repo', ...over })
-const answering = (value) => standIn(() => value).run
 
 test("ask: one headless run on the given harness and model, in the project, with the question's prompt and schema; its answer is returned", async () => {
   const { run, calls } = standIn(() => ({ n: 7 }))
@@ -61,53 +59,6 @@ test('ask: close() ends every run still asked, which is given up as stopped, and
   await orch.close()
   await assert.rejects(asked, (e) => e instanceof OrchestratorError && e.stopped)
   await assert.rejects(orch.ask({ name: 'late', prompt: 'p', schema: SCHEMA }), (e) => e instanceof OrchestratorError && e.stopped)
-})
-
-test('draft: the checks as validation.md, each under its source; none is an empty list, said to be empty; a command of two lines is no answer', async () => {
-  assert.equal(
-    validationText({
-      checks: [
-        { command: 'npm test', source: 'package.json' },
-        { command: ' make lint ', source: 'Makefile\nlint' },
-      ],
-    }),
-    '# package.json\nnpm test\n# Makefile lint\nmake lint\n',
-  )
-  const none = standIn(() => ({ checks: [] }))
-  assert.deepEqual(await draftValidation(ask(none.run), { repoDir: 'C:/repo' }), { text: '', empty: true })
-  const { prompt } = none.calls[0]
-  assert.match(prompt, /repo at C:\/repo/)
-  assert.match(prompt, /Never read source files/)
-  assert.match(prompt, /empty checks list/)
-  await assert.rejects(draftValidation(ask(answering({ checks: [{ command: 'a\nb', source: 's' }] })), { repoDir: 'C:/repo' }), (e) => e instanceof OrchestratorError && /not one line/.test(e.message))
-})
-
-test("draft: a command the workflow's String.raw list cannot hold (backtick, ${, trailing backslash) is no answer; a source holding one is only a comment, so it is cleaned", async () => {
-  for (const [command, why] of [
-    ['echo `date`', /holds a backtick/],
-    ['npm test -- --shard=${{ matrix.shard }}', /holds \$\{/],
-    ['make \\', /ends in a backslash/],
-  ]) {
-    await assert.rejects(
-      draftValidation(
-        ask(
-          answering({
-            checks: [
-              { command: 'npm test', source: 'package.json' },
-              { command, source: 'ci.yml' },
-            ],
-          }),
-        ),
-        { repoDir: 'C:/repo' },
-      ),
-      (e) => e instanceof OrchestratorError && why.test(e.message) && e.message.includes(JSON.stringify(command)),
-      command,
-    )
-  }
-  assert.equal(validationText({ checks: [{ command: 'npm test', source: 'ci.yml `test` ${{ matrix.os }} \\' }] }), "# ci.yml 'test' $ {{ matrix.os }}\nnpm test\n")
-  const prompt = standIn(() => ({ checks: [] }))
-  await draftValidation(ask(prompt.run), { repoDir: 'C:/repo' })
-  assert.match(prompt.calls[0].prompt, /resolve every CI expression \(a GitHub Actions \$\{\{ matrix\.x \}\}.*no command holding a backtick, a \$\{ or a trailing backslash/)
 })
 
 test('graph: a journal naming an orchestrator session shows no row for it, in any phase', async () => {
@@ -309,10 +260,9 @@ function crewScratch({ program = [process.execPath, FAKE_HARNESS] } = {}) {
   return { paths, repo, root, host, orch: orchestrator({ harness: 'claude', model: 'opus', cwd: repo, env, program, answerMs: 60_000 }) }
 }
 
-test('headless: the fake-harness orchestrator answers in the project, drafts its fixed list, and opens no session', async () => {
-  const { paths, repo, orch } = crewScratch()
+test('headless: the fake-harness orchestrator answers in the project, and opens no session', async () => {
+  const { paths, orch } = crewScratch()
   assert.deepEqual(await orch.ask({ name: 'count', prompt: 'How many? [answer {"n":7}]', schema: SCHEMA }), { n: 7 })
-  assert.deepEqual(await draftValidation(orch, { repoDir: repo }), { text: '# package.json scripts.test\nnpm test\n# .github/workflows/ci.yml job lint\nnpm run lint\n', empty: false })
   assert.equal(await request(paths, { op: 'session.list' }).catch(() => null), null, 'no daemon was started: no session was needed')
 })
 

@@ -120,7 +120,7 @@ export function runHeadless({ harness = 'claude', prompt, schema = null, model =
 
 // Whether `harness` can run on `model` at all: logged in, the model one its
 // account reaches. One short headless turn, so it costs a little; `crew
-// start` runs it before it drafts or arms anything. Rejects with the
+// start` runs it before it arms anything. Rejects with the
 // harness's own words for why not.
 export async function preflight({ harness = 'claude', model = null, effort = null, cwd, env = process.env, program = null, ms = 2 * 60_000, run = runHeadless }) {
   const reply = await run({ harness, prompt: 'Reply with the single word: ok', model, effort, cwd, env, program, ms })
