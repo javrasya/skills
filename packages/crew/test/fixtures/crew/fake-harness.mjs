@@ -77,6 +77,7 @@ import { basename, dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { claudeDir, claudeSlug, piDir, transcriptPath } from '../../../src/transcript.mjs'
 import { validate } from '../../../src/schema.mjs'
+import { fillRequired } from '../../../../../scripts/fill-required.mjs'
 
 const argv = process.argv.slice(2)
 const after = (flag) => (argv.includes(flag) ? argv[argv.indexOf(flag) + 1] : null)
@@ -248,11 +249,8 @@ async function tui() {
     const label = basename(dirname(result)).replace(/^\d+-/, '')
     const answer = Object.entries(JSON.parse(readFileSync(file, 'utf8'))).find(([pattern]) => new RegExp(pattern).test(label))?.[1]
     if (!schemaPath) return typeof answer === 'string' ? answer : null
-    const schema = JSON.parse(readFileSync(schemaPath, 'utf8'))
-    const empty = { array: [], string: '', boolean: false, integer: 0, number: 0, object: {} }
-    const filled = { ...answer }
-    for (const key of schema.required ?? []) if (!(key in filled)) filled[key] = empty[schema.properties?.[key]?.type] ?? null
-    return JSON.stringify(filled)
+    // Shared with the workflow simulator, which fakes the same template's agents.
+    return JSON.stringify(fillRequired(JSON.parse(readFileSync(schemaPath, 'utf8')), answer))
   }
 
   function asked(prompt) {

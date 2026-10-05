@@ -3,6 +3,7 @@
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { loadScript } from '../packages/crew/src/runner.mjs'
+import { fillRequired } from './fill-required.mjs'
 
 const TPL = fileURLToPath(new URL('../skills/engineering/implement-spec-in-workflow/workflow.template.js', import.meta.url))
 
@@ -41,23 +42,17 @@ const issueFor = (loc) => ISSUES.get(loc) || '?'
 // The harness enforces each call's schema, so a real agent never omits a
 // required field. Stubs state only what a scenario is about; this fills the
 // rest the way a green, well-behaved agent would. A null result (an agent that
-// died) stays null.
+// died) stays null. The empty values come from fill-required.mjs, shared with
+// crew's fake harness; only the green-run values below are the simulator's.
 function completeToSchema(result, opts, label) {
   const schema = opts.schema
   if (!schema || !result || typeof result !== 'object') return result
-  const filled = { ...result }
-  for (const key of schema.required || []) {
-    if (key in filled) continue
-    if (key === 'checks') filled.checks = [{ command: SIM_CHECK, passed: true }]
-    else if (key === 'validation') filled.validation = [SIM_CHECK]
-    else if (key === 'validated_sha') filled.validated_sha = 'simsha'
-    else if (key === 'worktree') filled.worktree = '/wt/' + label
-    else {
-      const type = (schema.properties[key] || {}).type
-      filled[key] = type === 'array' ? [] : type === 'string' ? '' : type === 'boolean' ? false : type === 'integer' || type === 'number' ? 0 : null
-    }
-  }
-  return filled
+  return fillRequired(schema, result, {
+    checks: [{ command: SIM_CHECK, passed: true }],
+    validation: [SIM_CHECK],
+    validated_sha: 'simsha',
+    worktree: '/wt/' + label,
+  })
 }
 
 async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel', startRef = 'main' } = {}) {
