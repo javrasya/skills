@@ -17,7 +17,8 @@ import { sessionHost } from '../src/session-host.mjs'
 import { sessionTranscripts, transcriptPath } from '../src/transcript.mjs'
 import { readJournal } from '../src/journal.mjs'
 import { validate } from '../src/schema.mjs'
-import { pinBase, renderTemplate, templatePath } from '../src/arm.mjs'
+import { pinBase } from '../src/arm.mjs'
+import { renderWith } from './fixtures/render-with.mjs'
 import { runView } from '../src/run-view-model.mjs'
 import { draw, strip } from '../src/run-view/draw.mjs'
 import { crewPaths } from '../src/daemon/transport.mjs'
@@ -612,8 +613,7 @@ test("the skill's template on the crew host: a dispatcher's validation reaches t
       '^finalize': { summary: 'stack ready' },
     }),
   )
-  const template = readFileSync(templatePath(), 'utf8')
-  const script = renderTemplate(template, { SPEC: 94, REPO: 'acme/app', REPO_DIR: cwd, NOTES_DIR: join(root, 'template-notes'), BASE_REF: 'main', START_REF: 'main', BASE_SHA: '0a1b2c3d4e5f60718293a4b5c6d7e8f901234567', STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session', PER_CHANGE_COMMANDS: '[]', AT_REVIEW_COMMANDS: '[]' })
+  const script = renderWith({ REPO_DIR: cwd, NOTES_DIR: join(root, 'template-notes') })
   const fake = [process.execPath, FAKE_HARNESS]
   const host = sessionHost(crewHost({ paths, env: { ...env, CREW_FAKE_MCP: '0', CREW_FAKE_ANSWERS: answers }, cwd, harnesses: { claude: fake, pi: fake }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
   const stateDir = join(root, 'template-state')
@@ -681,7 +681,7 @@ test("the skill's template on the crew host: two tickets started after origin/<b
       '^finalize': { summary: 'stack ready' },
     }),
   )
-  const script = renderTemplate(readFileSync(templatePath(), 'utf8'), { SPEC: 94, REPO: 'acme/app', REPO_DIR: cwd, NOTES_DIR: join(root, 'pinned-notes'), BASE_REF: 'main', START_REF: 'main', BASE_SHA: pinned, STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session', PER_CHANGE_COMMANDS: '[]', AT_REVIEW_COMMANDS: '[]' })
+  const script = renderWith({ REPO_DIR: cwd, NOTES_DIR: join(root, 'pinned-notes'), BASE_SHA: pinned })
   const fake = [process.execPath, FAKE_HARNESS]
   const host = sessionHost(crewHost({ paths, env: { ...env, CREW_FAKE_MCP: '0', CREW_FAKE_ANSWERS: answers }, cwd, harnesses: { claude: fake, pi: fake }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
   const stateDir = join(root, 'pinned-state')
@@ -736,7 +736,7 @@ test("the skill's template on the crew host: the baseline runs beside the explor
       '^finalize': { summary: 'stack ready' },
     }),
   )
-  const script = renderTemplate(readFileSync(templatePath(), 'utf8'), { SPEC: 94, REPO: 'acme/app', REPO_DIR: cwd, NOTES_DIR: notesDir, BASE_REF: 'main', START_REF: 'main', BASE_SHA: pinned, STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session', PER_CHANGE_COMMANDS: JSON.stringify(perChange), AT_REVIEW_COMMANDS: '[]' })
+  const script = renderWith({ REPO_DIR: cwd, NOTES_DIR: notesDir, BASE_SHA: pinned, PER_CHANGE_COMMANDS: JSON.stringify(perChange) })
   const fake = [process.execPath, FAKE_HARNESS]
   const host = sessionHost(crewHost({ paths, env: { ...env, CREW_FAKE_MCP: '0', CREW_FAKE_ANSWERS: answers }, cwd, harnesses: { claude: fake, pi: fake }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
   const stateDir = join(root, 'baseline-state')
@@ -758,7 +758,14 @@ test("the skill's template on the crew host: the baseline runs beside the explor
   const started = entries().find((e) => e.type === 'started' && e.title?.includes('baseline:per-change'))
   assert.equal(started.node, 'baseline/per-change')
   assert.ok(started.worktree && realpathSync(started.worktree) !== realpathSync(cwd), 'the baseline has a worktree of its own')
-  assert.ok(readFileSync(setupLog, 'utf8').trim().split('\n').map((p) => realpathSync(p)).includes(realpathSync(started.worktree)), 'the setup hook ran in it')
+  assert.ok(
+    readFileSync(setupLog, 'utf8')
+      .trim()
+      .split('\n')
+      .map((p) => realpathSync(p))
+      .includes(realpathSync(started.worktree)),
+    'the setup hook ran in it',
+  )
   assert.equal(realpathSync(entries().find((e) => e.type === 'started' && e.title?.includes('explore:code paths')).worktree), realpathSync(cwd), 'the explorer still runs in the checkout')
 
   const prompt = promptsOf(stateDir, log)('baseline:per-change')
@@ -847,7 +854,7 @@ test("the skill's template on the crew host: a masked command replaces its origi
       '^finalize': { summary: 'stack ready' },
     }),
   )
-  const script = renderTemplate(readFileSync(templatePath(), 'utf8'), { SPEC: 94, REPO: 'acme/app', REPO_DIR: cwd, NOTES_DIR: notesDir, BASE_REF: 'main', START_REF: 'main', BASE_SHA: pinned, STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session', PER_CHANGE_COMMANDS: JSON.stringify([unit, lint]), AT_REVIEW_COMMANDS: '[]' })
+  const script = renderWith({ REPO_DIR: cwd, NOTES_DIR: notesDir, BASE_SHA: pinned, PER_CHANGE_COMMANDS: JSON.stringify([unit, lint]) })
   const fake = [process.execPath, FAKE_HARNESS]
   const host = sessionHost(crewHost({ paths, env: { ...env, CREW_FAKE_MCP: '0', CREW_FAKE_ANSWERS: answers }, cwd, harnesses: { claude: fake, pi: fake }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
   const stateDir = join(root, 'masked-state')
@@ -909,7 +916,7 @@ test("the skill's template on the crew host: a waived check counts green, the ga
       '^finalize': { summary: 'stack ready' },
     }),
   )
-  const script = renderTemplate(readFileSync(templatePath(), 'utf8'), { SPEC: 94, REPO: 'acme/app', REPO_DIR: cwd, NOTES_DIR: notesDir, BASE_REF: 'main', START_REF: 'main', BASE_SHA: pinned, STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session', PER_CHANGE_COMMANDS: JSON.stringify(perChange), AT_REVIEW_COMMANDS: '[]' })
+  const script = renderWith({ REPO_DIR: cwd, NOTES_DIR: notesDir, BASE_SHA: pinned, PER_CHANGE_COMMANDS: JSON.stringify(perChange) })
   const fake = [process.execPath, FAKE_HARNESS]
   const host = sessionHost(crewHost({ paths, env: { ...env, CREW_FAKE_MCP: '0', CREW_FAKE_ANSWERS: answers }, cwd, harnesses: { claude: fake, pi: fake }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
   const stateDir = join(root, 'waived-state')
@@ -996,7 +1003,7 @@ test("the skill's template on the crew host: dispatch does not wait on the at-re
       '^finalize': { summary: 'stack ready' },
     }),
   )
-  const script = renderTemplate(readFileSync(templatePath(), 'utf8'), { SPEC: 94, REPO: 'acme/app', REPO_DIR: cwd, NOTES_DIR: notesDir, BASE_REF: 'main', START_REF: 'main', BASE_SHA: pinned, STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session', PER_CHANGE_COMMANDS: JSON.stringify([unit]), AT_REVIEW_COMMANDS: JSON.stringify([e2e, typecheck, unit]) })
+  const script = renderWith({ REPO_DIR: cwd, NOTES_DIR: notesDir, BASE_SHA: pinned, PER_CHANGE_COMMANDS: JSON.stringify([unit]), AT_REVIEW_COMMANDS: JSON.stringify([e2e, typecheck, unit]) })
   const fake = [process.execPath, FAKE_HARNESS]
   const host = sessionHost(crewHost({ paths, env: { ...env, CREW_FAKE_MCP: '0', CREW_FAKE_ANSWERS: answers }, cwd, harnesses: { claude: fake, pi: fake }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
   const stateDir = join(root, 'at-review-state')
@@ -1082,7 +1089,7 @@ test("the skill's template on the crew host: an at-review baseline returning a b
       '^publish_101': { published: true, pr_url: 'https://github.com/acme/app/pull/101', pr_number: 101, checks: ok(unit), validated_sha: 'abc123', stack_link: 'registered' },
     }),
   )
-  const script = renderTemplate(readFileSync(templatePath(), 'utf8'), { SPEC: 94, REPO: 'acme/app', REPO_DIR: cwd, NOTES_DIR: join(root, 'at-review-blocked-notes'), BASE_REF: 'main', START_REF: 'main', BASE_SHA: pinned, STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session', PER_CHANGE_COMMANDS: JSON.stringify([unit]), AT_REVIEW_COMMANDS: JSON.stringify([e2e]) })
+  const script = renderWith({ REPO_DIR: cwd, NOTES_DIR: join(root, 'at-review-blocked-notes'), BASE_SHA: pinned, PER_CHANGE_COMMANDS: JSON.stringify([unit]), AT_REVIEW_COMMANDS: JSON.stringify([e2e]) })
   const fake = [process.execPath, FAKE_HARNESS]
   const host = sessionHost(crewHost({ paths, env: { ...env, CREW_FAKE_MCP: '0', CREW_FAKE_ANSWERS: answers }, cwd, harnesses: { claude: fake, pi: fake }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
   const stateDir = join(root, 'at-review-blocked-state')

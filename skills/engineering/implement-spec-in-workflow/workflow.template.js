@@ -66,6 +66,7 @@ const RUN_ORDER = '__RUN_ORDER__'                  // 'parallel' (the frontier a
 const RUNNER = '__RUNNER__'                        // 'session' on the session runner (crew, on Orca), and 'orca', its value before, still; anything else is the Workflow runner. The one line the two renderings differ in
 const PER_CHANGE_COMMANDS = __PER_CHANGE_COMMANDS__ // every takeable ticket's `### Run per change` commands, each once: a JSON array of strings, rendered bare so no command text breaks the literal (ADR-0030)
 const AT_REVIEW_COMMANDS = __AT_REVIEW_COMMANDS__   // the same for `### Run at review`
+const TICKET_RECIPES = __TICKET_RECIPES__           // each takeable ticket's own recipe by its number, { perChange, atReview }, read by the same rule as the two sets above: what the run runs for that ticket
 // -------------------------------------------------------------------------
 
 const POINTERS = `Repo ${REPO}, checkout ${REPO_DIR}. Spec: \`gh issue view ${SPEC}\`. Research notes: ${NOTES_DIR}.`
@@ -252,8 +253,8 @@ const CONTRACT = `The acceptance contract for this ticket is its own acceptance 
 // — the agent does not judge, the exit code does — so the implementer runs
 // it, and the reviewer establishes it first: by inheriting the implementer's
 // result when the sha is unchanged (ADR-0009), else by re-running. The
-// commands are the ticket's own `### Run per change`, copied by its dispatcher
-// (ADR-0029); its `### Run at review` half runs once, on the stack tip, in the
+// commands are the ticket's own `### Run per change`, as arming read them
+// (ADR-0029, ADR-0030); its `### Run at review` half runs once, on the stack tip, in the
 // whole-stack review, and never reaches a per-ticket role.
 const validationLine = (cmds) => `${cmds.length
   ? `Ticket validation — run per change. Run EVERY command below on your final commit and return one result per command, the command copied verbatim:\n${cmds.map((c) => `- \`${maskOf(c)}\``).join('\n')}${unmasking(cmds)}`
@@ -267,7 +268,7 @@ const JUDGING = `Each result carries the command's \`exit_code\`. A zero exit is
 // The checks a result judged green over a non-zero exit. They travel with the
 // validated sha, so the next role knows which ones it may not inherit.
 const waivedOf = (checks) => (checks || []).filter((k) => k.passed && k.exit_code !== 0).map((k) => ({ command: k.command, exit_code: k.exit_code }))
-const unionWaived = (a, b) => [...a, ...b.filter((k) => !a.some((w) => norm(w.command) === norm(k.command)))]
+const unionWaived = (a, b) => unionInto([...a], b, (k) => norm(k.command))
 const validatedBy = (r, by) => r.validated_sha ? { sha: r.validated_sha, by, waived: waivedOf(r.checks) } : null
 // A green result travels with the sha it was green on (ADR-0009). The agent
 // downstream checks the sha itself — one rev-parse — and inherits the result
@@ -304,10 +305,11 @@ const unmasking = (cmds) => {
 // roles were told them.
 const readinessRed = (checks, cmds) =>
   cmds.filter((c) => !(checks || []).some((k) => k.passed && (norm(k.command) === norm(c) || norm(k.command) === norm(maskOf(c))))).map(maskOf)
-// Appends to `into` each command of `cmds` it lacks, verbatim, with the same
-// whitespace tolerance as readiness: a command copied twice runs once.
-const unionInto = (into, cmds) => {
-  for (const c of cmds) if (norm(c) && !into.some((k) => norm(k) === norm(c))) into.push(c)
+// Appends to `into` each of `items` it lacks, verbatim, compared by `key`: by
+// default a command, with the same whitespace tolerance as readiness, so a
+// command copied twice runs once.
+const unionInto = (into, items, key = norm) => {
+  for (const c of items) if (key(c) && !into.some((k) => key(k) === key(c))) into.push(c)
   return into
 }
 // One result per command. A single green boolean is what let a fixer report
@@ -764,7 +766,7 @@ const exploreNodes = graph.explorations.map((e, i, a) =>
 // own, so a resume keeps whichever succeeded. A halt on either is recorded on
 // the Workflow runner, where its next prompt names it: so a resume is a call
 // the runner has not made, and that node runs again.
-const AT_REVIEW_ONLY = AT_REVIEW_COMMANDS.filter((c) => !PER_CHANGE_COMMANDS.some((p) => norm(p) === norm(c)))
+const AT_REVIEW_ONLY = unionInto([...PER_CHANGE_COMMANDS], AT_REVIEW_COMMANDS).slice(PER_CHANGE_COMMANDS.length)
 const MEASURED = {
   'per-change': { commands: PER_CHANGE_COMMANDS, halts: `${NOTES_DIR}/baseline-blockers.json` },
   'at-review': { commands: AT_REVIEW_ONLY, halts: `${NOTES_DIR}/baseline-at-review-blockers.json` },
@@ -1055,7 +1057,7 @@ Each brief is under 3,000 characters and has four sections, nothing else: (1) th
 
 Also return ticket_brief: one short paragraph on the whole ticket, for later fix agents.
 
-And return the ticket's validation recipe. Read exactly two subsections of the ticket's \`## Validation\` section, and nothing else for it — no CI config, no package scripts, no other ticket: \`### Run per change\` into \`validation\`, and \`### Run at review\` into \`review_validation\`. One array entry per command the subsection lists in backticks, copied character for character — never rewritten, merged, split, reordered or invented. A line that names no command ("absent: …", "not applicable: …", a measured time, "Needs: …") adds nothing. A subsection that is missing or lists no command is an empty array.`,
+And return the ticket's validation recipe. Read exactly two subsections of the ticket's \`## Validation\` section, and nothing else for it — no CI config, no package scripts, no other ticket: \`### Run per change\` into \`validation\`, and \`### Run at review\` into \`review_validation\`. One array entry per line of the subsection that names a command: the line's FIRST span in backticks, copied character for character — never rewritten, merged, split, reordered or invented; a later span on the same line is no command. A line with no span, or one that is prose ("absent: …", "not applicable: …", "Recipe measured …", "Needs: …", "Deferred repo gate: …", also after a label, as in "Typecheck: absent: …"), adds nothing. A subsection that is missing or lists no command is an empty array. It is the rule the run was armed with, and the run checks your copy against its own.`,
     { ...ROLES.dispatch, effort: 'high', phase: 'Implement', schema: DISPATCH_SCHEMA, label: `dispatch:#${t.number}${remainder ? ':re' : ''}`, node },
   )
 }
@@ -1588,12 +1590,20 @@ async function implementTicket(t) {
   const plan = await dispatch(t, null, `ticket/${t.number}/dispatch`)
   if (!plan) throw new Error(`dispatcher for #${t.number} died`)
   if (plan.slices.length > 1) log(`#${t.number} dispatched as ${plan.slices.length} slices`)
-  // The first dispatch's copy of the recipe holds for the whole ticket, as its
-  // ticket_brief does: a re-dispatch re-slices, it does not re-read the ticket.
-  // Only the gate's cross-check grows it, with the commands the dispatcher
-  // dropped, so every later round runs the ticket's whole recipe.
-  const validation = unionInto([], plan.validation || [])
-  const reviewValidation = plan.review_validation || []
+  // The ticket's recipe is the one arming read off it, string for string the
+  // commands the baseline measured (ADR-0030), so the record and maskOf always
+  // know them. The dispatcher's copy stands in only for a ticket arming never
+  // read, and is otherwise a cross-check. The recipe holds for the whole
+  // ticket, as its ticket_brief does: a re-dispatch re-slices, it does not
+  // re-read the ticket. Only the gate's cross-check grows it, with the
+  // commands it lacks, so every later round runs the ticket's whole recipe.
+  const armed = TICKET_RECIPES[t.number]
+  if (armed) {
+    const unarmed = [...(plan.validation || []), ...(plan.review_validation || [])].filter((c) => ![...armed.perChange, ...armed.atReview].some((k) => norm(k) === norm(c)))
+    if (unarmed.length) log(`#${t.number}: the dispatcher read commands arming did not; the armed recipe runs: ${unarmed.join('; ')}`)
+  }
+  const validation = unionInto([], armed ? armed.perChange : plan.validation || [])
+  const reviewValidation = armed ? armed.atReview : plan.review_validation || []
   const tk = { single: false, gates: 0 }
   const stop = (detail) => {
     log(`#${t.number} stopped — ${detail}`)

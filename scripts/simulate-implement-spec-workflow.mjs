@@ -3,6 +3,7 @@
 import { readFileSync, rmSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { loadScript } from '../packages/crew/src/runner.mjs'
+import { renderTemplate } from '../packages/crew/src/arm.mjs'
 import { fillRequired } from './fill-required.mjs'
 
 const TPL = fileURLToPath(new URL('../skills/engineering/implement-spec-in-workflow/workflow.template.js', import.meta.url))
@@ -10,24 +11,26 @@ const TPL = fileURLToPath(new URL('../skills/engineering/implement-spec-in-workf
 const SIM_CHECK = 'npm t'
 
 // `startRef` is the operator's prior work (ADR-0023): the base itself for none.
-// PINNED is the sha arming resolved it to (ADR-0030).
+// PINNED is the sha arming resolved it to (ADR-0030). `recipes` is arming's
+// per-ticket recipe map; none by default, so the dispatcher's copy stands in.
+// Rendered by crew's own renderTemplate, which refuses a placeholder left out.
 const PINNED = '0a1b2c3d4e5f60718293a4b5c6d7e8f901234567'
-function render(runner, runOrder = 'parallel', startRef = 'main') {
-  let s = readFileSync(TPL, 'utf8')
-  s = s
-    .replace(/__SPEC__/g, '224')
-    .replace(/__REPO__/g, 'o/r')
-    .replace(/__REPO_DIR__/g, '/tmp/x')
-    .replace(/__NOTES_DIR__/g, '/tmp/n')
-    .replace(/__BASE_REF__/g, 'main')
-    .replace(/__START_REF__/g, startRef)
-    .replace(/__BASE_SHA__/g, PINNED)
-    .replace(/__STACK_MODE__/g, 'native')
-    .replace(/__RUN_ORDER__/g, runOrder)
-    .replace(/__RUNNER__/g, runner)
-    .replace(/__PER_CHANGE_COMMANDS__/g, JSON.stringify([SIM_CHECK]))
-    .replace(/__AT_REVIEW_COMMANDS__/g, '[]')
-  return s
+function render(runner, runOrder = 'parallel', startRef = 'main', recipes = {}) {
+  return renderTemplate(readFileSync(TPL, 'utf8'), {
+    SPEC: 224,
+    REPO: 'o/r',
+    REPO_DIR: '/tmp/x',
+    NOTES_DIR: '/tmp/n',
+    BASE_REF: 'main',
+    START_REF: startRef,
+    BASE_SHA: PINNED,
+    STACK_MODE: 'native',
+    RUN_ORDER: runOrder,
+    RUNNER: runner,
+    PER_CHANGE_COMMANDS: JSON.stringify([SIM_CHECK]),
+    AT_REVIEW_COMMANDS: '[]',
+    TICKET_RECIPES: JSON.stringify(recipes),
+  })
 }
 
 // A stubbed fixer answers from the findings its prompt actually names, so a
@@ -60,7 +63,7 @@ function completeToSchema(result, opts, label) {
   })
 }
 
-async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel', startRef = 'main' } = {}) {
+async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel', startRef = 'main', recipes = {} } = {}) {
   const calls = []
   const defaults = {
     graph: () => ({
@@ -136,7 +139,7 @@ async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel',
   const phase = () => {}
 
   // The session runner's own loader, so the script is loaded one way everywhere.
-  const result = await loadScript(render(runner, runOrder, startRef))(agent, parallel, phase, log, {})
+  const result = await loadScript(render(runner, runOrder, startRef, recipes))(agent, parallel, phase, log, {})
   EVERY_CALL.push(...calls)
   EVERY_RUN.push(calls)
   return { result, calls, logs, timeline }
@@ -699,7 +702,7 @@ const withBlockers = (blockers) => () => ({
   check('H5: finalize is told it is the first registration, and why', /first registration/.test(finalize.prompt) && /the last failure: #11/.test(finalize.prompt), finalize.prompt.slice(0, 1500))
 }
 
-// --- scenario B: a baseline command that cannot run is a blocker -----------
+// --- scenario BL: a baseline command that cannot run is a blocker ----------
 // The Workflow runner replays a completed call whose (prompt, opts) did not
 // change, so a resume is a run whose baseline prompt changed or did not.
 {
@@ -710,18 +713,37 @@ const withBlockers = (blockers) => () => ({
   const promptOf = (r) => r.calls.find((c) => c.label === 'baseline:per-change').prompt
   const first = await run(blocked)
   const told = promptOf(first)
-  check('B: the baseline is told a command that runs and fails from one that cannot run, and what to do with each', /It runs and fails: .*pre-existing failure: record it/.test(told) && /It cannot run: .*a mask would hide it: it is a \*\*blocker\*\*/.test(told), told)
-  check('B: on the Workflow runner the baseline returns the blocker, nobody being there to clear it', /Nobody is in this session to clear it\. Return the blocker in `blockers`/.test(told) && !/needs_you/.test(told), '')
+  check('BL: the baseline is told a command that runs and fails from one that cannot run, and what to do with each', /It runs and fails: .*pre-existing failure: record it/.test(told) && /It cannot run: .*a mask would hide it: it is a \*\*blocker\*\*/.test(told), told)
+  check('BL: on the Workflow runner the baseline returns the blocker, nobody being there to clear it', /Nobody is in this session to clear it\. Return the blocker in `blockers`/.test(told) && !/needs_you/.test(told), '')
   const onSession = promptOf(await run({}, { runner: 'session' }))
-  check('B: on the session runner the baseline calls needs_you and carries on once it is cleared', /tool named `needs_you`, call it with the blocker/.test(onSession) && /carry on measuring and return as usual, with an empty `blockers`/.test(onSession), '')
-  check('B: a blocked baseline halts the run before any dispatch, naming what, evidence and check', first.result.halted === true && ['npm is not installed', 'npm t: command not found (exit 127)', '`npm --version`'].every((s) => first.result.reason.includes(s)) && !first.calls.some((c) => c.label.startsWith('dispatch')), JSON.stringify(first.result))
+  check('BL: on the session runner the baseline calls needs_you and carries on once it is cleared', /tool named `needs_you`, call it with the blocker/.test(onSession) && /carry on measuring and return as usual, with an empty `blockers`/.test(onSession), '')
+  check('BL: a blocked baseline halts the run before any dispatch, naming what, evidence and check', first.result.halted === true && ['npm is not installed', 'npm t: command not found (exit 127)', '`npm --version`'].every((s) => first.result.reason.includes(s)) && !first.calls.some((c) => c.label.startsWith('dispatch')), JSON.stringify(first.result))
   const second = await run(blocked)
-  check('B: a resume after the halt runs the baseline node again, told the blocker to check first', promptOf(second) !== told && /halted once before/.test(promptOf(second)) && promptOf(second).includes('1. npm is not installed — evidence: npm t: command not found (exit 127); check: `npm --version`'), promptOf(second))
+  check('BL: a resume after the halt runs the baseline node again, told the blocker to check first', promptOf(second) !== told && /halted once before/.test(promptOf(second)) && promptOf(second).includes('1. npm is not installed — evidence: npm t: command not found (exit 127); check: `npm --version`'), promptOf(second))
   const cleared = await run()
-  check('B: a resume still blocked halts again, and the next one is again a call not made before', /halted 2 times before/.test(promptOf(cleared)) && cleared.result.state.startsWith('complete') && cleared.calls.some((c) => c.label === 'dispatch:#10'), JSON.stringify(cleared.result))
+  check('BL: a resume still blocked halts again, and the next one is again a call not made before', /halted 2 times before/.test(promptOf(cleared)) && cleared.result.state.startsWith('complete') && cleared.calls.some((c) => c.label === 'dispatch:#10'), JSON.stringify(cleared.result))
   const replay = await run()
-  check('B: once it succeeds, a later resume makes the same baseline call, so the runner replays its success', promptOf(replay) === promptOf(cleared), '')
+  check('BL: once it succeeds, a later resume makes the same baseline call, so the runner replays its success', promptOf(replay) === promptOf(cleared), '')
   rmSync(halts, { force: true })
+}
+
+// --- scenario BM: a ticket runs the recipe arming read, which the baseline measured
+// The baseline masks what arming extracted; a dispatcher that copies a
+// command otherwise (a second span, a rewrite) must not unmask it, or the
+// pre-existing failure is judged red against a record with no entry for it.
+{
+  const masked = `${SIM_CHECK} --test-skip-pattern flaky`
+  const { result, calls, logs } = await run(
+    {
+      baseline: () => ({ commands: [{ command: SIM_CHECK, exit_code: 1, masked_command: masked, failures: { tests: ['test/a.mjs::flaky'], diagnostics: [] } }], decisions_needed: [] }),
+      dispatch: (label) => ({ ticket_brief: 'the ticket in brief', validation: label.includes('#10') ? ['npm test', 'npm run e2e'] : [SIM_CHECK], review_validation: [], slices: [{ title: 'all of it', brief: 'do it', effort: 'medium' }] }),
+    },
+    { recipes: { 10: { perChange: [SIM_CHECK], atReview: [] }, 11: { perChange: [SIM_CHECK], atReview: [] } } },
+  )
+  const impl = calls.find((c) => c.label.startsWith('impl:#10')).prompt
+  check('BM: the implementer is told the masked form of the armed command, not the dispatcher\'s copy', impl.includes(`- \`${masked}\``) && !impl.includes('- `npm test`') && !impl.includes('- `npm run e2e`'), impl.slice(0, 1500))
+  check('BM: the gate reviewer is told the same masked command', !!calls.find((c) => c.label.startsWith('gate:#10'))?.prompt.includes(`- \`${masked}\``), '')
+  check('BM: the dispatcher\'s differing copy is logged, and the run completes', logs.some((l) => /#10: the dispatcher read commands arming did not.*npm test; npm run e2e/.test(l)) && result.state.startsWith('complete'), logs.join(' | '))
 }
 
 // --- scenario R: the Workflow runner reclaims, the Orca runner never does ---

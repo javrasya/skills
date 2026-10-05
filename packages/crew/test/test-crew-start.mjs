@@ -31,13 +31,26 @@ const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '')
 // as scripts/simulate-implement-spec-workflow.mjs renders it.
 const skillRender = (template, v) => PLACEHOLDERS.reduce((s, k) => s.split(`__${k}__`).join(String(v[k])), template)
 
-const VALUES = { SPEC: 94, REPO: 'acme/app', REPO_DIR: 'C:\\work\\app', NOTES_DIR: 'C:\\Users\\me\\.claude\\spec-notes\\app-94', BASE_REF: 'develop', START_REF: 'develop', BASE_SHA: '0a1b2c3d4e5f60718293a4b5c6d7e8f901234567', STACK_MODE: 'native', RUN_ORDER: 'parallel', PER_CHANGE_COMMANDS: JSON.stringify(['npm test', 'echo "`x`" ${HOME} \'q\' C:\\x $&']), AT_REVIEW_COMMANDS: '[]' }
+const VALUES = {
+  SPEC: 94,
+  REPO: 'acme/app',
+  REPO_DIR: 'C:\\work\\app',
+  NOTES_DIR: 'C:\\Users\\me\\.claude\\spec-notes\\app-94',
+  BASE_REF: 'develop',
+  START_REF: 'develop',
+  BASE_SHA: '0a1b2c3d4e5f60718293a4b5c6d7e8f901234567',
+  STACK_MODE: 'native',
+  RUN_ORDER: 'parallel',
+  PER_CHANGE_COMMANDS: JSON.stringify(['npm test', 'echo "`x`" ${HOME} \'q\' C:\\x $&']),
+  AT_REVIEW_COMMANDS: '[]',
+  TICKET_RECIPES: JSON.stringify({ 7: { perChange: ['npm test', '$& \\x'], atReview: [] } }),
+}
 
 // A constant of a rendered script, as the script reads it.
 const renderedConst = (script, name) => new Function(`${script.split(/\r?\n/).find((l) => l.startsWith(`const ${name} = `))}\nreturn ${name}`)()
 
-test('render: the template with the twelve values is what the skill renders, RUNNER session', () => {
-  assert.deepEqual(PLACEHOLDERS, ['SPEC', 'REPO', 'REPO_DIR', 'NOTES_DIR', 'BASE_REF', 'START_REF', 'BASE_SHA', 'STACK_MODE', 'RUN_ORDER', 'RUNNER', 'PER_CHANGE_COMMANDS', 'AT_REVIEW_COMMANDS'])
+test('render: the template with every value is what the skill renders, RUNNER session', () => {
+  assert.deepEqual(PLACEHOLDERS, ['SPEC', 'REPO', 'REPO_DIR', 'NOTES_DIR', 'BASE_REF', 'START_REF', 'BASE_SHA', 'STACK_MODE', 'RUN_ORDER', 'RUNNER', 'PER_CHANGE_COMMANDS', 'AT_REVIEW_COMMANDS', 'TICKET_RECIPES'])
   const template = readFileSync(templatePath(), 'utf8')
   assert.doesNotMatch(template, /__VALIDATION__|VALIDATION_RAW|\bVALIDATION\b/)
   assert.equal(templatePath(), SKILL_TEMPLATE, "in a checkout the skill folder's template is the one rendered")
@@ -51,6 +64,7 @@ test('render: the template with the twelve values is what the skill renders, RUN
   assert.throws(() => renderTemplate(template, { ...VALUES }), /no value for __RUNNER__/)
   assert.deepEqual(renderedConst(rendered, 'PER_CHANGE_COMMANDS'), JSON.parse(VALUES.PER_CHANGE_COMMANDS))
   assert.deepEqual(renderedConst(rendered, 'AT_REVIEW_COMMANDS'), [])
+  assert.deepEqual(renderedConst(rendered, 'TICKET_RECIPES'), JSON.parse(VALUES.TICKET_RECIPES))
 })
 
 test('render: a value is substituted as written, whatever it holds', () => {
@@ -292,7 +306,7 @@ test('validation recipe: a ## Validation heading whose section holds ### Run per
   assert.equal(hasValidationRecipe('## Validation recipe\n\n### Run per change\n'), false, 'another heading')
 })
 
-test('recipe commands: each subsection line\'s backticked command; prose, other sections and lines with no command are none', () => {
+test("recipe commands: each subsection line's backticked command; prose, other sections and lines with no command are none", () => {
   const body = [
     '## Validation',
     '',
@@ -325,7 +339,7 @@ test('recipe commands: each subsection line\'s backticked command; prose, other 
 
 const recipeOf = (perChange, atReview = []) => `## Validation\n\n### Run per change\n${perChange.map((c) => `- ${c}\n`).join('')}\n### Run at review\n${atReview.map((c) => `- ${c}\n`).join('')}`
 
-test('crew start: the takeable tickets\' recipe commands are rendered into workflow.js, each once and exactly as written; closed and ready-for-human tickets add none', async () => {
+test("crew start: the takeable tickets' recipe commands are rendered into workflow.js, each once and exactly as written; closed and ready-for-human tickets add none", async () => {
   const odd = 'echo "`date`" ${HOME} \'q\' C:\\x\\ $& __SPEC__'
   const w = world({
     tickets: [
@@ -341,6 +355,11 @@ test('crew start: the takeable tickets\' recipe commands are rendered into workf
   const script = readFileSync(armed.script, 'utf8')
   assert.deepEqual(renderedConst(script, 'PER_CHANGE_COMMANDS'), ['npm test', odd, 'npm run lint'])
   assert.deepEqual(renderedConst(script, 'AT_REVIEW_COMMANDS'), ['npm test -- --all'])
+  assert.deepEqual(
+    renderedConst(script, 'TICKET_RECIPES'),
+    { 101: { perChange: ['npm test', odd], atReview: ['npm test -- --all'] }, 102: { perChange: ['npm   test', 'npm run lint'], atReview: ['npm test -- --all'] }, 105: { perChange: [], atReview: [] } },
+    "each takeable ticket's own recipe, read by the rule the sets are, so every command a ticket runs is one the baseline measured",
+  )
   assert.match(script, /^const SPEC = 94\b/m, 'a command naming a placeholder is not substituted into')
 })
 
@@ -431,7 +450,24 @@ test('crew start at a terminal: Enter through the form renders workflow.js into 
   assert.deepEqual(w.launches, [{ script, stateDir, permissionMode: 'auto', cwd: w.repoDir, title: 'implement-spec #94: Crew, the session runner' }])
   const template = readFileSync(templatePath(), 'utf8')
   const pinned = (await w.git('rev-parse', 'origin/develop')).stdout.trim()
-  assert.equal(readFileSync(script, 'utf8'), skillRender(template, { SPEC: 94, REPO: 'acme/app', REPO_DIR: w.repoDir, NOTES_DIR: runDir, BASE_REF: 'develop', START_REF: 'develop', BASE_SHA: pinned, STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session', PER_CHANGE_COMMANDS: '["npm test"]', AT_REVIEW_COMMANDS: '["npm test"]' }))
+  assert.equal(
+    readFileSync(script, 'utf8'),
+    skillRender(template, {
+      SPEC: 94,
+      REPO: 'acme/app',
+      REPO_DIR: w.repoDir,
+      NOTES_DIR: runDir,
+      BASE_REF: 'develop',
+      START_REF: 'develop',
+      BASE_SHA: pinned,
+      STACK_MODE: 'native',
+      RUN_ORDER: 'parallel',
+      RUNNER: 'session',
+      PER_CHANGE_COMMANDS: '["npm test"]',
+      AT_REVIEW_COMMANDS: '["npm test"]',
+      TICKET_RECIPES: '{"101":{"perChange":["npm test"],"atReview":["npm test"]},"102":{"perChange":["npm test"],"atReview":["npm test"]}}',
+    }),
+  )
   assert.deepEqual(rememberedAnswers(w.paths, w.repoDir), { harness: 'claude', base: 'develop', stackMode: 'native', runOrder: 'parallel', permissionMode: 'auto', models: { claude: 'opus' } }, 'prior work is never remembered')
   assert.ok(!w.calls.some((c) => c.startsWith('gh extension install')), 'the extension is installed only when chosen')
 })

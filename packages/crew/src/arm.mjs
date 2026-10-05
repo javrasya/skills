@@ -30,7 +30,7 @@ export function templatePath(candidates = TEMPLATES) {
   return found
 }
 
-export const PLACEHOLDERS = ['SPEC', 'REPO', 'REPO_DIR', 'NOTES_DIR', 'BASE_REF', 'START_REF', 'BASE_SHA', 'STACK_MODE', 'RUN_ORDER', 'RUNNER', 'PER_CHANGE_COMMANDS', 'AT_REVIEW_COMMANDS']
+export const PLACEHOLDERS = ['SPEC', 'REPO', 'REPO_DIR', 'NOTES_DIR', 'BASE_REF', 'START_REF', 'BASE_SHA', 'STACK_MODE', 'RUN_ORDER', 'RUNNER', 'PER_CHANGE_COMMANDS', 'AT_REVIEW_COMMANDS', 'TICKET_RECIPES']
 const PLACEHOLDER = new RegExp(`__(${PLACEHOLDERS.join('|')})__`, 'g')
 
 // SKILL.md step 3: substitute, never rewrite. One pass, so a value that
@@ -124,22 +124,6 @@ export async function resolveArming({ repoDir, spec, repo, run = execProgram, ho
   return { spec, repo, repoDir, notesDir: notesDirOf(repo, spec, home), title: issue.stdout.trim() }
 }
 
-// Whether a ticket's body carries its validation recipe (ADR-0029): a
-// `## Validation` heading whose section holds a `### Run per change` one.
-// Headings only, matched as strings; what the section says is preflight's.
-export function hasValidationRecipe(body) {
-  const lines = String(body ?? '')
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-  const at = lines.indexOf('## Validation')
-  if (at < 0) return false
-  for (const line of lines.slice(at + 1)) {
-    if (line === '### Run per change') return true
-    if (/^##?\s/.test(line)) return false
-  }
-  return false
-}
-
 // The run's pinned base (ADR-0030): the commit its cut-from ref, the prior work
 // or else the base, stands at on origin after a fetch, resolved once here so
 // every ticket of the run is cut from one sha however the ref moves under it.
@@ -156,15 +140,17 @@ export async function pinBase({ repoDir, base, startRef, run = execProgram }) {
   throw new StartError(`cannot pin the run's base: ${named} resolves to no commit${startRef === base ? ' on origin' : ', on origin or in this checkout'}; nothing armed`)
 }
 
-// A ticket's recipe commands (ADR-0029, ADR-0030): under `## Validation`,
-// each `### Run per change` and `### Run at review` line's first code span.
+// A ticket's validation recipe (ADR-0029, ADR-0030), read from its body's
+// `## Validation` section: whether that holds a `### Run per change` heading,
+// and each `### Run per change` and `### Run at review` line's first code span.
 // A line with none, or labelled as prose ("absent: …", "Tests: not
-// applicable: …"), is no command. String work only, as the heading check is.
+// applicable: …"), is no command. Headings and spans only, matched as strings;
+// what the section says is preflight's.
 const PROSE = /^(absent|not applicable|recipe measured|needs|deferred repo gate)\b/i
 const SUBSECTIONS = { '### Run per change': 'perChange', '### Run at review': 'atReview' }
 const CODE_SPAN = /(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)/
-export function recipeCommands(body) {
-  const found = { perChange: [], atReview: [] }
+function readRecipe(body) {
+  const found = { hasPerChange: false, perChange: [], atReview: [] }
   let inValidation = false
   let into = null
   for (const raw of String(body ?? '').split(/\r?\n/)) {
@@ -172,8 +158,10 @@ export function recipeCommands(body) {
     if (/^##?\s/.test(line)) {
       inValidation = line === '## Validation'
       into = null
-    } else if (inValidation && /^#{3,}\s/.test(line)) into = SUBSECTIONS[line] ?? null
-    else if (into) {
+    } else if (inValidation && /^#{3,}\s/.test(line)) {
+      into = SUBSECTIONS[line] ?? null
+      if (into === 'perChange') found.hasPerChange = true
+    } else if (into) {
       const text = line.replace(/^(?:[-*+]|\d+[.)])\s+/, '')
       if (PROSE.test(text) || PROSE.test(text.replace(/^[^:`]*:\s*/, ''))) continue
       const command = CODE_SPAN.exec(text)?.[2].trim()
@@ -183,21 +171,36 @@ export function recipeCommands(body) {
   return found
 }
 
-// The per-change and the at-review commands of all `tickets`, each command
-// once whichever tickets list it, kept as first written; two that differ only
-// in whitespace are one.
-export function recipeCommandSets(tickets) {
-  const sets = { perChange: new Map(), atReview: new Map() }
-  for (const { body } of tickets) {
-    const commands = recipeCommands(body)
-    for (const [k, set] of Object.entries(sets))
-      for (const c of commands[k]) {
-        const key = c.split(/\s+/).join(' ')
-        if (!set.has(key)) set.set(key, c)
-      }
+// Whether a ticket's body carries its validation recipe: the headings alone.
+export const hasValidationRecipe = (body) => readRecipe(body).hasPerChange
+
+// Each command once, kept as first written; two that differ only in
+// whitespace are one, as the rendered script's norm() has them.
+function onceEach(commands) {
+  const seen = new Map()
+  for (const c of commands) {
+    const key = c.replace(/\s+/g, ' ').trim()
+    if (!seen.has(key)) seen.set(key, c)
   }
-  return { perChange: [...sets.perChange.values()], atReview: [...sets.atReview.values()] }
+  return [...seen.values()]
 }
+
+export function recipeCommands(body) {
+  const { perChange, atReview } = readRecipe(body)
+  return { perChange: onceEach(perChange), atReview: onceEach(atReview) }
+}
+
+// The per-change and the at-review commands of all `tickets`, each command
+// once whichever tickets list it: the sets the baseline measures.
+export function recipeCommandSets(tickets) {
+  const recipes = tickets.map(({ body }) => readRecipe(body))
+  return { perChange: onceEach(recipes.flatMap((r) => r.perChange)), atReview: onceEach(recipes.flatMap((r) => r.atReview)) }
+}
+
+// Each ticket's own recipe by its number, from the same parse as the sets: the
+// commands the script runs for that ticket are the baselined ones, string for
+// string, so the record always has an entry for them.
+export const ticketRecipes = (tickets) => Object.fromEntries(tickets.map(({ number, body }) => [number, recipeCommands(body)]))
 
 // The spec's open `ready-for-agent` sub-issues, as [{ number, title, body }];
 // ready-for-human ones are never the run's to take, and nor are closed ones —
@@ -254,12 +257,14 @@ export function runOrchestrator({ paths, host = (cwd) => crewHost({ paths, cwd }
 // Renders the template into a new run's own folder and launches it there.
 // `answers` are the form's, stackMode settled to the template's value; `roles`
 // the per-role overrides of crew's per-repo config; `baseSha` the pinned base
-// (pinBase); `recipe` the tickets' recipeCommandSets, rendered as JSON array
-// literals, which no command text can break out of; `newId()` draws the run's
+// (pinBase); `tickets` the takeable ones, whose recipeCommandSets and
+// ticketRecipes are rendered as JSON literals, which no command text can break
+// out of; `newId()` draws the run's
 // id (newRunId). A run folder that exists already is another run's: a new id
 // is drawn, `attempts` times in all, before the start is refused.
-export async function armRun({ target, answers, baseSha, roles, recipe, newId, attempts = 5, template = readFileSync(templatePath(), 'utf8'), launch }) {
+export async function armRun({ target, answers, baseSha, roles, tickets, newId, attempts = 5, template = readFileSync(templatePath(), 'utf8'), launch }) {
   const { spec, repo, repoDir, notesDir, title } = target
+  const recipe = recipeCommandSets(tickets)
   const render = (runFolder) =>
     renderRoles(
       renderTemplate(template, {
@@ -275,6 +280,7 @@ export async function armRun({ target, answers, baseSha, roles, recipe, newId, a
         RUNNER: 'session',
         PER_CHANGE_COMMANDS: JSON.stringify(recipe.perChange),
         AT_REVIEW_COMMANDS: JSON.stringify(recipe.atReview),
+        TICKET_RECIPES: JSON.stringify(ticketRecipes(tickets)),
       }),
       { runDefault: answers, roles },
     )
@@ -364,5 +370,5 @@ export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdi
   const baseSha = await pinBase({ repoDir, base: answers.base, startRef: answers.startRef, run })
   const settled = { ...answers, stackMode: await settleStackMode(answers, run) }
   rememberAnswers(paths, repo, settled)
-  return { ...(await armRun({ target, answers: settled, baseSha, roles, recipe: recipeCommandSets(tickets), newId: () => runIdFor(spec), launch })), target, answers: settled, baseSha }
+  return { ...(await armRun({ target, answers: settled, baseSha, roles, tickets, newId: () => runIdFor(spec), launch })), target, answers: settled, baseSha }
 }

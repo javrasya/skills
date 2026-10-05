@@ -303,9 +303,13 @@ written into the ticket's **Validation** section by [[preflight]] and read from 
 It has two halves: **run per change**, the commands every implementer, fixer, gate reviewer and publisher
 of that ticket runs on its commit; and **run at review**, the full suites the whole-stack review runs once
 on the stack tip, unioned over every ticket. A section with no commands is honest — the operator decided
-there was nothing to run — and the brief says so; a ticket with no section is not armable. The
-[[dispatcher]] turns the section into the commands each role is told, verbatim, and the gate reviewer,
-who reads the ticket anyway, blocks when the two differ. Every role returns **one result per command**,
+there was nothing to run — and the brief says so; a ticket with no section is not armable. **Arming**
+reads the commands off every ticket by one rule — each line's first backticked span, prose lines none —
+and the run runs that ticket's own, the very strings measured for [[pre-existing failure]]s at the pinned
+base; the [[dispatcher]]'s copy stands in only for a ticket arming never read. Each role is told every
+command verbatim, or, where it already fails at the pinned base, its masked form, with those failures
+deselected; the gate reviewer, who reads the ticket anyway, blocks when what it was told and the ticket
+differ. Every role returns **one result per command**,
 never one green boolean; a missing result is a schema failure, not a pass. **Readiness** is the per-change
 half green on the exact commit under review: the reviewer's first act is to establish it — by
 [[inherited-result]] when the sha is unchanged, else by re-running — and a red there is a **remainder**
