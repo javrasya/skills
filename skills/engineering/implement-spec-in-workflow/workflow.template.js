@@ -269,7 +269,7 @@ const JUDGING = `Each result carries the command's \`exit_code\`. A zero exit is
 // validated sha, so the next role knows which ones it may not inherit.
 const waivedOf = (checks) => (checks || []).filter((k) => k.passed && k.exit_code !== 0).map((k) => ({ command: k.command, exit_code: k.exit_code }))
 const unionWaived = (a, b) => unionInto([...a], b, (k) => norm(k.command))
-const validatedBy = (r, by) => r.validated_sha ? { sha: r.validated_sha, by, waived: waivedOf(r.checks) } : null
+const validatedBy = (r, by) => r.validated_sha ? { sha: r.validated_sha, by, waived: waivedOf(r.checks), cleared: (r.checks || []).filter((k) => k.passed && k.exit_code === 0).map((k) => norm(k.command)) } : null
 // A green result travels with the sha it was green on (ADR-0009). The agent
 // downstream checks the sha itself — one rev-parse — and inherits the result
 // when nothing changed, so the run pays for each tree once. Re-running on an
@@ -1190,7 +1190,11 @@ Stack so far, bottom to top: ${stacked.length ? stacked.map((s) => `#${s.number}
 ${cutFrom !== base ? `4. The tip moved since this ticket was cut. Replay its commits onto the tip: \`git rebase --onto ${ref(base)} ${cutRef(cutFrom)}\`. This rewrites only local commits that have never left this clone, so it needs no force and destroys nothing. Resolve any conflict in favour of keeping BOTH tickets' behaviour.
 5. The rebase produced a tree nobody has validated. ${validationLine(impl.validation)}
    Get every command green, committing any fix.
-6. Move the branch onto the rebased work: \`git update-ref refs/heads/${impl.branch} HEAD\`.` : `4. The tip has not moved: the branch already sits on \`${cutRef(base)}\`. No rebase.
+6. Move the branch onto the rebased work: \`git update-ref refs/heads/${impl.branch} HEAD\`.` : cutRef(base) !== ref(base) ? `4. This ticket was cut from the run's pinned base, \`${BASE_SHA}\`, but its PR goes on \`${base}\` as origin has it now, which may have moved since the run was armed. Decide by sha, never by name: \`git rev-parse ${ref(base)}\`. If it prints \`${BASE_SHA}\`, nothing moved: no rebase. Anything else: replay the ticket's commits onto it, \`git rebase --onto ${ref(base)} ${BASE_SHA}\`. This rewrites only local commits that have never left this clone, so it needs no force and destroys nothing. Resolve any conflict in favour of keeping both the ticket's behaviour and what landed on \`${base}\`.
+5. ${validationLine(impl.validation)}
+   Get every command green, committing any fix. After a rebase the tree is one nobody has validated, and HEAD no longer matches any validated sha.
+   ${inherit(impl.validated)}
+6. If you rebased or committed, move the branch onto that work: \`git update-ref refs/heads/${impl.branch} HEAD\`. Otherwise it already points at the work.` : `4. The tip has not moved: the branch already sits on \`${cutRef(base)}\`. No rebase.
 5. ${validationLine(impl.validation)}
    ${inherit(impl.validated)}
 6. The branch already points at the work; nothing to move.`}
@@ -1696,6 +1700,8 @@ if (unpublished.length) {
   const cause = haltedBy || unpublished[0]
   log(`HALTED on #${cause.number} (${cause.state}) — ${unpublished.map((o) => `#${o.number} ${o.state}`).join(', ')}`)
   const localOnly = unpublished.filter((o) => runRefs.has(`ticket/${o.number}`)).map((o) => `ticket/${o.number}`)
+  if (AT_REVIEW_ONLY.length) log('Waiting for the at-review baseline to settle before halting, so no session outlives the run and a resume replays its result instead of measuring again')
+  await atReviewMeasured
   return {
     spec: SPEC,
     halted: true,
@@ -1805,7 +1811,8 @@ if (findings.length) {
   integrationUnaccounted = out.unaccounted
   // Every waived check behind this PR: the review's at-review ones, and the
   // last fixer's over the union recipe.
-  const integrationWaived = unionWaived(reviewWaived, out.validated?.waived || [])
+  const cleared = new Set(out.validated?.cleared || [])
+  const integrationWaived = unionWaived(out.validated?.waived || [], reviewWaived.filter((k) => !cleared.has(norm(k.command))))
   if (out.landed) {
     // Publishing is the one irreversible act of this phase, so it is its own
     // small agent rather than the last and most context-exhausted fixer's job.
@@ -1923,7 +1930,9 @@ ${stackDisabled
 2. Mark every PR of the stack ready for review, bottom to top: \`gh pr ready <number>\`. Draft PRs block a stack merge, so none may stay draft — and until this step the drafts are what tell the operator the run is still adding layers, so it must not happen earlier.
 ${complete
     ? `3. Append the line \`Closes #${SPEC}\` to the TOP PR's body (\`gh pr edit\` — keep the existing body, add the line). Merging the whole stack from the top then closes every ticket and the spec at once.`
-    : `3. Add NO \`Closes #${SPEC}\` anywhere — the spec is not complete. Comment on the TOP PR and on issue #${SPEC}: the stack in merge order (the PR list above), and what remains for a human: ${remains.join('; ')}. A later run stacks the remainder on top.`}
+    : `3. Add NO \`Closes #${SPEC}\` anywhere — the spec is not complete. Comment on the TOP PR and on issue #${SPEC}: the stack in merge order (the PR list above), and what remains for a human: ${remains.join('; ')}. A later run stacks the remainder on top.`}${!integration && reviewWaived.length ? `
+   The whole-stack review waived these at-review checks on the stack tip, the TOP PR's head — each judged green over a non-zero exit, every failure in it pre-existing at the run's pinned base (${BASELINE_RECORD}) — and no integration PR exists to list them. Append them to the TOP PR's body (\`gh pr edit\` — keep the existing body, add the lines; never rewrite it), one line each as \`Waived: <command> exited <exit_code>\`, the command in code formatting:
+${reviewWaived.map((k) => `   - \`${k.command}\` exited ${k.exit_code}`).join('\n')}` : ''}
 4. ${reclaimStep(finalReclaim)}
 ${ON_SESSION ? '' : `   The lane already reclaimed each published ticket's worktrees; these are the rest. ${strayStep()}
 `}   Touch no other worktree — the user's own checkout in particular — and delete no branches and close no PRs.

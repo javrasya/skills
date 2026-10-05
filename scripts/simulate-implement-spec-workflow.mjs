@@ -15,7 +15,7 @@ const SIM_CHECK = 'npm t'
 // per-ticket recipe map; none by default, so the dispatcher's copy stands in.
 // Rendered by crew's own renderTemplate, which refuses a placeholder left out.
 const PINNED = '0a1b2c3d4e5f60718293a4b5c6d7e8f901234567'
-function render(runner, runOrder = 'parallel', startRef = 'main', recipes = {}) {
+function render(runner, runOrder = 'parallel', startRef = 'main', recipes = {}, atReview = []) {
   return renderTemplate(readFileSync(TPL, 'utf8'), {
     SPEC: 224,
     REPO: 'o/r',
@@ -28,7 +28,7 @@ function render(runner, runOrder = 'parallel', startRef = 'main', recipes = {}) 
     RUN_ORDER: runOrder,
     RUNNER: runner,
     PER_CHANGE_COMMANDS: JSON.stringify([SIM_CHECK]),
-    AT_REVIEW_COMMANDS: '[]',
+    AT_REVIEW_COMMANDS: JSON.stringify(atReview),
     TICKET_RECIPES: JSON.stringify(recipes),
   })
 }
@@ -63,7 +63,7 @@ function completeToSchema(result, opts, label) {
   })
 }
 
-async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel', startRef = 'main', recipes = {} } = {}) {
+async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel', startRef = 'main', recipes = {}, atReview = [] } = {}) {
   const calls = []
   const defaults = {
     graph: () => ({
@@ -139,7 +139,7 @@ async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel',
   const phase = () => {}
 
   // The session runner's own loader, so the script is loaded one way everywhere.
-  const result = await loadScript(render(runner, runOrder, startRef, recipes))(agent, parallel, phase, log, {})
+  const result = await loadScript(render(runner, runOrder, startRef, recipes, atReview))(agent, parallel, phase, log, {})
   EVERY_CALL.push(...calls)
   EVERY_RUN.push(calls)
   return { result, calls, logs, timeline }
@@ -169,7 +169,10 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('A: a bottom ticket is cut from the pinned base, not the moving ref', calls.find((c) => c.label === 'impl:#10').prompt.includes(`git switch --detach ${PINNED}`) && !calls.find((c) => c.label === 'impl:#10').prompt.includes('git switch --detach origin/main'), '')
   check('A: slices move the ref instead of pushing', calls.find((c) => c.label === 'impl:#10').prompt.includes('git update-ref refs/heads/ticket/10 HEAD') && calls.find((c) => c.label === 'impl:#10').prompt.includes('Push nothing'), '')
   check('A: the lane pushes once, creating the ref', calls.find((c) => c.label === 'publish:#10').prompt.includes('git push origin ticket/10') && calls.find((c) => c.label === 'publish:#10').prompt.includes('CREATES the branch'), '')
-  check('A: publish #10 needs no rebase (tip unmoved)', !calls.find((c) => c.label === 'publish:#10').prompt.includes('git rebase --onto'), '')
+  const bottom = calls.find((c) => c.label === 'publish:#10').prompt
+  check('A: the bottom publish decides whether the base moved by sha, not by name', bottom.includes('git rev-parse origin/main') && bottom.includes(`If it prints \`${PINNED}\`, nothing moved: no rebase`) && bottom.includes(`git rebase --onto origin/main ${PINNED}`) && !bottom.includes('The tip has not moved'), bottom.slice(0, 2500))
+  check('A: after that rebase the bottom publish re-runs the recipe and moves the branch', bottom.includes('After a rebase the tree is one nobody has validated') && bottom.includes('git update-ref refs/heads/ticket/10 HEAD'), '')
+  check('A: publish #11 needs no rebase (stacked on #10, tip unmoved)', !calls.find((c) => c.label === 'publish:#11').prompt.includes('git rebase --onto'), '')
   check('A: finalize is the last agent', seq[seq.length - 1] === 'finalize', seq.join(' | '))
   check('A: complete state', result.state.startsWith('complete'), result.state)
   check('A: not halted, reviewed and finalized', result.halted === false && seq.includes('review:spec-224') && seq.includes('finalize'), seq.join(' | '))
@@ -566,6 +569,44 @@ const withBlockers = (blockers) => () => ({
   check('G: no integration PR in the stack', !result.stack_bottom_to_top.some((l) => l.startsWith('integration')), JSON.stringify(result.stack_bottom_to_top))
 }
 
+{
+  const TC = 'npm run typecheck'
+  const E2E = 'npm run e2e'
+  const finding = { severity: 'major', location: 'c.js:3', issue: 'two helpers', fix: 'merge them' }
+  const reviewChecks = [{ command: TC, passed: true, exit_code: 2 }, { command: E2E, passed: true, exit_code: 1 }]
+  const fixed = await run({
+    review: () => ({ findings: [finding], checks: reviewChecks }),
+    fixslice: (label, prompt) => ({ verdicts: locationsIn(prompt).map((l) => ({ location: l, issue: issueFor(l), action: 'fixed', reason: 'fixed it' })), unfinished: [], checks: [{ command: TC, passed: true, exit_code: 2 }, { command: E2E, passed: true, exit_code: 0 }], validated_sha: 'fixsha' }),
+  })
+  const pr = fixed.calls.find((c) => c.label === 'publish:integration').prompt
+  check('W: the integration PR lists a check the last fixer still waived', pr.includes(`- \`${TC}\` exited 2`), pr)
+  check('W: a waived check the last fixer ran green is dropped from the integration PR', !pr.includes(`\`${E2E}\` exited`), pr)
+  check('W: with an integration PR, finalize appends no waived lines', !fixed.calls.find((c) => c.label === 'finalize').prompt.includes('Waived:'), '')
+  const clean = await run({ review: () => ({ findings: [], checks: reviewChecks }) })
+  const fin = clean.calls.find((c) => c.label === 'finalize').prompt
+  check('W: with no integration PR, finalize appends the review\'s waived checks to the top PR\'s body', !clean.calls.some((c) => c.label === 'publish:integration') && /Append them to the TOP PR's body \(`gh pr edit` — keep the existing body/.test(fin) && fin.includes('`Waived: <command> exited <exit_code>`') && fin.includes(`- \`${TC}\` exited 2`) && fin.includes(`- \`${E2E}\` exited 1`), fin)
+  check('W: the run result still carries them', JSON.stringify(clean.result.review_waived) === JSON.stringify([{ command: TC, exit_code: 2 }, { command: E2E, exit_code: 1 }]), JSON.stringify(clean.result.review_waived))
+}
+
+{
+  const E2E = 'npm run e2e'
+  const { result, timeline, logs } = await run(
+    {
+      graph: () => ({ tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }], explorations: [] }),
+      baseline: async (label) => {
+        if (label === 'baseline:at-review') await new Promise((done) => setTimeout(done, 100))
+        const command = label === 'baseline:at-review' ? E2E : SIM_CHECK
+        return { commands: [{ command, exit_code: 0, masked_command: '', failures: { tests: [], diagnostics: [] } }], decisions_needed: [] }
+      },
+      impl: () => ({ branch: 'ticket/10', summary: 'partial', tests_run: 'npm t', tests_green: true, unmet: ['criterion Z'] }),
+    },
+    { atReview: [E2E] },
+  )
+  check('WH: the run halts in Implement', result.halted === true && result.tickets?.[0]?.state === 'unmet', JSON.stringify(result))
+  check('WH: the at-review baseline has settled by the time the halted run returns', timeline.includes('end baseline:at-review'), timeline.join(' | '))
+  check('WH: the halt says it waited on it', logs.some((l) => l.startsWith('Waiting for the at-review baseline to settle before halting')), logs.join(' | '))
+}
+
 // --- scenario H: the stack registers as it grows, not at finalize ----------
 // `gh stack link` takes a minimum of two arguments, so the first PR of a
 // layer-0-less run cannot register and the second must. Every call re-lists
@@ -817,7 +858,8 @@ const withBlockers = (blockers) => () => ({
   check('S: the explorers still run side by side', calls.filter((c) => c.label.startsWith('explore')).some((c) => c.alongside > 0), '')
   check("S: each ticket's publish returns before the next ticket's dispatch starts", order.slice(1).every((n, i) => before(`end publish:#${order[i]}`, `start dispatch:#${n}`)), timeline.join(' | '))
   const publishes = calls.filter((c) => c.label.startsWith('publish:'))
-  check('S: no publisher prompt carries a rebase step', publishes.length === 6 && !publishes.some((c) => /git rebase/.test(c.prompt)), publishes.filter((c) => /git rebase/.test(c.prompt)).map((c) => c.label).join(' | '))
+  const rebasing = publishes.filter((c) => /git rebase/.test(c.prompt))
+  check("S: no publisher replays onto another ticket; only the bottom one may replay onto a moved START_REF", publishes.length === 6 && rebasing.length === 1 && rebasing[0].label === `publish:#${order[0]}` && rebasing[0].prompt.includes(`git rebase --onto origin/main ${PINNED}`) && !publishes.some((c) => /git rebase --onto ticket\//.test(c.prompt)), rebasing.map((c) => c.label).join(' | '))
   check('S: the whole-stack review and its integration fixes run one agent at a time', before('end review:spec-224', 'start integration:dispatch') && before('end integration:dispatch', 'start integration:s1') && before('end integration:s1', 'start integration:s2') && before('end integration:s2', 'start publish:integration'), timeline.join(' | '))
   check('S: the sequential run completes', result.state.startsWith('complete'), result.state)
 

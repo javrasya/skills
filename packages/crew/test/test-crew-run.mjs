@@ -697,7 +697,8 @@ test("the skill's template on the crew host: two tickets started after origin/<b
   const stackedOn = /git switch --detach (ticket\/10[12])`/.exec(promptOf('impl:#103'))
   assert.ok(stackedOn, `#103 is cut from the tip's branch:\n${promptOf('impl:#103')}`)
   assert.ok(!promptOf('impl:#103').includes(`git switch --detach ${pinned}`))
-  const rebased = [101, 102].map((n) => promptOf(`publish:#${n}`)).filter((p) => p.includes('git rebase --onto'))
+  for (const n of [101, 102]) assert.ok(promptOf(`publish:#${n}`).includes(`git rebase --onto origin/main ${pinned}\``), `a bottom publish replays onto origin/main if it moved since arming, by sha:\n${promptOf(`publish:#${n}`)}`)
+  const rebased = [101, 102].map((n) => promptOf(`publish:#${n}`)).filter((p) => p.includes('git rebase --onto ticket/'))
   assert.equal(rebased.length, 1, 'the second of the two to publish replays onto the first')
   assert.match(rebased[0], new RegExp(`git rebase --onto ticket/10[12] ${pinned}\``))
   assert.match(rebased[0], /The rebase produced a tree nobody has validated/)
@@ -998,7 +999,7 @@ test("the skill's template on the crew host: dispatch does not wait on the at-re
       '^publish_101': { published: true, pr_url: 'https://github.com/acme/app/pull/101', pr_number: 101, checks: ok(unit), validated_sha: 'abc123', stack_link: 'registered' },
       '^review': { checks: [...ok(maskedE2e, unit), { command: typecheck, passed: true, exit_code: 2 }], findings: [finding] },
       '^integration_dispatch': { slices: [{ title: 'one helper', brief: 'merge the sums', findings: [finding.location], effort: 'medium' }] },
-      '^integration': { verdicts: [], checks: ok(unit, maskedE2e, typecheck), validated_sha: 'fed987' },
+      '^integration': { verdicts: [], checks: [...ok(unit, maskedE2e), { command: typecheck, passed: true, exit_code: 2 }], validated_sha: 'fed987' },
       '^publish_integration': { pr_url: 'https://github.com/acme/app/pull/102', pr_number: 102, branch: 'spec/94-integration' },
       '^finalize': { summary: 'stack ready' },
     }),

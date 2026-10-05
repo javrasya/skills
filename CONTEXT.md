@@ -344,6 +344,39 @@ decides whether its own work is meant to fix one, as when the ticket names that 
 
 _Avoid_: baseline failure, known failure — a worktree's **baseline** is its setup's leftover files.
 
+### Pinned base
+
+A run's **pinned base** is the commit its start ref stood at when the run was armed, resolved once after
+a fetch: the sha every ticket on the stack's bottom is cut from, and the one the [[baseline measurement]]
+runs on, however the ref moves under the run. Whether the base moved is decided by sha, never by name: a
+bottom ticket's publisher compares `origin/<start ref>` with the pinned base and, when they differ,
+replays the ticket onto it and runs its recipe again (ADR-0030).
+
+_Avoid_: start ref, base ref, for this sha — both name a branch, which moves.
+
+### Baseline measurement, and the baseline record
+
+The **baseline measurement** is the run measuring its [[validation recipe]] at the [[pinned base]] before
+anything is built: the `baseline` role, as two nodes of the run tree — `baseline:per-change`, which
+dispatch waits on, and `baseline:at-review`, which runs in the background and only the whole-stack review
+waits on. Its result is the **baseline record**, `pre-existing-failures.json` in the run folder: per
+command its exit code, its [[pre-existing failure]]s and any [[masked command]]. A command it cannot run
+is a blocker; a halt on one is kept in `baseline-blockers.json` or `baseline-at-review-blockers.json`,
+which a resume reads to check that blocker first (ADR-0030).
+
+It shares only the word with a worktree's **baseline**, the setup leftover files journaled as the
+`baseline` event: one run's journal can hold a `baseline` event and a `baseline:per-change` agent, unrelated.
+
+_Avoid_: baseline, bare, for the measurement or its record — alone it means a worktree's leftover files.
+
+### Masked command
+
+A **masked command** is a recipe command with the [[pre-existing failure]]s the [[baseline measurement]]
+found deselected, where the tool can skip tests. It replaces its original wherever validation runs, so no
+role is sent to fix what its ticket did not break; a role whose work is meant to fix a masked failure
+runs the original and says so. A failure no tool can deselect — a lint or type error — stays in the
+command, and the role may judge it a **waived check** (ADR-0030).
+
 ### Reporting to a screen
 
 The output discipline of a review a human reads under time pressure: the verdict in the first
