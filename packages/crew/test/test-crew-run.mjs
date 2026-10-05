@@ -552,7 +552,7 @@ test("the skill's template on the crew host: a dispatcher's validation reaches t
     }),
   )
   const template = readFileSync(templatePath(), 'utf8')
-  const script = renderTemplate(template, { SPEC: 94, REPO: 'acme/app', REPO_DIR: cwd, NOTES_DIR: join(root, 'template-notes'), BASE_REF: 'main', START_REF: 'main', BASE_SHA: '0a1b2c3d4e5f60718293a4b5c6d7e8f901234567', STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session' })
+  const script = renderTemplate(template, { SPEC: 94, REPO: 'acme/app', REPO_DIR: cwd, NOTES_DIR: join(root, 'template-notes'), BASE_REF: 'main', START_REF: 'main', BASE_SHA: '0a1b2c3d4e5f60718293a4b5c6d7e8f901234567', STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session', PER_CHANGE_COMMANDS: '[]', AT_REVIEW_COMMANDS: '[]' })
   const fake = [process.execPath, FAKE_HARNESS]
   const host = sessionHost(crewHost({ paths, env: { ...env, CREW_FAKE_MCP: '0', CREW_FAKE_ANSWERS: answers }, cwd, harnesses: { claude: fake, pi: fake }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
   const stateDir = join(root, 'template-state')
@@ -620,7 +620,7 @@ test("the skill's template on the crew host: two tickets started after origin/<b
       '^finalize': { summary: 'stack ready' },
     }),
   )
-  const script = renderTemplate(readFileSync(templatePath(), 'utf8'), { SPEC: 94, REPO: 'acme/app', REPO_DIR: cwd, NOTES_DIR: join(root, 'pinned-notes'), BASE_REF: 'main', START_REF: 'main', BASE_SHA: pinned, STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session' })
+  const script = renderTemplate(readFileSync(templatePath(), 'utf8'), { SPEC: 94, REPO: 'acme/app', REPO_DIR: cwd, NOTES_DIR: join(root, 'pinned-notes'), BASE_REF: 'main', START_REF: 'main', BASE_SHA: pinned, STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session', PER_CHANGE_COMMANDS: '[]', AT_REVIEW_COMMANDS: '[]' })
   const fake = [process.execPath, FAKE_HARNESS]
   const host = sessionHost(crewHost({ paths, env: { ...env, CREW_FAKE_MCP: '0', CREW_FAKE_ANSWERS: answers }, cwd, harnesses: { claude: fake, pi: fake }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
   const stateDir = join(root, 'pinned-state')
