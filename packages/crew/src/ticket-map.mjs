@@ -116,10 +116,16 @@ export function ticketsOf(graph, agents, resultOf = () => null) {
   return tickets
 }
 
-// The star map's spacing, in cells: a depth a column apart, a column's stars
-// a row apart. Never squeezed to the screen: the camera moves instead.
+// The star map's least spacing, in cells: a depth a column apart, a column's
+// stars a row apart. A screen with room for more spreads the map to fill it,
+// up to the most, past which a line is too long to follow; one with less
+// never squeezes it: the camera moves instead.
 export const COLUMN = 26
 export const ROW = 5
+const COLUMN_MOST = 60
+const ROW_MOST = 10
+// The cells kept clear at each side, for the selected title under its star.
+const MARGIN = 16
 
 // A small offset of its own for each ticket, so the map reads as a sky rather
 // than a grid, and the same ticket sits in the same place every refresh.
@@ -131,9 +137,10 @@ function jitter(n, salt) {
   return (h % 1000) / 1000 - 0.5
 }
 
-// Sets each ticket's x and y, in cells, in the map's own space: depth across,
-// each column centred on row 0, its stars in the order of their blockers'
-// rows (so lines cross less), a root's by its number.
+// Sets each ticket's x and y in the map's own units, a column and a row: depth
+// across, each column centred on row 0, its stars in the order of their
+// blockers' rows (so lines cross less), a root's by its number. mapScale
+// turns them into cells for a screen.
 export function layoutTickets(tickets) {
   const cols = []
   for (const t of tickets) (cols[t.depth] ??= []).push(t)
@@ -143,8 +150,8 @@ export function layoutTickets(tickets) {
     if (!col) continue
     col.sort((a, b) => meanY(a) - meanY(b) || a.n - b.n)
     col.forEach((t, i) => {
-      t.x = Math.round(t.depth * COLUMN + jitter(t.n, 1) * 3)
-      t.y = Math.round((i - (col.length - 1) / 2) * ROW + jitter(t.n, 2) * 2)
+      t.x = t.depth + (jitter(t.n, 1) * 3) / COLUMN
+      t.y = i - (col.length - 1) / 2 + (jitter(t.n, 2) * 2) / ROW
     })
   }
   return tickets
@@ -161,7 +168,7 @@ export function stepTicket(tickets, from, dir) {
     let best = null
     let bd = Infinity
     for (const t of list) {
-      const d = Math.hypot((t.x - at.x) / 2, t.y - at.y)
+      const d = Math.hypot(((t.x - at.x) * COLUMN) / 2, (t.y - at.y) * ROW)
       if (t !== at && d < bd) [best, bd] = [t, d]
     }
     return best?.n ?? from
@@ -171,6 +178,28 @@ export function stepTicket(tickets, from, dir) {
   const way = { UP: (t) => t.y < at.y, DOWN: (t) => t.y > at.y, LEFT: (t) => t.x < at.x, RIGHT: (t) => t.x > at.x }[dir]
   return way ? nearest(tickets.filter(way)) : from
 }
+
+// The map on a screen W cells wide and H high: { column, row }, the cells a
+// map unit spans each way, as many as fill the screen, from COLUMN and ROW up
+// to their most; fits, along each axis, whether the whole map is on screen
+// at that spacing; centre, the map's middle, in map units.
+export function mapScale(tickets, W, H) {
+  const xs = tickets.map((t) => t.x)
+  const ys = tickets.map((t) => t.y)
+  const span = (vs) => Math.max(...vs) - Math.min(...vs)
+  const middle = (vs) => (Math.max(...vs) + Math.min(...vs)) / 2
+  const [wide, high] = [span(xs), span(ys)]
+  const roomX = W - 2 * MARGIN
+  const roomY = H - 3
+  const column = wide > 0 ? Math.max(COLUMN, Math.min(COLUMN_MOST, Math.floor(roomX / wide))) : COLUMN
+  const row = high > 0 ? Math.max(ROW, Math.min(ROW_MOST, Math.floor(roomY / high))) : ROW
+  return { column, row, fits: { x: wide * column <= roomX, y: high * row <= roomY }, centre: { x: middle(xs), y: middle(ys) } }
+}
+
+// Where the camera looks, in map units: at the map's middle along an axis the
+// whole map fits, so it sits still and centred; along one it overflows, at
+// cam, the camera that follows the selected star.
+export const lookAt = (scale, cam) => ({ x: scale.fits.x ? scale.centre.x : cam.x, y: scale.fits.y ? scale.centre.y : cam.y })
 
 // How long the camera takes to glide to a newly selected star. A fixed time
 // with ease-in-out, never a chase that creeps its last cell.

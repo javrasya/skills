@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ticketsOf, layoutTickets, stepTicket, cameraAt, latestAgent, GLIDE_MS, COLUMN, ROW } from '../src/ticket-map.mjs'
+import { ticketsOf, layoutTickets, stepTicket, cameraAt, latestAgent, lookAt, mapScale, GLIDE_MS, COLUMN, ROW } from '../src/ticket-map.mjs'
 import { runView, runsView } from '../src/run-view-model.mjs'
 import { draw, strip, TICKETS_HELP } from '../src/run-view/draw.mjs'
 import { painter } from '../src/run-view/paint.mjs'
@@ -129,20 +129,32 @@ test('ticket model: a cycle in the graph does not hang the depth', () => {
   assert.ok(tickets.every((t) => Number.isInteger(t.depth)))
 })
 
-test('ticket layout: depth is a fixed column apart and a column’s stars a fixed row apart, never squeezed', () => {
-  const tickets = ticketsOf(graphOf([[1], [2, [1]], [3, [1]], [4, [1]], [5, [2]]]), [])
-  layoutTickets(tickets)
+test('ticket layout: depth a column apart and a column’s stars a row apart, in the map’s own units, the same every time', () => {
+  const graph = graphOf([[1], [2, [1]], [3, [1]], [4, [1]], [5, [2]]])
+  const tickets = layoutTickets(ticketsOf(graph, []))
   const by = new Map(tickets.map((t) => [t.n, t]))
-  for (const t of tickets) assert.ok(Math.abs(t.x - t.depth * COLUMN) <= 2, `#${t.n} at x ${t.x}`)
+  for (const t of tickets) assert.ok(Math.abs(t.x - t.depth) < 0.1, `#${t.n} at x ${t.x}`)
   const col = [2, 3, 4].map((n) => by.get(n).y).sort((a, b) => a - b)
-  assert.ok(col[1] - col[0] >= ROW - 2 && col[2] - col[1] >= ROW - 2, `rows ${col}`)
-  // The same graph lays out the same way every time.
-  const again = ticketsOf(graphOf([[1], [2, [1]], [3, [1]], [4, [1]], [5, [2]]]), [])
-  layoutTickets(again)
+  assert.ok(col[1] - col[0] > 0.5 && col[2] - col[1] > 0.5, `rows ${col}`)
   assert.deepEqual(
-    again.map((t) => [t.x, t.y]),
+    layoutTickets(ticketsOf(graph, [])).map((t) => [t.x, t.y]),
     tickets.map((t) => [t.x, t.y]),
   )
+})
+
+test('ticket spread: a screen with room spreads the map to fill it, up to a most; a small one keeps the least and the camera moves', () => {
+  const tickets = layoutTickets(ticketsOf(graphOf([[1], [2, [1]], [3, [1]], [4, [2, 3]]]), []))
+  const wide = mapScale(tickets, 280, 30)
+  assert.ok(wide.column > COLUMN && wide.column <= 60, `column ${wide.column}`)
+  assert.ok(wide.row > ROW && wide.row <= 10, `row ${wide.row}`)
+  assert.deepEqual(wide.fits, { x: true, y: true })
+  const small = mapScale(tickets, 60, 8)
+  assert.deepEqual([small.column, small.row], [COLUMN, ROW])
+  assert.deepEqual(small.fits, { x: false, y: false })
+  // Where it fits the camera sits on the map's middle; where it does not, it follows.
+  const cam = { x: 2, y: 1 }
+  assert.deepEqual(lookAt(wide, cam), wide.centre)
+  assert.deepEqual(lookAt(small, cam), cam)
 })
 
 test('ticket navigation: → follows a line to what it blocks, ← back to a blocker, ↑↓ the nearest star that way', () => {
@@ -323,6 +335,22 @@ test('ticket page: draws stars with their numbers, the selected one’s title, t
   assert.equal(text.at(-1).trim(), TICKETS_HELP.trim())
   assert.equal(screen.rowAt(10), null, 'no tree row is under a click on this page')
   assert.ok(screen.tick > 0, 'the page asks to be drawn again: its stars twinkle')
+})
+
+test('ticket page: on a wide screen the whole map is spread across it, centred, with nothing off its edges', async () => {
+  const view = viewOf(runDir())
+  await view.refresh()
+  await view.key('g')
+  const text = draw(view.model, { width: 280, height: 40, now: T0 + 10 * MIN }).lines.map(strip)
+  const body = text.slice(4, -7)
+  const at = (n) => {
+    const y = body.findIndex((l) => new RegExp(`(?<![#\\d])${n}(?!\\d)`).test(l))
+    return y < 0 ? null : body[y].search(new RegExp(`(?<![#\\d])${n}(?!\\d)`))
+  }
+  for (const n of [201, 203, 204, 205]) assert.ok(at(n) !== null, `#${n} is on screen`)
+  // Depth 0 to depth 2 spans far more than the least spacing's 52 columns.
+  assert.ok(at(204) - at(201) > 2 * COLUMN + 20, `201 at ${at(201)}, 204 at ${at(204)}`)
+  assert.doesNotMatch(body.join('\n'), /‹ \d|\d ›|˄ \d|˅ \d/)
 })
 
 test('ticket page: a click lands on the star drawn under it', async () => {

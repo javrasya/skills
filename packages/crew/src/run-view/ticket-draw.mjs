@@ -3,7 +3,7 @@
 // layout; draw.mjs puts it between the header and the pane. Lines of text
 // with 24-bit colour, a braille dot grid for the lines between stars.
 import { marqueeOffset } from './marquee.mjs'
-import { byNumber, cameraAt, cannotMove, GLIDE_MS, latestAgent } from '../ticket-map.mjs'
+import { byNumber, cameraAt, cannotMove, GLIDE_MS, latestAgent, lookAt, mapScale } from '../ticket-map.mjs'
 
 // Each stage's star: a glyph that tells it without colour, and the colour.
 export const STAGE = Object.freeze({
@@ -105,11 +105,12 @@ export function starMap(tm, { width: W, height: H, now = null }) {
 
   const t0 = now ?? tm?.selectedAt ?? 0
   const sel = tm?.list.find((t) => t.n === tm.selected) ?? tm?.list[0] ?? null
-  const cam = sel ? cameraAt(tm.glide, sel, t0) : { x: 0, y: 0 }
+  const spread = sel ? mapScale(tm.list, W, H) : { column: 1, row: 1 }
+  const look = sel ? lookAt(spread, cameraAt(tm.glide, sel, t0)) : { x: 0, y: 0 }
   const mod = (a, m) => ((a % m) + m) % m
   for (const s of SKY) {
-    const x = mod(Math.floor(s.fx * W - cam.x * 0.25), W)
-    const y = mod(Math.floor(s.fy * H - cam.y * 0.25), H)
+    const x = mod(Math.floor(s.fx * W - look.x * spread.column * 0.25), W)
+    const y = mod(Math.floor(s.fy * H - look.y * spread.row * 0.25), H)
     const v = s.brightness * (now === null ? 0.8 : 0.6 + 0.4 * Math.sin((now / 1000) * s.speed + s.phase))
     sky[y * W + x] = [s.glyph, [v, v, v * 1.25], false]
   }
@@ -119,15 +120,15 @@ export function starMap(tm, { width: W, height: H, now = null }) {
     return { lines: out(), at: () => null, gliding: false }
   }
 
-  // The camera keeps the selected star in the middle. Lines and halos move by
-  // braille dot (half a cell across, a quarter down); glyphs and text snap to
-  // whole cells.
-  const fx = W / 2 - cam.x
-  const fy = Math.floor((H - 1) / 2) - cam.y
-  const ox = Math.round(fx)
-  const oy = Math.round(fy)
+  // The map spread to fill the screen, the camera on its middle, or on the
+  // selected star along an axis it overflows. Lines and halos move by braille
+  // dot (half a cell across, a quarter down); glyphs and text snap to whole cells.
+  const fx = W / 2 - look.x * spread.column
+  const fy = Math.floor((H - 1) / 2) - look.y * spread.row
+  const cellX = (t) => t.x * spread.column + fx
+  const cellY = (t) => t.y * spread.row + fy
   const by = byNumber(tm.list)
-  const centre = (t) => [Math.round((t.x + fx) * 2) + 1, Math.round((t.y + fy) * 4) + 2]
+  const centre = (t) => [Math.round(cellX(t) * 2) + 1, Math.round(cellY(t) * 4) + 2]
 
   // A line from each blocker to what it blocks, a curve that leaves and
   // arrives level, fading from one star's colour to the other's; lit while
@@ -156,7 +157,7 @@ export function starMap(tm, { width: W, height: H, now = null }) {
   }
 
   // Where each star is drawn, in cells of the map, for the edge counts and clicks.
-  const spot = new Map(tm.list.map((t) => [t.n, { x: t.x + ox, y: t.y + oy }]))
+  const spot = new Map(tm.list.map((t) => [t.n, { x: Math.round(cellX(t)), y: Math.round(cellY(t)) }]))
   const SPIN = ['◐', '◓', '◑', '◒']
   // A ticket at work breathes, one waiting on a person faster; still without a time.
   const live = (t) => t.stage === 'impl' || t.stage === 'gate' || t.stage === 'waiting'
