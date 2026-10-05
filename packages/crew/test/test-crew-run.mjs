@@ -496,7 +496,8 @@ for (const [harness, prefix, ticket, answer, calls] of [
   })
 }
 
-// The prompt a label's session was told in a run, from its transcript.
+// The prompt a label's session was told in a run, from its transcript: the
+// last session of exactly that label, else the first whose title holds it.
 const promptsOf = (stateDir, log) => {
   const started = readFileSync(join(stateDir, 'journal.jsonl'), 'utf8')
     .split('\n')
@@ -504,7 +505,7 @@ const promptsOf = (stateDir, log) => {
     .map((l) => JSON.parse(l))
     .filter((e) => e.type === 'started')
   return (label) => {
-    const s = started.find((e) => e.title?.includes(label))
+    const s = started.findLast((e) => e.title?.endsWith(`] ${label}`)) ?? started.find((e) => e.title?.includes(label))
     assert.ok(s, `no agent ${label} started: ${started.map((e) => e.title).join(', ')}\n${log}`)
     return readFileSync(transcriptPath({ harness: s.harness, sessionId: s.sessionId, worktree: s.worktree, env }), 'utf8')
       .split('\n')
@@ -705,7 +706,10 @@ test("the skill's template on the crew host: the baseline runs beside the explor
   assert.ok(prompt.includes(`git switch --detach ${pinned}\``), `the baseline is told the pinned sha:\n${prompt}`)
   for (const command of perChange) assert.ok(prompt.includes(`- \`${command}\``), `the baseline is told ${command}`)
   assert.match(prompt, /Never a line number alone/)
-  assert.ok(!promptsOf(stateDir, log)('impl:#101').includes('pre-existing'), 'nothing downstream reads the record yet')
+  const impl = promptsOf(stateDir, log)('impl:#101')
+  assert.ok(impl.includes(join(notesDir, 'pre-existing-failures.json')), 'the implementer is pointed at the record')
+  for (const command of perChange) assert.ok(impl.includes(`- \`${command}\``), `nothing masked: the implementer is told ${command} as it is`)
+  assert.ok(!impl.includes('Masked:'), 'and no unmasking rule')
 
   const record = join(notesDir, 'pre-existing-failures.json')
   assert.deepEqual(JSON.parse(readFileSync(record, 'utf8')), { base_sha: pinned, commands: green }, 'a green base: every command exits 0 with no failures')
@@ -732,3 +736,84 @@ test("the skill's template on the crew host: the baseline runs beside the explor
   assert.ok(!entries().some((e) => e.type === 'started' && e.title?.includes('baseline:per-change')), 'the resume starts no worker to measure again')
   assert.deepEqual(JSON.parse(readFileSync(record, 'utf8')), { base_sha: pinned, commands: green }, 'the record is written again from the kept result')
 })
+
+// ADR-0030: a baseline record with one command masked. Every role that runs
+// the per-change recipe is told the masked command in the original's place,
+// the record's path and the unmasking rule; the unmasked lint reaches each as
+// it is. #101's gate reports the unmasked command, its implementer and fixer
+// the masked one, and both satisfy readiness. #102's dispatcher drops the
+// masked command; the gate's cross-check adds it back, and the next round is
+// told it masked.
+test("the skill's template on the crew host: a masked command replaces its original in every recipe a role is told, and readiness takes a check on either form", async () => {
+  const cwd = repo('masked-repo')
+  const pinned = spawnSync('git', ['-C', cwd, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim()
+  const unit = 'cd packages/app && node --test test/*.mjs'
+  const masked = `${unit} --test-skip-pattern="adds two numbers"`
+  const lint = 'npm run lint'
+  const notesDir = join(root, 'masked-notes')
+  const record = join(notesDir, 'pre-existing-failures.json')
+  const none = { tests: [], diagnostics: [] }
+  const ok = (...commands) => commands.map((command) => ({ command, passed: true }))
+  const slices = [{ title: 'all of it', brief: 'do it', effort: 'medium' }]
+  const published = (n) => ({ published: true, pr_url: `https://github.com/acme/app/pull/${n}`, pr_number: n, checks: ok(masked, lint), validated_sha: 'abc123', stack_link: 'registered' })
+  const finding = { severity: 'blocker', location: 'src/a.js:1', issue: 'wrong sum', fix: 'add them' }
+  const answers = join(root, 'masked-answers.json')
+  writeFileSync(
+    answers,
+    JSON.stringify({
+      '^graph': {
+        tickets: [
+          { number: 101, title: 'One', blocked_by: [], needs_human: false, human_reason: '' },
+          { number: 102, title: 'Two', blocked_by: [101], needs_human: false, human_reason: '' },
+        ],
+      },
+      '^baseline': {
+        commands: [
+          { command: unit, exit_code: 1, masked_command: masked, failures: { tests: [{ id: 'test/a.mjs > adds two numbers' }], diagnostics: [] } },
+          { command: lint, exit_code: 0, masked_command: '', failures: none },
+        ],
+      },
+      '^dispatch_101': { ticket_brief: '#101 in brief', validation: [unit, lint], review_validation: [], slices },
+      '^dispatch_102': { ticket_brief: '#102 in brief', validation: [lint], review_validation: [], slices },
+      '^impl_101': { branch: 'ticket/101', summary: 'done', checks: ok(masked, lint), validated_sha: 'abc123' },
+      '^impl_102': { branch: 'ticket/102', summary: 'done', checks: ok(masked, lint), validated_sha: 'abc123' },
+      '^gate-fix_101_r1_dispatch': { slices: [{ title: 'the sum', brief: 'fix the sum', findings: [finding.location], effort: 'medium' }] },
+      '^gate-fix_101_r1': { verdicts: [], checks: ok(masked, lint), validated_sha: 'def456' },
+      '^gate_101_r1': { checks: ok(unit, lint), validated_sha: 'abc123', findings: [finding] },
+      '^gate_101': { checks: ok(masked, lint), validated_sha: 'def456' },
+      // Reported every round: once the recipe holds it, the run counts it present.
+      '^gate_102': { checks: ok(masked, lint), validated_sha: 'abc123', missing_validation: [unit] },
+      '^publish_101': published(101),
+      '^publish_102': published(102),
+      '^finalize': { summary: 'stack ready' },
+    }),
+  )
+  const script = renderTemplate(readFileSync(templatePath(), 'utf8'), { SPEC: 94, REPO: 'acme/app', REPO_DIR: cwd, NOTES_DIR: notesDir, BASE_REF: 'main', START_REF: 'main', BASE_SHA: pinned, STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session', PER_CHANGE_COMMANDS: JSON.stringify([unit, lint]), AT_REVIEW_COMMANDS: '[]' })
+  const fake = [process.execPath, FAKE_HARNESS]
+  const host = sessionHost(crewHost({ paths, env: { ...env, CREW_FAKE_MCP: '0', CREW_FAKE_ANSWERS: answers }, cwd, harnesses: { claude: fake, pi: fake }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
+  const stateDir = join(root, 'masked-state')
+  const said = []
+  const result = await runScript(script, { host, stateDir, out: (s) => said.push(s), settings: FAST, transcripts: sessionTranscripts({ env }), project: cwd })
+  const log = said.join('\n')
+  const promptOf = promptsOf(stateDir, log)
+  const lines = (prompt) => prompt.split('\n')
+
+  assert.ok(!/validation red/.test(log), `a check on either form is green:\n${log}`)
+  assert.match(log, /#102 gate round 1: not ready — the recipe omits the ticket's /)
+  assert.ok(!/#101 gate round \d: not ready/.test(log), `#101's gate checked the unmasked command, and that satisfies the masked line:\n${log}`)
+  assert.equal(result.halted, false, JSON.stringify(result))
+  assert.equal(result.stack_bottom_to_top.length, 2, 'both tickets publish')
+
+  for (const label of ['impl:#101', 'gate-fix:#101:r1', 'gate:#101:r1', 'gate:#101:r2', 'publish:#101', 'impl:#102:r2', 'gate:#102:r1', 'publish:#102']) {
+    const prompt = promptOf(label)
+    assert.ok(lines(prompt).includes(`- \`${masked}\``), `${label} is told the masked command:\n${prompt}`)
+    assert.ok(!lines(prompt).includes(`- \`${unit}\``), `${label} is not told the original as a recipe line`)
+    assert.ok(lines(prompt).includes(`- \`${lint}\``), `${label} is told the unmasked lint as it is`)
+    assert.ok(prompt.includes(`Research notes: ${notesDir}. What the per-change commands already failed on at the run's pinned base: ${record}.`), `${label} is pointed at the record beside the notes`)
+    assert.ok(prompt.includes(`\`${masked}\` is \`${unit}\` with the tests that already failed`) && prompt.includes('run the unmasked command in place of the masked one'), `${label} is told the unmasking rule`)
+  }
+  const first = promptOf('impl:#102')
+  assert.ok(lines(first).includes(`- \`${lint}\``) && !first.includes(masked), "#102's first round runs only the dispatcher's copy")
+  assert.match(promptOf('gate:#101:r1'), /A command shown above in its masked form stands for the ticket's unmasked one/)
+})
+

@@ -69,6 +69,11 @@ const AT_REVIEW_COMMANDS = __AT_REVIEW_COMMANDS__   // the same for `### Run at 
 // -------------------------------------------------------------------------
 
 const POINTERS = `Repo ${REPO}, checkout ${REPO_DIR}. Spec: \`gh issue view ${SPEC}\`. Research notes: ${NOTES_DIR}.`
+// The baseline's record (ADR-0030), written before anything is dispatched.
+// Told to every role that runs the per-change recipe, and only those: nothing
+// before the baseline returns could read it.
+const BASELINE_RECORD = `${NOTES_DIR}/pre-existing-failures.json`
+const RECIPE_POINTERS = `${POINTERS} What the per-change commands already failed on at the run's pinned base: ${BASELINE_RECORD}.`
 // Every agent in this run works in a worktree LINKED to one clone — one object
 // store, one ref namespace — so a commit any agent makes is reachable by name
 // from every other the moment it lands. The shared clone, not origin, is how
@@ -250,7 +255,7 @@ const CONTRACT = `The acceptance contract for this ticket is its own acceptance 
 // (ADR-0029); its `### Run at review` half runs once, on the stack tip, in the
 // whole-stack review, and never reaches a per-ticket role.
 const validationLine = (cmds) => `${cmds.length
-  ? `Ticket validation — run per change. Run EVERY command below on your final commit and return one result per command, the command copied verbatim:\n${cmds.map((c) => `- \`${c}\``).join('\n')}`
+  ? `Ticket validation — run per change. Run EVERY command below on your final commit and return one result per command, the command copied verbatim:\n${cmds.map((c) => `- \`${maskOf(c)}\``).join('\n')}${unmasking(cmds)}`
   : `This ticket's validation recipe has no per-change commands. Run the repo's tests for what you touched and return each command you ran with its result.`}
 ${RUNNING}`
 // A green result travels with the sha it was green on (ADR-0009). The agent
@@ -264,7 +269,24 @@ const inherit = (v) => v && v.sha
 // The commands a result set leaves red or missing. Whitespace-insensitive,
 // because agents copy imperfectly; anything looser would credit the wrong run.
 const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim()
-const readinessRed = (checks, cmds) => cmds.filter((c) => !(checks || []).some((k) => norm(k.command) === norm(c) && k.passed))
+// The baseline's masked forms, by the normalized original (ADR-0030): a
+// command that already failed at the pinned base reaches every role with
+// those failures deselected, so no ticket is sent to fix what it did not
+// break. Recipes keep the ticket's originals — what the gate's cross-check
+// compares with the ticket — and every prompt renders them through maskOf.
+const MASKED = new Map()
+const maskOf = (c) => MASKED.get(norm(c)) || c
+const unmasking = (cmds) => {
+  const masked = cmds.filter((c) => maskOf(c) !== c)
+  return masked.length
+    ? `\nMasked: ${masked.map((c) => `\`${maskOf(c)}\` is \`${c}\` with the tests that already failed at the run's pinned base deselected`).join('; ')} — see ${BASELINE_RECORD}. Those failures are not this ticket's to fix. If your work is meant to fix one of them — the ticket names that test, say — run the unmasked command in place of the masked one, report its check under the unmasked command, and say so in your result.`
+    : ''
+}
+// A masked line is satisfied by a check on either form: the unmasked one is
+// what a role meant to fix a masked failure runs. Red lines are named as the
+// roles were told them.
+const readinessRed = (checks, cmds) =>
+  cmds.filter((c) => !(checks || []).some((k) => k.passed && (norm(k.command) === norm(c) || norm(k.command) === norm(maskOf(c))))).map(maskOf)
 // Appends to `into` each command of `cmds` it lacks, verbatim, with the same
 // whitespace tolerance as readiness: a command copied twice runs once.
 const unionInto = (into, cmds) => {
@@ -715,7 +737,6 @@ phase('Explore')
 const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'topic'
 const exploreNodes = graph.explorations.map((e, i, a) =>
   a.filter((x) => slug(x.label) === slug(e.label)).length > 1 ? `explore/${slug(e.label)}-${i + 1}` : `explore/${slug(e.label)}`)
-const BASELINE_RECORD = `${NOTES_DIR}/pre-existing-failures.json`
 const baselinePrompt = `Measure what this run's per-change validation commands already fail on at its pinned base, before any ticket of spec #${SPEC} changes anything.
 
 ${POINTERS}
@@ -769,6 +790,7 @@ if (baseline.decisions_needed.length) {
   log(`HALTED at Explore — the baseline could not run: ${baseline.decisions_needed.join('; ')}`)
   return { spec: SPEC, halted: true, reason: `the baseline could not run a per-change command: ${baseline.decisions_needed.join('; ')}. Nothing was built. Clear it, then resume the run.`, published: [], notes: NOTES_DIR }
 }
+for (const c of baseline.commands) if (norm(c.masked_command) && norm(c.masked_command) !== norm(c.command)) MASKED.set(norm(c.command), c.masked_command)
 try {
   const fs = await import('node:fs')
   fs.mkdirSync(NOTES_DIR, { recursive: true })
@@ -958,7 +980,7 @@ async function runSlices(t, slices, { cutFrom, started, tag, node, validation })
     const r = await agent(
       `Implement one slice of ticket #${t.number}: ${s.title}${slices.length > 1 ? ` (slice ${i + 1} of ${slices.length})` : ''}.
 
-${POINTERS}
+${RECIPE_POINTERS}
 ${GIT}
 
 Your brief — which criteria you own, which files, which notes:
@@ -1064,7 +1086,7 @@ function enqueuePublish(t, impl, cutFrom, single) {
     return agent(
       `Publish ticket #${t.number}'s branch as the next PR of the stack for spec #${SPEC}.
 
-${POINTERS}
+${RECIPE_POINTERS}
 ${GIT}
 Ticket branch: \`${impl.branch}\` — a LOCAL ref this run created. It is not on origin, and putting it there is your job. Cut from \`${cutRef(cutFrom)}\` (\`gh issue view ${t.number}\` for what it was meant to do).
 Current stack tip: \`${ref(base)}\` — what your PR must be based on.
@@ -1202,7 +1224,7 @@ async function runFixSlices(slices, { subject, branch, cutFrom, started, phase: 
     const r = await agent(
       `Fix one slice of the review findings on ${subject}: ${s.title}${slices.length > 1 ? ` (slice ${i + 1} of ${slices.length})` : ''}.
 
-${POINTERS}
+${RECIPE_POINTERS}
 ${GIT}
 
 Your brief — the work and its findings are already distilled into it, so run no \`gh issue view\`, read no spec, and re-read no review:
@@ -1339,7 +1361,7 @@ async function reviewGate(t, impl, cutFrom, ticketBrief, tk) {
     const r = await agent(
       `Review ticket #${t.number}'s branch before it is published as a PR${round > 1 ? ` — round ${round}, verifying the previous round's fixes` : ''}.
 
-${POINTERS}
+${RECIPE_POINTERS}
 ${GIT}
 Branch \`${impl.branch}\`, reviewed against \`${cutRef(cutFrom)}\` — that diff is the whole of this ticket's work.
 What the ticket asked for: \`gh issue view ${t.number}\`. What the implementer says it did: ${impl.summary}
@@ -1348,7 +1370,7 @@ What the ticket asked for: \`gh issue view ${t.number}\`. What the implementer s
 ${inherit(validated)}
 Return one result per command in \`checks\`, and the sha they hold for in \`validated_sha\`.
 
-The per-change commands above (${impl.validation.length ? `${impl.validation.length} of them` : 'none'}) are this run's copy of the ticket's recipe. Compare them with the commands the ticket's \`### Run per change\` subsection lists, under \`## Validation\` in \`gh issue view ${t.number}\`: put each command the ticket has that this prompt omits in \`missing_validation\`, copied verbatim from the ticket — never as a finding: the run adds it to the recipe and sends the branch back to implementation to run it.
+The per-change commands above (${impl.validation.length ? `${impl.validation.length} of them` : 'none'}) are this run's copy of the ticket's recipe. Compare them with the commands the ticket's \`### Run per change\` subsection lists, under \`## Validation\` in \`gh issue view ${t.number}\`: put each command the ticket has that this prompt omits in \`missing_validation\`, copied verbatim from the ticket — never as a finding: the run adds it to the recipe and sends the branch back to implementation to run it.${impl.validation.some((c) => maskOf(c) !== c) ? ' A command shown above in its masked form stands for the ticket\'s unmasked one it names: that one is not omitted.' : ''}
 
 If any check is red, or \`missing_validation\` is not empty, stop there and return no findings — the branch is not ready for review and goes back to implementation, not to a fixer.
 
@@ -1389,7 +1411,7 @@ ${WORKTREE}`,
       continue
     }
     const red = readinessRed(r.checks, impl.validation)
-    const missing = unionInto([], r.missing_validation || []).filter((c) => !impl.validation.some((k) => norm(k) === norm(c)))
+    const missing = unionInto([], r.missing_validation || []).filter((c) => !impl.validation.some((k) => norm(k) === norm(c) || norm(maskOf(k)) === norm(c)))
     if (red.length || missing.length) {
       if (red.length) log(`#${t.number} gate round ${round}: not ready — validation red: ${red.join('; ')}`)
       if (missing.length) log(`#${t.number} gate round ${round}: not ready — the recipe omits the ticket's ${missing.join('; ')}`)
@@ -1515,7 +1537,7 @@ async function implementTicket(t) {
       unionInto(validation, gate.missing)
       unmet = [
         ...gate.readiness.map((c) => `validation red at the gate: ${c}`),
-        ...gate.missing.map((c) => `the ticket's per-change command \`${c}\` was never run: run it on the branch and make it green`),
+        ...gate.missing.map((c) => `the ticket's per-change command \`${maskOf(c)}\` was never run: run it on the branch and make it green`),
       ]
     }
     if (round === MAX_DISPATCH_ROUNDS) return halt(t, 'unmet', `after ${MAX_DISPATCH_ROUNDS} dispatch rounds: ${unmet.join('; ')}`, { unmet })
