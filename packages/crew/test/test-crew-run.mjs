@@ -496,6 +496,65 @@ for (const [harness, prefix, ticket, answer, calls] of [
   })
 }
 
+// ADR-0030, ADR-0021: a baseline command that cannot run is a blocker, and on
+// the crew host the baseline agent clears it with the operator in its session.
+test('a baseline that cannot run a command on the crew host: it needs you on its row, is never nudged while it does, and dispatch is held until it submits', async () => {
+  const cwd = repo('baseline-needs-you-repo')
+  const fake = [process.execPath, FAKE_HARNESS]
+  const host = sessionHost(crewHost({ paths, env, cwd, harnesses: { claude: fake, pi: fake }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
+  const stateDir = join(root, 'baseline-needs-you-state')
+  const journal = join(stateDir, 'journal.jsonl')
+  const said = []
+  const running = runScript(fixture('baseline-needs-you.workflow.js'), { host, stateDir, out: (s) => said.push(s), settings: { ...FAST, idleNudges: 1 }, transcripts: sessionTranscripts({ env }), project: cwd })
+  const agentOf = (label) => {
+    try {
+      return readJournal(journal).agents.find((a) => a.title?.includes(label)) ?? null
+    } catch {
+      return null
+    }
+  }
+  const entries = () =>
+    readFileSync(journal, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l))
+  for (const until = Date.now() + 20_000; agentOf('baseline:per-change')?.state !== 'needs you' || agentOf('explore:code paths')?.state !== 'done'; await new Promise((done) => setTimeout(done, 50))) {
+    if (Date.now() > until) assert.fail(`the baseline never needed you beside a finished explorer: ${JSON.stringify([agentOf('baseline:per-change'), agentOf('explore:code paths')])}\n${said.join('\n')}`)
+  }
+  const baseline = () => agentOf('baseline:per-change')
+  assert.ok(baseline().worktree && realpathSync(baseline().worktree) !== realpathSync(cwd), 'the baseline is in a worktree of its own')
+  const view = runView({ stateDir, host, transcripts: sessionTranscripts({ env }) })
+  await view.refresh()
+  const row = draw(view.model, { width: 200, height: 30 })
+    .lines.map(strip)
+    .find((l) => / baseline:per-change +\? needs you /.test(l))
+  assert.ok(row, `the baseline's row shows needs you:\n${said.join('\n')}`)
+  assert.equal(view.model.alert, `NEEDS YOU: [Explore] baseline:per-change in tab ${baseline().terminal}: npm is not installed — evidence: npm test: command not found (exit 127); check: \`npm --version\``)
+
+  // Past the nudge grace, with the explorer long done: never nudged, nothing dispatched.
+  await new Promise((done) => setTimeout(done, 3000))
+  assert.equal(baseline().state, 'needs you', said.join('\n'))
+  assert.ok(!entries().some((e) => e.type === 'nudge'), 'never nudged while it needs you')
+  assert.ok(!entries().some((e) => e.type === 'started' && e.title?.includes('dispatch:#101')), `dispatch is held while the baseline needs you:\n${said.join('\n')}`)
+
+  const record = { command: 'npm test', exit_code: 0 }
+  const { request } = await import('../src/daemon/client.mjs')
+  await request(paths, { op: 'session.write', id: baseline().terminal, data: `Installed npm. [call submit ${JSON.stringify(record)}]` })
+  await request(paths, { op: 'session.write', id: baseline().terminal, data: '\r' })
+
+  assert.deepEqual(await running, { measured: record, note: 'notes', sized: 'one slice' }, said.join('\n'))
+  const all = entries()
+  const at = (type, label) => all.findIndex((e) => e.type === type && e.title?.includes(label))
+  const ofBaseline = all.filter((e) => e.title?.includes('baseline:per-change'))
+  assert.deepEqual(
+    ofBaseline.filter((e) => ['needsYou', 'needsYouCleared', 'nudge', 'result'].includes(e.type)).map((e) => e.type),
+    ['needsYou', 'needsYouCleared', 'result'],
+    said.join('\n'),
+  )
+  assert.ok(at('result', 'baseline:per-change') < at('started', 'dispatch:#101'), `dispatch starts only after the baseline's submit:\n${said.join('\n')}`)
+  assert.equal(baseline().state, 'done')
+})
+
 // The prompt a label's session was told in a run, from its transcript: the
 // last session of exactly that label, else the first whose title holds it.
 const promptsOf = (stateDir, log) => {
@@ -716,7 +775,7 @@ test("the skill's template on the crew host: the baseline runs beside the explor
 
   // The schema the baseline submitted against, as submit checks it.
   const schema = JSON.parse(readFileSync(join(stateDir, started.dir, 'schema.json'), 'utf8'))
-  const accepted = { commands: green, decisions_needed: [], worktree: started.worktree }
+  const accepted = { commands: green, blockers: [], decisions_needed: [], worktree: started.worktree }
   assert.deepEqual(validate(schema, accepted), [])
   const red = (failures) => ({ ...accepted, commands: [{ ...green[0], exit_code: 1, failures }, green[1]] })
   assert.deepEqual(validate(schema, red({ tests: [{ id: 'test/a.mjs > adds' }], diagnostics: [{ tool: 'biome', rule: 'lint/style/useConst', file: 'src/a.js', snippet: 'let a = 1\n', message: 'use const' }] })), [])

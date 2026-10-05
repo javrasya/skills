@@ -1,6 +1,6 @@
 // Simulates the rendered workflow script with stubbed agent() calls, driving
 // it through the paths the dispatcher redesign added.
-import { readFileSync } from 'fs'
+import { readFileSync, rmSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { loadScript } from '../packages/crew/src/runner.mjs'
 import { fillRequired } from './fill-required.mjs'
@@ -697,6 +697,31 @@ const withBlockers = (blockers) => () => ({
   check('H5: the brief says the lane never registered, with the last rejection', /NOT REGISTERED IN THE LANE/.test(result.stack_registration) && /#11: link push rejected non-fast-forward — ticket\/10 local a vs origin b/.test(result.stack_registration), result.stack_registration)
   check('H5: the brief does not blame the layer count', !/never reached two layers/.test(result.stack_registration), result.stack_registration)
   check('H5: finalize is told it is the first registration, and why', /first registration/.test(finalize.prompt) && /the last failure: #11/.test(finalize.prompt), finalize.prompt.slice(0, 1500))
+}
+
+// --- scenario B: a baseline command that cannot run is a blocker -----------
+// The Workflow runner replays a completed call whose (prompt, opts) did not
+// change, so a resume is a run whose baseline prompt changed or did not.
+{
+  const halts = '/tmp/n/baseline-blockers.json'
+  rmSync(halts, { force: true })
+  const blocker = { subject: 'npm is not installed', tickets: [], why: 'npm t cannot start', evidence: 'npm t: command not found (exit 127)', check: 'npm --version' }
+  const blocked = { baseline: () => ({ commands: [{ command: SIM_CHECK, exit_code: 127, masked_command: '', failures: { tests: [], diagnostics: [] } }], blockers: [blocker] }) }
+  const promptOf = (r) => r.calls.find((c) => c.label === 'baseline:per-change').prompt
+  const first = await run(blocked)
+  const told = promptOf(first)
+  check('B: the baseline is told a command that runs and fails from one that cannot run, and what to do with each', /It runs and fails: .*pre-existing failure: record it/.test(told) && /It cannot run: .*a mask would hide it: it is a \*\*blocker\*\*/.test(told), told)
+  check('B: on the Workflow runner the baseline returns the blocker, nobody being there to clear it', /Nobody is in this session to clear it\. Return the blocker in `blockers`/.test(told) && !/needs_you/.test(told), '')
+  const onSession = promptOf(await run({}, { runner: 'session' }))
+  check('B: on the session runner the baseline calls needs_you and carries on once it is cleared', /tool named `needs_you`, call it with the blocker/.test(onSession) && /carry on measuring and return as usual, with an empty `blockers`/.test(onSession), '')
+  check('B: a blocked baseline halts the run before any dispatch, naming what, evidence and check', first.result.halted === true && ['npm is not installed', 'npm t: command not found (exit 127)', '`npm --version`'].every((s) => first.result.reason.includes(s)) && !first.calls.some((c) => c.label.startsWith('dispatch')), JSON.stringify(first.result))
+  const second = await run(blocked)
+  check('B: a resume after the halt runs the baseline node again, told the blocker to check first', promptOf(second) !== told && /halted once before/.test(promptOf(second)) && promptOf(second).includes('1. npm is not installed — evidence: npm t: command not found (exit 127); check: `npm --version`'), promptOf(second))
+  const cleared = await run()
+  check('B: a resume still blocked halts again, and the next one is again a call not made before', /halted 2 times before/.test(promptOf(cleared)) && cleared.result.state.startsWith('complete') && cleared.calls.some((c) => c.label === 'dispatch:#10'), JSON.stringify(cleared.result))
+  const replay = await run()
+  check('B: once it succeeds, a later resume makes the same baseline call, so the runner replays its success', promptOf(replay) === promptOf(cleared), '')
+  rmSync(halts, { force: true })
 }
 
 // --- scenario R: the Workflow runner reclaims, the Orca runner never does ---

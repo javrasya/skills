@@ -611,7 +611,7 @@ const EXPLORE_SCHEMA = {
 const BASELINE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['commands', 'decisions_needed', 'worktree'],
+  required: ['commands', 'blockers', 'decisions_needed', 'worktree'],
   properties: {
     commands: {
       type: 'array',
@@ -655,7 +655,8 @@ const BASELINE_SCHEMA = {
         },
       },
     },
-    decisions_needed: { type: 'array', items: { type: 'string' }, description: 'each command that could not run at all, and what you saw; empty normally' },
+    ...BLOCKERS_FIELD,
+    decisions_needed: { type: 'array', items: { type: 'string' }, description: 'each blocker you return, named again, so the run holds this node until it is cleared; empty normally' },
     ...WORKTREE_FIELD,
   },
 }
@@ -753,6 +754,24 @@ phase('Explore')
 const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'topic'
 const exploreNodes = graph.explorations.map((e, i, a) =>
   a.filter((x) => slug(x.label) === slug(e.label)).length > 1 ? `explore/${slug(e.label)}-${i + 1}` : `explore/${slug(e.label)}`)
+const BASELINE_HALTS = `${NOTES_DIR}/baseline-blockers.json`
+const showBlocker = (b) => `${b.subject} — evidence: ${b.evidence}; check: \`${b.check}\``
+let baselineHalts = []
+if (!ON_SESSION) {
+  try {
+    const fs = await import('node:fs')
+    if (fs.existsSync(BASELINE_HALTS)) baselineHalts = JSON.parse(fs.readFileSync(BASELINE_HALTS, 'utf8'))
+  } catch (e) {
+    log(`!! could not read ${BASELINE_HALTS}: ${e?.message ?? e}`)
+  }
+}
+const lastHalt = baselineHalts.at(-1)
+const cannotRun = `Tell a command that runs and fails from one that cannot run:
+- It runs and fails: it started, ran its tests or checks, and exits non-zero with failures you can read off its output. That is a pre-existing failure: record it as above.
+- It cannot run: the tool will not start (not found, a missing dependency, credential or service), it dies before any test or check ran, or its exit is not a check failure and nothing can be read from its output. That is a broken environment, not a pre-existing failure, and a mask would hide it: it is a **blocker**. Name what is missing in \`subject\`, \`tickets\` empty (the whole run needs it), what the command cannot do without it in \`why\`, the command and what it printed in \`evidence\`, and in \`check\` one command that succeeds once it is cleared.
+
+${ON_SESSION ? `If your session has a tool named \`needs_you\`, call it with the blocker as its reason — what is missing, the evidence and the check — then wait in this session for as long as it takes: the operator enters it and fixes the environment with you. Guide them; never install, configure or fetch anything yourself, and never handle a secret. Once its check passes and the command runs, carry on measuring and return as usual, with an empty \`blockers\`.
+Without that tool, return the blocker in \`blockers\`, its command's entry with the exit code you saw and no failures, and name it again in \`decisions_needed\`: the run holds this node until the operator clears it, and resuming the run carries this session on.` : `Nobody is in this session to clear it. Return the blocker in \`blockers\`, its command's entry with the exit code you saw and no failures, and measure the others as usual. The run halts with it named, and once the operator has cleared it, resuming the run starts this node again.`}`
 const baselinePrompt = `Measure what this run's per-change validation commands already fail on at its pinned base, before any ticket of spec #${SPEC} changes anything.
 
 ${POINTERS}
@@ -769,13 +788,17 @@ Return one entry per command, in this order, the command copied verbatim, with i
 - \`masked_command\`: where the tool can deselect tests (pytest \`--deselect\`, \`cargo test -- --skip\`, \`node --test --test-skip-pattern\`, …), the command with every failing test you listed deselected. Run it once and keep it only if it exits 0; else, or when nothing failed, leave it empty.
 A command that exits 0 is \`exit_code\` 0 with no failures.
 
-A command that cannot run at all — not found, a missing dependency, credential or service, a crash before any test or check ran, output nothing can be read from — is a broken environment, not a pre-existing failure: record no failures for it, and put it in \`decisions_needed\` with what you saw. It holds the run until the operator clears it.` : 'This run has no per-change commands: run nothing, and return an empty `commands`.'}
+${cannotRun}${lastHalt ? `
+
+This node has halted ${baselineHalts.length === 1 ? 'once' : `${baselineHalts.length} times`} before. The last time on these blockers, which the operator was to clear before resuming the run:
+${lastHalt.blockers.map((b, i) => `${i + 1}. ${showBlocker(b)}`).join('\n')}
+Run each one's check first. One that still fails is still a blocker: return it again.` : ''}` : 'This run has no per-change commands: run nothing, and return an empty `commands`.'}
 
 Never run a build-cache clean, and never launch a command in the background.
 
 ${OWN_WORKTREE}
 
-Return the commands, an empty \`decisions_needed\` unless a command could not run, and your worktree.`
+Return the commands, your blockers (an empty list unless a command could not run), \`decisions_needed\`, and your worktree.`
 const [baseline, ...explored] = await parallel([
   () => agent(baselinePrompt, { ...ROLES.baseline, effort: 'medium', phase: 'Explore', schema: BASELINE_SCHEMA, isolation: 'worktree', label: 'baseline:per-change', node: 'baseline/per-change' }),
   ...graph.explorations.map((e, i) => () =>
@@ -802,9 +825,19 @@ Return the absolute path you wrote, and your blockers.`,
 const notes = explored.filter(Boolean)
 log(`${notes.length} research notes in ${NOTES_DIR}`)
 if (!baseline) throw new Error('the baseline of the per-change commands failed — nothing is dispatched without it')
-if (baseline.decisions_needed.length) {
-  log(`HALTED at Explore — the baseline could not run: ${baseline.decisions_needed.join('; ')}`)
-  return { spec: SPEC, halted: true, reason: `the baseline could not run a per-change command: ${baseline.decisions_needed.join('; ')}. Nothing was built. Clear it, then resume the run.`, published: [], notes: NOTES_DIR }
+if (baseline.blockers.length || baseline.decisions_needed.length) {
+  const named = baseline.blockers.length ? baseline.blockers.map(showBlocker).join('; ') : baseline.decisions_needed.join('; ')
+  if (!ON_SESSION) {
+    try {
+      const fs = await import('node:fs')
+      fs.mkdirSync(NOTES_DIR, { recursive: true })
+      fs.writeFileSync(BASELINE_HALTS, JSON.stringify([...baselineHalts, { blockers: baseline.blockers }], null, 2) + '\n')
+    } catch (e) {
+      log(`!! could not write ${BASELINE_HALTS}, so a resume replays this halt: ${e?.message ?? e}`)
+    }
+  }
+  log(`HALTED at Explore — the baseline cannot run a per-change command: ${named}`)
+  return { spec: SPEC, halted: true, reason: `the baseline cannot run a per-change command, a blocker: ${named}. Nothing was built. Clear it, then resume the run: the baseline runs again.`, blockers: baseline.blockers, published: [], notes: NOTES_DIR }
 }
 for (const c of baseline.commands) if (norm(c.masked_command) && norm(c.masked_command) !== norm(c.command)) MASKED.set(norm(c.command), c.masked_command)
 try {
