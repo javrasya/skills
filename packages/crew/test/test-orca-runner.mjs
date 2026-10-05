@@ -6933,7 +6933,7 @@ test("run console: the frames — no runner row, the key line naming the back ke
   assert.equal(screen.rowAt(discover + 1), 0, 'the first row is the first phase (rowAt takes a 1-based y)')
   assert.ok(!lines.some((l) => /runner {3}crew session|the runner {2}crew session/.test(l)), 'no runner row or pane')
   // Too long for 140 columns: cut with a ›, the rest a sideways scroll away.
-  assert.match(lines.at(-1), /^ ↑↓ move · ⏎\/→\/click enter · F12 out of a session · ← runs · f filter · Ctrl\+F search · Ctrl\+R reclaim · Ctrl\+P park · l log · .*›$/)
+  assert.match(lines.at(-1), /^ ↑↓ move · ⏎\/→\/click enter · F12 out of a session · ← runs · g tickets · f filter · Ctrl\+F search · Ctrl\+R reclaim · Ctrl\+P park · l log · .*›$/)
   assert.match(strip(draw(view.model, { width: 140, height: 30, help: consoleTreeHelp('crew', 'f12'), helpOffset: 99 }).lines.at(-1)), /^‹.*x remove · \? orchestrator$/)
   assert.equal(consoleTreeHelp('orca', 'f12'), `${TREE_HELP} · ? orchestrator`, "an Orca run's agent is its tab; ? is crew's orchestrator whatever the host")
   const runs = listOf.get(view)
@@ -7456,7 +7456,7 @@ viewTest("run view: the screen is the design's tree, a click lands on the row dr
   assert.match(lines[10], /^ +6 +impl:e +✗ failed +░{10} +— +— /, 'an agent that never started')
   assert.ok(!lines.some((l) => /PROTOTYPE|Tab ▸|Timeline/.test(l)), 'no status bar')
   assert.match(lines.at(-2), /== Discover/)
-  assert.match(lines.at(-1), /↑↓ move · ⏎\/click a phase to fold · ⏎\/→\/click focus tab · f filter · Ctrl\+F search · Ctrl\+R reclaim · l log · q quit/)
+  assert.match(lines.at(-1), /↑↓ move · ⏎\/click a phase to fold · ⏎\/→\/click focus tab · g tickets · f filter · Ctrl\+F search · Ctrl\+R reclaim · l log · q quit/)
 
   // The selected row is inverted; a selected phase's pane names its problems.
   await view.key('DOWN')
@@ -7680,13 +7680,13 @@ test('standalone: two concurrent runs in one repo are separate rows, and a hand-
   const rowOf = (key) => tree.model.rows.findIndex((r) => r.key === key)
   await tree.click(rowOf('agent:3'))
   assert.equal(tree.model.pane.agent.worktree, null)
-  const lines = draw(tree.model, { width: 140, height: 30, help: TREE_HELP }).lines.map(strip)
+  const lines = draw(tree.model, { width: 152, height: 30, help: TREE_HELP }).lines.map(strip)
   assert.ok(
     lines.some((l) => /^ worktree — +tab term_fake3/.test(l)),
     'the checkout is not named as its worktree',
   )
   assert.ok(!lines.some((l) => /my-feature/.test(l)))
-  assert.match(lines.at(-1), /← back to the runs · f filter · Ctrl\+F search · Ctrl\+R reclaim · l log · p pause/)
+  assert.match(lines.at(-1), /← back to the runs · g tickets · f filter · Ctrl\+F search · Ctrl\+R reclaim · l log · p pause/)
   assert.deepEqual(
     orca.calls.filter((c) => MUTATING.includes(c.verb)),
     [],

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-09-24. Amended by #71: the end-of-run prompt is gone, and an agent is reclaimed only from the run view. Amends ADR-0011's consequence "it releases every worker it started". Amended 2026-10-01 by ADR-0020: `Ctrl+R` opens the reclaim dialog and reclaims a whole run, `r` resumes, and a sequential run's `<runId>-chain` is the run's, removed only by reclaiming the whole run. Applies to the **Orca runner only**; the Workflow runner, and the shared workflow script, are unchanged.
+Accepted — 2026-09-24. Amended by #71: the end-of-run prompt is gone, and an agent is reclaimed only from the run view. Amends ADR-0011's consequence "it releases every worker it started". Amended 2026-10-01 by ADR-0020: `Ctrl+R` opens the reclaim dialog and reclaims a whole run, `r` resumes, and a sequential run's `<runId>-chain` is the run's, removed only by reclaiming the whole run. Amended 2026-10-05 by ADR-0031: the run view gains a second page, the ticket view (`g`, `t` back), beside the tree. Applies to the **Orca runner only**; the Workflow runner, and the shared workflow script, are unchanged.
 
 ## Context
 
