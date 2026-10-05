@@ -13,7 +13,7 @@ import { pathKey, samePath } from './paths.mjs'
 import { agentName, agentsOf, chainAgent, reclaimAgent, reclaimChainAfter, reclaimRun, runWorktree } from './reclaim.mjs'
 import { foldJournal, journalLines, readJournal, timeOf } from './journal.mjs'
 import { REGISTRY_PATH, readRegistry, runRegistry } from './registry.mjs'
-import { worktreeUnpushed } from './git.mjs'
+import { ghBrowse, worktreeUnpushed } from './git.mjs'
 import { hostUnreachable } from './session-host.mjs'
 /** @typedef {import('./session-host.mjs').SessionHost} SessionHost */
 import { CONSOLE_PHASE, closeConsult, consoleTitle, consultSessions, isOrchestratorTitle } from './orchestrator.mjs'
@@ -371,9 +371,9 @@ const OPENS_ON = ['waiting', 'failed', 'gate', 'impl', 'todo', 'stacked']
 const firstTicket = (tickets) => OPENS_ON.map((s) => tickets.find((t) => t.stage === s)).find(Boolean)?.n ?? null
 
 /**
- * @param {{ stateDir: string, host: SessionHost, clock?: { now: () => number }, transcripts?: Partial<ReturnType<typeof sessionTranscripts>>, registry?: string, unpushed?: typeof worktreeUnpushed, alive?: typeof runnerAlive, resumeHost?: (() => unknown) | null, resumeHalted?: ((node: string | null) => unknown) | null, enter?: boolean, triage?: (() => unknown) | null, remove?: (() => ReturnType<typeof removeRun>) | null }} options
+ * @param {{ stateDir: string, host: SessionHost, clock?: { now: () => number }, transcripts?: Partial<ReturnType<typeof sessionTranscripts>>, registry?: string, unpushed?: typeof worktreeUnpushed, alive?: typeof runnerAlive, resumeHost?: (() => unknown) | null, resumeHalted?: ((node: string | null) => unknown) | null, enter?: boolean, triage?: (() => unknown) | null, remove?: (() => ReturnType<typeof removeRun>) | null, browse?: typeof ghBrowse }} options
  */
-export function runView({ stateDir, host, clock = { now: () => Date.now() }, transcripts = sessionTranscripts(), registry = REGISTRY_PATH, unpushed = worktreeUnpushed, alive = runnerAlive, resumeHost = null, resumeHalted = null, enter = false, triage = null, remove = null }) {
+export function runView({ stateDir, host, clock = { now: () => Date.now() }, transcripts = sessionTranscripts(), registry = REGISTRY_PATH, unpushed = worktreeUnpushed, alive = runnerAlive, resumeHost = null, resumeHalted = null, enter = false, triage = null, remove = null, browse = ghBrowse }) {
   const journalPath = join(stateDir, 'journal.jsonl')
   // name -> folded, only for phases the operator folded or unfolded.
   const folds = new Map()
@@ -409,6 +409,9 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   // graph agent returned; the selected ticket and since when; the camera's
   // glide to it, { from, at }, or null while it sits on it.
   let page = 'tree'
+  // The run's project checkout, as the registry names it: where o opens a
+  // ticket from, so gh picks the repo the run's tickets are in.
+  let project = null
   let tickets = null
   let ticket = { n: null, at: null }
   let glide = null
@@ -550,6 +553,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
       } catch {}
     }
     chain = fold.chain && !run?.reclaimed && !run?.chainReclaimed ? fold.chain : null
+    project = run?.project ?? null
     let open = null
     let parked = null
     if (every.some((a) => a.terminal)) {
@@ -1111,6 +1115,18 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     return {}
   }
 
+  // o on a ticket: its issue on GitHub, in the default browser.
+  async function openTicket(n) {
+    if (n === null) return {}
+    if (!project) return say(`#${n}: the run registry names no project to open it from`)
+    try {
+      await browse(project, n)
+      return say(`opened #${n} in the browser`)
+    } catch (e) {
+      return say(`could not open #${n}: ${e?.message ?? e}`)
+    }
+  }
+
   // The ticket page's keys; null for a key the tree's own handles alike
   // (the log, pause, resume, remove and quit), {} for one the page ignores.
   function ticketKey(name) {
@@ -1122,6 +1138,8 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
         return tickets && ticket.n !== null ? selectTicket(stepTicket(tickets, ticket.n, name)) : {}
       case 'ENTER':
         return showAgentOf(ticket.n)
+      case 'o':
+        return openTicket(ticket.n)
       case 't':
       case 'ESCAPE':
         page = 'tree'
