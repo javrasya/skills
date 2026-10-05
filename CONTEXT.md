@@ -76,7 +76,7 @@ The norm that every skill in this repo must be free of personal info (individual
 
 ### Preflight
 
-The attended pass over a spec and its tickets **before** an unattended run, so the run never stops to ask. Separates **facts** (the agent's to find, proved by a **drill** — a small, harmless, real execution) from **decisions** (the operator's, settled by grilling) and **blockers** (ADR-0021). Every ticket leaves with a **validation recipe** — the optimal format, lint, typecheck, test and e2e checks, each cut to the narrowest scope that proves the ticket — inside the **validation budget** of 7 minutes, with full suites left to review. Held by the [[preflight]] skill.
+The attended pass over a spec and its tickets **before** an unattended run, so the run never stops to ask. Separates **facts** (the agent's to find, proved by a **drill** — a small, harmless, real execution) from **decisions** (the operator's, settled by grilling) and **blockers** (ADR-0021). Every ticket leaves with its [[validation recipe]] — the optimal format, lint, typecheck, test and e2e checks, each cut to the narrowest scope that proves the ticket — inside the **validation budget** of 7 minutes, with full suites left to review. Held by the [[preflight]] skill.
 
 ### Ralph (Wiggum) loop
 
@@ -236,7 +236,7 @@ The **run view** is the operator's live terminal screen for [[runner|session-run
 
 A **session host** is what the session [[runner]] relies on to keep an agent's live session: it makes the agent's worktree, starts its [[runner|harness]] in a terminal, types prompts into it, tells when it is idle, carries each run's mailbox, and keeps sessions alive when the runner and every screen are gone. Crew is one session host and the default; **Orca** is another, and the runner is the same over either. A done agent's session is the one exception crew makes to keeping a harness alive: once quiet past `parkAfterMs` it is **parked**, its harness ended and its session kept, and entering it starts the harness again on its resume line (ADR-0024). A daemon that dies takes every session's process with it, but not the session: the next daemon brings every agent's session back parked, under its old id (ADR-0025).
 
-The **orchestrator** is crew's brain: an agent, on a harness and model the operator picks when arming, that crew hands a question needing judgement — drafting a missing validation list, for one — in a fresh headless run of the harness, in the project and outside the run's graph; crew shows what it returns, and the operator can open a fresh one from the console to talk to it about the run. It never schedules: what runs next is always crew's code. Not the [[doctor]], which is started for one failed agent and only writes a note.
+The **orchestrator** is crew's brain: an agent, on a harness and model the operator picks when arming, that crew hands a question needing judgement — laying out a halted run's questions, for one — in a fresh headless run of the harness, in the project and outside the run's graph; crew shows what it returns, and the operator can open a fresh one from the console to talk to it about the run. It never schedules: what runs next is always crew's code. Not the [[doctor]], which is started for one failed agent and only writes a note.
 
 An **orchestrator session** is the conversation the operator opens from a run's tree with `?`: a live harness session with the orchestrator, seeded with the run's directory. It is recorded in the run's state dir by the console that opens it, never by the runner, and the tree lists each one as a row of its **Orchestrator** phase, drawn before the run's phases, in the state crew has its session in; leaving it keeps it, and the daemon parks and restores it as it does a done agent's session (ADR-0026). It is no agent of the run: it has no worktree and no call number, and nothing of the run counts it. It has the **orchestrator's tools** (ADR-0028): `run_status`, `agent_result` and `runner_log` read the run from the files the tree reads, and `pause`, `resume` and `decide` act on it as the operator's `p` and `r` do, through `paused.json` and `resume-request.json`; `decide` answers a held node's questions, its answers carried in the resume request to the worker's resumed prompt. The daemon knows which run a `?` session is about because the console that opens it names the run's state dir, kept with the session. Not the orchestrator's **questions**, which run headless and show as what they return.
 
@@ -296,22 +296,29 @@ and it goes back to dispatch, not forward to the gate or to a human. A gap with 
 attached is a remainder wearing a costume; an observed run (#343) relabelled a required test
 this way and paid a gate round to rediscover it.
 
-### Validation list, and readiness
+### Validation recipe, and readiness
 
-The project's own mechanical checks — format, lint, test — as commands with exit codes, **confirmed by the
-user once before a run launches** (inferred from the tech stack and CI config when the project documents
-none; empty is honest and the [[brief]] says so) and reused by every later run. Every implementer and
-fixer carries the same list and returns **one result per command**, never one green boolean; a missing
-result is a schema failure, not a pass. **Readiness** is the list green on the exact commit under review:
-the reviewer's first act is to establish it — by [[inherited-result]] when the sha is unchanged, else by
-re-running — and a red there is a **remainder** sent back to dispatch, not a finding sent to gate-fix.
-Running a command is not the self-assessment ADR-0004 forbids — the agent does not judge, the exit code
-does. A check is run **in the foreground, as written, once after the last edit**; while iterating an
-agent runs the narrowest scope its build tool supports, and no agent ever cleans a build cache.
+A ticket's own mechanical checks — format, lint, typecheck, test, e2e — as commands with exit codes,
+written into the ticket's **Validation** section by [[preflight]] and read from there by the run (ADR-0029).
+It has two halves: **run per change**, the commands every implementer, fixer, gate reviewer and publisher
+of that ticket runs on its commit; and **run at review**, the full suites the whole-stack review runs once
+on the stack tip, unioned over every ticket. A section with no commands is honest — the operator decided
+there was nothing to run — and the brief says so; a ticket with no section is not armable. The
+[[dispatcher]] turns the section into the commands each role is told, verbatim, and the gate reviewer,
+who reads the ticket anyway, blocks when the two differ. Every role returns **one result per command**,
+never one green boolean; a missing result is a schema failure, not a pass. **Readiness** is the per-change
+half green on the exact commit under review: the reviewer's first act is to establish it — by
+[[inherited-result]] when the sha is unchanged, else by re-running — and a red there is a **remainder**
+sent back to dispatch, not a finding sent to gate-fix. Running a command is not the self-assessment
+ADR-0004 forbids — the agent does not judge, the exit code does. A check is run **in the foreground, as
+written, once after the last edit**; while iterating an agent runs the narrowest scope its build tool
+supports, and no agent ever cleans a build cache.
+
+_Avoid_: validation list, `validation.md` — the spec-level file every run once shared; gone since ADR-0029.
 
 ### Validated sha, and the inherited result
 
-The **validated sha** is the commit the whole validation list last passed on, named by whoever ran it
+The **validated sha** is the commit the ticket's per-change recipe last passed on, named by whoever ran it
 and carried downstream with the result: implementer to gate reviewer, fixer to the next reviewer, gate
 to publisher, publisher to the PR body (`Validated green at <sha> by <role>`). An **inherited result**
 is a downstream agent reporting that list green without re-running it, because `git rev-parse HEAD`
@@ -319,16 +326,6 @@ equals the validated sha and it edited nothing — one `rev-parse` proves the tr
 proven. A rebase produces a tree nobody has validated, so the publisher always runs the list after one.
 The proof is the sha match, never the upstream agent's word: an agent that edited anything, or whose
 HEAD differs, runs the list. See ADR-0009.
-
-### Retrospective, and the validation report
-
-What a run's validation **cost**, summed by the script from every agent's own timings (seconds and run
-count per command, hangs, results inherited, checks re-run on an unchanged sha), and written by one
-agent as the **validation report** in the notes directory: the numbers, then **proposals** for the
-validation list with the number that motivates each, then the hangs and outliers. The report is for the
-operator, or for a separate session the operator points at it. **Nothing applies a proposal**: every
-run reads the validation list exactly as the operator left it, so the report can never change what the
-next run does behind the operator's back.
 
 ### Reporting to a screen
 
