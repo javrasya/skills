@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ticketsOf, layoutTickets, stepTicket, cameraAt, GLIDE_MS, COLUMN, ROW } from '../src/ticket-map.mjs'
+import { ticketsOf, layoutTickets, stepTicket, cameraAt, latestAgent, GLIDE_MS, COLUMN, ROW } from '../src/ticket-map.mjs'
 import { runView, runsView } from '../src/run-view-model.mjs'
 import { draw, strip, TICKETS_HELP } from '../src/run-view/draw.mjs'
 import { painter } from '../src/run-view/paint.mjs'
@@ -17,12 +17,12 @@ import { runRegistry } from '../src/registry.mjs'
 let next = 1
 const agent = (node, state, more = {}) => ({ origin: next, n: next++, node, state, label: node, reason: null, waiting: null, patient: null, ...more })
 const graphOf = (tickets, more = {}) => ({ tickets: tickets.map(([number, blocked_by = [], extra = {}]) => ({ number, title: `ticket ${number}`, blocked_by, needs_human: false, human_reason: '', ...extra })), explorations: [], blockers: [], ...more })
-const nodesWith = (results) => new Map(Object.entries(results).map(([node, result]) => [node, { node, result }]))
+const nodesWith = (results) => (node) => results[node] ?? null
 const stagesOf = (tickets) => Object.fromEntries(tickets.map((t) => [t.n, [t.stage, t.note]]))
 
 test('ticket model: no graph result yet is no tickets', () => {
-  assert.equal(ticketsOf(null, [], new Map()), null)
-  assert.equal(ticketsOf({ tickets: [] }, [], new Map()), null)
+  assert.equal(ticketsOf(null, []), null)
+  assert.equal(ticketsOf({ tickets: [] }, []), null)
 })
 
 test('ticket model: each ticket is at the furthest stage its agents and its publish reached', () => {
@@ -52,14 +52,14 @@ test('ticket model: each ticket is at the furthest stage its agents and its publ
   })
 })
 
-test('ticket model: a ticket waiting on a person is blocked, whichever way it waits', () => {
+test('ticket model: a ticket waiting on a person is waiting, whichever way it waits', () => {
   const graph = graphOf([[1], [2, [], { needs_human: true, human_reason: 'a device on the desk' }], [3], [4], [5, [], { done_in_prior_work: true }]], { blockers: [{ subject: 'signing key', tickets: [3], why: '', evidence: '', check: '' }] })
   const agents = [agent('ticket/1/impl/r1/s1', 'needs you', { reason: 'decisions needed: which API' })]
   const nodes = nodesWith({ 'ticket/4/publish': { published: false, nothing_to_publish: true } })
   assert.deepEqual(stagesOf(ticketsOf(graph, agents, nodes)), {
-    1: ['blocked', 'decisions needed: which API'],
-    2: ['blocked', 'a device on the desk'],
-    3: ['blocked', 'blocker: signing key'],
+    1: ['waiting', 'decisions needed: which API'],
+    2: ['waiting', 'a device on the desk'],
+    3: ['waiting', 'blocker: signing key'],
     4: ['stacked', 'subsumed'],
     5: ['stacked', 'in prior work'],
   })
@@ -67,17 +67,42 @@ test('ticket model: a ticket waiting on a person is blocked, whichever way it wa
   assert.deepEqual(stagesOf(ticketsOf(graph, [...agents, agent('unblock', 'done')], nodes))[3], ['todo', null])
 })
 
-test('ticket model: a doctor that needs you makes its patient’s ticket blocked', () => {
+test('ticket model: a doctor that needs you makes its patient’s ticket wait on you', () => {
   const patient = agent('ticket/1/impl/r1/s1', 'failed', { reason: 'session died' })
   const doctor = agent(undefined, 'needs you', { patient: patient.origin, reason: 'a human must restart the emulator' })
-  assert.deepEqual(stagesOf(ticketsOf(graphOf([[1]]), [patient, doctor], new Map())), { 1: ['blocked', 'a human must restart the emulator'] })
+  assert.deepEqual(stagesOf(ticketsOf(graphOf([[1]]), [patient, doctor])), { 1: ['waiting', 'a human must restart the emulator'] })
 })
 
-test('ticket model: edges, depth, and what a blocked ticket holds up', () => {
+test('ticket model: a gate that sends a ticket back to dispatch has it implementing again', () => {
+  const agents = [agent('ticket/1/dispatch', 'done'), agent('ticket/1/impl/r1/s1', 'done'), agent('ticket/1/gate/r1', 'done'), agent('ticket/1/dispatch/r2', 'done'), agent('ticket/1/impl/r2/s1', 'running')]
+  assert.deepEqual(stagesOf(ticketsOf(graphOf([[1]]), agents)), { 1: ['impl', null] })
+  assert.deepEqual(stagesOf(ticketsOf(graphOf([[1]]), [...agents, agent('ticket/1/gate/r2', 'running')])), { 1: ['gate', 'round 2'] })
+})
+
+test('ticket model: a ticket not picked up behind a needs-human one waits too, deferred as the run defers it', () => {
+  const graph = graphOf([[1, [], { needs_human: true, human_reason: 'a device' }], [2, [1]], [3, [2]], [4]])
+  assert.deepEqual(stagesOf(ticketsOf(graph, [])), {
+    1: ['waiting', 'a device'],
+    2: ['waiting', 'deferred: behind #1, which needs a human'],
+    3: ['waiting', 'deferred: behind #1, which needs a human'],
+    4: ['todo', null],
+  })
+})
+
+test('ticket model: the latest agent is the ticket’s own latest, a doctor only when it has none of its own', () => {
+  const own = agent('ticket/1/impl/r1/s1', 'failed')
+  const doctor = agent(undefined, 'running', { patient: own.origin })
+  const [t] = ticketsOf(graphOf([[1]]), [own, doctor])
+  assert.equal(latestAgent(t), own)
+  assert.equal(latestAgent({ agents: [doctor] }), doctor)
+  assert.equal(latestAgent({ agents: [] }), null)
+})
+
+test('ticket model: edges, depth, and what a waiting ticket holds up', () => {
   // 9 is not in the graph: an edge to it is dropped, as is 4's edge to itself.
   const graph = graphOf([[1], [2, [1, 9]], [3, [2]], [4, [3, 4]], [5, [1]]])
   const agents = [agent('ticket/2/impl/r1/s1', 'needs you', { reason: 'which API' })]
-  const tickets = ticketsOf(graph, agents, new Map())
+  const tickets = ticketsOf(graph, agents)
   const by = new Map(tickets.map((t) => [t.n, t]))
   assert.deepEqual(by.get(2).deps, [1])
   assert.deepEqual(by.get(4).deps, [3])
@@ -99,21 +124,20 @@ test('ticket model: a cycle in the graph does not hang the depth', () => {
       [2, [1]],
     ]),
     [],
-    new Map(),
   )
   assert.equal(tickets.length, 2)
   assert.ok(tickets.every((t) => Number.isInteger(t.depth)))
 })
 
 test('ticket layout: depth is a fixed column apart and a column’s stars a fixed row apart, never squeezed', () => {
-  const tickets = ticketsOf(graphOf([[1], [2, [1]], [3, [1]], [4, [1]], [5, [2]]]), [], new Map())
+  const tickets = ticketsOf(graphOf([[1], [2, [1]], [3, [1]], [4, [1]], [5, [2]]]), [])
   layoutTickets(tickets)
   const by = new Map(tickets.map((t) => [t.n, t]))
   for (const t of tickets) assert.ok(Math.abs(t.x - t.depth * COLUMN) <= 2, `#${t.n} at x ${t.x}`)
   const col = [2, 3, 4].map((n) => by.get(n).y).sort((a, b) => a - b)
   assert.ok(col[1] - col[0] >= ROW - 2 && col[2] - col[1] >= ROW - 2, `rows ${col}`)
   // The same graph lays out the same way every time.
-  const again = ticketsOf(graphOf([[1], [2, [1]], [3, [1]], [4, [1]], [5, [2]]]), [], new Map())
+  const again = ticketsOf(graphOf([[1], [2, [1]], [3, [1]], [4, [1]], [5, [2]]]), [])
   layoutTickets(again)
   assert.deepEqual(
     again.map((t) => [t.x, t.y]),
@@ -122,7 +146,7 @@ test('ticket layout: depth is a fixed column apart and a column’s stars a fixe
 })
 
 test('ticket navigation: → follows a line to what it blocks, ← back to a blocker, ↑↓ the nearest star that way', () => {
-  const tickets = ticketsOf(graphOf([[1], [2, [1]], [3, [1]], [4, [2, 3]]]), [], new Map())
+  const tickets = ticketsOf(graphOf([[1], [2, [1]], [3, [1]], [4, [2, 3]]]), [])
   layoutTickets(tickets)
   const by = new Map(tickets.map((t) => [t.n, t]))
   assert.ok([2, 3].includes(stepTicket(tickets, 1, 'RIGHT')))
@@ -162,6 +186,9 @@ test('painter: writes only the lines that changed, inside synchronized output, a
   p.reset()
   p.paint(['a', 'B', 'c'])
   assert.ok(out[2].includes('\x1b[1;1Ha') && out[2].includes('\x1b[3;1Hc'))
+  // A shorter frame clears the lines it no longer has.
+  p.paint(['a'])
+  assert.ok(out[3].includes('\x1b[2;1H\x1b[2K') && out[3].includes('\x1b[3;1H\x1b[2K'))
 })
 
 // --- the page, in a real run's journal ------------------------------------
@@ -222,6 +249,10 @@ test('ticket page: g opens it on the run’s tickets at their stages, t goes bac
   await view.key('t')
   assert.equal(view.model.page, 'tree')
   assert.equal(view.model.selected, treeAt)
+  // Esc goes back too.
+  await view.key('g')
+  await view.key('ESCAPE')
+  assert.equal(view.model.page, 'tree')
 })
 
 test('ticket page: arrows move along the lines and the camera glides there; Enter shows the ticket’s agent in the tree', async () => {
@@ -329,7 +360,7 @@ test('ticket page: a long title on the selected star scrolls as an agent’s nam
   assert.doesNotMatch(later, /#205 a ticket/)
 })
 
-test('ticket page in the runs list: ← moves along the lines rather than leaving the run; q still goes back to the list', async () => {
+test('ticket page in the runs list: ← moves along the lines and Esc goes back to the tree, rather than leaving the run; q still goes back to the list', async () => {
   const stateDir = runDir()
   const registry = join(mkdtempSync(join(tmpdir(), 'ticket-view-reg-')), 'runs.jsonl')
   runRegistry(registry).armed({ runId: 'run_tickets', name: 'spec-195', spec: 'spec-195', project: '/tmp/project', runDir: stateDir, script: join(stateDir, 'script.js'), host: 'crew' })
@@ -347,6 +378,10 @@ test('ticket page in the runs list: ← moves along the lines rather than leavin
   assert.ok([202, 203].includes(runs.opened().model.tickets.selected))
   await runs.clickTicket(201)
   assert.equal(runs.opened().model.tickets.selected, 201)
+  // Esc goes back to the tree, not out of the run; on the tree it leaves the run.
+  await runs.key('ESCAPE')
+  assert.equal(runs.opened().model.page, 'tree')
+  await runs.key('g')
   await runs.key('q')
   assert.equal(runs.opened(), null)
 })

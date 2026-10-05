@@ -8,8 +8,9 @@ import { RUNNER_SETTINGS } from '../settings.mjs'
 import { LEGACY_HOST } from '../hosts.mjs'
 import { backKeyLabel } from '../crew-config.mjs'
 import { starMap, ticketPane, ticketsHeading, TICKETS_HELP } from './ticket-draw.mjs'
+import { MARQUEE, marqueeOffset } from './marquee.mjs'
 
-export { TICKETS_HELP }
+export { TICKETS_HELP, marqueeOffset }
 
 const E = '\x1b['
 const c = (code, s) => `${E}${code}m${s}${E}0m`
@@ -117,20 +118,6 @@ function phaseLine(p) {
 // The name column's width. A name that overflows it is cut, ending in …, on
 // every row but the selected one, where it scrolls (marqueeOffset).
 export const NAME_W = 34
-const MARQUEE = { holdStartMs: 3000, holdEndMs: 5000, msPerChar: 250 }
-
-// How many characters a selected name of `length` scrolls left by, `elapsedMs`
-// after its row was selected, in a column `width` wide: 0 while it fits.
-// Otherwise it shows its start for 3 s, scrolls left at 4 characters a
-// second until its end is in view, holds its end for 5 s, and snaps back to
-// its start, over and over.
-export function marqueeOffset(elapsedMs, length, width) {
-  const max = length - width
-  if (max <= 0) return 0
-  const scrollMs = max * MARQUEE.msPerChar
-  const t = Math.max(0, elapsedMs) % (MARQUEE.holdStartMs + scrollMs + MARQUEE.holdEndMs)
-  return t < MARQUEE.holdStartMs ? 0 : Math.min(max, Math.floor((t - MARQUEE.holdStartMs) / MARQUEE.msPerChar))
-}
 
 // A row's name, NAME_W wide. A doctor's row, under its patient's, names only
 // its role, after its └: its label is `recover -> <the patient's label>`, the

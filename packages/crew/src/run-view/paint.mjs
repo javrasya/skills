@@ -10,6 +10,8 @@ export function painter(write) {
     paint(lines) {
       let out = ''
       for (const [i, l] of lines.entries()) if (last[i] !== l) out += `\x1b[${i + 1};1H${l}`
+      // A frame shorter than the last leaves no line of it behind.
+      for (let i = lines.length; i < last.length; i++) out += `\x1b[${i + 1};1H\x1b[2K`
       last = lines.slice()
       if (out) write(`\x1b[?2026h\x1b[?25l${out}\x1b[?2026l`)
     },
@@ -17,5 +19,30 @@ export function painter(write) {
     reset() {
       last = []
     },
+  }
+}
+
+// Draws the screen again, by calling fire, every `ms` while it changes with
+// time alone (draw's tick: the ticket view's glide and twinkle, a scrolling
+// name); tickEvery(null) stops it. A fire still drawing when the next is due
+// skips that one, so a slow action holds the screen still rather than piling
+// draws up behind it. fire returns the draw's promise, or nothing.
+export function ticker(fire) {
+  let timer = null
+  let every = null
+  let drawing = false
+  return function tickEvery(ms) {
+    if (ms === every) return
+    clearInterval(timer)
+    timer = null
+    every = ms
+    if (!ms) return
+    timer = setInterval(() => {
+      if (drawing) return
+      drawing = true
+      Promise.resolve(fire()).finally(() => {
+        drawing = false
+      })
+    }, ms)
   }
 }

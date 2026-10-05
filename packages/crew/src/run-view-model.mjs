@@ -24,7 +24,7 @@ import { leftOnDisk, removeRun } from './remove.mjs'
 import { writeJsonAtomic } from './fsutil.mjs'
 import { probesBy } from './outage.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
-import { cameraAt, layoutTickets, stepTicket, ticketsOf } from './ticket-map.mjs'
+import { cameraAt, latestAgent, layoutTickets, stepTicket, ticketsOf } from './ticket-map.mjs'
 
 export { RUNNER_PATH } from './daemon/runs.mjs'
 import { RUNNER_PATH } from './daemon/runs.mjs'
@@ -350,11 +350,12 @@ const FILTER_ORDER = [null, ...Object.keys(FILTERS)]
 // key (UP, CTRL_R) or a control character is none.
 const typed = (name) => ([...name].length === 1 && !/\p{Cc}/u.test(name) ? name : null)
 
-// The graph agent's result (implement-spec-in-workflow's GRAPH_SCHEMA): the
-// journal's, or, once a resume has truncated the journal before the graph
-// node replays, the result.json its agent left. null before it returned.
-function graphResult(fold) {
-  const node = fold.nodes.get('graph')
+// A node's result: the journal's, or, once a resume has truncated the
+// journal before the node replays, the result.json its agent left. null
+// before it returned. The ticket view reads the graph agent's (`graph`,
+// implement-spec-in-workflow's GRAPH_SCHEMA) and each ticket's publish.
+function nodeResult(fold, name) {
+  const node = fold.nodes.get(name)
   if (node?.result) return node.result
   if (!node?.last?.dir) return null
   try {
@@ -366,7 +367,7 @@ function graphResult(fold) {
 
 // The ticket the page opens on: the first, in the graph's order, that a
 // person answers or that is at work, else the first not picked up, else the first.
-const OPENS_ON = ['blocked', 'failed', 'gate', 'impl', 'todo', 'stacked']
+const OPENS_ON = ['waiting', 'failed', 'gate', 'impl', 'todo', 'stacked']
 const firstTicket = (tickets) => OPENS_ON.map((s) => tickets.find((t) => t.stage === s)).find(Boolean)?.n ?? null
 
 /**
@@ -586,7 +587,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
 
     phases = phaseGroups(agents, fold.phases ?? []).map(([name, list]) => phaseOf(name, list))
     consoles = await consolePhase(now)
-    tickets = ticketsOf(graphResult(fold), agents, fold.nodes)
+    tickets = ticketsOf(nodeResult(fold, 'graph'), agents, (name) => nodeResult(fold, name))
     if (tickets) {
       layoutTickets(tickets)
       if (!tickets.some((t) => t.n === ticket.n)) {
@@ -1101,7 +1102,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   // phase unfolded.
   function showAgentOf(n) {
     const t = tickets?.find((x) => x.n === n)
-    const a = t && ([...t.agents].filter((x) => x.patient == null).sort((x, y) => y.n - x.n)[0] ?? t.agents.at(-1))
+    const a = t ? latestAgent(t) : null
     if (!a) return say(`#${n} has no agent yet`)
     folds.set(a.phase, false)
     selectedKey = `agent:${a.n}`
@@ -1122,6 +1123,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
       case 'ENTER':
         return showAgentOf(ticket.n)
       case 't':
+      case 'ESCAPE':
         page = 'tree'
         layout()
         return {}
@@ -1527,8 +1529,9 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
         return { ...say(res.message), removed: true }
       }
       if (opened.view.model?.dialog) return gone(await opened.view.key(name))
-      // On the ticket page ← moves along the lines (ADR-0031).
-      if (name === 'q' || name === 'ESCAPE' || (name === 'LEFT' && opened.view.model?.page !== 'tickets')) return close()
+      // On the ticket page ← moves along the lines and Esc goes back to the tree (ADR-0031).
+      const onTickets = opened.view.model?.page === 'tickets'
+      if (name === 'q' || (!onTickets && (name === 'ESCAPE' || name === 'LEFT'))) return close()
       if (name === 'r') {
         // A paused run, or a live runner that is halted or paused on an
         // outage, is resumed from its tree; a dead one gets a new runner.

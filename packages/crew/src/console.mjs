@@ -12,7 +12,7 @@ import { RESET } from './daemon/modes.mjs'
 import { backKeyLabel, backKeySequences } from './crew-config.mjs'
 import { ARROW_KEYS, ENTER_KEYS, decodeKeys } from './keys.mjs'
 import { consoleRunsHelp, consoleTreeHelp, draw, drawRuns } from './run-view/draw.mjs'
-import { painter } from './run-view/paint.mjs'
+import { painter, ticker } from './run-view/paint.mjs'
 
 const bytes = (chunk) => (Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)).toString('latin1')
 
@@ -357,28 +357,13 @@ export function runsConsole({ paths, stdin, stdout, runs, backKey = 'ctrl+shift+
     tickEvery(screen.tick ?? null)
   }
 
-  // The tick that draws the screen again while it changes with time alone:
-  // the ticket page's glide and twinkle, a selected name that scrolls. A
-  // tick is a paint queued behind the actions like any other, one at a time,
-  // so a slow action holds the screen still rather than piling ticks up.
-  let ticker = null
-  let tickMs = null
-  let ticking = false
-  function tickEvery(ms) {
-    if (ms === tickMs) return
-    clearInterval(ticker)
-    ticker = null
-    tickMs = ms
-    if (!ms) return
-    ticker = setInterval(() => {
-      if (ticking || !shown) return
-      ticking = true
-      act(() => {})
-      busy.finally(() => {
-        ticking = false
-      })
-    }, ms)
-  }
+  // A tick is a paint queued behind the actions like any other, one at a
+  // time; none while a session is entered.
+  const tickEvery = ticker(() => {
+    if (!shown) return
+    act(() => {})
+    return busy
+  })
 
   // One that throws is an error on the flash line, never a crash, as in view.mjs.
   const act = (fn) => {

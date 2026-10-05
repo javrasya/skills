@@ -34,7 +34,7 @@ import { LEGACY_HOST, openHosts } from '../hosts.mjs'
 import { RUNNER_SETTINGS } from '../settings.mjs'
 import { TREE_HELP, draw, drawRuns } from './draw.mjs'
 import { VIEW_EXIT } from './exit-codes.mjs'
-import { painter } from './paint.mjs'
+import { painter, ticker } from './paint.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REFRESH_MS = 2000
@@ -165,27 +165,8 @@ function render() {
   tickEvery(screen.tick ?? null)
 }
 
-// The tick that draws the screen again while it changes with time alone: a
-// scrolling name, the ticket page's glide and twinkle (draw's tick). A tick is
-// a render queued behind the actions like any other, one at a time, so a
-// slow action holds the screen still and never piles ticks up behind it.
-let ticker = null
-let tickMs = null
-let ticking = false
-function tickEvery(ms) {
-  if (ms === tickMs) return
-  clearInterval(ticker)
-  ticker = null
-  tickMs = ms
-  if (!ms) return
-  ticker = setInterval(() => {
-    if (ticking) return
-    ticking = true
-    act(() => {}).finally(() => {
-      ticking = false
-    })
-  }, ms)
-}
+// A tick is a render queued behind the actions like any other, one at a time.
+const tickEvery = ticker(() => act(() => {}))
 
 function quit() {
   const done = () => {
