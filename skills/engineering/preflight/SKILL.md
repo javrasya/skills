@@ -64,6 +64,8 @@ Show the operator the full change set before touching the tracker: per ticket, t
 
 Every ticket leaves preflight with its validation recipe written as a **Validation** section beside its acceptance criteria, in two subsections. `### Run per change` holds the commands every implementer, fixer, gate reviewer and publisher of the ticket runs on its commit. `### Run at review` holds the full suites the whole-stack review runs once on the stack tip. Each command is one line holding one backticked command. Prose lines — "absent: …", "not applicable: …", "Recipe measured …", "Needs: …", a deferred repo gate — are allowed in either subsection and are never run as commands.
 
+A recipe line may already be red. The run baselines every recipe command once on its pinned base before it dispatches anything, and a check that already fails there is a **pre-existing failure**: a role whose red is made only of those may judge it green, a **waived check**, listed on the PR (ADR-0030). So write the command the ticket needs, not one trimmed until it passes on today's code; a known red is worth a line in the ticket's acceptance criteria only when the ticket is meant to fix it.
+
 ```
 ## Validation
 
