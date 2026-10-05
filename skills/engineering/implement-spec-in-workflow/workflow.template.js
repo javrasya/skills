@@ -212,13 +212,13 @@ const ECONOMY = `Context economy — your context is re-read every turn, so neve
 - Decide a file's whole change before touching it and land it in as few edits as you can.
 - Run tests in the repo's quietest failures-only form, and re-run only after you changed something.`
 
-// How a check is run, told to every agent that carries the validation list.
+// How a check is run, told to every agent that carries the validation recipe.
 // Measured over 4821 validation calls of one project's runs: 55% of the wall
 // time was waiting (sleep/pgrep loops around backgrounded tests), the full
 // suite ran 193 times where a scoped run would have done, and end-of-agent
 // cache cleans deleted what the next agent could have reused. See ADR-0009.
 const RUNNING = `Running checks:
-- While iterating, run the narrowest scope your build tool supports (one package, one crate, one test file). Run the validation list once, after your last edit, before you return.
+- While iterating, run the narrowest scope your build tool supports (one package, one crate, one test file). Run the validation recipe once, after your last edit, before you return.
 - Run every check in the foreground, exactly as written. Never launch a check in the background. If the harness moves a long command to the background on its own, wait on it once with the harness's wait primitive — never with a sleep, pgrep or polling loop.
 - Never run a build-cache clean (\`cargo clean\` or its equivalent). The worktree remove at reclaim is the only disk reclaim this run does.`
 
@@ -265,13 +265,13 @@ const CHECKS_FIELD = {
       additionalProperties: false,
       required: ['command', 'passed'],
       properties: {
-        command: { type: 'string', description: 'the exact command, copied verbatim from the validation list' },
+        command: { type: 'string', description: 'the exact command, copied verbatim from the validation recipe' },
         passed: { type: 'boolean' },
       },
     },
     description: 'one entry per validation command run on the final commit',
   },
-  validated_sha: { type: 'string', description: '`git rev-parse HEAD` of the commit the whole validation list last passed on; empty if it never passed' },
+  validated_sha: { type: 'string', description: '`git rev-parse HEAD` of the commit the whole validation recipe last passed on; empty if it never passed' },
 }
 
 // What discovery finds missing from the environment (ADR-0021): something a
@@ -788,7 +788,7 @@ Return the PR url and number, what the mirror found, and your worktree.`,
 // MAX_DISPATCH_ROUNDS governs re-slicing HERE only. The gate has no equivalent
 // nesting: whatever a fix slice does not reach falls to the next reviewer,
 // which re-derives what is still broken from the branch itself. A readiness
-// red at the gate (the validation list failing on the branch) also comes back
+// red at the gate (the validation recipe failing on the branch) also comes back
 // here as a remainder and spends one of these rounds — one cap, not two.
 const MAX_DISPATCH_ROUNDS = 6
 
@@ -970,7 +970,7 @@ ${cutFrom !== base ? `4. The tip moved since this ticket was cut. Replay its com
 
    ${layerLine(layers.length)}
 
-   and must also contain the line \`Closes #${t.number}\`, state that it is part of the stack for spec #${SPEC}, and carry one provenance line — \`Validated green at <sha> by <role>\` — naming the sha the validation list last passed on and who ran it (you, or the role you inherited it from).${impl.decided.length ? ` Under a heading "Decided during implementation", list what the implementer settled itself where the ticket left it open:
+   and must also contain the line \`Closes #${t.number}\`, state that it is part of the stack for spec #${SPEC}, and carry one provenance line — \`Validated green at <sha> by <role>\` — naming the sha the validation recipe last passed on and who ran it (you, or the role you inherited it from).${impl.decided.length ? ` Under a heading "Decided during implementation", list what the implementer settled itself where the ticket left it open:
 ${impl.decided.map((d) => `   - ${d}`).join('\n')}
   ` : ''} Leave it a DRAFT — every layer stays draft until the run finalizes, which is how the operator can tell the stack is still being built.
 ${canLink
@@ -1122,7 +1122,7 @@ Return one verdict per finding in your brief you fixed or rejected, the \`locati
     out.landed = true
     out.verdicts.push(...r.verdicts)
     out.unfinished.push(...r.unfinished)
-    // A fixer that left the validation list red has not fixed anything it
+    // A fixer that left the validation recipe red has not fixed anything it
     // claims: the next reviewer's readiness check will catch it, but the log
     // should say why before it does.
     const red = readinessRed(r.checks, validation)
@@ -1186,7 +1186,7 @@ async function fixFindings(findings, opts) {
 // whole diff; later rounds verify the claimed fixes and the lines the fixer
 // touched, so the round count measures repair, not fresh discovery.
 //
-// Readiness comes before review: the reviewer re-runs the validation list on
+// Readiness comes before review: the reviewer re-runs the validation recipe on
 // the branch, and a red there is a remainder handed back to dispatch (the
 // gate returns `readiness`), not a finding handed to a fixer.
 //
@@ -1364,7 +1364,7 @@ async function implementTicket(t) {
     return { number: t.number, state: 'stopped', detail }
   }
   // Slice rounds: run the plan; a remainder (a slice bailed out, was never
-  // started, or left the validation list red — including at the gate) goes
+  // started, or left the validation recipe red — including at the gate) goes
   // back to the dispatcher for a re-slice with a fresh agent. A decision
   // needed, or a remainder that survives the round cap, halts the ticket.
   let slices = plan.slices

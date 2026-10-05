@@ -321,11 +321,11 @@ _Avoid_: validation list, `validation.md` — the spec-level file every run once
 The **validated sha** is the commit the ticket's per-change recipe last passed on, named by whoever ran it
 and carried downstream with the result: implementer to gate reviewer, fixer to the next reviewer, gate
 to publisher, publisher to the PR body (`Validated green at <sha> by <role>`). An **inherited result**
-is a downstream agent reporting that list green without re-running it, because `git rev-parse HEAD`
+is a downstream agent reporting that recipe green without re-running it, because `git rev-parse HEAD`
 equals the validated sha and it edited nothing — one `rev-parse` proves the tree is the one already
-proven. A rebase produces a tree nobody has validated, so the publisher always runs the list after one.
+proven. A rebase produces a tree nobody has validated, so the publisher always runs the recipe after one.
 The proof is the sha match, never the upstream agent's word: an agent that edited anything, or whose
-HEAD differs, runs the list. See ADR-0009.
+HEAD differs, runs the recipe. See ADR-0009.
 
 ### Reporting to a screen
 
