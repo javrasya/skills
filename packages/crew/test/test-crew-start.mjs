@@ -181,7 +181,7 @@ const fakeCheck = ({ repoDir, harness, model }) => preflight({ harness, model, c
 // A ticket body as preflight leaves it, and one it never touched.
 const RECIPE = '## What to build\n\nIt.\n\n## Validation\n\n### Run per change\n- Tests: `npm test`\n\n### Run at review\n- Tests: `npm test`\n'
 const BARE = '## What to build\n\nIt.\n\n## Acceptance criteria\n\n- [ ] it\n'
-const ticket = (number, body, label = 'ready-for-agent') => ({ number, title: `Ticket ${number}`, body, labels: [label] })
+const ticket = (number, body, label = 'ready-for-agent', state = 'open') => ({ number, title: `Ticket ${number}`, state, body, labels: [label] })
 const TICKETS = [ticket(101, RECIPE), ticket(102, RECIPE)]
 
 // A repo on disk for git, and gh and pi answered from a table. `tickets` are
@@ -314,6 +314,13 @@ test('crew start: every ticket without the headings is named; a spec whose ticke
   assert.equal(unread.launches.length, 0)
 })
 
+test('crew start: a closed ready-for-agent ticket without the headings does not block the start; no run would take it', async () => {
+  const w = world({ tickets: [ticket(101, RECIPE), ticket(102, BARE, 'ready-for-agent', 'closed')] })
+  await w.ready
+  await w.start(['94', ...FLAGS])
+  assert.equal(w.launches.length, 1)
+})
+
 test('crew start by flags alone: tickets that all carry the headings arm headless, with no validation list anywhere and no orchestrator', async () => {
   const w = world()
   await w.ready
@@ -321,7 +328,7 @@ test('crew start by flags alone: tickets that all carry the headings arm headles
   const armed = await w.start(['94', ...FLAGS], { check: async (c) => (checked++, fakeCheck(c)) })
   assert.equal(w.launches.length, 1)
   assert.equal(checked, 1, 'the harness runs once, as the preflight, and for nothing else')
-  assert.ok(w.calls.includes(`gh api repos/acme/app/issues/94/sub_issues?per_page=100 --paginate --jq .[] | {number, title, body, labels: [.labels[].name]} | @json`), w.calls.join('\n'))
+  assert.ok(w.calls.includes(`gh api repos/acme/app/issues/94/sub_issues?per_page=100 --paginate --jq .[] | {number, title, state, body, labels: [.labels[].name]} | @json`), w.calls.join('\n'))
   assert.ok(!existsSync(join(w.notesDir, 'validation.md')))
   assert.ok(!existsSync(join(armed.script, '..', 'validation.md')))
   assert.deepEqual(Object.keys(armed.target).sort(), ['notesDir', 'repo', 'repoDir', 'spec', 'title'])
