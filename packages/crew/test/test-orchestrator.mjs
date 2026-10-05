@@ -344,6 +344,11 @@ test('?: consultSession records each session in the run dir (#168), starting the
   const host = { sessionStart: async (s) => (starts.push(s), { terminal: String(starts.length) }) }
   assert.deepEqual(await consultSession({ host, stateDir, harness: 'claude', model: 'opus', dir: 'C:/repo' }), { terminal: '1', n: 1 })
   assert.deepEqual(await consultSession({ host, stateDir, harness: 'pi', dir: 'C:/repo' }), { terminal: '2', n: 2 })
+  assert.deepEqual(
+    starts.map((s) => s.stateDir),
+    [stateDir, stateDir],
+    'the host is told the run the session is about, for its tools (#194)',
+  )
   const failing = {
     sessionStart: async () => {
       throw new Error('crew: agent_not_ready')
@@ -631,6 +636,9 @@ test("run default: the orchestrator of an armed run runs on the harness and mode
   assert.ok(isOrchestratorTitle(s.title))
   assert.ok(s.prompt.includes(runDir), 'seeded with the run directory')
   assert.match(s.prompt, /halted\.json.*journal\.jsonl.*agents\/\*\/result\.json.*summary\.json/)
+  // Its tools (#194), named from the table: what it reads first, and what it does only when asked.
+  assert.match(s.prompt, /Your session has crew's tools for this run: `run_status`, `agent_result` and `runner_log` read it, and `pause`, `resume` and `decide` act on it as the operator's p and r do in the run console\. Start with run_status/)
+  assert.match(s.prompt, /Use pause, resume and decide only when the operator asks, and give decide only the answers they gave/)
   await orch.consult({ runDir, script: join(dir, 'gone.js'), project: null, permissionMode: null })
   assert.deepEqual([starts[1].harness, starts[1].model, starts[1].dir], ['claude', null, runDir], 'a script it cannot read runs it on Claude')
 })
@@ -648,6 +656,7 @@ test('crew host: ? starts the fake harness in a session of no run, titled orches
     'what the tree reads its state from',
   )
   await assert.rejects(request(paths, { op: 'worker.show', id }), /dispatch_not_found/, 'no dispatch of any run: never a node')
+  assert.deepEqual((await request(paths, { op: 'worker.agent', id })).agent, { role: 'orchestrator', schema: null, stateDir }, "the orchestrator's agent, about this run (#194)")
   const transcripts = () =>
     existsSync(join(root, 'claude'))
       ? readdirSync(join(root, 'claude'), { recursive: true })

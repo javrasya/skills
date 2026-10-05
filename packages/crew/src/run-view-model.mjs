@@ -53,13 +53,30 @@ const TITLE = /^\[([^\]]*)\] ([\s\S]*)$/
 // of a node that a later one superseded (journal.mjs) is no row either, but
 // Reclaim All still takes it, with any worktree it was given. An orchestrator
 // session (orchestrator.mjs) is never a row, whatever journal names one.
-const agentsIn = (fold) =>
+// Shared with the orchestrator's run report (run-report.mjs, #194).
+export const agentsIn = (fold) =>
   fold.agents
     .filter((a) => !isOrchestratorTitle(a.title))
     .map((a) => {
       const [, phase, label] = TITLE.exec(a.title ?? '') ?? [null, 'Run', a.title ?? `agent-${a.n}`]
       return { ...a, phase, label }
     })
+
+// The agents by phase, [[name, agents]…]: the phases in the order the script's
+// meta declares them (`declared`, the journal's `phases`), then any it does
+// not declare in the order their agents were called; each phase's agents in
+// call order (n). A resume journals its carried lines before the calls it
+// replays, so the order lines come in is no phase order. Shared with the
+// orchestrator's run report (run-report.mjs, #194).
+export function phaseGroups(agents, declared = []) {
+  const byPhase = new Map()
+  for (const a of [...agents].sort((x, y) => x.n - y.n)) {
+    if (!byPhase.has(a.phase)) byPhase.set(a.phase, [])
+    byPhase.get(a.phase).push(a)
+  }
+  const rank = (name) => (declared.includes(name) ? declared.indexOf(name) : declared.length)
+  return [...byPhase].sort(([x], [y]) => rank(x) - rank(y))
+}
 
 // The `?` sessions the run dir records (orchestrator.mjs consultSessions,
 // #168), each as a row of the Orchestrator phase, shaped like an agent so the
@@ -539,18 +556,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
         .filter(Boolean)
         .join(' · ') || null
 
-    // A resume journals its carried lines before the calls it replays, so
-    // the order lines come in is no phase order: the script's is, and one it
-    // does not declare follows, as its first agent was called. The fold's
-    // agents are in call order.
-    const byPhase = new Map()
-    for (const a of [...agents].sort((x, y) => x.n - y.n)) {
-      if (!byPhase.has(a.phase)) byPhase.set(a.phase, [])
-      byPhase.get(a.phase).push(a)
-    }
-    const declared = fold.phases ?? []
-    const rank = (name) => (declared.includes(name) ? declared.indexOf(name) : declared.length)
-    phases = [...byPhase].sort(([x], [y]) => rank(x) - rank(y)).map(([name, list]) => phaseOf(name, list))
+    phases = phaseGroups(agents, fold.phases ?? []).map(([name, list]) => phaseOf(name, list))
     consoles = await consolePhase(now)
 
     const isAlive = livenessOf(alive, stateDir)

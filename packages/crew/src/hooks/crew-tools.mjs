@@ -1,12 +1,26 @@
 // crew's tools (tools.mjs, ADR-0027) as a session's harness gives them: pi
 // registers them in its extension (crew-pi.mjs), Claude lists them from crew's
-// MCP server (crew-mcp.mjs). Each is one daemon op keyed by the session's id
-// (CREW_SESSION, under CREW_HOME); a refusal throws the daemon's words, and a
-// daemon gone throws them named, with what the agent does instead.
+// MCP server (crew-mcp.mjs). An agent's is one daemon op keyed by the
+// session's id (CREW_SESSION, under CREW_HOME); a refusal throws the daemon's
+// words, and a daemon gone throws them named, with what the agent does
+// instead. The orchestrator's, a `?` session's (#194), read the run's state
+// dir (run-report.mjs) and write the files the operator's p and r write
+// (pause.mjs, halt.mjs's RESUME_REQUEST), the daemon asked nothing.
+import { join } from 'node:path'
 import { request, daemonGone } from '../daemon/client.mjs'
 import { crewPaths } from '../daemon/transport.mjs'
+import { writeJsonAtomic } from '../fsutil.mjs'
+import { RESUME_REQUEST, decisionsOf } from '../halt.mjs'
+import { pauseRun, pausedAt, unpauseRun } from '../pause.mjs'
+import { agentReport, runReport, runnerLogTail } from '../run-report.mjs'
+import { runnerAlive } from '../run-view-model.mjs'
 import { NOTE_MAX, submitShape, tool } from '../tools.mjs'
+import { haltNoticeOf } from '../triage.mjs'
 import { sleep } from '../util.mjs'
+
+// How many lines of runner.log runner_log reads when not told, and the most.
+const LOG_LINES = 50
+const LOG_LINES_MAX = 500
 
 // How long a session crew started for an agent (CREW_AGENT) waits for its
 // dispatch: its runner makes it just after the session, which may start first.
@@ -34,6 +48,11 @@ export async function sessionAgent(env = process.env) {
 // answers the agent's text.
 /** @returns {Array<{ name: string, label: string, description: string, parameters: object, call: (args: any) => Promise<string> }>} */
 export function crewTools(agent, env = process.env) {
+  const all = agent.role === 'orchestrator' ? orchestratorTools(agent.stateDir) : agentTools(agent, env)
+  return all.filter((t) => tool(t.name).who.includes(agent.role)).map((t) => ({ ...t, description: tool(t.name).description }))
+}
+
+function agentTools(agent, env) {
   const ask = async (said, instead) => {
     try {
       return await request(crewPaths(env), { ...said, id: env.CREW_SESSION })
@@ -97,5 +116,116 @@ export function crewTools(agent, env = process.env) {
       },
     },
   ]
-  return all.filter((t) => tool(t.name).who.includes(agent.role)).map((t) => ({ ...t, description: tool(t.name).description }))
+  return all
+}
+
+// A held node as halted.json names it, for resume and decide: what it is
+// held for, and whether it is one the run holds at all.
+const heldNodes = (stateDir) => haltNoticeOf(stateDir)?.nodes ?? []
+const heldFor = (n) => (Array.isArray(n.questions) && n.questions.length ? 'needs decisions' : 'failed')
+const named = (nodes) => nodes.map((n) => `${n.node} (${heldFor(n)})`).join(', ')
+
+// The orchestrator's tools, on the run in `stateDir`: what a `?` session
+// reads and does. `resume` does what the tree's r does (run-view-model.mjs):
+// a pause it lifts itself, removing paused.json, which the runner journals as
+// it finds the file gone; a halt it asks the runner about, through the file
+// its watchResumeRequests takes (runner.mjs), so a node is carried on by the
+// runner itself. `decide` asks the same way. Neither writes the file for a
+// runner that is not there to take it.
+function orchestratorTools(stateDir) {
+  // The runner a request is for, refused when none is there to take it.
+  const runner = () => {
+    const report = runReport(stateDir, { alive: runnerAlive })
+    if (report.alive === false) throw new Error(`the run's runner is not running, so nothing would take the request. The operator resumes it with r in \`crew view ${report.runId ?? '<run id>'}\`, which starts a runner again.`)
+    return { send: (request) => writeJsonAtomic(join(stateDir, RESUME_REQUEST), request) }
+  }
+  return [
+    {
+      name: 'run_status',
+      label: 'Run status',
+      parameters: { type: 'object', properties: {} },
+      async call() {
+        return JSON.stringify(runReport(stateDir), null, 2)
+      },
+    },
+    {
+      name: 'agent_result',
+      label: 'Agent result',
+      parameters: { type: 'object', required: ['agent'], properties: { agent: { type: 'string', description: "The agent's node, its title (with or without its [Phase]), or its call number, as run_status lists them." } } },
+      async call({ agent }) {
+        return JSON.stringify(agentReport(stateDir, agent), null, 2)
+      },
+    },
+    {
+      name: 'runner_log',
+      label: 'Runner log',
+      parameters: { type: 'object', properties: { lines: { type: 'integer', minimum: 1, maximum: LOG_LINES_MAX, description: `How many of its last lines, ${LOG_LINES} when not given.` } } },
+      async call({ lines = LOG_LINES } = {}) {
+        const n = Number.isInteger(lines) ? Math.min(Math.max(lines, 1), LOG_LINES_MAX) : LOG_LINES
+        return runnerLogTail(stateDir, n)
+      },
+    },
+    {
+      name: 'pause',
+      label: 'Pause',
+      parameters: { type: 'object', properties: {} },
+      async call() {
+        return pauseRun(stateDir, new Date()) ? 'Paused: no new agent starts, and every agent at work finishes. resume lifts it.' : 'Already paused: resume lifts it.'
+      },
+    },
+    {
+      name: 'resume',
+      label: 'Resume',
+      parameters: { type: 'object', properties: { node: { type: 'string', description: 'One held node to carry on, as run_status names it under halted. Every held node when not given.' } } },
+      async call({ node = null } = {}) {
+        const held = heldNodes(stateDir)
+        const paused = pausedAt(stateDir)
+        if (!held.length && !paused) return 'Nothing to resume: the run is neither paused nor halted.'
+        if (node !== null && !held.some((n) => n.node === node)) throw new Error(`${node} is not held: ${held.length ? `the held nodes are ${named(held)}` : 'the run is not halted'}. Nothing was asked of the runner.`)
+        // A halt is the runner's to carry on: refused before anything is done when it is gone.
+        const { send } = held.length ? runner() : { send: null }
+        if (paused) unpauseRun(stateDir)
+        if (send) send({ node })
+        const lifted = paused ? 'Lifted the pause, as r in the run console does: the agents it held start.' : ''
+        if (!held.length) return lifted
+        const then = node
+          ? heldFor(held.find((n) => n.node === node)) === 'needs decisions'
+            ? ' Its worker is told the operator answered its questions on the ticket: use decide to hand it the answers instead.'
+            : ' Its worker is told the run was halted here and to finish.'
+          : held.some((n) => heldFor(n) === 'needs decisions')
+            ? ' A node that needs decisions is told the operator answered them on the ticket: use decide to hand its worker the answers instead.'
+            : ' Each worker is told the run was halted here and to finish.'
+        return `${lifted ? `${lifted} ` : ''}Asked the runner to carry ${node ? `node ${node}` : `every held node (${held.map((n) => n.node).join(', ')})`} on, as r in the run console does.${then}`
+      },
+    },
+    {
+      name: 'decide',
+      label: 'Decide',
+      parameters: {
+        type: 'object',
+        required: ['node', 'decisions'],
+        properties: {
+          node: { type: 'string', description: 'The held node that asked, as run_status names it under halted.' },
+          decisions: {
+            type: 'array',
+            minItems: 1,
+            items: { type: 'object', required: ['question', 'answer'], properties: { question: { type: 'string', description: 'The question, as the node asked it.' }, answer: { type: 'string', description: "The operator's answer, in their words." } } },
+            description: 'Every question the node asked, each with its answer.',
+          },
+        },
+      },
+      async call({ node, decisions }) {
+        const given = decisionsOf(decisions)
+        if (!given || given.length !== decisions.length) throw new Error('decide needs at least one decision, each a question and its answer.')
+        const { send } = runner()
+        const held = heldNodes(stateDir)
+        const asking = held.filter((n) => heldFor(n) === 'needs decisions')
+        const it = held.find((n) => n.node === node)
+        if (!it) throw new Error(`${node} is not held: ${held.length ? `the held nodes are ${named(held)}` : 'the run is not halted'}. Nothing was asked of the runner.`)
+        if (heldFor(it) !== 'needs decisions') throw new Error(`${node} is held because it failed, not for decisions: resume carries it on. ${asking.length ? `The nodes that need decisions are ${asking.map((n) => n.node).join(', ')}.` : 'No node needs decisions.'}`)
+        send({ node, decisions: given })
+        return `Answered ${given.length} decision${given.length === 1 ? '' : 's'} for node ${node} and asked the runner to carry it on: its worker is told your answers and finishes with them.`
+      },
+    },
+  ]
 }

@@ -7,9 +7,11 @@
 // that does not match, in the turn. A worker's or a doctor's session gets
 // `status` and `needs_you` (#175); a doctor's needs_you is its escalation,
 // sent as mail. A doctor's also gets `handoff` and `give_up`, which end its
-// round (#176). A session of no agent, or one outside crew, gets no tool.
-// The tools themselves are crew-tools.mjs's, shared with Claude's MCP server.
-// Nothing else of pi's is changed.
+// round (#176). A `?` session, the orchestrator's about one run (#194), gets
+// the orchestrator's: run_status, agent_result and runner_log, and pause,
+// resume and decide. A session of no agent, or one outside crew, gets no
+// tool. The tools themselves are crew-tools.mjs's, shared with Claude's MCP
+// server. Nothing else of pi's is changed.
 import { piWaiting } from '../waiting.mjs'
 import { sessionAgent, crewTools } from './crew-tools.mjs'
 import { tell } from './tell.mjs'

@@ -1,11 +1,12 @@
-// crew's MCP server, passed to a worker's Claude session only (`claude
+// crew's MCP server, passed to a Claude session crew starts only (`claude
 // --mcp-config`, crew-host crewMcpConfig), never installed: Claude starts it
 // over stdio and it gives the session crew's tools (crew-tools.mjs), as crew's
 // pi extension gives pi's. JSON-RPC by hand, one message a line, as MCP's
 // stdio transport has it: initialize, tools/list and tools/call, nothing more.
 // It lists the tools of the session's agent, as the daemon holds its
-// dispatch (CREW_SESSION, under CREW_HOME), so a session of no agent, or one
-// outside crew, lists none. Claude keeps the list it is given until told it
+// dispatch (CREW_SESSION, under CREW_HOME), or the orchestrator's for a `?`
+// session about a run (#194), so a session of no agent, or one outside crew,
+// lists none. Claude keeps the list it is given until told it
 // changed, so an agent's session (CREW_AGENT) that lists none yet goes on
 // looking, and says so once its agent is found (listChanged). A call is one daemon op; whatever fails it, a
 // refusal or a daemon gone, comes back as error content, so Claude goes on.

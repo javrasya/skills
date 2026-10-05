@@ -280,13 +280,14 @@ export function crewHost({
   // worker: no dispatch, no preamble, only the prompt.
   // `asking` is ready's: who hears of a dialog the person must answer first.
   // `agent` is what its dispatch knows of its agent, for a submit by session
-  // (runs.mjs): { role, schema, resultPath }.
-  async function launch(line, { harness, dir, title, prompt, run, typing = () => {}, asking = null, agent = null }) {
+  // (runs.mjs): { role, schema, resultPath }. `stateDir` is the run a session
+  // of no Run is about (sessionStart), kept on the session by the daemon.
+  async function launch(line, { harness, dir, title, prompt, run, typing = () => {}, asking = null, agent = null, stateDir = null }) {
     const [program, ...args] = line
     const command = [...(harnesses[harness] ?? [program]), ...args, ...waitWords(harness)]
     // CREW_AGENT: its dispatch follows the session, which its harness's tools
     // wait for (hooks/crew-pi.mjs).
-    const { session } = await call({ op: 'session.spawn', command, cwd: dir, env: run ? { ...sessionEnv, CREW_AGENT: '1' } : sessionEnv, title })
+    const { session } = await call({ op: 'session.spawn', command, cwd: dir, env: run ? { ...sessionEnv, CREW_AGENT: '1' } : sessionEnv, title, ...(stateDir !== null && { stateDir }) })
     try {
       const { worker } = run ? await call({ op: 'run.worker', run, session: session.id, coordinator, agent }) : { worker: null }
       await ready(session.id, command, { harness, asking })
@@ -426,9 +427,12 @@ export function crewHost({
     // A harness session of no Run, for a person to talk to: in `dir` (the
     // host's own directory by default), prompted once ready, and entered from
     // the run console. Nothing settles it, and closing it is its opener's.
+    // `stateDir` is the run it is about (a `?` session's): kept on the session
+    // by the daemon, so worker.agent answers it the orchestrator's and its
+    // harness equips it with the orchestrator's tools (#194).
     // Crew's own, beyond the session host interface (session-host.mjs CREW_ONLY).
-    async sessionStart({ title, prompt, harness = 'claude', model, effort, permissionMode, sessionId, dir = cwd }) {
-      const { terminal } = await launch(launchWords({ harness, model, effort, permissionMode, sessionId }), { harness, dir, title, prompt, run: null })
+    async sessionStart({ title, prompt, harness = 'claude', model, effort, permissionMode, sessionId, dir = cwd, stateDir = null }) {
+      const { terminal } = await launch(launchWords({ harness, model, effort, permissionMode, sessionId }), { harness, dir, title, prompt, run: null, stateDir })
       return { terminal }
     },
 

@@ -188,15 +188,20 @@ const continuePrompt = (why) => `You were interrupted: the workflow runner stopp
 
 // A node resumed after the run halted on it (ADR-0016): its session carried
 // on, told why. One that needed decisions is told the operator has answered,
-// on the ticket. `remade`: the baseline of the run's chain worktree, made
-// again because it was reclaimed while the run was halted (ADR-0020).
-// `attended`: a person joins it (ADR-0021), so its answers come from them.
-export const haltedPrompt = (needsDecision, remade = null, attended = false) =>
+// on the ticket, or, when the resume carries `decisions` (the orchestrator's
+// decide, #194: [{ question, answer }]), the answers themselves, each
+// question with its answer, to take as final. `remade`: the baseline of the
+// run's chain worktree, made again because it was reclaimed while the run was
+// halted (ADR-0020). `attended`: a person joins it (ADR-0021), so its answers
+// come from them.
+export const haltedPrompt = (needsDecision, remade = null, attended = false, decisions = null) =>
   `${
     attended
       ? 'The workflow run was halted here and has been resumed. The person is back in this session: pick up with them where you stopped, and finish the task'
       : needsDecision
-        ? 'The workflow run was halted here: your result named decisions only the operator can make, and the operator has answered them. Re-read the ticket, its body and its comments, for the answers, then finish the task'
+        ? decisions?.length
+          ? `The workflow run was halted here: your result named decisions only the operator can make, and the operator has answered them here, each question with its answer. ${decisions.map((d) => `Q: ${d.question} A: ${d.answer}`).join(' ')} Take these answers as final, and finish the task`
+          : 'The workflow run was halted here: your result named decisions only the operator can make, and the operator has answered them. Re-read the ticket, its body and its comments, for the answers, then finish the task'
         : 'The workflow run was halted here, and the operator has resumed it. Carry on from where you are and finish the task'
   }, then ${SUBMIT_THEN}. ${NEW_IDS}${remade ? ` Your worktree was reclaimed while the run was halted and has been made again, its setup hook run again: anything you left uncommitted in it is gone, and it is no longer on the ref you were on, so switch back to your work's ref first.${baselineSection(remade)}` : ''}`
 
@@ -1077,7 +1082,8 @@ export function agentLifecycle({
   // A node the run halted on, resumed (ADR-0016): its session continued in its
   // own worktree, in its own tab, or in a new one there once that is gone, with
   // haltedPrompt, then watched as any worker, its continuations counted
-  // afresh. call.adopt is the worker it last ran; call.halted { needsDecision }.
+  // afresh. call.adopt is the worker it last ran; call.halted { needsDecision,
+  // decisions }, decisions the operator's answers a resume carried (#194).
   async function carryHalted(runId, call) {
     const { key, n, title, launch, adopt, halted, isolation } = call
     // A chained node (ADR-0020) carries on in the run's chain worktree, asked
@@ -1111,7 +1117,7 @@ export function agentLifecycle({
         terminal: w.terminal,
         worktree: w.worktree,
         title,
-        prompt: haltedPrompt(!!halted.needsDecision, chain?.made ? (chain.baseline ?? []) : null, !!call.attended),
+        prompt: haltedPrompt(!!halted.needsDecision, chain?.made ? (chain.baseline ?? []) : null, !!call.attended, halted.decisions ?? null),
         ...launch,
         agent: dispatchAgent(call),
         sessionId: adopt.sessionId,

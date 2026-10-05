@@ -46,6 +46,9 @@ import { request, stopDaemon } from '../src/daemon/client.mjs'
 import { startDaemon } from '../src/daemon/daemon.mjs'
 import crewPi from '../src/hooks/crew-pi.mjs'
 import { tool } from '../src/tools.mjs'
+import { consultSession } from '../src/orchestrator.mjs'
+import { RESUME_REQUEST } from '../src/halt.mjs'
+import { PAUSE_FILE } from '../src/pause.mjs'
 
 const FAKE_HARNESS = fileURLToPath(new URL('./fixtures/crew/fake-harness.mjs', import.meta.url))
 const CREW_BIN = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url))
@@ -556,7 +559,7 @@ test("crew host: the harness starts from the runner's launch line word for word,
 
 test("crew host: a Claude session's settings allow crew's tools without a prompt per call, beside its hooks, and its MCP config starts crew's server with the session's own ids; the repo's servers stay (#177)", () => {
   const settings = JSON.parse(claudeSettings())
-  assert.deepEqual(settings.permissions, { allow: ['submit', 'status', 'needs_you', 'handoff', 'give_up'].map((name) => `mcp__crew-agent-tools__${name}`) })
+  assert.deepEqual(settings.permissions, { allow: ['submit', 'status', 'needs_you', 'handoff', 'give_up', 'run_status', 'agent_result', 'runner_log', 'pause', 'resume', 'decide'].map((name) => `mcp__crew-agent-tools__${name}`) })
   assert.equal(settings.hooks.PreToolUse?.[0].hooks[0].command, `"${process.execPath}" "${CLAUDE_HOOK}"`)
   assert.deepEqual(JSON.parse(crewMcpConfig()), {
     mcpServers: { 'crew-agent-tools': { type: 'stdio', command: process.execPath, args: [CREW_MCP], env: { CREW_SESSION: '${CREW_SESSION}', CREW_HOME: '${CREW_HOME}', CREW_AGENT: '${CREW_AGENT:-}' } } },
@@ -852,6 +855,128 @@ test("crew host: crew's pi extension gives a worker's session `status`, `needs_y
     await other.start().catch((e) => assert.match(e.message, /^no session no-such-session$/))
     assert.deepEqual(other.tools, [], JSON.stringify(none))
   }
+})
+
+test("crew host: crew's pi extension gives a `?` session the orchestrator's tools: run_status and agent_result read the run as the tree shows it, runner_log its log, pause and resume act as p and r do through the run's files, decide answers a held node's questions and resumes it; a `?` session of no run gets none (#194)", async () => {
+  const h = crewKind.open()
+  const stateDir = join(scratchDir(), 'orca-run')
+  mkdirSync(join(stateDir, 'agents', '002-impl_a'), { recursive: true })
+  const at = (min) => new Date(Date.UTC(2026, 9, 5, 0, min)).toISOString()
+  const line = (type, n, title, min, more = {}) => ({ type, at: at(min), key: `k${n}`, n, title, ...more })
+  const started = (n, title, min, more = {}) => line('started', n, title, min, { run: 'run_fake9', dispatchId: `ctx${n}`, harness: 'claude', sessionId: `sid-${n}`, worktree: `C:/wt/${n}`, terminal: `t${n}`, dir: `agents/00${n}-x`, ...more })
+  const journal = [
+    { type: 'run', at: at(0), runId: 'run_fake9', terminal: 'term_runner', phases: ['Discover', 'Implement'] },
+    started(1, '[Discover] discover', 0),
+    line('result', 1, '[Discover] discover', 5, { result: { ok: true } }),
+    started(2, '[Implement] impl:a', 6, { node: 'impl_a', dir: 'agents/002-impl_a' }),
+    line('note', 2, '[Implement] impl:a', 7, { node: 'impl_a', dispatchId: 'ctx2', note: 'writing tests' }),
+    started(3, '[Implement] impl:b', 8, { node: 'impl_b' }),
+    line('result', 2, '[Implement] impl:a', 10, { node: 'impl_a', result: { decisions_needed: ['which database?'] }, needsDecision: true, submissions: 1 }),
+    { type: 'halted', at: at(10), node: 'impl_a', reason: 'which database?' },
+    line('failed', 3, '[Implement] impl:b', 12, { node: 'impl_b', reason: 'its agent died', attempts: 3 }),
+    line('held', 4, '[Implement] impl:c', 13, { node: 'impl_c' }),
+  ]
+  writeFileSync(join(stateDir, 'journal.jsonl'), journal.map((e) => JSON.stringify(e)).join('\n') + '\n')
+  writeFileSync(join(stateDir, 'agents', '002-impl_a', 'result.json'), JSON.stringify({ decisions_needed: ['which database?'] }))
+  const held = [
+    { node: 'impl_a', title: '[Implement] impl:a', reason: 'which database?', questions: ['which database?'], tab: 't2' },
+    { node: 'impl_b', title: '[Implement] impl:b', reason: 'its agent died', tab: 't3' },
+  ]
+  writeFileSync(join(stateDir, 'halted.json'), JSON.stringify({ at: at(12), runId: 'run_fake9', terminal: 'term_runner', nodes: held }))
+  writeFileSync(join(stateDir, 'runner.pid'), String(process.pid))
+  writeFileSync(join(stateDir, 'runner.log'), ['one', 'two', 'three', 'four'].map((w, i) => `${at(i)} ${w}`).join('\n') + '\n')
+
+  const { terminal } = await consultSession({ host: h.host, stateDir, harness: 'claude', dir: crewScratch().cwd })
+  const pi = stubPi({ CREW_HOME: h.paths.home, CREW_SESSION: terminal })
+  await pi.start()
+  const NAMES = ['run_status', 'agent_result', 'runner_log', 'pause', 'resume', 'decide']
+  assert.deepEqual(
+    pi.tools.map((t) => [t.name, t.description]),
+    NAMES.map((name) => [name, tool(name).description]),
+  )
+  const call = async (name, args = {}) => (await pi.tools.find((t) => t.name === name).execute('call', args)).content[0].text
+  const json = async (name, args) => JSON.parse(await call(name, args))
+
+  const agent = (n, title, node, state, reason, more) => ({ n, title, node, state, reason, note: null, worktree: `C:/wt/${n}`, terminal: `t${n}`, ...more })
+  assert.deepEqual(await json('run_status'), {
+    runId: 'run_fake9',
+    stateDir,
+    state: 'halted',
+    alive: true,
+    ended: false,
+    outcome: null,
+    paused: null,
+    halted: { since: at(12), nodes: held.map(({ tab, ...n }) => ({ questions: null, ...n })) },
+    outage: null,
+    phases: [
+      { name: 'Discover', agents: [agent(1, '[Discover] discover', null, 'done', null, { from: at(0), to: at(5) })] },
+      {
+        name: 'Implement',
+        agents: [
+          agent(2, '[Implement] impl:a', 'impl_a', 'needs you', 'decisions needed: which database?', { from: at(6), to: at(10) }),
+          agent(3, '[Implement] impl:b', 'impl_b', 'failed', 'its agent died', { from: at(8), to: at(12) }),
+          agent(4, '[Implement] impl:c', 'impl_c', 'queued', 'held: the run is halted', { worktree: null, terminal: null, from: null, to: null }),
+        ],
+      },
+    ],
+  })
+
+  assert.deepEqual(await json('agent_result', { agent: 'impl_a' }), { n: 2, title: '[Implement] impl:a', node: 'impl_a', state: 'needs you', result: { decisions_needed: ['which database?'] }, decisions: ['which database?'], reason: null, resultPath: join(stateDir, 'agents', '002-impl_a', 'result.json') })
+  assert.deepEqual(await json('agent_result', { agent: 'impl:b' }), { n: 3, title: '[Implement] impl:b', node: 'impl_b', state: 'failed', result: null, decisions: null, reason: 'its agent died', resultPath: null })
+  assert.deepEqual((await json('agent_result', { agent: '1' })).result, { ok: true })
+  await assert.rejects(call('agent_result', { agent: 'nope' }), /no agent of this run is nope: its agents are discover \(1\), impl:a \(impl_a, 2\), impl:b \(impl_b, 3\), impl:c \(impl_c, 4\)/)
+
+  assert.equal(await call('runner_log', { lines: 2 }), `${at(2)} three\n${at(3)} four`)
+  assert.equal((await call('runner_log')).split('\n').length, 4)
+
+  // What p and r do, through the files the runner reads (pause.mjs, halt.mjs).
+  assert.equal(await call('pause'), 'Paused: no new agent starts, and every agent at work finishes. resume lifts it.')
+  assert.ok(existsSync(join(stateDir, PAUSE_FILE)))
+  assert.equal((await json('run_status')).state, 'halted', 'a halted run stays halted while paused too')
+  assert.ok((await json('run_status')).paused)
+  assert.equal(await call('pause'), 'Already paused: resume lifts it.')
+  const requested = () => JSON.parse(readFileSync(join(stateDir, RESUME_REQUEST), 'utf8'))
+  await assert.rejects(call('resume', { node: 'impl_c' }), /^Error: impl_c is not held: the held nodes are impl_a \(needs decisions\), impl_b \(failed\)\. Nothing was asked of the runner\.$/)
+  assert.ok(existsSync(join(stateDir, PAUSE_FILE)), 'a refused resume lifts nothing')
+  // As the tree's r: the pause is lifted here, the halt is the runner's.
+  assert.equal(await call('resume', { node: 'impl_b' }), 'Lifted the pause, as r in the run console does: the agents it held start. Asked the runner to carry node impl_b on, as r in the run console does. Its worker is told the run was halted here and to finish.')
+  assert.deepEqual([requested(), existsSync(join(stateDir, PAUSE_FILE))], [{ node: 'impl_b' }, false])
+  assert.equal(await call('resume'), 'Asked the runner to carry every held node (impl_a, impl_b) on, as r in the run console does. A node that needs decisions is told the operator answered them on the ticket: use decide to hand its worker the answers instead.')
+  assert.deepEqual(requested(), { node: null })
+  rmSync(join(stateDir, RESUME_REQUEST))
+  // A paused run alone, its runner dead: r lifts the pause with no runner, and so does resume.
+  rmSync(join(stateDir, 'halted.json'))
+  await call('pause')
+  writeFileSync(join(stateDir, 'runner.pid'), '999999')
+  assert.equal(await call('resume'), 'Lifted the pause, as r in the run console does: the agents it held start.')
+  assert.deepEqual([existsSync(join(stateDir, PAUSE_FILE)), existsSync(join(stateDir, RESUME_REQUEST))], [false, false])
+  writeFileSync(join(stateDir, 'halted.json'), JSON.stringify({ at: at(12), runId: 'run_fake9', terminal: 'term_runner', nodes: held }))
+  writeFileSync(join(stateDir, 'runner.pid'), String(process.pid))
+
+  await assert.rejects(call('decide', { node: 'impl_b', decisions: [{ question: 'q', answer: 'a' }] }), /^Error: impl_b is held because it failed, not for decisions: resume carries it on\. The nodes that need decisions are impl_a\.$/)
+  await assert.rejects(call('decide', { node: 'impl_a', decisions: [] }), /^Error: decide needs at least one decision, each a question and its answer\.$/)
+  assert.equal(await call('decide', { node: 'impl_a', decisions: [{ question: 'which database?', answer: 'Postgres, as the other services use' }] }), 'Answered 1 decision for node impl_a and asked the runner to carry it on: its worker is told your answers and finishes with them.')
+  assert.deepEqual(requested(), { node: 'impl_a', decisions: [{ question: 'which database?', answer: 'Postgres, as the other services use' }] })
+  rmSync(join(stateDir, RESUME_REQUEST))
+
+  // A halt is the runner's to carry on: with the runner dead, resume and decide refuse and write nothing.
+  writeFileSync(join(stateDir, 'runner.pid'), '999999')
+  const noRunner = /^Error: the run's runner is not running, so nothing would take the request\. The operator resumes it with r in `crew view run_fake9`, which starts a runner again\.$/
+  await assert.rejects(call('resume', { node: 'impl_b' }), noRunner)
+  await assert.rejects(call('decide', { node: 'impl_a', decisions: [{ question: 'which database?', answer: 'Postgres' }] }), noRunner)
+  assert.equal(existsSync(join(stateDir, RESUME_REQUEST)), false)
+  assert.deepEqual([(await json('run_status')).state, (await json('run_status')).alive], ['runner gone', false])
+  // Nothing to resume on a run neither paused nor halted.
+  rmSync(join(stateDir, 'halted.json'))
+  assert.equal(await call('resume'), 'Nothing to resume: the run is neither paused nor halted.')
+  assert.equal(existsSync(join(stateDir, RESUME_REQUEST)), false)
+
+  // A `?` session about no run has no tools.
+  const none = await h.host.sessionStart({ title: 'orchestrator/console', prompt: 'hello', harness: 'claude', sessionId: randomUUID(), dir: crewScratch().cwd })
+  const nonePi = stubPi({ CREW_HOME: h.paths.home, CREW_SESSION: none.terminal })
+  await nonePi.start()
+  assert.deepEqual(nonePi.tools, [])
+  for (const id of [terminal, none.terminal]) await request(h.paths, { op: 'session.close', id })
 })
 
 test("crew host: a pi worker calls crew's submit tool: pi rejects a payload that fails its schema in the turn, and the one it repairs settles its dispatch (#174)", async () => {

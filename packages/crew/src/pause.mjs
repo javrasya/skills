@@ -6,7 +6,7 @@
 // call order. Unlike a halt (halt.mjs), a pause holds in-flight calls too:
 // nothing new launches. The calls it holds wait in the hold queue (hold.mjs),
 // the one a halt holds calls in too, so they go on in call order across both.
-import { existsSync, rmSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { writeJsonAtomic } from './fsutil.mjs'
 import { holdQueue } from './hold.mjs'
@@ -14,6 +14,17 @@ import { holdQueue } from './hold.mjs'
 export const PAUSE_FILE = 'paused.json'
 
 export const pausedAt = (stateDir) => existsSync(join(stateDir, PAUSE_FILE))
+
+// When the run was paused, the file's `at`, or null: not paused, or a file
+// that cannot be read (torn, or written by hand), which is still a pause.
+export function pausedSince(stateDir) {
+  try {
+    const at = JSON.parse(readFileSync(join(stateDir, PAUSE_FILE), 'utf8'))?.at
+    return typeof at === 'string' ? at : null
+  } catch {
+    return null
+  }
+}
 
 // Pauses the run in stateDir as of at (a Date): false if it was already paused.
 export function pauseRun(stateDir, at) {

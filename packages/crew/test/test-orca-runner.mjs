@@ -6823,8 +6823,18 @@ test("run console: r in a halted crew run's tree writes the resume request its r
   watch.take()
   watch.stop()
   await new Promise((done) => setImmediate(done))
-  assert.deepEqual(got, [{ node: null }])
+  assert.deepEqual(got, [{ node: null, decisions: null }])
   assert.equal(existsSync(file), false, 'the runner took the request')
+  // The orchestrator's decide (#194): a node with the operator's answers; malformed ones are dropped, a request of none carries none.
+  writeFileSync(file, JSON.stringify({ node: 'n/x', decisions: [{ question: 'which?', answer: 'that one' }, { question: 7 }, 'nope', { question: 'and?', answer: '' }] }))
+  watch.take()
+  writeFileSync(file, JSON.stringify({ node: 'n/y', decisions: [] }))
+  watch.take()
+  await new Promise((done) => setImmediate(done))
+  assert.deepEqual(got.slice(1), [
+    { node: 'n/x', decisions: [{ question: 'which?', answer: 'that one' }] },
+    { node: 'n/y', decisions: null },
+  ])
 })
 
 test("run console: the attached view of a crew run, itself in the runner's session, has no runner row and names where to enter an agent's session", async () => {
@@ -9426,6 +9436,30 @@ test('halt: a node whose result needs decisions is held as needs you with its qu
   const [c] = rig.orca.calls.filter((x) => x.verb === 'workerContinue')
   assert.match(c.text, /operator has answered them\. Re-read the ticket, its body and its comments/)
   assert.equal(c.reopened, true, 'its dispatch settled, so it continues under a new one')
+})
+
+test("halt: a resume that carries the operator's decisions (the orchestrator's decide, #194) hands them to the node's session in its prompt, each question with its answer, instead of sending it to the ticket", async () => {
+  const rig = nodeRig({
+    'Do a.': async (w) => {
+      w.state.onContinue = submitsValue(ANSWERED)
+      return submitsValue(ASKS)(w)
+    },
+  })
+  const run = rig.go(`return await ${nodeCall('a')}`)
+  await until(() => rig.halts.length, 'the halt')
+  const decisions = [{ question: 'Keep the v1 key, or break it?', answer: 'Keep it: v2 reads both until 2027.' }]
+  assert.deepEqual(await run.control.resume({ node: 'n/a', decisions }), { resumed: ['n/a'], unpaused: false })
+  assert.deepEqual(await run.p, ANSWERED)
+  const [c] = rig.orca.calls.filter((x) => x.verb === 'workerContinue')
+  assert.match(
+    c.text,
+    /^The workflow run was halted here: your result named decisions only the operator can make, and the operator has answered them here, each question with its answer\. Q: Keep the v1 key, or break it\? A: Keep it: v2 reads both until 2027\. Take these answers as final, and finish the task, then finish with `submit`/,
+  )
+  assert.doesNotMatch(c.text, /Re-read the ticket/)
+  assert.ok(
+    rig.lines.some((l) => l.endsWith('>> r: resuming n/a, with 1 decision from the operator')),
+    rig.lines.join('\n'),
+  )
 })
 
 // --- a resubmit carries a held node on (#173) --------------------------------
