@@ -34,13 +34,10 @@ import { LEGACY_HOST, openHosts } from '../hosts.mjs'
 import { RUNNER_SETTINGS } from '../settings.mjs'
 import { TREE_HELP, draw, drawRuns } from './draw.mjs'
 import { VIEW_EXIT } from './exit-codes.mjs'
+import { painter } from './paint.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REFRESH_MS = 2000
-// While the selected row's name scrolls (draw.mjs), the screen is drawn again
-// this often, one character's step at its 4 a second; else only on a
-// refresh, a key, a click or a resize.
-const MARQUEE_MS = 250
 
 // Not a dependency of the package: the view installs it on first use, below,
 // so the specifier is a value the checker does not resolve.
@@ -151,6 +148,9 @@ let flash = null
 let rowAt = () => null
 /** @type {(y: number) => string | null} */
 let optionAt = () => null
+/** @type {(x: number, y: number) => number | null} */
+let ticketAt = () => null
+const screenOut = painter((s) => process.stdout.write(s))
 
 function render() {
   const t = tree()
@@ -160,28 +160,31 @@ function render() {
   const screen = t ? draw(t.model, { ...size, flash: flash ?? (t.model?.alert ? null : t.model?.latest), alert: t.model?.alert, now: Date.now(), ...(runs && { help: TREE_HELP }) }) : drawRuns(runs.model, { ...size, flash: flash ?? runs.model?.message })
   rowAt = screen.rowAt
   optionAt = screen.optionAt ?? (() => null)
-  process.stdout.write('\x1b[H' + screen.lines.join('\r\n'))
-  marquee(screen.scrolling === true)
+  ticketAt = screen.ticketAt ?? (() => null)
+  screenOut.paint(screen.lines)
+  tickEvery(screen.tick ?? null)
 }
 
-// The tick that draws a scrolling name on, only while one scrolls. A tick is
+// The tick that draws the screen again while it changes with time alone: a
+// scrolling name, the ticket page's glide and twinkle (draw's tick). A tick is
 // a render queued behind the actions like any other, one at a time, so a
-// slow action holds the name still and never piles ticks up behind it.
+// slow action holds the screen still and never piles ticks up behind it.
 let ticker = null
+let tickMs = null
 let ticking = false
-function marquee(on) {
-  if (on && !ticker) {
-    ticker = setInterval(() => {
-      if (ticking) return
-      ticking = true
-      act(() => {}).finally(() => {
-        ticking = false
-      })
-    }, MARQUEE_MS)
-  } else if (!on && ticker) {
-    clearInterval(ticker)
-    ticker = null
-  }
+function tickEvery(ms) {
+  if (ms === tickMs) return
+  clearInterval(ticker)
+  ticker = null
+  tickMs = ms
+  if (!ms) return
+  ticker = setInterval(() => {
+    if (ticking) return
+    ticking = true
+    act(() => {}).finally(() => {
+      ticking = false
+    })
+  }, ms)
 }
 
 function quit() {
@@ -245,6 +248,11 @@ term.on('mouse', (name, d) => {
   // The wheel moves the selection, as ↑↓ do.
   if (name === 'MOUSE_WHEEL_UP' || name === 'MOUSE_WHEEL_DOWN') return act(async () => said(await top.key(name === 'MOUSE_WHEEL_UP' ? 'UP' : 'DOWN')))
   if (name !== 'MOUSE_LEFT_BUTTON_PRESSED') return
+  if (t?.model?.page === 'tickets') {
+    const n = ticketAt(d.x, d.y)
+    if (n !== null) act(async () => said(await top.clickTicket(n)))
+    return
+  }
   const i = rowAt(d.y)
   if (i === null) return
   act(async () => {
@@ -252,7 +260,10 @@ term.on('mouse', (name, d) => {
     said(await top.click(i))
   })
 })
-term.on('resize', () => act(() => {}))
+term.on('resize', () => {
+  screenOut.reset()
+  act(() => {})
+})
 // The runner is gone: nothing is left to show the run for.
 if (!standalone) process.on('disconnect', quit)
 

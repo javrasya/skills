@@ -7,6 +7,9 @@ import { worktreeName } from '../git.mjs'
 import { RUNNER_SETTINGS } from '../settings.mjs'
 import { LEGACY_HOST } from '../hosts.mjs'
 import { backKeyLabel } from '../crew-config.mjs'
+import { starMap, ticketPane, ticketsHeading, TICKETS_HELP } from './ticket-draw.mjs'
+
+export { TICKETS_HELP }
 
 const E = '\x1b['
 const c = (code, s) => `${E}${code}m${s}${E}0m`
@@ -174,7 +177,7 @@ function phasePane(p, problems) {
   return lines
 }
 
-const HELP = ' ↑↓ move · ⏎/click a phase to fold · ⏎/→/click focus tab · f filter · Ctrl+F search · Ctrl+R reclaim · l log · q quit'
+const HELP = ' ↑↓ move · ⏎/click a phase to fold · ⏎/→/click focus tab · g tickets · f filter · Ctrl+F search · Ctrl+R reclaim · l log · q quit'
 const TOP = 4
 
 // An agent row's width: the halt panel takes what is right of it, or 30 columns.
@@ -263,22 +266,31 @@ function dialogBox(d, mw) {
 // model.rows of the row drawn on terminal line y (1-based), or null;
 // optionAt(y), the index of the dialog's option drawn there, or null; and
 // scrolling, whether the selected row's name overflows, and so scrolls: the
-// screen changes with `now` alone only then.
+// screen changes with `now` alone only then. On the ticket page (model.page,
+// ADR-0031) the star map takes the rows' place and the selected ticket the
+// pane's; ticketAt(x, y), the ticket whose star is at terminal cell (x, y),
+// 1-based, or null. tick: how soon, in ms, the screen changes with `now`
+// alone, so a renderer draws it again (a glide, the stars' twinkle, a
+// scrolling name), or null while it does not.
 export function draw(model, { width: W = 140, height: H = 40, flash = null, alert = null, help = HELP, helpOffset = 0, now = null } = {}) {
   const rows = model?.rows ?? []
   const selected = model?.selected ?? 0
   const body = Math.max(1, H - TOP - 1 - PANE - 2)
   const top = Math.max(0, Math.min(selected - body + 1, rows.length - body))
-  const lines = [...headerLines(model?.header, W, narrowedBy(model)), fit(grey('─'.repeat(W)), W), fit(grey(`   #   ${'AGENT'.padEnd(NAME_W + 1)}  STATE              CONTEXT           TOKENS   ELAPSED`), W)]
+  const tickets = model?.page === 'tickets'
+  const lines = [...headerLines(model?.header, W, narrowedBy(model)), fit(grey('─'.repeat(W)), W), fit(tickets ? ticketsHeading(model.tickets) : grey(`   #   ${'AGENT'.padEnd(NAME_W + 1)}  STATE              CONTEXT           TOKENS   ELAPSED`), W)]
   const since = model?.selectedAt ?? null
   const elapsed = now === null || since === null ? 0 : now - since
   const chosen = rows[selected]
-  const scrolling = chosen?.kind === 'agent' && nameCell(chosen.agent, chosen.depth, elapsed).overflows
-  for (let i = top; i < Math.min(rows.length, top + body); i++) {
-    const r = rows[i]
-    const line = r.kind === 'phase' ? phaseLine(r.phase) : agentLine(r.agent, r.depth, i === selected ? elapsed : null)
-    lines.push(i === selected ? c('7', fit(strip(line), W)) : fit(line, W))
-  }
+  const scrolling = !tickets && chosen?.kind === 'agent' && nameCell(chosen.agent, chosen.depth, elapsed).overflows
+  const map = tickets ? starMap(model.tickets, { width: W, height: body, now }) : null
+  if (map) for (const l of map.lines) lines.push(fit(l, W))
+  else
+    for (let i = top; i < Math.min(rows.length, top + body); i++) {
+      const r = rows[i]
+      const line = r.kind === 'phase' ? phaseLine(r.phase) : agentLine(r.agent, r.depth, i === selected ? elapsed : null)
+      lines.push(i === selected ? c('7', fit(strip(line), W)) : fit(line, W))
+    }
   while (lines.length < TOP + body) lines.push(fit('', W))
   const pw = Math.min(W, Math.max(PANEL_MIN, W - ROW_W))
   if (model?.halt && W - pw >= ROW_MIN) {
@@ -287,10 +299,10 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
   }
   lines.push(fit(grey('─'.repeat(W)), W))
   const pane = model?.pane
-  const paneLines = !pane ? [grey(' no agent has started yet')] : pane.kind === 'agent' ? agentPane(pane.agent) : phasePane(pane.phase, pane.problems)
+  const paneLines = tickets ? ticketPane(model.tickets) : !pane ? [grey(' no agent has started yet')] : pane.kind === 'agent' ? agentPane(pane.agent) : phasePane(pane.phase, pane.problems)
   for (let i = 0; i < PANE; i++) lines.push(fit(paneLines[i] ?? '', W))
   lines.push(fit(flash ? ' ' + c('1;36', flash) : alert ? ' ' + c(COLOUR[alert.startsWith('NEEDS YOU') ? 'needs you' : 'blocked'], alert) : '', W))
-  const key = helpLine(help, W, helpOffset)
+  const key = helpLine(tickets ? TICKETS_HELP : help, W, helpOffset)
   lines.push(fit(key.text, W))
   const helpAt = Math.min(lines.length, H)
 
@@ -311,11 +323,13 @@ export function draw(model, { width: W = 140, height: H = 40, flash = null, aler
     helpAt,
     helpOffset: key.offset,
     scrolling,
+    tick: map ? (map.gliding ? 16 : 100) : scrolling ? MARQUEE.msPerChar : null,
     rowAt: (y) => {
       const i = top + (y - TOP - 1)
       // The dialog takes every click: the tree behind it takes none.
-      return !dialog && y > TOP && y <= TOP + body && i < rows.length ? i : null
+      return !dialog && !tickets && y > TOP && y <= TOP + body && i < rows.length ? i : null
     },
+    ticketAt: (x, y) => (map && !dialog && y > TOP && y <= TOP + body ? map.at(x - 1, y - TOP - 1) : null),
     optionAt: (y) => {
       const k = optionsAt === null ? -1 : y - optionsAt
       return k >= 0 && k < dialog.options.length ? k : null
@@ -340,13 +354,13 @@ export function helpLine(help, W, offset = 0) {
   return { text: (at > 0 ? c('36', '‹') : '') + grey(shown) + (cut ? c('36', '›') : ''), offset: at }
 }
 
-export const TREE_HELP = ' ↑↓ move · ⏎/→/click focus tab · ⏎/click a phase to fold · ← back to the runs · f filter · Ctrl+F search · Ctrl+R reclaim · l log · p pause · r resume · x remove'
+export const TREE_HELP = ' ↑↓ move · ⏎/→/click focus tab · ⏎/click a phase to fold · ← back to the runs · g tickets · f filter · Ctrl+F search · Ctrl+R reclaim · l log · p pause · r resume · x remove'
 const RUNS_HELP = ' ↑↓ move · ⏎/→/click open a run · ←→ fold a project · Ctrl+R reclaim the run · p pause · r resume · x remove · q quit'
 
 // The key lines of `crew view`, which enters a crew run's sessions in place
 // and comes back from one with `backKey`; an Orca run's agent is its tab.
 // `?` is crew's orchestrator whatever the run's host.
-export const consoleTreeHelp = (host, backKey) => (host === 'crew' ? ` ↑↓ move · ⏎/→/click enter · ${backKeyLabel(backKey)} out of a session · ← runs · f filter · Ctrl+F search · Ctrl+R reclaim · Ctrl+P park · l log · p pause · r resume · x remove · ? orchestrator` : `${TREE_HELP} · ? orchestrator`)
+export const consoleTreeHelp = (host, backKey) => (host === 'crew' ? ` ↑↓ move · ⏎/→/click enter · ${backKeyLabel(backKey)} out of a session · ← runs · g tickets · f filter · Ctrl+F search · Ctrl+R reclaim · Ctrl+P park · l log · p pause · r resume · x remove · ? orchestrator` : `${TREE_HELP} · ? orchestrator`)
 export const consoleRunsHelp = (backKey) => `${RUNS_HELP} · ${backKeyLabel(backKey)} leaves an entered session`
 
 export function age(ms) {

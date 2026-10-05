@@ -36,7 +36,7 @@ The reference design for the Orca runner's [run view](../../CONTEXT.md) (spec #4
 
 ## What the image does not decide
 
-- **Ignore the bottom status bar** (`Tree  Lanes  Timeline  Tab ▸ next layout … PROTOTYPE`). It belonged to the prototype's layout toggle, which was dropped. The run view has one layout.
+- **Ignore the bottom status bar** (`Tree  Lanes  Timeline  Tab ▸ next layout … PROTOTYPE`). It belonged to the prototype's layout toggle, which was dropped. The tree has one layout; the ticket view (`g`, ADR-0031) is a second page beside it, not a layout of the tree.
 - **Colours:**
   - The screenshot's terminal theme flattens them.
   - Context size and its bar are coloured by band: green below 200k, yellow from 200k to 350k, red above 350k.

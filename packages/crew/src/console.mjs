@@ -12,6 +12,7 @@ import { RESET } from './daemon/modes.mjs'
 import { backKeyLabel, backKeySequences } from './crew-config.mjs'
 import { ARROW_KEYS, ENTER_KEYS, decodeKeys } from './keys.mjs'
 import { consoleRunsHelp, consoleTreeHelp, draw, drawRuns } from './run-view/draw.mjs'
+import { painter } from './run-view/paint.mjs'
 
 const bytes = (chunk) => (Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)).toString('latin1')
 
@@ -331,6 +332,9 @@ export function runsConsole({ paths, stdin, stdout, runs, backKey = 'ctrl+shift+
   let rowAt = () => null
   /** @type {(y: number) => string | null} */
   let optionAt = () => null
+  /** @type {(x: number, y: number) => number | null} */
+  let ticketAt = () => null
+  const screenOut = painter((s) => stdout.write(s))
   // The key line's row, and how far it is scrolled sideways.
   let helpAt = null
   let helpOffset = 0
@@ -346,9 +350,34 @@ export function runsConsole({ paths, stdin, stdout, runs, backKey = 'ctrl+shift+
       : drawRuns(runs.model, { ...size(), flash: flash ?? runs.model?.message, title: 'crew runs', help: consoleRunsHelp(backKey), helpOffset })
     rowAt = screen.rowAt
     optionAt = screen.optionAt ?? (() => null)
+    ticketAt = screen.ticketAt ?? (() => null)
     helpAt = screen.helpAt ?? null
     helpOffset = screen.helpOffset ?? 0
-    stdout.write('\x1b[?25l\x1b[H' + screen.lines.join('\r\n'))
+    screenOut.paint(screen.lines)
+    tickEvery(screen.tick ?? null)
+  }
+
+  // The tick that draws the screen again while it changes with time alone:
+  // the ticket page's glide and twinkle, a selected name that scrolls. A
+  // tick is a paint queued behind the actions like any other, one at a time,
+  // so a slow action holds the screen still rather than piling ticks up.
+  let ticker = null
+  let tickMs = null
+  let ticking = false
+  function tickEvery(ms) {
+    if (ms === tickMs) return
+    clearInterval(ticker)
+    ticker = null
+    tickMs = ms
+    if (!ms) return
+    ticker = setInterval(() => {
+      if (ticking || !shown) return
+      ticking = true
+      act(() => {})
+      busy.finally(() => {
+        ticking = false
+      })
+    }, ms)
   }
 
   // One that throws is an error on the flash line, never a crash, as in view.mjs.
@@ -381,6 +410,10 @@ export function runsConsole({ paths, stdin, stdout, runs, backKey = 'ctrl+shift+
         const k = optionAt(y)
         return k === null ? null : t.highlight(k)
       }
+      if (t?.model?.page === 'tickets') {
+        const n = ticketAt(key.click.x, y)
+        return n === null ? null : runs.clickTicket(n)
+      }
       const i = rowAt(y)
       if (i === null) return null
       flash = null
@@ -407,14 +440,19 @@ export function runsConsole({ paths, stdin, stdout, runs, backKey = 'ctrl+shift+
         shown = true
         // Clicks come as SGR mouse reports; the reset on entering turns them off again.
         stdout.write('\x1b[?1000h\x1b[?1006h\x1b[2J')
+        screenOut.reset()
         act(() => runs.refresh())
         timer = setInterval(() => act(() => runs.refresh()), refreshMs)
       },
       hide() {
         shown = false
         clearInterval(timer)
+        tickEvery(null)
       },
-      resize: () => act(() => {}),
+      resize: () => {
+        screenOut.reset()
+        return act(() => {})
+      },
       key(chunk) {
         const keys = keyNames(bytes(chunk))
         if (keys.includes('CTRL_C')) return { quit: true }

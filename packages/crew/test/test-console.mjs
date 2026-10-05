@@ -483,7 +483,7 @@ test('crew view: ? on an opened run enters a fresh orchestrator session seeded w
   const row = () => tree().rows[tree().selected].key
   const before = keys()
   // Wide enough for the whole key line, ? orchestrator at its end.
-  const term = fakeTerminal(190, 30)
+  const term = fakeTerminal(202, 30)
   const crew = runsConsole({ paths, stdin: term.stdin, stdout: term.stdout, runs, refreshMs: 100 })
   quitAfter(t, term, crew)
   await until('the tree', async () => (await term.screen()).lines.some((l) => l.includes('AGENT')))

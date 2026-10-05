@@ -24,6 +24,7 @@ import { leftOnDisk, removeRun } from './remove.mjs'
 import { writeJsonAtomic } from './fsutil.mjs'
 import { probesBy } from './outage.mjs'
 import { RUNNER_SETTINGS } from './settings.mjs'
+import { cameraAt, layoutTickets, stepTicket, ticketsOf } from './ticket-map.mjs'
 
 export { RUNNER_PATH } from './daemon/runs.mjs'
 import { RUNNER_PATH } from './daemon/runs.mjs'
@@ -349,6 +350,25 @@ const FILTER_ORDER = [null, ...Object.keys(FILTERS)]
 // key (UP, CTRL_R) or a control character is none.
 const typed = (name) => ([...name].length === 1 && !/\p{Cc}/u.test(name) ? name : null)
 
+// The graph agent's result (implement-spec-in-workflow's GRAPH_SCHEMA): the
+// journal's, or, once a resume has truncated the journal before the graph
+// node replays, the result.json its agent left. null before it returned.
+function graphResult(fold) {
+  const node = fold.nodes.get('graph')
+  if (node?.result) return node.result
+  if (!node?.last?.dir) return null
+  try {
+    return JSON.parse(readFileSync(join(node.last.dir, 'result.json'), 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+// The ticket the page opens on: the first, in the graph's order, that a
+// person answers or that is at work, else the first not picked up, else the first.
+const OPENS_ON = ['blocked', 'failed', 'gate', 'impl', 'todo', 'stacked']
+const firstTicket = (tickets) => OPENS_ON.map((s) => tickets.find((t) => t.stage === s)).find(Boolean)?.n ?? null
+
 /**
  * @param {{ stateDir: string, host: SessionHost, clock?: { now: () => number }, transcripts?: Partial<ReturnType<typeof sessionTranscripts>>, registry?: string, unpushed?: typeof worktreeUnpushed, alive?: typeof runnerAlive, resumeHost?: (() => unknown) | null, resumeHalted?: ((node: string | null) => unknown) | null, enter?: boolean, triage?: (() => unknown) | null, remove?: (() => ReturnType<typeof removeRun>) | null }} options
  */
@@ -383,7 +403,15 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
   let filter = null
   let search = null
   const triaged = new Set()
-  const view = { model: null, refresh, key, click, highlight, focus, reclaim, openLog }
+  // The ticket page (ADR-0031): g opens it over the tree, t goes back to the
+  // tree as it was left. tickets: ticketsOf's, laid out, or null before the
+  // graph agent returned; the selected ticket and since when; the camera's
+  // glide to it, { from, at }, or null while it sits on it.
+  let page = 'tree'
+  let tickets = null
+  let ticket = { n: null, at: null }
+  let glide = null
+  const view = { model: null, refresh, key, click, clickTicket, highlight, focus, reclaim, openLog }
 
   const agentsNow = () => phases.flatMap((p) => p.agents)
   // A doctor is reclaimed with its patient, and never on its own (#77): a
@@ -470,7 +498,7 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     selectedKey = row?.key ?? null
     if (shown.key !== selectedKey) shown = { key: selectedKey, at: clock.now() }
     const pane = !row ? null : row.kind === 'agent' ? { kind: 'agent', agent: row.agent } : { kind: 'phase', phase: row.phase, problems: problemsOf(row.phase.agents).map((agent) => ({ agent, reason: agent.reason })) }
-    view.model = { header, phases: allPhases(), rows, selected, selectedAt: shown.at, pane, message, latest, alert, dialog: dialogModel(row), halt, filter, search }
+    view.model = { header, phases: allPhases(), rows, selected, selectedAt: shown.at, pane, message, latest, alert, dialog: dialogModel(row), halt, filter, search, page, tickets: tickets && { list: tickets, selected: ticket.n, selectedAt: ticket.at, glide } }
     return view.model
   }
 
@@ -558,6 +586,14 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
 
     phases = phaseGroups(agents, fold.phases ?? []).map(([name, list]) => phaseOf(name, list))
     consoles = await consolePhase(now)
+    tickets = ticketsOf(graphResult(fold), agents, fold.nodes)
+    if (tickets) {
+      layoutTickets(tickets)
+      if (!tickets.some((t) => t.n === ticket.n)) {
+        ticket = { n: firstTicket(tickets), at: now }
+        glide = null
+      }
+    }
 
     const isAlive = livenessOf(alive, stateDir)
     // An outage a dead runner journaled is no one's any more.
@@ -1043,11 +1079,72 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
     return say(node ? `asked the runner to resume ${node}` : `asked the runner to resume every held node: ${halted.nodes.join(', ') || 'none left'}`)
   }
 
+  // The camera glides from wherever it is now to ticket n's star.
+  function selectTicket(n) {
+    const by = new Map((tickets ?? []).map((t) => [t.n, t]))
+    if (!by.has(n) || n === ticket.n) return {}
+    const now = clock.now()
+    const was = by.get(ticket.n)
+    glide = was ? { from: cameraAt(glide, was, now), at: now } : null
+    ticket = { n, at: now }
+    layout()
+    return {}
+  }
+
+  // A click on ticket n's star selects it.
+  async function clickTicket(n) {
+    if (dialog || page !== 'tickets') return {}
+    return selectTicket(n)
+  }
+
+  // Enter on a ticket: back to the tree, on the ticket's latest agent, its
+  // phase unfolded.
+  function showAgentOf(n) {
+    const t = tickets?.find((x) => x.n === n)
+    const a = t && ([...t.agents].filter((x) => x.patient == null).sort((x, y) => y.n - x.n)[0] ?? t.agents.at(-1))
+    if (!a) return say(`#${n} has no agent yet`)
+    folds.set(a.phase, false)
+    selectedKey = `agent:${a.n}`
+    page = 'tree'
+    layout()
+    return {}
+  }
+
+  // The ticket page's keys; null for a key the tree's own handles alike
+  // (the log, pause, resume, remove and quit), {} for one the page ignores.
+  function ticketKey(name) {
+    switch (name) {
+      case 'UP':
+      case 'DOWN':
+      case 'LEFT':
+      case 'RIGHT':
+        return tickets && ticket.n !== null ? selectTicket(stepTicket(tickets, ticket.n, name)) : {}
+      case 'ENTER':
+        return showAgentOf(ticket.n)
+      case 't':
+        page = 'tree'
+        layout()
+        return {}
+      case 'l':
+      case 'p':
+      case 'r':
+      case 'x':
+      case 'q':
+        return null
+      default:
+        return {}
+    }
+  }
+
   // Key names as terminal-kit gives them. Returns what the key did: { quit }
   // for q, which ends the view only, never the run. While the dialog is open
   // every key is its.
   async function key(name) {
     if (dialog) return dialogKey(name)
+    if (page === 'tickets') {
+      const done = ticketKey(name)
+      if (done !== null) return done
+    }
     const rows = view.model?.rows ?? []
     switch (name) {
       case 'UP':
@@ -1085,6 +1182,12 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
         return {}
       case 'l':
         return openLog()
+      case 'g':
+        // The camera starts on the selected star, without a glide.
+        page = 'tickets'
+        glide = null
+        layout()
+        return {}
       case 'f':
         return cycleFilter()
       case 'CTRL_F':
@@ -1201,7 +1304,7 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
   let selected = 0
   let message = null
   let opened = null
-  const runs = { model: null, refresh, key, click, open, reclaim, resume, opened: () => opened?.view ?? null }
+  const runs = { model: null, refresh, key, click, clickTicket, open, reclaim, resume, opened: () => opened?.view ?? null }
 
   function layout() {
     const rows = []
@@ -1424,7 +1527,8 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
         return { ...say(res.message), removed: true }
       }
       if (opened.view.model?.dialog) return gone(await opened.view.key(name))
-      if (name === 'q' || name === 'ESCAPE' || name === 'LEFT') return close()
+      // On the ticket page ← moves along the lines (ADR-0031).
+      if (name === 'q' || name === 'ESCAPE' || (name === 'LEFT' && opened.view.model?.page !== 'tickets')) return close()
       if (name === 'r') {
         // A paused run, or a live runner that is halted or paused on an
         // outage, is resumed from its tree; a dead one gets a new runner.
@@ -1487,6 +1591,10 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
       default:
         return {}
     }
+  }
+
+  async function clickTicket(n) {
+    return opened ? opened.view.clickTicket(n) : {}
   }
 
   async function click(index) {
