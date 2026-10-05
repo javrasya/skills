@@ -197,10 +197,13 @@ test("crew ls: every run of the registry, crew's and Orca's, by project; crew vi
   w.armed({ runId: 'run_o1', project: join(dir, 'proj'), runDir: join(dir, 'o'), spec: 'implement-spec-12' })
   w.armed({ runId: 'run_c1', project: join(dir, 'proj'), runDir: join(dir, 'c'), spec: 'implement-spec-13', host: 'crew' })
   w.ended({ runId: 'run_o1', outcome: 'ok' })
+  // run_o1's runner wrote its summary.json at its end; run_c1's runner is simply gone.
+  mkdirSync(join(dir, 'o'), { recursive: true })
+  writeFileSync(join(dir, 'o', 'summary.json'), JSON.stringify({ runner: 'session', ok: true, result: { halted: false, state: 'ready' } }))
   const r = crew('ls', '--registry', registry)
   assert.equal(r.status, 0, r.stderr)
   assert.match(r.stdout, /^proj {2}.*proj$/m)
-  assert.match(r.stdout, /^ {2}run_o1 +orca +#12 +ok +runner ○ dead +0 kept/m)
+  assert.match(r.stdout, /^ {2}run_o1 +orca +#12 +ok +runner ✓ complete +0 kept/m)
   assert.match(r.stdout, /^ {2}run_c1 +crew +#13 +unfinished +runner ○ dead +0 kept/m)
   assert.equal(crew('ls', 'extra').status, 2)
 

@@ -1144,10 +1144,17 @@ export function runView({ stateDir, host, clock = { now: () => Date.now() }, tra
 //   message   the latest action's outcome, or null
 //   opened    { runId, view }: the run Enter opened, as a runView, or null
 // A run is { runId, name, spec, project, runDir, script, permissionMode,
-// terminal, outcome, paused, alive, kept, reclaimed, closable, armedAt, ageMs,
-// resumable }. outcome is ok, partial or failed, halted while its runner has
-// halted it (ADR-0016), or null while no `ended` is recorded; paused is the registry's { reason, at } while its runner has
-// paused it (an Orca outage past its limit), else null. alive is runnerAlive's answer for its run dir, the rule attached
+// terminal, outcome, end, outagePaused, operatorPaused, alive, kept, reclaimed,
+// closable, armedAt, ageMs, resumable }. outcome is ok, partial or failed, halted
+// while its runner has halted it (ADR-0016), or null while no `ended` is
+// recorded. end is how the run ended, read from its summary.json by the rule
+// the attached header uses (outcomeOf, #157): { kind: 'complete' | 'halted' |
+// 'failed', detail }, or null while its runner is alive or wrote no summary;
+// so a runner not alive is dead only with no end, since a script halt the
+// registry records ok is an end the summary knows and the registry does not.
+// outagePaused is the registry's { reason, at } while its runner has
+// paused it (an Orca outage past its limit), else null; operatorPaused whether
+// p paused it. alive is runnerAlive's answer for its run dir, the rule attached
 // mode's header reads too: whether the process its runner.pid names is alive,
 // never whether its tab is open, since the tab outlives the runner. Just after
 // r, until the new runner has written its own runner.pid, the tab r opened
@@ -1247,6 +1254,7 @@ export function runsView({ host, hostOf = () => host, clock = { now: () => Date.
         permissionMode: r.permissionMode,
         terminal: launched.get(r.runId)?.terminal ?? r.runner?.terminal ?? null,
         outcome: r.state === 'running' ? null : r.state,
+        end: live === true || !r.runDir ? null : outcomeOf(r.runDir),
         outagePaused: r.state === 'running' ? (r.paused ?? null) : null,
         operatorPaused: !!r.runDir && pausedAt(r.runDir),
         alive: live,

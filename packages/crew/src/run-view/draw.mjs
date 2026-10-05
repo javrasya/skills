@@ -77,9 +77,9 @@ const mixOf = (mix) =>
 
 // An ended run reads as how it ended, not as its runner gone (#157).
 const OUTCOME_GLYPH = { complete: ['32', '✓ complete'], halted: ['1;33', '⏸ halted'], failed: ['31', '✗ failed'] }
-const outcomeLine = (o) => {
+const outcomeLine = (o, { resume = true } = {}) => {
   const [colour, label] = OUTCOME_GLYPH[o.kind]
-  return c(colour, `${label}${o.detail ? ` — ${o.detail}` : ''}${o.kind === 'halted' ? ' · r to resume' : ''}`)
+  return c(colour, `${label}${o.detail ? ` — ${o.detail}` : ''}${resume && o.kind === 'halted' ? ' · r to resume' : ''}`)
 }
 
 // The header's second line names what the rows are cut down to (f, Ctrl+F),
@@ -362,7 +362,12 @@ const outageHost = (paused) => (paused.reason === 'crew outage' ? 'crew' : 'Orca
 const OUTCOME = { ok: '32', partial: '33', failed: '31', halted: '1;33' }
 // A run its live runner paused on an outage of its host, Orca or crew, is not running (ADR-0015).
 const outcomeOf = (r) => (r.outcome ? c(OUTCOME[r.outcome], r.outcome) : r.outagePaused && r.alive !== false ? c('33', `paused (${outageHost(r.outagePaused)} outage)`) : r.operatorPaused ? c('33', 'paused') : r.alive ? c('36', 'running') : grey('unfinished'))
-const runnerOf = (r) => (r.alive === true ? c('32', '● alive') : r.alive === false ? c('31', '○ dead') : grey('? unknown'))
+// A run that ended reads as how it ended, from its summary.json, as the
+// attached header does (#157), never as a dead runner: dead is a runner gone
+// with no summary. `ended` is the run whose end the column shows.
+const ended = (r) => r.alive !== true && r.end != null
+const runnerOf = (r) => (r.alive === true ? c('32', '● alive') : ended(r) ? c(...OUTCOME_GLYPH[r.end.kind]) : r.alive === false ? c('31', '○ dead') : grey('? unknown'))
+const resumeBecause = (r) => (ended(r) ? (r.end.kind === 'halted' ? 'it halted' : 'its runner ended') : 'its runner is dead')
 
 const projectLine = (p) => ` ${p.folded ? '▸' : '▾'} ${bold(p.name)}  ${grey(p.path ?? '')}  ${grey(`${p.runs.length} run${p.runs.length === 1 ? '' : 's'}`)}`
 const runLine = (r) => `   ${r.runId.padEnd(20)} ${(r.spec ?? r.name ?? '—').padEnd(8)} ${fit(outcomeOf(r), 20)} ${fit(runnerOf(r), 10)} ${String(r.kept).padStart(4)}   ${age(r.ageMs).padStart(7)}${r.reclaimed ? grey('   reclaimed') : ''}`
@@ -370,9 +375,9 @@ const runLine = (r) => `   ${r.runId.padEnd(20)} ${(r.spec ?? r.name ?? '—').p
 function runPane(r) {
   // The tab outlives its runner, so whether it is open says nothing of the runner.
   const tab = r.terminal ? cyan(shortHandle(r.terminal)) : grey('—')
-  const does = ['Enter / → opens its tree', r.reclaimed ? null : r.closable ? 'Ctrl+R reclaims every agent and closes the run' : 'Ctrl+R reclaims every agent it may; the run stays open', r.resumable ? 'r resumes it: its runner is dead' : null].filter(Boolean).join(' · ')
+  const does = ['Enter / → opens its tree', r.reclaimed ? null : r.closable ? 'Ctrl+R reclaims every agent and closes the run' : 'Ctrl+R reclaims every agent it may; the run stays open', r.resumable ? `r resumes it: ${resumeBecause(r)}` : null].filter(Boolean).join(' · ')
   return [
-    ` ${bold(r.name ?? r.runId)}  ${grey(r.runId)}${r.spec ? `  spec ${r.spec}` : ''}  ${outcomeOf(r)}  ${r.kept} kept${r.reclaimed ? grey('  reclaimed') : ''}`,
+    ` ${bold(r.name ?? r.runId)}  ${grey(r.runId)}${r.spec ? `  spec ${r.spec}` : ''}  ${outcomeOf(r)}${ended(r) ? `  ${outcomeLine(r.end, { resume: false })}` : ''}  ${r.kept} kept${r.reclaimed ? grey('  reclaimed') : ''}`,
     // A crew run's runner has no screen of its own to go to: its tree is the run.
     r.host === 'crew' ? ` project ${grey(r.project ?? '—')}` : ` runner tab ${tab}   project ${grey(r.project ?? '—')}`,
     grey(` run dir ${r.runDir ?? '—'}`),
@@ -393,7 +398,7 @@ export function drawRuns(model, { width: W = 140, height: H = 40, flash = null, 
   const count = (n, what) => `${n} ${what}${n === 1 ? '' : 's'}`
   const lines = [
     fit(` ${bold(title)}${dot}${count(all.length, 'run')}${dot}${count(projects.length, 'project')}`, W),
-    fit(` ${c('32', `● ${all.filter((r) => r.alive === true).length} alive`)}  ${c('31', `○ ${all.filter((r) => r.alive === false).length} dead`)}  ${grey(`${all.filter((r) => r.reclaimed).length} reclaimed`)}`, W),
+    fit(` ${c('32', `● ${all.filter((r) => r.alive === true).length} alive`)}  ${grey(`${all.filter(ended).length} ended`)}  ${c('31', `○ ${all.filter((r) => r.alive === false && !ended(r)).length} dead`)}  ${grey(`${all.filter((r) => r.reclaimed).length} reclaimed`)}`, W),
     fit(grey('─'.repeat(W)), W),
     fit(grey('   RUN                  SPEC     OUTCOME              RUNNER     KEPT       AGE'), W),
   ]
