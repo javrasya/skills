@@ -4,3 +4,8 @@ node_modules
 # Editor swap files.
 *.swp
 *.swo
+
+# Local agent tooling: worktrees and task notes.
+.claude/
+.humanlayer/
+.pi/
