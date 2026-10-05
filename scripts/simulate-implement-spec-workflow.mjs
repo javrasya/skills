@@ -71,6 +71,7 @@ async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel',
       explorations: [{ label: 'area-a', question: 'q?' }],
     }),
     explore: () => ({ path: '/tmp/n/01-area-a.md', blockers: [] }),
+    baseline: () => ({ commands: [{ command: SIM_CHECK, exit_code: 0, masked_command: '', failures: { tests: [], diagnostics: [] } }], decisions_needed: [] }),
     unblock: () => ({ resolved: [], decisions_needed: [] }),
     layer0: () => ({ pr_url: 'https://pr/layer0', pr_number: 90, note: 'in sync', worktree: '/wt/layer0' }),
     dispatch: () => ({ ticket_brief: 'the ticket in brief', slices: [{ title: 'all of it', brief: 'do it', effort: 'medium' }] }),
@@ -98,6 +99,7 @@ async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel',
   function route(label) {
     if (label.startsWith('graph')) return 'graph'
     if (label.startsWith('explore')) return 'explore'
+    if (label.startsWith('baseline')) return 'baseline'
     if (label.startsWith('unblock')) return 'unblock'
     if (label.startsWith('layer0')) return 'layer0'
     if (label.startsWith('dispatch')) return 'dispatch'
@@ -152,8 +154,11 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
 
 // --- scenario A: happy path -------------------------------------------------
 {
-  const { result, calls } = await run()
+  const { result, calls, timeline } = await run()
   const seq = calls.map((c) => c.label)
+  const baseline = calls.find((c) => c.label === 'baseline:per-change')
+  check('A: the baseline starts beside the explorers, in a worktree of its own, before any dispatch', baseline?.opts.isolation === 'worktree' && timeline.indexOf('start explore:area-a') < timeline.indexOf('end baseline:per-change') && timeline.indexOf('end baseline:per-change') < timeline.indexOf('start dispatch:#10'), timeline.join(' | '))
+  check('A: the baseline is told the pinned sha and the per-change commands', baseline?.prompt.includes(`git switch --detach ${PINNED}`) && baseline.prompt.includes(`- \`${SIM_CHECK}\``), '')
   check('A: dispatcher runs once per ticket', seq.filter((l) => l.startsWith('dispatch')).length === 2, seq.join(' | '))
   check('A: implementer reads its ticket, not the spec', calls.find((c) => c.label === 'impl:#10').prompt.includes('`gh issue view 10`') && calls.find((c) => c.label === 'impl:#10').prompt.includes('Read no spec'), '')
   check('A: publish order respects the dependency', seq.indexOf('publish:#10') < seq.indexOf('publish:#11'), '')
@@ -774,8 +779,11 @@ const withBlockers = (blockers) => () => ({
   const first = ticketsOf(par.calls).slice(0, 4).sort((a, b) => a - b)
   check('S: parallel order still dispatches every takeable ticket at once', JSON.stringify(first) === '[11,12,13,15]' && par.calls.some((c) => c.label.startsWith('dispatch:#') && c.alongside > 0) && par.result.state.startsWith('complete'), JSON.stringify(ticketsOf(par.calls)))
 
+  const coding = calls.filter((c) => c.opts.isolation && !c.label.startsWith('baseline'))
   const isolations = (calls) => [...new Set(calls.filter((c) => c.opts.isolation).map((c) => c.opts.isolation))]
-  check('S: every agent that would get a worktree of its own runs in the chain worktree instead', JSON.stringify(isolations(calls)) === '["chain"]' && calls.filter((c) => c.opts.isolation).every((c) => /this run's one chain worktree/.test(c.prompt)), JSON.stringify(isolations(calls)))
+  check('S: every agent that would get a worktree of its own runs in the chain worktree instead', JSON.stringify(isolations(coding)) === '["chain"]' && coding.every((c) => /this run's one chain worktree/.test(c.prompt)), JSON.stringify(isolations(coding)))
+  const baseline = calls.find((c) => c.label.startsWith('baseline'))
+  check('S: the baseline, beside the explorers, keeps a worktree of its own', baseline?.opts.isolation === 'worktree' && !/chain worktree/.test(baseline.prompt), baseline?.opts.isolation)
   check('S: a parallel run still gives each its own', JSON.stringify(isolations(par.calls)) === '["worktree"]' && !par.calls.some((c) => /chain worktree/.test(c.prompt)), JSON.stringify(isolations(par.calls)))
 
   // A chain of blockers leaves a parallel run one order too: both publish the

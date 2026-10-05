@@ -6,7 +6,7 @@
 //   node packages/crew/test/test-crew-run.mjs
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -16,6 +16,7 @@ import { crewHost, crewWorktrees } from '../src/crew-host.mjs'
 import { sessionHost } from '../src/session-host.mjs'
 import { sessionTranscripts, transcriptPath } from '../src/transcript.mjs'
 import { readJournal } from '../src/journal.mjs'
+import { validate } from '../src/schema.mjs'
 import { pinBase, renderTemplate, templatePath } from '../src/arm.mjs'
 import { runView } from '../src/run-view-model.mjs'
 import { draw, strip } from '../src/run-view/draw.mjs'
@@ -641,4 +642,93 @@ test("the skill's template on the crew host: two tickets started after origin/<b
   assert.match(rebased[0], new RegExp(`git rebase --onto ticket/10[12] ${pinned}\``))
   assert.match(rebased[0], /The rebase produced a tree nobody has validated/)
   assert.ok(rebased[0].includes('npm test'), 'and re-runs the recipe')
+})
+
+// ADR-0030: whatever the graph agent asks to explore, the script starts the
+// baseline agent beside the explorers, in a worktree of its own with the setup
+// hook run, told the pinned sha and the per-change commands. Its record lands
+// in the run folder before anything is dispatched, and a resume keeps it.
+test("the skill's template on the crew host: the baseline runs beside the explorers in a set-up worktree of its own, its record is written before dispatch, and a resume keeps it", async () => {
+  const cwd = repo('baseline-repo')
+  const pinned = spawnSync('git', ['-C', cwd, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim()
+  const hook = join(root, 'baseline-setup.mjs')
+  const setupLog = join(root, 'baseline-setup.log')
+  writeFileSync(hook, `import { appendFileSync } from 'fs'\nappendFileSync(${JSON.stringify(setupLog)}, process.env.CREW_WORKTREE + '\\n')\n`)
+  mkdirSync(env.CREW_HOME, { recursive: true })
+  writeFileSync(paths.config, JSON.stringify({ repos: { [cwd]: { setup: hook } } }))
+
+  const perChange = ['npm test', 'npm run lint -- --max-warnings=0']
+  const checks = perChange.map((command) => ({ command, passed: true }))
+  const green = perChange.map((command) => ({ command, exit_code: 0, masked_command: '', failures: { tests: [], diagnostics: [] } }))
+  const notesDir = join(root, 'baseline-notes')
+  const answers = join(root, 'baseline-answers.json')
+  writeFileSync(
+    answers,
+    JSON.stringify({
+      // The explorer's turn is long enough for the baseline to start and finish inside it.
+      '^graph': { tickets: [{ number: 101, title: 'One', blocked_by: [], needs_human: false, human_reason: '' }], explorations: [{ label: 'code paths', question: 'Where does it live? [turn 6000]' }] },
+      '^explore': { path: join(notesDir, '01-code-paths.md') },
+      '^baseline': { commands: green },
+      '^dispatch_101': { ticket_brief: '#101 in brief', validation: perChange, review_validation: [], slices: [{ title: 'all of it', brief: 'do it', effort: 'medium' }] },
+      '^impl_101': { branch: 'ticket/101', summary: 'done', checks, validated_sha: 'abc123' },
+      '^gate': { checks, validated_sha: 'abc123' },
+      '^publish_101': { published: true, pr_url: 'https://github.com/acme/app/pull/101', pr_number: 101, checks, validated_sha: 'abc123', stack_link: 'registered' },
+      '^finalize': { summary: 'stack ready' },
+    }),
+  )
+  const script = renderTemplate(readFileSync(templatePath(), 'utf8'), { SPEC: 94, REPO: 'acme/app', REPO_DIR: cwd, NOTES_DIR: notesDir, BASE_REF: 'main', START_REF: 'main', BASE_SHA: pinned, STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session', PER_CHANGE_COMMANDS: JSON.stringify(perChange), AT_REVIEW_COMMANDS: '[]' })
+  const fake = [process.execPath, FAKE_HARNESS]
+  const host = sessionHost(crewHost({ paths, env: { ...env, CREW_FAKE_MCP: '0', CREW_FAKE_ANSWERS: answers }, cwd, harnesses: { claude: fake, pi: fake }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
+  const stateDir = join(root, 'baseline-state')
+  const journalPath = join(stateDir, 'journal.jsonl')
+  const said = []
+  await runScript(script, { host, stateDir, out: (s) => said.push(s), settings: FAST, transcripts: sessionTranscripts({ env }), project: cwd })
+  const log = said.join('\n')
+  const entries = () =>
+    readFileSync(journalPath, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l))
+  const at = (type, label) => entries().findIndex((e) => e.type === type && e.title?.includes(label))
+
+  assert.ok(at('started', 'baseline:per-change') < at('result', 'explore:code paths'), `the baseline starts while the explorer runs:\n${log}`)
+  assert.ok(at('started', 'explore:code paths') < at('result', 'baseline:per-change'), `the explorer starts while the baseline runs:\n${log}`)
+  assert.ok(at('result', 'baseline:per-change') < at('started', 'dispatch:#101'), `dispatch waits on the baseline:\n${log}`)
+
+  const started = entries().find((e) => e.type === 'started' && e.title?.includes('baseline:per-change'))
+  assert.equal(started.node, 'baseline/per-change')
+  assert.ok(started.worktree && realpathSync(started.worktree) !== realpathSync(cwd), 'the baseline has a worktree of its own')
+  assert.ok(readFileSync(setupLog, 'utf8').trim().split('\n').map((p) => realpathSync(p)).includes(realpathSync(started.worktree)), 'the setup hook ran in it')
+  assert.equal(realpathSync(entries().find((e) => e.type === 'started' && e.title?.includes('explore:code paths')).worktree), realpathSync(cwd), 'the explorer still runs in the checkout')
+
+  const prompt = promptsOf(stateDir, log)('baseline:per-change')
+  assert.ok(prompt.includes(`git switch --detach ${pinned}\``), `the baseline is told the pinned sha:\n${prompt}`)
+  for (const command of perChange) assert.ok(prompt.includes(`- \`${command}\``), `the baseline is told ${command}`)
+  assert.match(prompt, /Never a line number alone/)
+  assert.ok(!promptsOf(stateDir, log)('impl:#101').includes('pre-existing'), 'nothing downstream reads the record yet')
+
+  const record = join(notesDir, 'pre-existing-failures.json')
+  assert.deepEqual(JSON.parse(readFileSync(record, 'utf8')), { base_sha: pinned, commands: green }, 'a green base: every command exits 0 with no failures')
+
+  // The schema the baseline submitted against, as submit checks it.
+  const schema = JSON.parse(readFileSync(join(stateDir, started.dir, 'schema.json'), 'utf8'))
+  const accepted = { commands: green, decisions_needed: [], worktree: started.worktree }
+  assert.deepEqual(validate(schema, accepted), [])
+  const red = (failures) => ({ ...accepted, commands: [{ ...green[0], exit_code: 1, failures }, green[1]] })
+  assert.deepEqual(validate(schema, red({ tests: [{ id: 'test/a.mjs > adds' }], diagnostics: [{ tool: 'biome', rule: 'lint/style/useConst', file: 'src/a.js', snippet: 'let a = 1\n', message: 'use const' }] })), [])
+  assert.notDeepEqual(validate(schema, red({ tests: [], diagnostics: [{ tool: 'biome', file: 'src/a.js', line: 12, message: 'use const' }] })), [], 'a diagnostic by line number alone is rejected')
+  assert.notDeepEqual(validate(schema, { ...accepted, commands: [green[0]] }), [], 'a command left out is rejected')
+  assert.notDeepEqual(validate(schema, { ...accepted, commands: [green[0], { ...green[1], command: 'npm run lint' }] }), [], 'a command not in the set is rejected')
+
+  const view = runView({ stateDir, host, transcripts: sessionTranscripts({ env }) })
+  await view.refresh()
+  const node = view.model.phases.find((p) => p.name === 'Explore')?.agents.find((a) => a.label === 'baseline:per-change')
+  assert.ok(node?.terminal, `the baseline is a node under Explore, entered by its session: ${JSON.stringify(view.model.phases.map((p) => [p.name, p.agents.map((a) => a.label)]))}`)
+
+  rmSync(record)
+  const resumed = []
+  await runScript(script, { host, stateDir, out: (s) => resumed.push(s), settings: FAST, transcripts: sessionTranscripts({ env }), project: cwd, resume: true })
+  assert.ok(resumed.includes('<< [Explore] baseline:per-change: replayed from the journal'), resumed.join('\n'))
+  assert.ok(!entries().some((e) => e.type === 'started' && e.title?.includes('baseline:per-change')), 'the resume starts no worker to measure again')
+  assert.deepEqual(JSON.parse(readFileSync(record, 'utf8')), { base_sha: pinned, commands: green }, 'the record is written again from the kept result')
 })

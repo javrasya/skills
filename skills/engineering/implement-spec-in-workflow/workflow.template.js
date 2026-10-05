@@ -33,6 +33,7 @@ const RUN_DEFAULT = { harness: 'claude', model: 'opus' }
 const ROLES = {
   graph: RUN_DEFAULT,         // Graph: read the spec, return the ticket graph
   explore: RUN_DEFAULT,       // Explore: one research note
+  baseline: RUN_DEFAULT,
   unblock: RUN_DEFAULT,       // Unblock: guide the operator through the blockers (session runner only)
   layer0: RUN_DEFAULT,        // Setup: the layer-0 PR
   dispatch: RUN_DEFAULT,      // Implement: size a ticket into slices
@@ -145,11 +146,12 @@ const ISOLATION = RUN_ORDER === 'sequential' ? 'chain' : 'worktree'
 // work was already on it. Now the operator names it or there is none, and the
 // graph agent's one job about it is to say which tickets it already covers.
 const hasLayer0 = START_REF !== BASE_REF
-const WORKTREE = ISOLATION === 'chain'
-  ? `Your worktree is this run's one chain worktree, made by its session host and worked in by its code agents one after another: the dependencies and build cache the agent before you left are yours to use. Leave nothing of your own in it uncommitted. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. Never remove it: the operator decides at the end of the run whether it is reclaimed.`
-  : ON_SESSION
+const OWN_WORKTREE = ON_SESSION
   ? `Your worktree is a child worktree of this run's worktree, per agent, made by this run's session host. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. Never remove it: the operator decides at the end of the run whether it is reclaimed.`
   : `Your worktree is throwaway and per agent. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. This run reclaims it — uncommitted leftovers included — once the work it holds is published.`
+const WORKTREE = ISOLATION === 'chain'
+  ? `Your worktree is this run's one chain worktree, made by its session host and worked in by its code agents one after another: the dependencies and build cache the agent before you left are yours to use. Leave nothing of your own in it uncommitted. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. Never remove it: the operator decides at the end of the run whether it is reclaimed.`
+  : OWN_WORKTREE
 
 // --- the worktree ledger ---------------------------------------------------
 // Every path an isolated agent reports, keyed by what it worked on, beside the
@@ -568,6 +570,58 @@ const EXPLORE_SCHEMA = {
   },
 }
 
+const BASELINE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['commands', 'decisions_needed', 'worktree'],
+  properties: {
+    commands: {
+      type: 'array',
+      minItems: PER_CHANGE_COMMANDS.length,
+      maxItems: PER_CHANGE_COMMANDS.length,
+      description: 'one entry per command you were given, in the order given',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['command', 'exit_code', 'masked_command', 'failures'],
+        properties: {
+          command: { type: 'string', ...(PER_CHANGE_COMMANDS.length && { enum: PER_CHANGE_COMMANDS }), description: 'the command, copied verbatim' },
+          exit_code: { type: 'integer' },
+          masked_command: { type: 'string', description: 'the command with every failing test listed deselected, confirmed to exit 0; empty when none failed, the tool cannot deselect them, or a diagnostic fails it too' },
+          failures: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['tests', 'diagnostics'],
+            properties: {
+              tests: {
+                type: 'array',
+                items: { type: 'object', additionalProperties: false, required: ['id'], properties: { id: { type: 'string', description: 'the test id as the tool names it' } } },
+              },
+              diagnostics: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['tool', 'rule', 'file', 'snippet', 'message'],
+                  properties: {
+                    tool: { type: 'string' },
+                    rule: { type: 'string', description: 'the rule or error code; empty when the tool names none' },
+                    file: { type: 'string', description: 'repo-relative path' },
+                    snippet: { type: 'string', description: 'the five to six lines of code it points at, copied from the file' },
+                    message: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    decisions_needed: { type: 'array', items: { type: 'string' }, description: 'each command that could not run at all, and what you saw; empty normally' },
+    ...WORKTREE_FIELD,
+  },
+}
+
 // The unblock agent's result: every blocker it saw verified clear, and, as a
 // node's decisions_needed, each it could not — which holds the node and halts
 // the run until a resume carries the same session on (ADR-0016, ADR-0021).
@@ -661,8 +715,33 @@ phase('Explore')
 const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'topic'
 const exploreNodes = graph.explorations.map((e, i, a) =>
   a.filter((x) => slug(x.label) === slug(e.label)).length > 1 ? `explore/${slug(e.label)}-${i + 1}` : `explore/${slug(e.label)}`)
-const notes = (await parallel(
-  graph.explorations.map((e, i) => () =>
+const BASELINE_RECORD = `${NOTES_DIR}/pre-existing-failures.json`
+const baselinePrompt = `Measure what this run's per-change validation commands already fail on at its pinned base, before any ticket of spec #${SPEC} changes anything.
+
+${POINTERS}
+${GIT}
+
+First: \`git fetch origin && git switch --detach ${BASE_SHA}\` — the run's pinned base. Every ticket of this run is cut from this commit, so what fails here is what the tickets inherit. Change nothing: edit no tracked file, commit nothing, move no branch.
+
+${PER_CHANGE_COMMANDS.length ? `Run each command below once, from the worktree's top level, in the foreground, exactly as written:
+${PER_CHANGE_COMMANDS.map((c) => `- \`${c}\``).join('\n')}
+
+Return one entry per command, in this order, the command copied verbatim, with its exit code and its failures:
+- A failing test goes in \`tests\`, by its id as the tool names it (\`path::test_name\`, \`module::test\`, a file and a test title).
+- Every other failure — a lint, typecheck, format or build diagnostic — goes in \`diagnostics\`: the tool, its rule or error code, the file, a snippet of the five to six lines of code it points at, copied from the file, and its message. Never a line number alone: lines move as agents edit, and the snippet is how a later agent finds the failure again.
+- \`masked_command\`: where the tool can deselect tests (pytest \`--deselect\`, \`cargo test -- --skip\`, \`node --test --test-skip-pattern\`, …), the command with every failing test you listed deselected. Run it once and keep it only if it exits 0; else, or when nothing failed, leave it empty.
+A command that exits 0 is \`exit_code\` 0 with no failures.
+
+A command that cannot run at all — not found, a missing dependency, credential or service, a crash before any test or check ran, output nothing can be read from — is a broken environment, not a pre-existing failure: record no failures for it, and put it in \`decisions_needed\` with what you saw. It holds the run until the operator clears it.` : 'This run has no per-change commands: run nothing, and return an empty `commands`.'}
+
+Never run a build-cache clean, and never launch a command in the background.
+
+${OWN_WORKTREE}
+
+Return the commands, an empty \`decisions_needed\` unless a command could not run, and your worktree.`
+const [baseline, ...explored] = await parallel([
+  () => agent(baselinePrompt, { ...ROLES.baseline, effort: 'medium', phase: 'Explore', schema: BASELINE_SCHEMA, isolation: 'worktree', label: 'baseline:per-change', node: 'baseline/per-change' }),
+  ...graph.explorations.map((e, i) => () =>
     agent(
       `Research this question against the codebase and any external docs it needs, then save your findings as markdown.
 
@@ -682,8 +761,23 @@ Return the absolute path you wrote, and your blockers.`,
       { ...ROLES.explore, effort: 'low', phase: 'Explore', schema: EXPLORE_SCHEMA, label: `explore:${e.label}`, node: exploreNodes[i] },
     ),
   ),
-)).filter(Boolean)
+])
+const notes = explored.filter(Boolean)
 log(`${notes.length} research notes in ${NOTES_DIR}`)
+if (!baseline) throw new Error('the baseline of the per-change commands failed — nothing is dispatched without it')
+if (baseline.decisions_needed.length) {
+  log(`HALTED at Explore — the baseline could not run: ${baseline.decisions_needed.join('; ')}`)
+  return { spec: SPEC, halted: true, reason: `the baseline could not run a per-change command: ${baseline.decisions_needed.join('; ')}. Nothing was built. Clear it, then resume the run.`, published: [], notes: NOTES_DIR }
+}
+try {
+  const fs = await import('node:fs')
+  fs.mkdirSync(NOTES_DIR, { recursive: true })
+  fs.writeFileSync(BASELINE_RECORD, JSON.stringify({ base_sha: BASE_SHA, commands: baseline.commands }, null, 2) + '\n')
+  const red = baseline.commands.filter((c) => c.exit_code !== 0)
+  log(`Baseline at ${BASE_SHA}: ${red.length ? `${red.length} of ${baseline.commands.length} per-change commands already red (${red.map((c) => c.command).join('; ')})` : 'every per-change command green'}; recorded in ${BASELINE_RECORD}`)
+} catch (e) {
+  log(`!! could not write ${BASELINE_RECORD}: ${e?.message ?? e}`)
+}
 
 // --- step 2b: clear the blockers with the operator (ADR-0021) -------------
 // Everything discovery found missing is cleared before anything is built, so
