@@ -69,11 +69,12 @@ const AT_REVIEW_COMMANDS = __AT_REVIEW_COMMANDS__   // the same for `### Run at 
 // -------------------------------------------------------------------------
 
 const POINTERS = `Repo ${REPO}, checkout ${REPO_DIR}. Spec: \`gh issue view ${SPEC}\`. Research notes: ${NOTES_DIR}.`
-// The baseline's record (ADR-0030), written before anything is dispatched.
-// Told to every role that runs the per-change recipe, and only those: nothing
+// The baseline's record (ADR-0030): its per-change half written before
+// anything is dispatched, its at-review half joined before the whole-stack
+// review. Told to every role that runs a recipe, and only those: nothing
 // before the baseline returns could read it.
 const BASELINE_RECORD = `${NOTES_DIR}/pre-existing-failures.json`
-const RECIPE_POINTERS = `${POINTERS} What the per-change commands already failed on at the run's pinned base: ${BASELINE_RECORD}.`
+const RECIPE_POINTERS = `${POINTERS} What the recipe's commands already failed on at the run's pinned base: ${BASELINE_RECORD}.`
 // Every agent in this run works in a worktree LINKED to one clone — one object
 // store, one ref namespace — so a commit any agent makes is reachable by name
 // from every other the moment it lands. The shared clone, not origin, is how
@@ -266,6 +267,7 @@ const JUDGING = `Each result carries the command's \`exit_code\`. A zero exit is
 // The checks a result judged green over a non-zero exit. They travel with the
 // validated sha, so the next role knows which ones it may not inherit.
 const waivedOf = (checks) => (checks || []).filter((k) => k.passed && k.exit_code !== 0).map((k) => ({ command: k.command, exit_code: k.exit_code }))
+const unionWaived = (a, b) => [...a, ...b.filter((k) => !a.some((w) => norm(w.command) === norm(k.command)))]
 const validatedBy = (r, by) => r.validated_sha ? { sha: r.validated_sha, by, waived: waivedOf(r.checks) } : null
 // A green result travels with the sha it was green on (ADR-0009). The agent
 // downstream checks the sha itself — one rev-parse — and inherits the result
@@ -508,11 +510,13 @@ const FINDINGS_FIELD = {
     },
   },
 }
+// The whole-stack review returns its at-review checks so a waived one reaches
+// the integration PR (ADR-0030).
 const REVIEW_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['findings', 'worktree'],
-  properties: { ...WORKTREE_FIELD, ...FINDINGS_FIELD },
+  required: ['checks', 'findings', 'worktree'],
+  properties: { checks: { ...CHECKS_FIELD.checks, description: 'one entry per at-review command run on the stack tip; empty when none was listed' }, ...WORKTREE_FIELD, ...FINDINGS_FIELD },
 }
 // The gate reviewer also establishes readiness before it reads a line — by
 // inheriting the implementer's result when the sha is unchanged (ADR-0009),
@@ -608,22 +612,22 @@ const EXPLORE_SCHEMA = {
   },
 }
 
-const BASELINE_SCHEMA = {
+const baselineSchema = (commands) => ({
   type: 'object',
   additionalProperties: false,
   required: ['commands', 'blockers', 'decisions_needed', 'worktree'],
   properties: {
     commands: {
       type: 'array',
-      minItems: PER_CHANGE_COMMANDS.length,
-      maxItems: PER_CHANGE_COMMANDS.length,
+      minItems: commands.length,
+      maxItems: commands.length,
       description: 'one entry per command you were given, in the order given',
       items: {
         type: 'object',
         additionalProperties: false,
         required: ['command', 'exit_code', 'masked_command', 'failures'],
         properties: {
-          command: { type: 'string', ...(PER_CHANGE_COMMANDS.length && { enum: PER_CHANGE_COMMANDS }), description: 'the command, copied verbatim' },
+          command: { type: 'string', ...(commands.length && { enum: commands }), description: 'the command, copied verbatim' },
           exit_code: { type: 'integer' },
           masked_command: { type: 'string', description: 'the command with every failing test listed deselected, confirmed to exit 0; empty when none failed, the tool cannot deselect them, or a diagnostic fails it too' },
           failures: {
@@ -659,7 +663,7 @@ const BASELINE_SCHEMA = {
     decisions_needed: { type: 'array', items: { type: 'string' }, description: 'each blocker you return, named again, so the run holds this node until it is cleared; empty normally' },
     ...WORKTREE_FIELD,
   },
-}
+})
 
 // The unblock agent's result: every blocker it saw verified clear, and, as a
 // node's decisions_needed, each it could not — which holds the node and halts
@@ -754,33 +758,70 @@ phase('Explore')
 const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'topic'
 const exploreNodes = graph.explorations.map((e, i, a) =>
   a.filter((x) => slug(x.label) === slug(e.label)).length > 1 ? `explore/${slug(e.label)}-${i + 1}` : `explore/${slug(e.label)}`)
-const BASELINE_HALTS = `${NOTES_DIR}/baseline-blockers.json`
+// The baseline measures two command sets (ADR-0030): the per-change ones
+// before dispatch, then, in the background, the at-review ones the per-change
+// set lacks, which only the whole-stack review waits on. Each is a node of its
+// own, so a resume keeps whichever succeeded. A halt on either is recorded on
+// the Workflow runner, where its next prompt names it: so a resume is a call
+// the runner has not made, and that node runs again.
+const AT_REVIEW_ONLY = AT_REVIEW_COMMANDS.filter((c) => !PER_CHANGE_COMMANDS.some((p) => norm(p) === norm(c)))
+const MEASURED = {
+  'per-change': { commands: PER_CHANGE_COMMANDS, halts: `${NOTES_DIR}/baseline-blockers.json` },
+  'at-review': { commands: AT_REVIEW_ONLY, halts: `${NOTES_DIR}/baseline-at-review-blockers.json` },
+}
 const showBlocker = (b) => `${b.subject} — evidence: ${b.evidence}; check: \`${b.check}\``
-let baselineHalts = []
-if (!ON_SESSION) {
+const fsOr = async (what, fn) => {
   try {
-    const fs = await import('node:fs')
-    if (fs.existsSync(BASELINE_HALTS)) baselineHalts = JSON.parse(fs.readFileSync(BASELINE_HALTS, 'utf8'))
+    return fn(await import('node:fs'))
   } catch (e) {
-    log(`!! could not read ${BASELINE_HALTS}: ${e?.message ?? e}`)
+    log(`!! could not ${what}: ${e?.message ?? e}`)
+    return null
   }
 }
-const lastHalt = baselineHalts.at(-1)
+for (const m of Object.values(MEASURED))
+  m.halted = ON_SESSION ? [] : (await fsOr(`read ${m.halts}`, (fs) => (fs.existsSync(m.halts) ? JSON.parse(fs.readFileSync(m.halts, 'utf8')) : []))) || []
+// A measurement that came back with a blocker: recorded for the next prompt,
+// and named.
+const baselineHalt = async (set, r) => {
+  const named = r.blockers.length ? r.blockers.map(showBlocker).join('; ') : r.decisions_needed.join('; ')
+  const m = MEASURED[set]
+  if (!ON_SESSION)
+    await fsOr(`write ${m.halts}, so a resume replays this halt`, (fs) => {
+      fs.mkdirSync(NOTES_DIR, { recursive: true })
+      fs.writeFileSync(m.halts, JSON.stringify([...m.halted, { blockers: r.blockers }], null, 2) + '\n')
+    })
+  return named
+}
+const maskFrom = (commands) => {
+  for (const c of commands) if (norm(c.masked_command) && norm(c.masked_command) !== norm(c.command)) MASKED.set(norm(c.command), c.masked_command)
+}
+const writeRecord = (commands) =>
+  fsOr(`write ${BASELINE_RECORD}`, (fs) => {
+    fs.mkdirSync(NOTES_DIR, { recursive: true })
+    fs.writeFileSync(BASELINE_RECORD, JSON.stringify({ base_sha: BASE_SHA, commands }, null, 2) + '\n')
+    return true
+  })
+const redOf = (commands) => commands.filter((c) => c.exit_code !== 0)
 const cannotRun = `Tell a command that runs and fails from one that cannot run:
 - It runs and fails: it started, ran its tests or checks, and exits non-zero with failures you can read off its output. That is a pre-existing failure: record it as above.
 - It cannot run: the tool will not start (not found, a missing dependency, credential or service), it dies before any test or check ran, or its exit is not a check failure and nothing can be read from its output. That is a broken environment, not a pre-existing failure, and a mask would hide it: it is a **blocker**. Name what is missing in \`subject\`, \`tickets\` empty (the whole run needs it), what the command cannot do without it in \`why\`, the command and what it printed in \`evidence\`, and in \`check\` one command that succeeds once it is cleared.
 
 ${ON_SESSION ? `If your session has a tool named \`needs_you\`, call it with the blocker as its reason — what is missing, the evidence and the check — then wait in this session for as long as it takes: the operator enters it and fixes the environment with you. Guide them; never install, configure or fetch anything yourself, and never handle a secret. Once its check passes and the command runs, carry on measuring and return as usual, with an empty \`blockers\`.
 Without that tool, return the blocker in \`blockers\`, its command's entry with the exit code you saw and no failures, and name it again in \`decisions_needed\`: the run holds this node until the operator clears it, and resuming the run carries this session on.` : `Nobody is in this session to clear it. Return the blocker in \`blockers\`, its command's entry with the exit code you saw and no failures, and measure the others as usual. The run halts with it named, and once the operator has cleared it, resuming the run starts this node again.`}`
-const baselinePrompt = `Measure what this run's per-change validation commands already fail on at its pinned base, before any ticket of spec #${SPEC} changes anything.
+const baselinePrompt = (set) => {
+  const { commands, halted } = MEASURED[set]
+  const lastHalt = halted.at(-1)
+  return `${set === 'per-change'
+    ? `Measure what this run's per-change validation commands already fail on at its pinned base, before any ticket of spec #${SPEC} changes anything.`
+    : `Measure what this run's at-review validation commands already fail on at its pinned base. The tickets of spec #${SPEC} are being built meanwhile; only the whole-stack review waits on you.`}
 
 ${POINTERS}
 ${GIT}
 
 First: \`git fetch origin && git switch --detach ${BASE_SHA}\` — the run's pinned base. Every ticket of this run is cut from this commit, so what fails here is what the tickets inherit. Change nothing: edit no tracked file, commit nothing, move no branch.
 
-${PER_CHANGE_COMMANDS.length ? `Run each command below once, from the worktree's top level, in the foreground, exactly as written:
-${PER_CHANGE_COMMANDS.map((c) => `- \`${c}\``).join('\n')}
+${commands.length ? `Run each command below once, from the worktree's top level, in the foreground, exactly as written:
+${commands.map((c) => `- \`${c}\``).join('\n')}
 
 Return one entry per command, in this order, the command copied verbatim, with its exit code and its failures:
 - A failing test goes in \`tests\`, by its id as the tool names it (\`path::test_name\`, \`module::test\`, a file and a test title).
@@ -790,7 +831,7 @@ A command that exits 0 is \`exit_code\` 0 with no failures.
 
 ${cannotRun}${lastHalt ? `
 
-This node has halted ${baselineHalts.length === 1 ? 'once' : `${baselineHalts.length} times`} before. The last time on these blockers, which the operator was to clear before resuming the run:
+This node has halted ${halted.length === 1 ? 'once' : `${halted.length} times`} before. The last time on these blockers, which the operator was to clear before resuming the run:
 ${lastHalt.blockers.map((b, i) => `${i + 1}. ${showBlocker(b)}`).join('\n')}
 Run each one's check first. One that still fails is still a blocker: return it again.` : ''}` : 'This run has no per-change commands: run nothing, and return an empty `commands`.'}
 
@@ -799,8 +840,10 @@ Never run a build-cache clean, and never launch a command in the background.
 ${OWN_WORKTREE}
 
 Return the commands, your blockers (an empty list unless a command could not run), \`decisions_needed\`, and your worktree.`
+}
+const measure = (set) => agent(baselinePrompt(set), { ...ROLES.baseline, effort: 'medium', phase: 'Explore', schema: baselineSchema(MEASURED[set].commands), isolation: 'worktree', label: `baseline:${set}`, node: `baseline/${set}` })
 const [baseline, ...explored] = await parallel([
-  () => agent(baselinePrompt, { ...ROLES.baseline, effort: 'medium', phase: 'Explore', schema: BASELINE_SCHEMA, isolation: 'worktree', label: 'baseline:per-change', node: 'baseline/per-change' }),
+  () => measure('per-change'),
   ...graph.explorations.map((e, i) => () =>
     agent(
       `Research this question against the codebase and any external docs it needs, then save your findings as markdown.
@@ -826,28 +869,14 @@ const notes = explored.filter(Boolean)
 log(`${notes.length} research notes in ${NOTES_DIR}`)
 if (!baseline) throw new Error('the baseline of the per-change commands failed — nothing is dispatched without it')
 if (baseline.blockers.length || baseline.decisions_needed.length) {
-  const named = baseline.blockers.length ? baseline.blockers.map(showBlocker).join('; ') : baseline.decisions_needed.join('; ')
-  if (!ON_SESSION) {
-    try {
-      const fs = await import('node:fs')
-      fs.mkdirSync(NOTES_DIR, { recursive: true })
-      fs.writeFileSync(BASELINE_HALTS, JSON.stringify([...baselineHalts, { blockers: baseline.blockers }], null, 2) + '\n')
-    } catch (e) {
-      log(`!! could not write ${BASELINE_HALTS}, so a resume replays this halt: ${e?.message ?? e}`)
-    }
-  }
+  const named = await baselineHalt('per-change', baseline)
   log(`HALTED at Explore — the baseline cannot run a per-change command: ${named}`)
   return { spec: SPEC, halted: true, reason: `the baseline cannot run a per-change command, a blocker: ${named}. Nothing was built. Clear it, then resume the run: the baseline runs again.`, blockers: baseline.blockers, published: [], notes: NOTES_DIR }
 }
-for (const c of baseline.commands) if (norm(c.masked_command) && norm(c.masked_command) !== norm(c.command)) MASKED.set(norm(c.command), c.masked_command)
-try {
-  const fs = await import('node:fs')
-  fs.mkdirSync(NOTES_DIR, { recursive: true })
-  fs.writeFileSync(BASELINE_RECORD, JSON.stringify({ base_sha: BASE_SHA, commands: baseline.commands }, null, 2) + '\n')
-  const red = baseline.commands.filter((c) => c.exit_code !== 0)
+maskFrom(baseline.commands)
+if (await writeRecord(baseline.commands)) {
+  const red = redOf(baseline.commands)
   log(`Baseline at ${BASE_SHA}: ${red.length ? `${red.length} of ${baseline.commands.length} per-change commands already red (${red.map((c) => c.command).join('; ')})` : 'every per-change command green'}; recorded in ${BASELINE_RECORD}`)
-} catch (e) {
-  log(`!! could not write ${BASELINE_RECORD}: ${e?.message ?? e}`)
 }
 
 // --- step 2b: clear the blockers with the operator (ADR-0021) -------------
@@ -899,6 +928,17 @@ End when every blocker's check passes: each in \`resolved\`, with the check you 
   if (cleared.decisions_needed.length) return haltOnBlockers(`the unblock session left some uncleared (${cleared.decisions_needed.join('; ')})`)
   log(`Unblocked: ${cleared.resolved.map((r) => r.subject).join('; ') || 'nothing left to clear'}`)
 }
+
+// The at-review baseline starts once the environment is cleared, and nothing
+// awaits it until the whole-stack review: the full suites never hold a ticket
+// up (ADR-0030). Not awaited until then, so a failure is caught here, not left
+// to reject unobserved.
+const atReviewMeasured = AT_REVIEW_ONLY.length
+  ? measure('at-review').catch((e) => {
+    log(`!! the at-review baseline failed: ${e?.message ?? e}`)
+    return null
+  })
+  : Promise.resolve({ commands: [], blockers: [], decisions_needed: [] })
 
 // --- step 3: layer 0 — prior work becomes the bottom of the stack --------
 // The stack's whole-stack merge lands on BASE_REF, and a `Closes #N` only fires
@@ -1632,6 +1672,7 @@ async function runInOrder() {
 phase('Implement')
 const outcomes = RUN_ORDER === 'sequential' ? await runInOrder() : await Promise.all(auto.map((t) => ticketDone(t.number)))
 const layer0Line = () => (hasLayer0 ? [`layer 0 (pre-existing): ${layer0.pr_url}`] : [])
+const publishedSoFar = () => [...layer0Line(), ...stacked.map((s) => `#${s.number}: ${s.pr_url}`)]
 
 // --- a halted run: no review, no finalize, nothing more on GitHub ----------
 // Review and finalize are for a stack every automated ticket reached. Anything
@@ -1650,7 +1691,7 @@ if (unpublished.length) {
     halted: true,
     reason: `#${cause.number} ${cause.state}: ${cause.detail}. No whole-stack review and no finalize until every automated ticket is published — resume the run to carry it on.`,
     tickets: unpublished.map((o) => ({ ticket: o.number, state: o.state, detail: o.detail, ...(o.questions ? { questions: o.questions } : {}) })),
-    published: [...layer0Line(), ...stacked.map((s) => `#${s.number}: ${s.pr_url}`)],
+    published: publishedSoFar(),
     deferred_to_human: deferred.map((t) => ({ ticket: t.number, reason: t.human_reason || 'downstream of a human ticket' })),
     gate_unfixed: outcomes
       .filter((o) => o.unfixed && o.unfixed.length)
@@ -1664,6 +1705,30 @@ if (unpublished.length) {
 }
 
 // --- step 7: review the whole stack; fixes land as the top PR -------------
+// The review runs the at-review commands, so it waits on their baseline, and a
+// review without it would read every pre-existing failure as the stack's.
+const atReview = await atReviewMeasured
+if (!atReview || atReview.blockers.length || atReview.decisions_needed.length) {
+  const named = atReview ? await baselineHalt('at-review', atReview) : 'its agent returned no result'
+  log(`HALTED before Review — the at-review baseline did not succeed: ${named}`)
+  return {
+    spec: SPEC,
+    halted: true,
+    reason: `the at-review baseline did not succeed${atReview ? ', a blocker' : ''}: ${named}. Every automated ticket is published; no whole-stack review and no finalize until it has. ${atReview ? 'Clear it, then resume' : 'Resume'} the run: the at-review baseline runs again.`,
+    blockers: atReview ? atReview.blockers : [],
+    published: publishedSoFar(),
+    deferred_to_human: deferred.map((t) => ({ ticket: t.number, reason: t.human_reason || 'downstream of a human ticket' })),
+    worktrees_kept: worktreesKept,
+    notes: NOTES_DIR,
+  }
+}
+if (atReview.commands.length) {
+  maskFrom(atReview.commands)
+  if (await writeRecord([...baseline.commands, ...atReview.commands])) {
+    const red = redOf(atReview.commands)
+    log(`At-review baseline at ${BASE_SHA}: ${red.length ? `${red.length} of ${atReview.commands.length} at-review commands already red (${red.map((c) => c.command).join('; ')})` : 'every at-review command green'}; joined to ${BASELINE_RECORD}`)
+  }
+}
 // Every published ticket's `### Run at review` commands, once each, on the
 // stack tip: the full suites no per-ticket role runs (ADR-0029).
 const publishedOutcomes = outcomes.filter((o) => o.state === 'published')
@@ -1687,9 +1752,10 @@ Every ticket was already reviewed alone on its own branch, so look hardest at wh
 
 ${reviewValidation.length
     ? `Run at review — the deduplicated union of every published ticket's \`### Run at review\` commands. Run each once, on the stack tip (\`git switch --detach ${ref(tip)}\`), in the foreground and exactly as written, never as a background job and never with a build-cache clean:
-${reviewValidation.map((c) => `- \`${c}\``).join('\n')}
-Each command that exits red is a \`blocker\` finding: the command in \`location\`, what failed in \`issue\`.`
-    : `No published ticket lists a command to run at review.`}
+${reviewValidation.map((c) => `- \`${maskOf(c)}\``).join('\n')}${unmasking(reviewValidation)}
+Return one check per command, the command copied verbatim as listed. ${JUDGING}
+Each check that is \`passed: false\` is a \`blocker\` finding: the command in \`location\`, what failed in \`issue\`. A waived check is no finding: every failure in it was there before the stack.`
+    : `No published ticket lists a command to run at review: return an empty \`checks\`.`}
 
 ${WORKTREE}`,
   { ...ROLES.review, phase: 'Review', schema: REVIEW_SCHEMA, isolation: ISOLATION, label: `review:spec-${SPEC}`, node: 'review' },
@@ -1698,6 +1764,8 @@ noteWorktree('review', tip, review)
 // Fail closed: a review that never returned is not a review with zero findings.
 const reviewMissing = !review
 const findings = review ? review.findings : []
+// The at-review checks the review judged green over a non-zero exit.
+const reviewWaived = waivedOf(review?.checks)
 log(reviewMissing ? 'code review: the whole-stack reviewer died — the stack is UNREVIEWED as a whole' : `code review: ${findings.length} findings`)
 
 // The stack's PRs are published: pushing fixes into them would force-update
@@ -1725,6 +1793,9 @@ if (findings.length) {
   })
   integrationVerdicts = out.verdicts
   integrationUnaccounted = out.unaccounted
+  // Every waived check behind this PR: the review's at-review ones, and the
+  // last fixer's over the union recipe.
+  const integrationWaived = unionWaived(reviewWaived, out.validated?.waived || [])
   if (out.landed) {
     // Publishing is the one irreversible act of this phase, so it is its own
     // small agent rather than the last and most context-exhausted fixer's job.
@@ -1751,7 +1822,10 @@ Do not run \`gh stack link\` — finalize registers this layer.
 
 Findings it addresses:
 ${findings.map((f) => `- [${f.severity}] ${f.location} — ${f.issue}`).join('\n')}
-
+${integrationWaived.length ? `
+Under them, one line per waived check — judged green over a non-zero exit, every failure in it pre-existing at the run's pinned base (${BASELINE_RECORD}) — as \`Waived: <command> exited <exit_code>\`, the command in code formatting:
+${integrationWaived.map((k) => `- \`${k.command}\` exited ${k.exit_code}`).join('\n')}
+` : ''}
 After the PR exists:
 ${reclaimStep(integrationReclaim)}
 
@@ -1880,6 +1954,8 @@ return {
   // also on its PR.
   decided: outcomes.filter((o) => o.decided && o.decided.length).map((o) => ({ ticket: o.number, decisions: o.decided })),
   review_findings: reviewMissing ? 'UNREVIEWED — the whole-stack reviewer died' : findings.length,
+  // The at-review checks the review waived; on the integration PR too when one opened.
+  review_waived: reviewWaived,
   integration_pr: integration ? integration.pr_url : null,
   integration_unfixed: [
     ...integrationUnaccounted.map((f) => `[${f.severity}] ${f.location} — ${f.issue} — no verdict came back`),

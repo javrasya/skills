@@ -13,6 +13,8 @@
 // Words in a prompt script its turn:
 //   [turn <ms>]   the turn takes this long, the terminal quiet meanwhile
 //   [spin <ms>]   the turn takes this long, a spinner drawn meanwhile
+//   [until <path>] the turn lasts until a file is at that path, the terminal
+//                 quiet meanwhile
 //   [draw]        from now on the terminal redraws a clock, turn or none
 //   [unrecorded]  the turn leaves no trace in the transcript
 //   [die]         the harness dies mid-turn: its prompt is in the transcript,
@@ -357,6 +359,8 @@ async function tui() {
       clearInterval(spinner)
       status = ''
     } else if (how === 'turn') await sleep(Number(ms))
+    const until = /\[until ([^\]]+)\]/.exec(prompt)?.[1]
+    if (until) while (!existsSync(until)) await sleep(50)
     const ask = /\[ask ([^\]]+)\]/.exec(prompt)?.[1]
     if (ask) await waitOn(ask)
     if (/\[call /.test(prompt)) {
