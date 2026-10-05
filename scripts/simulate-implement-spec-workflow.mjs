@@ -10,6 +10,8 @@ const TPL = fileURLToPath(new URL('../skills/engineering/implement-spec-in-workf
 const SIM_CHECK = 'npm t'
 
 // `startRef` is the operator's prior work (ADR-0023): the base itself for none.
+// PINNED is the sha arming resolved it to (ADR-0030).
+const PINNED = '0a1b2c3d4e5f60718293a4b5c6d7e8f901234567'
 function render(runner, runOrder = 'parallel', startRef = 'main') {
   let s = readFileSync(TPL, 'utf8')
   s = s
@@ -19,6 +21,7 @@ function render(runner, runOrder = 'parallel', startRef = 'main') {
     .replace(/__NOTES_DIR__/g, '/tmp/n')
     .replace(/__BASE_REF__/g, 'main')
     .replace(/__START_REF__/g, startRef)
+    .replace(/__BASE_SHA__/g, PINNED)
     .replace(/__STACK_MODE__/g, 'native')
     .replace(/__RUN_ORDER__/g, runOrder)
     .replace(/__RUNNER__/g, runner)
@@ -155,7 +158,7 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
   check('A: implementer reads its ticket, not the spec', calls.find((c) => c.label === 'impl:#10').prompt.includes('`gh issue view 10`') && calls.find((c) => c.label === 'impl:#10').prompt.includes('Read no spec'), '')
   check('A: publish order respects the dependency', seq.indexOf('publish:#10') < seq.indexOf('publish:#11'), '')
   check('A: #11 cut from #10 branch, addressed locally', calls.find((c) => c.label === 'impl:#11').prompt.includes('git switch --detach ticket/10') && !calls.find((c) => c.label === 'impl:#11').prompt.includes('origin/ticket/10'), '')
-  check('A: an inherited ref stays origin-addressed', calls.find((c) => c.label === 'impl:#10').prompt.includes('origin/main'), '')
+  check('A: a bottom ticket is cut from the pinned base, not the moving ref', calls.find((c) => c.label === 'impl:#10').prompt.includes(`git switch --detach ${PINNED}`) && !calls.find((c) => c.label === 'impl:#10').prompt.includes('git switch --detach origin/main'), '')
   check('A: slices move the ref instead of pushing', calls.find((c) => c.label === 'impl:#10').prompt.includes('git update-ref refs/heads/ticket/10 HEAD') && calls.find((c) => c.label === 'impl:#10').prompt.includes('Push nothing'), '')
   check('A: the lane pushes once, creating the ref', calls.find((c) => c.label === 'publish:#10').prompt.includes('git push origin ticket/10') && calls.find((c) => c.label === 'publish:#10').prompt.includes('CREATES the branch'), '')
   check('A: publish #10 needs no rebase (tip unmoved)', !calls.find((c) => c.label === 'publish:#10').prompt.includes('git rebase --onto'), '')
@@ -233,7 +236,7 @@ const withBlockers = (blockers) => () => ({
   const layer0 = calls.find((c) => c.label.startsWith('layer0'))
   check('P2: with prior work the graph agent is asked, per ticket, whether it is already done there', graph.opts.schema.properties.tickets.items.required.includes('done_in_prior_work') && /origin\/main\.\.origin\/spec\/827-integration/.test(graph.prompt) && /never guess from titles alone/.test(graph.prompt), graph.prompt.slice(-600))
   check('P2: a ticket already done on the prior work gets no agent', !seq.some((l) => /#1199/.test(l)), seq.join(' | '))
-  check('P2: its dependants are not blocked by it', seq.includes('publish:#1200') && calls.find((c) => c.label === 'impl:#1200').prompt.includes('git switch --detach origin/spec/827-integration'), seq.join(' | '))
+  check('P2: its dependants are not blocked by it', seq.includes('publish:#1200') && calls.find((c) => c.label === 'impl:#1200').prompt.includes(`git switch --detach ${PINNED}`), seq.join(' | '))
   check('P2: the layer-0 PR closes it, with the evidence', layer0 && layer0.prompt.includes('Closes #<n>') && layer0.prompt.includes('#1199: 4ff25216 Keychain store moves (#1199)') && /The operator named `spec\/827-integration` as prior work/.test(layer0.prompt), layer0 && layer0.prompt.slice(-700))
   check('P2: the layer count excludes it', layer0.prompt.includes('Layer 1 of 2 planned') && calls.find((c) => c.label === 'publish:#1200').prompt.includes('Layer 2 of 2 planned'), '')
   check('P2: the log says what prior work already covers', logs.some((l) => /Already done on spec\/827-integration.*#1199 \(4ff25216/.test(l)), logs.join(' | '))
@@ -263,7 +266,7 @@ const withBlockers = (blockers) => () => ({
   const pub = calls.find((c) => c.label === 'publish:#10')
   check('P4: the publisher is told to count the commits it adds and to stop when there are none', /git rev-list --count origin\/main\.\.ticket\/10/.test(pub.prompt) && /`nothing_to_publish: true`/.test(pub.prompt), pub.prompt.slice(0, 1500))
   check('P4: nothing to publish is not a halt: the run goes on to its dependants, review and finalize', result.halted === false && seq.includes('publish:#11') && seq.includes('review:spec-224') && seq.includes('finalize'), seq.join(' | '))
-  check('P4: the tip stays where it was', calls.find((c) => c.label === 'impl:#11').prompt.includes('git switch --detach origin/main'), '')
+  check('P4: the tip stays where it was', calls.find((c) => c.label === 'impl:#11').prompt.includes(`git switch --detach ${PINNED}`), '')
   check('P4: the ticket is open still, so the spec is not complete, and the brief says why', !result.state.startsWith('complete') && result.finalize !== undefined && /nothing to publish/.test(calls.find((c) => c.label === 'finalize').prompt), result.state)
   check('P4: the log names it', logs.some((l) => /#10: nothing to publish/.test(l)), logs.join(' | '))
   check('P4: its branch is not listed as unpublished work', !(result.local_only_branches && result.local_only_branches.refs.includes('ticket/10')), JSON.stringify(result.local_only_branches))
@@ -363,8 +366,8 @@ const withBlockers = (blockers) => () => ({
     }),
   })
   const second = calls.find((c) => c.label === 'publish:#11')
-  check('B2: both tickets cut from the same inherited base', calls.find((c) => c.label === 'impl:#11').prompt.includes('origin/main'), '')
-  check('B2: the second publish replays onto the moved tip', second.prompt.includes('git rebase --onto ticket/10'), second.prompt.slice(0, 400))
+  check('B2: both tickets cut from the same pinned base', ['impl:#10', 'impl:#11'].every((l) => calls.find((c) => c.label === l).prompt.includes(`git switch --detach ${PINNED}`)), '')
+  check('B2: the second publish replays onto the moved tip, from the pinned base', second.prompt.includes(`git rebase --onto ticket/10 ${PINNED}`), second.prompt.slice(0, 400))
   check('B2: the rebase is stated as local-only', second.prompt.includes('never left this clone'), '')
   check('B2: still one plain push, no force', second.prompt.includes('git push origin ticket/11') && !second.prompt.includes('--force-with-lease origin'), '')
   check('B2: both tickets stack', result.stack_bottom_to_top.length === 2, JSON.stringify(result.stack_bottom_to_top))

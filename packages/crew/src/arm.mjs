@@ -30,7 +30,7 @@ export function templatePath(candidates = TEMPLATES) {
   return found
 }
 
-export const PLACEHOLDERS = ['SPEC', 'REPO', 'REPO_DIR', 'NOTES_DIR', 'BASE_REF', 'START_REF', 'STACK_MODE', 'RUN_ORDER', 'RUNNER', 'PER_CHANGE_COMMANDS', 'AT_REVIEW_COMMANDS']
+export const PLACEHOLDERS = ['SPEC', 'REPO', 'REPO_DIR', 'NOTES_DIR', 'BASE_REF', 'START_REF', 'BASE_SHA', 'STACK_MODE', 'RUN_ORDER', 'RUNNER', 'PER_CHANGE_COMMANDS', 'AT_REVIEW_COMMANDS']
 const PLACEHOLDER = new RegExp(`__(${PLACEHOLDERS.join('|')})__`, 'g')
 
 // SKILL.md step 3: substitute, never rewrite. One pass, so a value that
@@ -140,6 +140,22 @@ export function hasValidationRecipe(body) {
   return false
 }
 
+// The run's pinned base (ADR-0030): the commit its cut-from ref, the prior work
+// or else the base, stands at on origin after a fetch, resolved once here so
+// every ticket of the run is cut from one sha however the ref moves under it.
+// Prior work may live only in the checkout yet (the layer-0 agent pushes it),
+// so its local branch answers when origin has none; the base must be on origin.
+export async function pinBase({ repoDir, base, startRef, run = execProgram }) {
+  const named = startRef === base ? `origin/${base}` : `prior work ${startRef}`
+  const fetched = await run('git', ['-C', repoDir, 'fetch', '-q', 'origin'])
+  if (fetched.code !== 0) throw new StartError(`cannot pin the run's base, ${named}: git fetch origin: ${fetched.stderr.trim() || `exited ${fetched.code}`}; nothing armed`)
+  for (const candidate of [`refs/remotes/origin/${startRef}`, ...(startRef === base ? [] : [`refs/heads/${startRef}`])]) {
+    const sha = await run('git', ['-C', repoDir, 'rev-parse', '-q', '--verify', `${candidate}^{commit}`])
+    if (sha.code === 0) return sha.stdout.trim()
+  }
+  throw new StartError(`cannot pin the run's base: ${named} resolves to no commit${startRef === base ? ' on origin' : ', on origin or in this checkout'}; nothing armed`)
+}
+
 // A ticket's recipe commands (ADR-0029, ADR-0030): under `## Validation`,
 // each `### Run per change` and `### Run at review` line's first code span.
 // A line with none, or labelled as prose ("absent: …", "Tests: not
@@ -237,11 +253,12 @@ export function runOrchestrator({ paths, host = (cwd) => crewHost({ paths, cwd }
 
 // Renders the template into a new run's own folder and launches it there.
 // `answers` are the form's, stackMode settled to the template's value; `roles`
-// the per-role overrides of crew's per-repo config; `recipe` the tickets'
-// recipeCommandSets, rendered as JSON array literals, which no command text can
-// break out of; `newId()` draws the run's id (newRunId). A run folder that exists already is another run's: a new id
+// the per-role overrides of crew's per-repo config; `baseSha` the pinned base
+// (pinBase); `recipe` the tickets' recipeCommandSets, rendered as JSON array
+// literals, which no command text can break out of; `newId()` draws the run's
+// id (newRunId). A run folder that exists already is another run's: a new id
 // is drawn, `attempts` times in all, before the start is refused.
-export async function armRun({ target, answers, roles, recipe, newId, attempts = 5, template = readFileSync(templatePath(), 'utf8'), launch }) {
+export async function armRun({ target, answers, baseSha, roles, recipe, newId, attempts = 5, template = readFileSync(templatePath(), 'utf8'), launch }) {
   const { spec, repo, repoDir, notesDir, title } = target
   const render = (runFolder) =>
     renderRoles(
@@ -252,6 +269,7 @@ export async function armRun({ target, answers, roles, recipe, newId, attempts =
         NOTES_DIR: runFolder,
         BASE_REF: answers.base,
         START_REF: answers.startRef,
+        BASE_SHA: baseSha,
         STACK_MODE: answers.stackMode,
         RUN_ORDER: answers.runOrder,
         RUNNER: 'session',
@@ -281,6 +299,10 @@ export async function armRun({ target, answers, roles, recipe, newId, attempts =
   return { script, session }
 }
 
+// What `crew start` tells the operator once the run is launched: its script,
+// the ref and pinned sha every ticket is cut from, and how to enter the run.
+export const startSummary = ({ script, session, answers, baseSha }) => `crew start: armed ${script}, every ticket cut from ${answers.startRef} at ${baseSha}; the runner is crew session ${session.id}; enter it from \`crew view "${session.runDir}"\``
+
 export class StartError extends Error {
   constructor(message, code = 1) {
     super(message)
@@ -292,7 +314,8 @@ export class StartError extends Error {
 // [--run-order o] [--permission-mode p]`. With no terminal each row's flag is required; at
 // one, the form shows, pre-filled from the flags and the repo's remembered
 // answers. Either way every `ready-for-agent` ticket of the spec must carry
-// its validation recipe first, else nothing is armed. A `validation.md` left
+// its validation recipe first, else nothing is armed; so must the cut-from ref
+// resolve to the sha the run is pinned to. A `validation.md` left
 // in the notes dir from before ADR-0029 is ignored, said once to `warn`. The
 // repo's config and remembered answers are its main checkout's, whichever of
 // its worktrees crew start runs in; the run itself is armed in this one.
@@ -338,7 +361,8 @@ export async function startCommand({ argv, paths, cwd = process.cwd(), tty, stdi
   } catch (e) {
     throw new StartError(`${answers.harness}${answers.model ? ` on ${answers.model}` : ''} cannot run here: ${e?.message ?? e}; nothing armed`)
   }
+  const baseSha = await pinBase({ repoDir, base: answers.base, startRef: answers.startRef, run })
   const settled = { ...answers, stackMode: await settleStackMode(answers, run) }
   rememberAnswers(paths, repo, settled)
-  return { ...(await armRun({ target, answers: settled, roles, recipe: recipeCommandSets(tickets), newId: () => runIdFor(spec), launch })), target, answers: settled }
+  return { ...(await armRun({ target, answers: settled, baseSha, roles, recipe: recipeCommandSets(tickets), newId: () => runIdFor(spec), launch })), target, answers: settled, baseSha }
 }

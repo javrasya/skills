@@ -59,6 +59,7 @@ const REPO_DIR = String.raw`__REPO_DIR__`          // main checkout
 const NOTES_DIR = String.raw`__NOTES_DIR__`        // research notes, outside the repo
 const BASE_REF = '__BASE_REF__'                    // branch the stack merges into
 const START_REF = '__START_REF__'                  // prior work the operator named at arm time: the stack's layer 0, or BASE_REF itself for none (ADR-0023). No agent of this run chooses it
+const BASE_SHA = '__BASE_SHA__'                    // the commit START_REF stood at when the run was armed, resolved once after a fetch: the run's pinned base (ADR-0030)
 const STACK_MODE = '__STACK_MODE__'                // 'native' (gh-stack + stacks API) or 'chain' (plain --base chain)
 const RUN_ORDER = '__RUN_ORDER__'                  // 'parallel' (the frontier at once) or 'sequential' (one ticket at a time, session runner only; ADR-0020)
 const RUNNER = '__RUNNER__'                        // 'session' on the session runner (crew, on Orca), and 'orca', its value before, still; anything else is the Workflow runner. The one line the two renderings differ in
@@ -80,6 +81,11 @@ const POINTERS = `Repo ${REPO}, checkout ${REPO_DIR}. Spec: \`gh issue view ${SP
 // another machine may have moved it, so it is fetched and addressed there.
 const runRefs = new Set()
 const ref = (r) => (runRefs.has(r) ? r : /^[0-9a-f]{7,40}$/.test(r) ? r : `origin/${r}`)
+// Where a ticket is cut from. A ticket on the stack's bottom is cut from the
+// pinned base, never from START_REF, which may move under a run: every one of
+// them then builds on the one commit the run was armed on (ADR-0030). A ticket
+// stacked on another is cut from that one's branch, as the tip names it.
+const cutRef = (r) => (r === START_REF ? BASE_SHA : ref(r))
 
 // Told to every agent that touches git. The first rule is why no push is
 // needed; the second is the one an agent cannot guess — git refuses to check
@@ -868,7 +874,7 @@ Read the ticket for the wording of your criteria: \`gh issue view ${t.number}\`.
 
 You design the change: your brief names what to satisfy, not how. Read the code the criteria touch and decide the approach with it in front of you.
 
-First: \`git fetch origin && git switch --detach ${out.started ? `ticket/${t.number}\` — this run's own local branch, carrying what earlier slices of this same workflow committed minutes ago` : `${ref(cutFrom)}\` — your worktree starts on the wrong ref, and everything stacked before this ticket is reachable from there`}.
+First: \`git fetch origin && git switch --detach ${out.started ? `ticket/${t.number}\` — this run's own local branch, carrying what earlier slices of this same workflow committed minutes ago` : `${cutRef(cutFrom)}\` — your worktree starts on the wrong ref, and everything stacked before this ticket is reachable from there`}.
 
 Follow the repo's own conventions and CLAUDE.md, and stay inside the brief — the rest of the ticket belongs to other slices. Comments only where load-bearing: why-not-what, landmines, pointers to external context; never narrate what code does.
 
@@ -966,7 +972,7 @@ function enqueuePublish(t, impl, cutFrom, single) {
 
 ${POINTERS}
 ${GIT}
-Ticket branch: \`${impl.branch}\` — a LOCAL ref this run created. It is not on origin, and putting it there is your job. Cut from \`${ref(cutFrom)}\` (\`gh issue view ${t.number}\` for what it was meant to do).
+Ticket branch: \`${impl.branch}\` — a LOCAL ref this run created. It is not on origin, and putting it there is your job. Cut from \`${cutRef(cutFrom)}\` (\`gh issue view ${t.number}\` for what it was meant to do).
 Current stack tip: \`${ref(base)}\` — what your PR must be based on.
 Stack so far, bottom to top: ${stacked.length ? stacked.map((s) => `#${s.number} (${s.branch})`).join(' → ') : hasLayer0 ? `layer 0 (${START_REF})` : 'empty'}.
 
@@ -974,10 +980,10 @@ Stack so far, bottom to top: ${stacked.length ? stacked.map((s) => `#${s.number}
 2. ${reclaimStep(toReclaim)}${toReclaim.length ? `
    This comes before any rebase on purpose: the check is that a worktree's HEAD sits on its branch, and a rebase would orphan every one of them from the branch they built.` : ''}
 3. \`git switch --detach ${impl.branch}\`. Then \`git rev-list --count ${ref(base)}..${impl.branch}\`: if it is 0 the branch adds nothing to \`${base}\` — the ticket's work was already there — and there is no PR to open. Stop here: return \`published: false\`, \`nothing_to_publish: true\`, an empty \`decisions_needed\`, and in \`note\` what \`git log --oneline -5 ${impl.branch}\` shows. Push nothing, remove nothing beyond step 2.
-${cutFrom !== base ? `4. The tip moved since this ticket was cut. Replay its commits onto the tip: \`git rebase --onto ${ref(base)} ${ref(cutFrom)}\`. This rewrites only local commits that have never left this clone, so it needs no force and destroys nothing. Resolve any conflict in favour of keeping BOTH tickets' behaviour.
+${cutFrom !== base ? `4. The tip moved since this ticket was cut. Replay its commits onto the tip: \`git rebase --onto ${ref(base)} ${cutRef(cutFrom)}\`. This rewrites only local commits that have never left this clone, so it needs no force and destroys nothing. Resolve any conflict in favour of keeping BOTH tickets' behaviour.
 5. The rebase produced a tree nobody has validated. ${validationLine(impl.validation)}
    Get every command green, committing any fix.
-6. Move the branch onto the rebased work: \`git update-ref refs/heads/${impl.branch} HEAD\`.` : `4. The tip has not moved: the branch already sits on \`${ref(base)}\`. No rebase.
+6. Move the branch onto the rebased work: \`git update-ref refs/heads/${impl.branch} HEAD\`.` : `4. The tip has not moved: the branch already sits on \`${cutRef(base)}\`. No rebase.
 5. ${validationLine(impl.validation)}
    ${inherit(impl.validated)}
 6. The branch already points at the work; nothing to move.`}
@@ -1108,7 +1114,7 @@ ${GIT}
 Your brief — the work and its findings are already distilled into it, so run no \`gh issue view\`, read no spec, and re-read no review:
 ${s.brief}
 
-First: \`git fetch origin && git switch --detach ${out.landed ? `${branch}\` — this run's own local branch, carrying what earlier fix slices of this same workflow committed minutes ago` : `${ref(cutFrom)}\``}.
+First: \`git fetch origin && git switch --detach ${out.landed ? `${branch}\` — this run's own local branch, carrying what earlier fix slices of this same workflow committed minutes ago` : `${cutRef(cutFrom)}\``}.
 
 Fix what your brief owns and nothing else — the rest of the findings belong to other slices, and the branches below this one in the stack are published and must not be touched.
 
@@ -1158,7 +1164,7 @@ Return one verdict per finding in your brief you fixed or rejected, the \`locati
 // reached only once nothing halts, so it passes none.
 async function fixFindings(findings, opts) {
   opts = { guard: () => ({}), ...opts }
-  const skimRef = opts.started ? opts.branch : ref(opts.cutFrom)
+  const skimRef = opts.started ? opts.branch : cutRef(opts.cutFrom)
   const go = opts.guard()
   if (!go) return { verdicts: [], unaccounted: findings, landed: opts.started, validated: opts.validated || null, stopped: true }
   const plan = await dispatchFix(findings, { ...opts, skimRef, go })
@@ -1241,7 +1247,7 @@ async function reviewGate(t, impl, cutFrom, ticketBrief, tk) {
 
 ${POINTERS}
 ${GIT}
-Branch \`${impl.branch}\`, reviewed against \`${ref(cutFrom)}\` — that diff is the whole of this ticket's work.
+Branch \`${impl.branch}\`, reviewed against \`${cutRef(cutFrom)}\` — that diff is the whole of this ticket's work.
 What the ticket asked for: \`gh issue view ${t.number}\`. What the implementer says it did: ${impl.summary}
 
 \`git fetch origin && git switch --detach ${impl.branch}\`. Before you read a line of the diff, establish readiness. ${validationLine(impl.validation)}
@@ -1254,7 +1260,7 @@ If any check is red, or \`missing_validation\` is not empty, stop there and retu
 
 ${CONTRACT}
 ${round === 1
-        ? `Then invoke the \`code-review\` skill with \`${ref(cutFrom)}\` as the fixed point and ticket #${t.number} as the spec — both its axes, with the severities below overriding whatever the skill would assign. Judge acceptance criterion by acceptance criterion.`
+        ? `Then invoke the \`code-review\` skill with \`${cutRef(cutFrom)}\` as the fixed point and ticket #${t.number} as the spec — both its axes, with the severities below overriding whatever the skill would assign. Judge acceptance criterion by acceptance criterion.`
         : `Then verify, do not rediscover: the previous round's fixer claims to have fixed the findings below. Check each on the branch, and read the lines the fixer touched since the last review (\`git log -p\` for the newest commit(s)) for anything that fix broke. Do not re-review the rest of the diff — round 1 did, and the whole stack gets its own review later.
 
 Claimed fixed:

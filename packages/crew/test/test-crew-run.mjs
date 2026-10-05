@@ -16,7 +16,7 @@ import { crewHost, crewWorktrees } from '../src/crew-host.mjs'
 import { sessionHost } from '../src/session-host.mjs'
 import { sessionTranscripts, transcriptPath } from '../src/transcript.mjs'
 import { readJournal } from '../src/journal.mjs'
-import { renderTemplate, templatePath } from '../src/arm.mjs'
+import { pinBase, renderTemplate, templatePath } from '../src/arm.mjs'
 import { runView } from '../src/run-view-model.mjs'
 import { draw, strip } from '../src/run-view/draw.mjs'
 import { crewPaths } from '../src/daemon/transport.mjs'
@@ -495,6 +495,26 @@ for (const [harness, prefix, ticket, answer, calls] of [
   })
 }
 
+// The prompt a label's session was told in a run, from its transcript.
+const promptsOf = (stateDir, log) => {
+  const started = readFileSync(join(stateDir, 'journal.jsonl'), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l))
+    .filter((e) => e.type === 'started')
+  return (label) => {
+    const s = started.find((e) => e.title?.includes(label))
+    assert.ok(s, `no agent ${label} started: ${started.map((e) => e.title).join(', ')}\n${log}`)
+    return readFileSync(transcriptPath({ harness: s.harness, sessionId: s.sessionId, worktree: s.worktree, env }), 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l))
+      .filter((e) => e.type === 'user' && typeof e.message?.content === 'string')
+      .map((e) => e.message.content)
+      .join('\n')
+  }
+}
+
 // The skill's own template, rendered as `crew start` renders it, run on the
 // crew host: its prompts hold no [answer], so each agent's answer is keyed by
 // its label (CREW_FAKE_ANSWERS). What a fake dispatcher copies out of the
@@ -532,31 +552,13 @@ test("the skill's template on the crew host: a dispatcher's validation reaches t
     }),
   )
   const template = readFileSync(templatePath(), 'utf8')
-  const script = renderTemplate(template, { SPEC: 94, REPO: 'acme/app', REPO_DIR: cwd, NOTES_DIR: join(root, 'template-notes'), BASE_REF: 'main', START_REF: 'main', STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session' })
+  const script = renderTemplate(template, { SPEC: 94, REPO: 'acme/app', REPO_DIR: cwd, NOTES_DIR: join(root, 'template-notes'), BASE_REF: 'main', START_REF: 'main', BASE_SHA: '0a1b2c3d4e5f60718293a4b5c6d7e8f901234567', STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session' })
   const fake = [process.execPath, FAKE_HARNESS]
   const host = sessionHost(crewHost({ paths, env: { ...env, CREW_FAKE_MCP: '0', CREW_FAKE_ANSWERS: answers }, cwd, harnesses: { claude: fake, pi: fake }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
   const stateDir = join(root, 'template-state')
   const said = []
   await runScript(script, { host, stateDir, out: (s) => said.push(s), settings: FAST, transcripts: sessionTranscripts({ env }), project: cwd })
-  const log = said.join('\n')
-
-  const started = readFileSync(join(stateDir, 'journal.jsonl'), 'utf8')
-    .split('\n')
-    .filter(Boolean)
-    .map((l) => JSON.parse(l))
-    .filter((e) => e.type === 'started')
-  // The prompt a label's session was told, from its transcript.
-  const promptOf = (label) => {
-    const s = started.find((e) => e.title?.includes(label))
-    assert.ok(s, `no agent ${label} started: ${started.map((e) => e.title).join(', ')}\n${log}`)
-    return readFileSync(transcriptPath({ harness: s.harness, sessionId: s.sessionId, worktree: s.worktree, env }), 'utf8')
-      .split('\n')
-      .filter(Boolean)
-      .map((l) => JSON.parse(l))
-      .filter((e) => e.type === 'user' && typeof e.message?.content === 'string')
-      .map((e) => e.message.content)
-      .join('\n')
-  }
+  const promptOf = promptsOf(stateDir, said.join('\n'))
   const impl = promptOf('impl:#101')
   for (const command of perChange) assert.ok(impl.includes(command), `the implementer is told ${command}`)
   for (const command of atReview) assert.ok(!impl.includes(command), `the implementer is not told the at-review ${command}`)
@@ -565,4 +567,78 @@ test("the skill's template on the crew host: a dispatcher's validation reaches t
   assert.equal(listed(atReview[0]), 1, `the whole-stack review is told ${atReview[0]} once:\n${review}`)
   assert.equal(listed(respaced), 0, 'the respaced copy is the same command')
   assert.equal(listed(e2e), 1, `the whole-stack review is told the second ticket's ${e2e}`)
+})
+
+// ADR-0030: the base pinned as `crew start` pins it, then origin/main moved
+// before any ticket starts. Both tickets on the stack's bottom are still cut
+// from the pinned sha; the one stacked on them from the tip's branch; and the
+// second publish still replays onto the moved tip and re-runs the recipe.
+test("the skill's template on the crew host: two tickets started after origin/<base> moved both cut from the pinned sha; a stacked one from the tip", async () => {
+  const cwd = repo('pinned-repo')
+  const git = (...args) => {
+    const r = spawnSync('git', ['-C', cwd, '-c', 'user.name=crew', '-c', 'user.email=crew@example.com', ...args], { encoding: 'utf8' })
+    assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`)
+    return r.stdout.trim()
+  }
+  const origin = join(root, 'pinned-origin.git')
+  assert.equal(spawnSync('git', ['init', '-q', '--bare', origin]).status, 0)
+  git('branch', '-M', 'main')
+  git('remote', 'add', 'origin', origin)
+  git('push', '-q', 'origin', 'main')
+  const pinned = await pinBase({ repoDir: cwd, base: 'main', startRef: 'main' })
+  assert.equal(pinned, git('rev-parse', 'main'))
+  git('commit', '-q', '--allow-empty', '-m', 'main moves on')
+  git('push', '-q', 'origin', 'HEAD:main')
+  const moved = git('rev-parse', 'origin/main')
+  assert.notEqual(moved, pinned)
+
+  const validation = ['npm test']
+  const checks = validation.map((command) => ({ command, passed: true }))
+  const slices = [{ title: 'all of it', brief: 'do it', effort: 'medium' }]
+  const ticket = (n) => ({ ticket_brief: `#${n} in brief`, validation, review_validation: [], slices })
+  const impl = (n) => ({ branch: `ticket/${n}`, summary: 'done', checks, validated_sha: 'abc123' })
+  const published = (n) => ({ published: true, pr_url: `https://github.com/acme/app/pull/${n}`, pr_number: n, checks, validated_sha: 'abc123', stack_link: 'registered' })
+  const answers = join(root, 'pinned-answers.json')
+  writeFileSync(
+    answers,
+    JSON.stringify({
+      '^graph': {
+        tickets: [
+          { number: 101, title: 'One', blocked_by: [], needs_human: false, human_reason: '' },
+          { number: 102, title: 'Two', blocked_by: [], needs_human: false, human_reason: '' },
+          { number: 103, title: 'Three', blocked_by: [101, 102], needs_human: false, human_reason: '' },
+        ],
+      },
+      ...Object.fromEntries(
+        [101, 102, 103].flatMap((n) => [
+          [`^dispatch_${n}`, ticket(n)],
+          [`^impl_${n}`, impl(n)],
+          [`^publish_${n}`, published(n)],
+        ]),
+      ),
+      '^gate': { checks, validated_sha: 'abc123' },
+      '^finalize': { summary: 'stack ready' },
+    }),
+  )
+  const script = renderTemplate(readFileSync(templatePath(), 'utf8'), { SPEC: 94, REPO: 'acme/app', REPO_DIR: cwd, NOTES_DIR: join(root, 'pinned-notes'), BASE_REF: 'main', START_REF: 'main', BASE_SHA: pinned, STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session' })
+  const fake = [process.execPath, FAKE_HARNESS]
+  const host = sessionHost(crewHost({ paths, env: { ...env, CREW_FAKE_MCP: '0', CREW_FAKE_ANSWERS: answers }, cwd, harnesses: { claude: fake, pi: fake }, quietMs: 300, readyMs: 20_000, pollMs: 50 }))
+  const stateDir = join(root, 'pinned-state')
+  const said = []
+  await runScript(script, { host, stateDir, out: (s) => said.push(s), settings: FAST, transcripts: sessionTranscripts({ env }), project: cwd })
+  const promptOf = promptsOf(stateDir, said.join('\n'))
+
+  for (const n of [101, 102]) {
+    const prompt = promptOf(`impl:#${n}`)
+    assert.ok(prompt.includes(`git switch --detach ${pinned}\``), `#${n} is cut from the pinned sha:\n${prompt}`)
+    assert.ok(!prompt.includes('git switch --detach origin/main'), `#${n} is not cut from the moving ref`)
+  }
+  const stackedOn = /git switch --detach (ticket\/10[12])`/.exec(promptOf('impl:#103'))
+  assert.ok(stackedOn, `#103 is cut from the tip's branch:\n${promptOf('impl:#103')}`)
+  assert.ok(!promptOf('impl:#103').includes(`git switch --detach ${pinned}`))
+  const rebased = [101, 102].map((n) => promptOf(`publish:#${n}`)).filter((p) => p.includes('git rebase --onto'))
+  assert.equal(rebased.length, 1, 'the second of the two to publish replays onto the first')
+  assert.match(rebased[0], new RegExp(`git rebase --onto ticket/10[12] ${pinned}\``))
+  assert.match(rebased[0], /The rebase produced a tree nobody has validated/)
+  assert.ok(rebased[0].includes('npm test'), 'and re-runs the recipe')
 })
