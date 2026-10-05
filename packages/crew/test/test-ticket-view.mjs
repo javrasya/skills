@@ -292,6 +292,38 @@ test('ticket page: arrows move along the lines and the camera glides there; Ente
   assert.equal(row.agent.node, 'ticket/203/impl/r1/s1')
 })
 
+test('ticket page: o opens the selected ticket in the browser, from the run’s project', async () => {
+  const stateDir = runDir()
+  const registry = join(mkdtempSync(join(tmpdir(), 'ticket-view-reg-')), 'runs.jsonl')
+  runRegistry(registry).armed({ runId: 'run_tickets', project: '/tmp/the-project', runDir: stateDir, spec: 'spec-195', host: 'crew' })
+  const opened = []
+  let fails = null
+  const browse = async (cwd, n) => {
+    if (fails) throw new Error(fails)
+    opened.push([cwd, n])
+  }
+  const view = runView({ stateDir, host: {}, clock: clockAt(10), transcripts: { usage: () => null }, registry, alive: () => false, browse })
+  await view.refresh()
+  assert.deepEqual(await view.key('o'), {}, 'o on the tree is not the page’s')
+  assert.deepEqual(opened, [])
+  await view.key('g')
+  await view.clickTicket(203)
+  assert.equal((await view.key('o')).message, 'opened #203 in the browser')
+  assert.deepEqual(opened, [['/tmp/the-project', 203]])
+  fails = 'no git remotes found'
+  assert.equal((await view.key('o')).message, 'could not open #203: no git remotes found')
+  assert.equal(view.model.page, 'tickets', 'it stays on the page either way')
+})
+
+test('ticket page: o without a project in the registry says so and opens nothing', async () => {
+  const opened = []
+  const view = runView({ stateDir: runDir(), host: {}, clock: clockAt(10), transcripts: { usage: () => null }, registry: null, alive: () => false, browse: async (cwd, n) => opened.push([cwd, n]) })
+  await view.refresh()
+  await view.key('g')
+  assert.equal((await view.key('o')).message, '#202: the run registry names no project to open it from')
+  assert.deepEqual(opened, [])
+})
+
 test('ticket page: a click on a star selects it', async () => {
   const view = viewOf(runDir())
   await view.refresh()
@@ -318,11 +350,11 @@ test('ticket page: draws stars with their numbers, the selected one’s title, t
   const view = viewOf(runDir())
   await view.refresh()
   await view.key('g')
-  const screen = draw(view.model, { width: 140, height: 36, now: T0 + 10 * MIN })
+  const screen = draw(view.model, { width: 160, height: 36, now: T0 + 10 * MIN })
   const text = screen.lines.map(strip)
   assert.equal(screen.lines.length, 36)
   assert.ok(
-    text.every((l) => [...l].length === 140),
+    text.every((l) => [...l].length === 160),
     'every line is the screen’s width',
   )
   const body = text.join('\n')

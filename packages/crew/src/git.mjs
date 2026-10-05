@@ -135,6 +135,13 @@ export async function branchNames(cwd, run = execProgram) {
   return [...new Set(names)]
 }
 
+// Opens issue or PR `n` of the checkout's repo in the default browser, by
+// gh's own rule for which repo a checkout is; throws gh's error when it cannot.
+export async function ghBrowse(cwd, n, run = execProgram) {
+  const r = await run('gh', ['browse', String(n)], { cwd })
+  if (r.code !== 0) throw new Error(r.stderr.trim() || `gh browse ${n} failed`)
+}
+
 // The repo's owner/name as gh knows it, null when gh knows none for the checkout.
 export async function ghRepo(cwd, run = execProgram) {
   const r = await run('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'], { cwd })

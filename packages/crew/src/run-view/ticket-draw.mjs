@@ -18,7 +18,7 @@ const LEGEND = ['todo', 'impl', 'gate', 'stacked', 'waiting', 'failed']
 // The heading's counts, what a person answers first.
 const COUNTED = ['waiting', 'failed', 'gate', 'impl', 'stacked', 'todo']
 
-export const TICKETS_HELP = ' ←→ along the lines · ↑↓ nearby · click a star · ⏎ its agent in the tree · t tree · l log · p pause · r resume · x remove · q out'
+export const TICKETS_HELP = ' ←→ along the lines · ↑↓ nearby · click a star · ⏎ its agent in the tree · o open on GitHub · t tree · l log · p pause · r resume · x remove · q out'
 
 const fg = (rgb, b = false) => `\x1b[${b ? 1 : 22};38;2;${rgb.map((v) => Math.max(0, Math.min(255, Math.round(v)))).join(';')}m`
 const tint = (rgb, s, b = false) => `${fg(rgb, b)}${s}\x1b[0m`
