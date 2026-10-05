@@ -249,12 +249,18 @@ ${RUNNING}`
 // unchanged tree was 36 of 153 measured full-suite runs, provably; the same
 // rule is what ECONOMY asks for and could not enforce.
 const inherit = (v) => v && v.sha
-  ? `The branch was validated green at \`${v.sha}\` by ${v.by}. Run \`git rev-parse HEAD\`: if it matches and you have edited nothing, inherit that result — report every check with \`passed: true\` and \`validated_sha\` = \`${v.sha}\` — instead of re-running. If it differs, or you edited anything, run the list.`
+  ? `The branch was validated green at \`${v.sha}\` by ${v.by}. Run \`git rev-parse HEAD\`: if it matches and you have edited nothing, inherit that result — report every check with \`passed: true\` and \`validated_sha\` = \`${v.sha}\` — instead of re-running. If it differs, or you edited anything, run the recipe.`
   : ''
 // The commands a result set leaves red or missing. Whitespace-insensitive,
 // because agents copy imperfectly; anything looser would credit the wrong run.
 const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim()
 const readinessRed = (checks, cmds) => cmds.filter((c) => !(checks || []).some((k) => norm(k.command) === norm(c) && k.passed))
+// Appends to `into` each command of `cmds` it lacks, verbatim, with the same
+// whitespace tolerance as readiness: a command copied twice runs once.
+const unionInto = (into, cmds) => {
+  for (const c of cmds) if (norm(c) && !into.some((k) => norm(k) === norm(c))) into.push(c)
+  return into
+}
 // One result per command. A single green boolean is what let a fixer report
 // "tests, clippy, docs green" while fmt was never run (#344).
 const CHECKS_FIELD = {
@@ -462,13 +468,20 @@ const REVIEW_SCHEMA = {
 }
 // The gate reviewer also establishes readiness before it reads a line — by
 // inheriting the implementer's result when the sha is unchanged (ADR-0009),
-// else by re-running the list. A red there is a readiness failure, routed
-// back to dispatch, not a finding.
+// else by re-running the recipe. A red there is a readiness failure, routed
+// back to dispatch, not a finding. So is a per-change command the dispatcher
+// dropped (`missing_validation`): no fixer can change the recipe, so as a
+// finding it would be re-raised every round until the cap, and never run.
 const GATE_REVIEW_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['checks', 'validated_sha', 'findings', 'worktree'],
-  properties: { ...WORKTREE_FIELD, ...CHECKS_FIELD, ...FINDINGS_FIELD },
+  required: ['checks', 'validated_sha', 'missing_validation', 'findings', 'worktree'],
+  properties: {
+    ...WORKTREE_FIELD,
+    ...CHECKS_FIELD,
+    missing_validation: { type: 'array', items: { type: 'string' }, description: "each command the ticket's `### Run per change` lists that this prompt's per-change commands omit, copied verbatim from the ticket; empty when none is omitted" },
+    ...FINDINGS_FIELD,
+  },
 }
 
 const VERDICTS = {
@@ -789,7 +802,8 @@ Return the PR url and number, what the mirror found, and your worktree.`,
 // nesting: whatever a fix slice does not reach falls to the next reviewer,
 // which re-derives what is still broken from the branch itself. A readiness
 // red at the gate (the validation recipe failing on the branch) also comes back
-// here as a remainder and spends one of these rounds — one cap, not two.
+// here as a remainder and spends one of these rounds — one cap, not two — and
+// so does a per-change command the gate found the recipe omits.
 const MAX_DISPATCH_ROUNDS = 6
 
 // --- halting (ADR-0016) ------------------------------------------------------
@@ -869,7 +883,7 @@ Every command must pass on the commit you return. Commit, then move the ticket b
 
 ${WORKTREE}
 
-Return the branch, a one-line summary, one result per validation command, the sha the list passed on in \`validated_sha\`, anything from the brief you did not reach in \`unmet\`, what you settled yourself in \`decided\`, any contradiction for the operator in \`decisions_needed\`, and your worktree.`,
+Return the branch, a one-line summary, one result per validation command, the sha the recipe passed on in \`validated_sha\`, anything from the brief you did not reach in \`unmet\`, what you settled yourself in \`decided\`, any contradiction for the operator in \`decisions_needed\`, and your worktree.`,
       { ...ROLES.impl, effort: s.effort, phase: 'Implement', schema: IMPL_SCHEMA, isolation: ISOLATION, label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}`, node: `${node}/s${i + 1}`, ...go },
     )
     if (!r) throw new Error(`slice implementer for #${t.number} died (${s.title})`)
@@ -883,7 +897,7 @@ Return the branch, a one-line summary, one result per validation command, the sh
     // re-dispatched slice then waited on a reply nobody was there to give.
     if (r.decisions_needed.length) { out.decisions.push(...r.decisions_needed); break }
     // A red or missing validation result is a remainder like any other: the
-    // brief asked for a green list and did not get one.
+    // brief asked for a green recipe and did not get one.
     const red = readinessRed(r.checks, validation)
     const unmet = [...r.unmet, ...red.map((c) => `validation red or not run: ${c}`)]
     if (unmet.length) {
@@ -1110,7 +1124,7 @@ Every command must pass on the commit you return — a fix that leaves one red i
 
 ${WORKTREE}
 
-Return one verdict per finding in your brief you fixed or rejected, the \`location\` of any you did not reach, one result per validation command, the sha the list passed on in \`validated_sha\`, and your worktree.`,
+Return one verdict per finding in your brief you fixed or rejected, the \`location\` of any you did not reach, one result per validation command, the sha the recipe passed on in \`validated_sha\`, and your worktree.`,
       { ...ROLES.fix, effort: s.effort, phase: ph, schema: FIX_SLICE_SCHEMA, isolation: ISOLATION, label: `${tag}${slices.length > 1 ? `:s${i + 1}` : ''}`, node: `${node}/s${i + 1}`, ...go },
     )
     // A dead fixer is not fatal — it is the next reviewer's problem, and that
@@ -1188,7 +1202,10 @@ async function fixFindings(findings, opts) {
 //
 // Readiness comes before review: the reviewer re-runs the validation recipe on
 // the branch, and a red there is a remainder handed back to dispatch (the
-// gate returns `readiness`), not a finding handed to a fixer.
+// gate returns `readiness`), not a finding handed to a fixer. The reviewer
+// also cross-checks the recipe against the ticket; a command it omits is
+// added to the recipe and routed the same way (the gate returns `missing`),
+// so a dropped line costs one round, not a run (ADR-0029).
 //
 // The loop's real hazard is not slow convergence, it is ping-pong: a fixer
 // judges a finding wrong and leaves the code, the next reviewer raises it
@@ -1200,7 +1217,7 @@ async function fixFindings(findings, opts) {
 // falls to the next round's reviewer, which re-derives what is still broken
 // from the branch. One cap governs the gate, not two multiplying ones.
 const GATE_MAX_ROUNDS = 4
-const BLOCKING = `What may block this ticket is exactly four things: an acceptance criterion of the ticket that the diff does not meet; a validation command that is red on the branch; a command the ticket's \`### Run per change\` lists that this prompt's per-change commands omit; and a correctness bug — a panic or crash reachable from input, an unhandled variant, silent data loss or a check that only runs in debug builds. Mark those \`blocker\` or \`major\`. Everything else — ADR fit, architecture, naming, style, a convention the repo documents — is \`minor\`, which passes the gate: it was settled when the spec was designed, or it is the whole-stack review's to judge across tickets.`
+const BLOCKING = `What may block this ticket is exactly three things: an acceptance criterion of the ticket that the diff does not meet; a validation command that is red on the branch; and a correctness bug — a panic or crash reachable from input, an unhandled variant, silent data loss or a check that only runs in debug builds. Mark those \`blocker\` or \`major\`. Everything else — ADR fit, architecture, naming, style, a convention the repo documents — is \`minor\`, which passes the gate: it was settled when the spec was designed, or it is the whole-stack review's to judge across tickets.`
 // `tk` is the ticket's own state: `single` for goOn, and `gates`, which numbers
 // its gate rounds across every gate it runs (a readiness red sends the ticket
 // back to dispatch and a later gate goes on counting), so each round's node
@@ -1227,9 +1244,11 @@ What the ticket asked for: \`gh issue view ${t.number}\`. What the implementer s
 
 \`git fetch origin && git switch --detach ${impl.branch}\`. Before you read a line of the diff, establish readiness. ${validationLine(impl.validation)}
 ${inherit(validated)}
-Return one result per command in \`checks\`, and the sha they hold for in \`validated_sha\`. If any is red, stop there and return no findings — the branch is not ready for review and goes back to implementation, not to a fixer.
+Return one result per command in \`checks\`, and the sha they hold for in \`validated_sha\`.
 
-The per-change commands above (${impl.validation.length ? `${impl.validation.length} of them` : 'none'}) are this run's copy of the ticket's recipe. Compare them with the commands the ticket's \`### Run per change\` subsection lists, under \`## Validation\` in \`gh issue view ${t.number}\`: for each command the ticket has that this prompt omits, return a \`blocker\` finding naming that command.
+The per-change commands above (${impl.validation.length ? `${impl.validation.length} of them` : 'none'}) are this run's copy of the ticket's recipe. Compare them with the commands the ticket's \`### Run per change\` subsection lists, under \`## Validation\` in \`gh issue view ${t.number}\`: put each command the ticket has that this prompt omits in \`missing_validation\`, copied verbatim from the ticket — never as a finding: the run adds it to the recipe and sends the branch back to implementation to run it.
+
+If any check is red, or \`missing_validation\` is not empty, stop there and return no findings — the branch is not ready for review and goes back to implementation, not to a fixer.
 
 ${CONTRACT}
 ${round === 1
@@ -1268,9 +1287,11 @@ ${WORKTREE}`,
       continue
     }
     const red = readinessRed(r.checks, impl.validation)
-    if (red.length) {
-      log(`#${t.number} gate round ${round}: not ready — validation red: ${red.join('; ')}`)
-      return { readiness: red }
+    const missing = unionInto([], r.missing_validation || []).filter((c) => !impl.validation.some((k) => norm(k) === norm(c)))
+    if (red.length || missing.length) {
+      if (red.length) log(`#${t.number} gate round ${round}: not ready — validation red: ${red.join('; ')}`)
+      if (missing.length) log(`#${t.number} gate round ${round}: not ready — the recipe omits the ticket's ${missing.join('; ')}`)
+      return { readiness: red, missing }
     }
     if (r.validated_sha) validated = { sha: r.validated_sha, by: validated && validated.sha === r.validated_sha ? validated.by : 'the gate reviewer' }
     const blocking = r.findings.filter((f) => f.severity !== 'minor')
@@ -1356,7 +1377,9 @@ async function implementTicket(t) {
   if (plan.slices.length > 1) log(`#${t.number} dispatched as ${plan.slices.length} slices`)
   // The first dispatch's copy of the recipe holds for the whole ticket, as its
   // ticket_brief does: a re-dispatch re-slices, it does not re-read the ticket.
-  const validation = plan.validation || []
+  // Only the gate's cross-check grows it, with the commands the dispatcher
+  // dropped, so every later round runs the ticket's whole recipe.
+  const validation = unionInto([], plan.validation || [])
   const reviewValidation = plan.review_validation || []
   const tk = { single: false, gates: 0 }
   const stop = (detail) => {
@@ -1387,7 +1410,11 @@ async function implementTicket(t) {
       gate = await reviewGate(t, { branch: `ticket/${t.number}`, summary: summaries.join(' '), decided, validated: last.validated_sha ? { sha: last.validated_sha, by: 'the implementer' } : null, validation }, cutFrom, plan.ticket_brief, tk)
       if (gate.stopped) return stop(gate.stopped)
       if (!gate.readiness) break
-      unmet = gate.readiness.map((c) => `validation red at the gate: ${c}`)
+      unionInto(validation, gate.missing)
+      unmet = [
+        ...gate.readiness.map((c) => `validation red at the gate: ${c}`),
+        ...gate.missing.map((c) => `the ticket's per-change command \`${c}\` was never run: run it on the branch and make it green`),
+      ]
     }
     if (round === MAX_DISPATCH_ROUNDS) return halt(t, 'unmet', `after ${MAX_DISPATCH_ROUNDS} dispatch rounds: ${unmet.join('; ')}`, { unmet })
     // A re-dispatch is new work, which halting never starts.
@@ -1466,10 +1493,12 @@ if (unpublished.length) {
 // --- step 7: review the whole stack; fixes land as the top PR -------------
 // Every published ticket's `### Run at review` commands, once each, on the
 // stack tip: the full suites no per-ticket role runs (ADR-0029).
-const reviewValidation = []
-for (const c of outcomes.filter((o) => o.state === 'published').flatMap((o) => o.review_validation || [])) {
-  if (!reviewValidation.some((k) => norm(k) === norm(c))) reviewValidation.push(c)
-}
+const publishedOutcomes = outcomes.filter((o) => o.state === 'published')
+const reviewValidation = unionInto([], publishedOutcomes.flatMap((o) => o.review_validation || []))
+// Integration fixers change code across tickets, so they run every published
+// ticket's per-change commands plus the at-review suites: never a recipe
+// narrower than any ticket's, and never empty while any ticket names one.
+const integrationValidation = unionInto(unionInto([], publishedOutcomes.flatMap((o) => o.validation || [])), reviewValidation)
 phase('Review')
 const review = await agent(
   `Review the whole stack for spec #${SPEC}.
@@ -1519,7 +1548,7 @@ if (findings.length) {
     tag: 'integration',
     node: 'review/fix',
     ledgerKey: 'integration',
-    validation: reviewValidation,
+    validation: integrationValidation,
   })
   integrationVerdicts = out.verdicts
   integrationUnaccounted = out.unaccounted

@@ -323,6 +323,29 @@ const withBlockers = (blockers) => () => ({
   check('B: a re-dispatch and its slices are nodes of their round', ['ticket/10/impl/r1/s1', 'ticket/10/dispatch/r2', 'ticket/10/impl/r2/s1'].every((n) => nodesOf(calls).includes(n)) && !nodesOf(calls).includes('ticket/10/impl/r1/s2'), nodesOf(calls).join(' | '))
 }
 
+// --- scenario V: a per-change command the dispatcher dropped costs one round --
+// The gate's cross-check cannot go to a fixer: no fixer can change the recipe,
+// so the omission would be re-raised every round and never run (ADR-0029).
+{
+  const LINT = 'npm run lint -- --max-warnings=0'
+  const green = (prompt) => [SIM_CHECK, ...(prompt.includes(LINT) ? [LINT] : [])].map((command) => ({ command, passed: true }))
+  const { result, calls, logs } = await run({
+    graph: () => ({ tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }], explorations: [] }),
+    impl: (label, prompt) => ({ branch: 'ticket/10', summary: 's', unmet: [], checks: green(prompt) }),
+    gate: (label, prompt) => ({ checks: green(prompt), missing_validation: prompt.includes(LINT) ? [] : [LINT, `  ${LINT} `], findings: [] }),
+  })
+  const seq = calls.map((c) => c.label)
+  const gates = calls.filter((c) => c.label.startsWith('gate:#10'))
+  const lists = (c) => c.prompt.split('\n').filter((l) => l === `- \`${LINT}\``).length === 1
+  check('V: the omission goes to no fixer', !seq.some((l) => l.startsWith('gate-fix')), seq.join(' | '))
+  check('V: it goes back to dispatch, naming the command', seq.includes('dispatch:#10:re') && calls.find((c) => c.label === 'dispatch:#10:re').prompt.includes(LINT), seq.join(' | '))
+  check('V: the next round runs it, once in the recipe', lists(calls.find((c) => c.label === 'impl:#10:r2')), calls.find((c) => c.label === 'impl:#10:r2').prompt.slice(-1500))
+  check('V: the gate clears in one extra round, running the full recipe', gates.length === 2 && lists(gates[1]), String(gates.length))
+  check('V: the publisher runs the full recipe', lists(calls.find((c) => c.label === 'publish:#10')), '')
+  check('V: the gate logs the omission as not ready', logs.some((l) => l.includes('the recipe omits') && l.includes(LINT)), logs.join(' | '))
+  check('V: run completes with nothing unfixed', result.halted === false && result.state.startsWith('complete') && !(result.gate_unfixed || []).length, JSON.stringify(result.gate_unfixed))
+}
+
 // --- scenario B2: two independent tickets — the tip moves under the second --
 // The case that produced the force-push: both cut from main, one publishes
 // first, so the other must be replayed onto a tip that did not exist when it
