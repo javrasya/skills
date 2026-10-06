@@ -307,14 +307,19 @@ written into the ticket's **Validation** section by [[preflight]] and read from 
 It has two halves: **run per change**, the commands every implementer, fixer, gate reviewer and publisher
 of that ticket runs on its commit; and **run at review**, the full suites the whole-stack review runs once
 on the stack tip, unioned over every ticket. A section with no commands is honest — the operator decided
-there was nothing to run — and the brief says so; a ticket with no section is not armable. The
-[[dispatcher]] turns the section into the commands each role is told, verbatim, and the gate reviewer,
-who reads the ticket anyway, blocks when the two differ. Every role returns **one result per command**,
+there was nothing to run — and the brief says so; a ticket with no section is not armable. **Arming**
+reads the commands off every ticket by one rule — each line's first backticked span, prose lines none —
+and the run runs that ticket's own, the very strings measured for [[pre-existing failure]]s at the pinned
+base; the [[dispatcher]]'s copy stands in only for a ticket arming never read. Each role is told every
+command verbatim, or, where it already fails at the pinned base, its masked form, with those failures
+deselected; the gate reviewer, who reads the ticket anyway, blocks when what it was told and the ticket
+differ. Every role returns **one result per command**,
 never one green boolean; a missing result is a schema failure, not a pass. **Readiness** is the per-change
 half green on the exact commit under review: the reviewer's first act is to establish it — by
 [[inherited-result]] when the sha is unchanged, else by re-running — and a red there is a **remainder**
 sent back to dispatch, not a finding sent to gate-fix. Running a command is not the self-assessment
-ADR-0004 forbids — the agent does not judge, the exit code does. A check is run **in the foreground, as
+ADR-0004 forbids — a zero exit code decides a green with no judgement; only a red made entirely of
+[[pre-existing failure]]s may be judged green by the role, a **waived check** (ADR-0030). A check is run **in the foreground, as
 written, once after the last edit**; while iterating an agent runs the narrowest scope its build tool
 supports, and no agent ever cleans a build cache.
 
@@ -329,7 +334,52 @@ is a downstream agent reporting that recipe green without re-running it, because
 equals the validated sha and it edited nothing — one `rev-parse` proves the tree is the one already
 proven. A rebase produces a tree nobody has validated, so the publisher always runs the recipe after one.
 The proof is the sha match, never the upstream agent's word: an agent that edited anything, or whose
-HEAD differs, runs the recipe. See ADR-0009.
+HEAD differs, runs the recipe. A **waived check** is never inherited: the next role re-runs it and
+judges it itself (ADR-0030), and the PR body lists each one with its exit code under the provenance
+line. See ADR-0009.
+
+### Pre-existing failure
+
+A **pre-existing failure** is a check in a ticket's [[validation recipe]] that already fails on the run's base
+commit, before any agent has changed anything: a failing test, named by its id, or a lint, typecheck or
+format error, named by its rule and the few lines of code it points at rather than a line number, since
+lines move as agents edit. A red made only of pre-existing failures is not the change's red. A role still
+decides whether its own work is meant to fix one, as when the ticket names that test.
+
+_Avoid_: baseline failure, known failure — a worktree's **baseline** is its setup's leftover files.
+
+### Pinned base
+
+A run's **pinned base** is the commit its start ref stood at when the run was armed, resolved once after
+a fetch: the sha every ticket on the stack's bottom is cut from, and the one the [[baseline measurement]]
+runs on, however the ref moves under the run. Whether the base moved is decided by sha, never by name: a
+bottom ticket's publisher compares `origin/<start ref>` with the pinned base and, when they differ,
+replays the ticket onto it and runs its recipe again (ADR-0030).
+
+_Avoid_: start ref, base ref, for this sha — both name a branch, which moves.
+
+### Baseline measurement, and the baseline record
+
+The **baseline measurement** is the run measuring its [[validation recipe]] at the [[pinned base]] before
+anything is built: the `baseline` role, as two nodes of the run tree — `baseline:per-change`, which
+dispatch waits on, and `baseline:at-review`, which runs in the background and only the whole-stack review
+waits on. Its result is the **baseline record**, `pre-existing-failures.json` in the run folder: per
+command its exit code, its [[pre-existing failure]]s and any [[masked command]]. A command it cannot run
+is a blocker; a halt on one is kept in `baseline-blockers.json` or `baseline-at-review-blockers.json`,
+which a resume reads to check that blocker first (ADR-0030).
+
+It shares only the word with a worktree's **baseline**, the setup leftover files journaled as the
+`baseline` event: one run's journal can hold a `baseline` event and a `baseline:per-change` agent, unrelated.
+
+_Avoid_: baseline, bare, for the measurement or its record — alone it means a worktree's leftover files.
+
+### Masked command
+
+A **masked command** is a recipe command with the [[pre-existing failure]]s the [[baseline measurement]]
+found deselected, where the tool can skip tests. It replaces its original wherever validation runs, so no
+role is sent to fix what its ticket did not break; a role whose work is meant to fix a masked failure
+runs the original and says so. A failure no tool can deselect — a lint or type error — stays in the
+command, and the role may judge it a **waived check** (ADR-0030).
 
 ### Reporting to a screen
 

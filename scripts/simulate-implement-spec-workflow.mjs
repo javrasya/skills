@@ -1,8 +1,9 @@
 // Simulates the rendered workflow script with stubbed agent() calls, driving
 // it through the paths the dispatcher redesign added.
-import { readFileSync } from 'fs'
+import { readFileSync, rmSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { loadScript } from '../packages/crew/src/runner.mjs'
+import { renderTemplate } from '../packages/crew/src/arm.mjs'
 import { fillRequired } from './fill-required.mjs'
 
 const TPL = fileURLToPath(new URL('../skills/engineering/implement-spec-in-workflow/workflow.template.js', import.meta.url))
@@ -10,19 +11,26 @@ const TPL = fileURLToPath(new URL('../skills/engineering/implement-spec-in-workf
 const SIM_CHECK = 'npm t'
 
 // `startRef` is the operator's prior work (ADR-0023): the base itself for none.
-function render(runner, runOrder = 'parallel', startRef = 'main') {
-  let s = readFileSync(TPL, 'utf8')
-  s = s
-    .replace(/__SPEC__/g, '224')
-    .replace(/__REPO__/g, 'o/r')
-    .replace(/__REPO_DIR__/g, '/tmp/x')
-    .replace(/__NOTES_DIR__/g, '/tmp/n')
-    .replace(/__BASE_REF__/g, 'main')
-    .replace(/__START_REF__/g, startRef)
-    .replace(/__STACK_MODE__/g, 'native')
-    .replace(/__RUN_ORDER__/g, runOrder)
-    .replace(/__RUNNER__/g, runner)
-  return s
+// PINNED is the sha arming resolved it to (ADR-0030). `recipes` is arming's
+// per-ticket recipe map; none by default, so the dispatcher's copy stands in.
+// Rendered by crew's own renderTemplate, which refuses a placeholder left out.
+const PINNED = '0a1b2c3d4e5f60718293a4b5c6d7e8f901234567'
+function render(runner, runOrder = 'parallel', startRef = 'main', recipes = {}, atReview = []) {
+  return renderTemplate(readFileSync(TPL, 'utf8'), {
+    SPEC: 224,
+    REPO: 'o/r',
+    REPO_DIR: '/tmp/x',
+    NOTES_DIR: '/tmp/n',
+    BASE_REF: 'main',
+    START_REF: startRef,
+    BASE_SHA: PINNED,
+    STACK_MODE: 'native',
+    RUN_ORDER: runOrder,
+    RUNNER: runner,
+    PER_CHANGE_COMMANDS: JSON.stringify([SIM_CHECK]),
+    AT_REVIEW_COMMANDS: JSON.stringify(atReview),
+    TICKET_RECIPES: JSON.stringify(recipes),
+  })
 }
 
 // A stubbed fixer answers from the findings its prompt actually names, so a
@@ -48,14 +56,14 @@ function completeToSchema(result, opts, label) {
   const schema = opts.schema
   if (!schema || !result || typeof result !== 'object') return result
   return fillRequired(schema, result, {
-    checks: [{ command: SIM_CHECK, passed: true }],
+    checks: [{ command: SIM_CHECK, passed: true, exit_code: 0 }],
     validation: [SIM_CHECK],
     validated_sha: 'simsha',
     worktree: '/wt/' + label,
   })
 }
 
-async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel', startRef = 'main' } = {}) {
+async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel', startRef = 'main', recipes = {}, atReview = [] } = {}) {
   const calls = []
   const defaults = {
     graph: () => ({
@@ -66,6 +74,7 @@ async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel',
       explorations: [{ label: 'area-a', question: 'q?' }],
     }),
     explore: () => ({ path: '/tmp/n/01-area-a.md', blockers: [] }),
+    baseline: () => ({ commands: [{ command: SIM_CHECK, exit_code: 0, masked_command: '', failures: { tests: [], diagnostics: [] } }], decisions_needed: [] }),
     unblock: () => ({ resolved: [], decisions_needed: [] }),
     layer0: () => ({ pr_url: 'https://pr/layer0', pr_number: 90, note: 'in sync', worktree: '/wt/layer0' }),
     dispatch: () => ({ ticket_brief: 'the ticket in brief', slices: [{ title: 'all of it', brief: 'do it', effort: 'medium' }] }),
@@ -93,6 +102,7 @@ async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel',
   function route(label) {
     if (label.startsWith('graph')) return 'graph'
     if (label.startsWith('explore')) return 'explore'
+    if (label.startsWith('baseline')) return 'baseline'
     if (label.startsWith('unblock')) return 'unblock'
     if (label.startsWith('layer0')) return 'layer0'
     if (label.startsWith('dispatch')) return 'dispatch'
@@ -129,7 +139,7 @@ async function run(overrides = {}, { runner = 'workflow', runOrder = 'parallel',
   const phase = () => {}
 
   // The session runner's own loader, so the script is loaded one way everywhere.
-  const result = await loadScript(render(runner, runOrder, startRef))(agent, parallel, phase, log, {})
+  const result = await loadScript(render(runner, runOrder, startRef, recipes, atReview))(agent, parallel, phase, log, {})
   EVERY_CALL.push(...calls)
   EVERY_RUN.push(calls)
   return { result, calls, logs, timeline }
@@ -147,16 +157,22 @@ function check(name, cond, detail) { checks.push({ name, ok: !!cond, detail }); 
 
 // --- scenario A: happy path -------------------------------------------------
 {
-  const { result, calls } = await run()
+  const { result, calls, timeline } = await run()
   const seq = calls.map((c) => c.label)
+  const baseline = calls.find((c) => c.label === 'baseline:per-change')
+  check('A: the baseline starts beside the explorers, in a worktree of its own, before any dispatch', baseline?.opts.isolation === 'worktree' && timeline.indexOf('start explore:area-a') < timeline.indexOf('end baseline:per-change') && timeline.indexOf('end baseline:per-change') < timeline.indexOf('start dispatch:#10'), timeline.join(' | '))
+  check('A: the baseline is told the pinned sha and the per-change commands', baseline?.prompt.includes(`git switch --detach ${PINNED}`) && baseline.prompt.includes(`- \`${SIM_CHECK}\``), '')
   check('A: dispatcher runs once per ticket', seq.filter((l) => l.startsWith('dispatch')).length === 2, seq.join(' | '))
   check('A: implementer reads its ticket, not the spec', calls.find((c) => c.label === 'impl:#10').prompt.includes('`gh issue view 10`') && calls.find((c) => c.label === 'impl:#10').prompt.includes('Read no spec'), '')
   check('A: publish order respects the dependency', seq.indexOf('publish:#10') < seq.indexOf('publish:#11'), '')
   check('A: #11 cut from #10 branch, addressed locally', calls.find((c) => c.label === 'impl:#11').prompt.includes('git switch --detach ticket/10') && !calls.find((c) => c.label === 'impl:#11').prompt.includes('origin/ticket/10'), '')
-  check('A: an inherited ref stays origin-addressed', calls.find((c) => c.label === 'impl:#10').prompt.includes('origin/main'), '')
+  check('A: a bottom ticket is cut from the pinned base, not the moving ref', calls.find((c) => c.label === 'impl:#10').prompt.includes(`git switch --detach ${PINNED}`) && !calls.find((c) => c.label === 'impl:#10').prompt.includes('git switch --detach origin/main'), '')
   check('A: slices move the ref instead of pushing', calls.find((c) => c.label === 'impl:#10').prompt.includes('git update-ref refs/heads/ticket/10 HEAD') && calls.find((c) => c.label === 'impl:#10').prompt.includes('Push nothing'), '')
   check('A: the lane pushes once, creating the ref', calls.find((c) => c.label === 'publish:#10').prompt.includes('git push origin ticket/10') && calls.find((c) => c.label === 'publish:#10').prompt.includes('CREATES the branch'), '')
-  check('A: publish #10 needs no rebase (tip unmoved)', !calls.find((c) => c.label === 'publish:#10').prompt.includes('git rebase --onto'), '')
+  const bottom = calls.find((c) => c.label === 'publish:#10').prompt
+  check('A: the bottom publish decides whether the base moved by sha, not by name', bottom.includes('git rev-parse origin/main') && bottom.includes(`If it prints \`${PINNED}\`, nothing moved: no rebase`) && bottom.includes(`git rebase --onto origin/main ${PINNED}`) && !bottom.includes('The tip has not moved'), bottom.slice(0, 2500))
+  check('A: after that rebase the bottom publish re-runs the recipe and moves the branch', bottom.includes('After a rebase the tree is one nobody has validated') && bottom.includes('git update-ref refs/heads/ticket/10 HEAD'), '')
+  check('A: publish #11 needs no rebase (stacked on #10, tip unmoved)', !calls.find((c) => c.label === 'publish:#11').prompt.includes('git rebase --onto'), '')
   check('A: finalize is the last agent', seq[seq.length - 1] === 'finalize', seq.join(' | '))
   check('A: complete state', result.state.startsWith('complete'), result.state)
   check('A: not halted, reviewed and finalized', result.halted === false && seq.includes('review:spec-224') && seq.includes('finalize'), seq.join(' | '))
@@ -231,7 +247,7 @@ const withBlockers = (blockers) => () => ({
   const layer0 = calls.find((c) => c.label.startsWith('layer0'))
   check('P2: with prior work the graph agent is asked, per ticket, whether it is already done there', graph.opts.schema.properties.tickets.items.required.includes('done_in_prior_work') && /origin\/main\.\.origin\/spec\/827-integration/.test(graph.prompt) && /never guess from titles alone/.test(graph.prompt), graph.prompt.slice(-600))
   check('P2: a ticket already done on the prior work gets no agent', !seq.some((l) => /#1199/.test(l)), seq.join(' | '))
-  check('P2: its dependants are not blocked by it', seq.includes('publish:#1200') && calls.find((c) => c.label === 'impl:#1200').prompt.includes('git switch --detach origin/spec/827-integration'), seq.join(' | '))
+  check('P2: its dependants are not blocked by it', seq.includes('publish:#1200') && calls.find((c) => c.label === 'impl:#1200').prompt.includes(`git switch --detach ${PINNED}`), seq.join(' | '))
   check('P2: the layer-0 PR closes it, with the evidence', layer0 && layer0.prompt.includes('Closes #<n>') && layer0.prompt.includes('#1199: 4ff25216 Keychain store moves (#1199)') && /The operator named `spec\/827-integration` as prior work/.test(layer0.prompt), layer0 && layer0.prompt.slice(-700))
   check('P2: the layer count excludes it', layer0.prompt.includes('Layer 1 of 2 planned') && calls.find((c) => c.label === 'publish:#1200').prompt.includes('Layer 2 of 2 planned'), '')
   check('P2: the log says what prior work already covers', logs.some((l) => /Already done on spec\/827-integration.*#1199 \(4ff25216/.test(l)), logs.join(' | '))
@@ -261,7 +277,7 @@ const withBlockers = (blockers) => () => ({
   const pub = calls.find((c) => c.label === 'publish:#10')
   check('P4: the publisher is told to count the commits it adds and to stop when there are none', /git rev-list --count origin\/main\.\.ticket\/10/.test(pub.prompt) && /`nothing_to_publish: true`/.test(pub.prompt), pub.prompt.slice(0, 1500))
   check('P4: nothing to publish is not a halt: the run goes on to its dependants, review and finalize', result.halted === false && seq.includes('publish:#11') && seq.includes('review:spec-224') && seq.includes('finalize'), seq.join(' | '))
-  check('P4: the tip stays where it was', calls.find((c) => c.label === 'impl:#11').prompt.includes('git switch --detach origin/main'), '')
+  check('P4: the tip stays where it was', calls.find((c) => c.label === 'impl:#11').prompt.includes(`git switch --detach ${PINNED}`), '')
   check('P4: the ticket is open still, so the spec is not complete, and the brief says why', !result.state.startsWith('complete') && result.finalize !== undefined && /nothing to publish/.test(calls.find((c) => c.label === 'finalize').prompt), result.state)
   check('P4: the log names it', logs.some((l) => /#10: nothing to publish/.test(l)), logs.join(' | '))
   check('P4: its branch is not listed as unpublished work', !(result.local_only_branches && result.local_only_branches.refs.includes('ticket/10')), JSON.stringify(result.local_only_branches))
@@ -328,7 +344,7 @@ const withBlockers = (blockers) => () => ({
 // so the omission would be re-raised every round and never run (ADR-0029).
 {
   const LINT = 'npm run lint -- --max-warnings=0'
-  const green = (prompt) => [SIM_CHECK, ...(prompt.includes(LINT) ? [LINT] : [])].map((command) => ({ command, passed: true }))
+  const green = (prompt) => [SIM_CHECK, ...(prompt.includes(LINT) ? [LINT] : [])].map((command) => ({ command, passed: true, exit_code: 0 }))
   const { result, calls, logs } = await run({
     graph: () => ({ tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }], explorations: [] }),
     impl: (label, prompt) => ({ branch: 'ticket/10', summary: 's', unmet: [], checks: green(prompt) }),
@@ -361,8 +377,8 @@ const withBlockers = (blockers) => () => ({
     }),
   })
   const second = calls.find((c) => c.label === 'publish:#11')
-  check('B2: both tickets cut from the same inherited base', calls.find((c) => c.label === 'impl:#11').prompt.includes('origin/main'), '')
-  check('B2: the second publish replays onto the moved tip', second.prompt.includes('git rebase --onto ticket/10'), second.prompt.slice(0, 400))
+  check('B2: both tickets cut from the same pinned base', ['impl:#10', 'impl:#11'].every((l) => calls.find((c) => c.label === l).prompt.includes(`git switch --detach ${PINNED}`)), '')
+  check('B2: the second publish replays onto the moved tip, from the pinned base', second.prompt.includes(`git rebase --onto ticket/10 ${PINNED}`), second.prompt.slice(0, 400))
   check('B2: the rebase is stated as local-only', second.prompt.includes('never left this clone'), '')
   check('B2: still one plain push, no force', second.prompt.includes('git push origin ticket/11') && !second.prompt.includes('--force-with-lease origin'), '')
   check('B2: both tickets stack', result.stack_bottom_to_top.length === 2, JSON.stringify(result.stack_bottom_to_top))
@@ -553,6 +569,44 @@ const withBlockers = (blockers) => () => ({
   check('G: no integration PR in the stack', !result.stack_bottom_to_top.some((l) => l.startsWith('integration')), JSON.stringify(result.stack_bottom_to_top))
 }
 
+{
+  const TC = 'npm run typecheck'
+  const E2E = 'npm run e2e'
+  const finding = { severity: 'major', location: 'c.js:3', issue: 'two helpers', fix: 'merge them' }
+  const reviewChecks = [{ command: TC, passed: true, exit_code: 2 }, { command: E2E, passed: true, exit_code: 1 }]
+  const fixed = await run({
+    review: () => ({ findings: [finding], checks: reviewChecks }),
+    fixslice: (label, prompt) => ({ verdicts: locationsIn(prompt).map((l) => ({ location: l, issue: issueFor(l), action: 'fixed', reason: 'fixed it' })), unfinished: [], checks: [{ command: TC, passed: true, exit_code: 2 }, { command: E2E, passed: true, exit_code: 0 }], validated_sha: 'fixsha' }),
+  })
+  const pr = fixed.calls.find((c) => c.label === 'publish:integration').prompt
+  check('W: the integration PR lists a check the last fixer still waived', pr.includes(`- \`${TC}\` exited 2`), pr)
+  check('W: a waived check the last fixer ran green is dropped from the integration PR', !pr.includes(`\`${E2E}\` exited`), pr)
+  check('W: with an integration PR, finalize appends no waived lines', !fixed.calls.find((c) => c.label === 'finalize').prompt.includes('Waived:'), '')
+  const clean = await run({ review: () => ({ findings: [], checks: reviewChecks }) })
+  const fin = clean.calls.find((c) => c.label === 'finalize').prompt
+  check('W: with no integration PR, finalize appends the review\'s waived checks to the top PR\'s body', !clean.calls.some((c) => c.label === 'publish:integration') && /Append them to the TOP PR's body \(`gh pr edit` — keep the existing body/.test(fin) && fin.includes('`Waived: <command> exited <exit_code>`') && fin.includes(`- \`${TC}\` exited 2`) && fin.includes(`- \`${E2E}\` exited 1`), fin)
+  check('W: the run result still carries them', JSON.stringify(clean.result.review_waived) === JSON.stringify([{ command: TC, exit_code: 2 }, { command: E2E, exit_code: 1 }]), JSON.stringify(clean.result.review_waived))
+}
+
+{
+  const E2E = 'npm run e2e'
+  const { result, timeline, logs } = await run(
+    {
+      graph: () => ({ tickets: [{ number: 10, title: 'T10', blocked_by: [], needs_human: false, human_reason: '' }], explorations: [] }),
+      baseline: async (label) => {
+        if (label === 'baseline:at-review') await new Promise((done) => setTimeout(done, 100))
+        const command = label === 'baseline:at-review' ? E2E : SIM_CHECK
+        return { commands: [{ command, exit_code: 0, masked_command: '', failures: { tests: [], diagnostics: [] } }], decisions_needed: [] }
+      },
+      impl: () => ({ branch: 'ticket/10', summary: 'partial', tests_run: 'npm t', tests_green: true, unmet: ['criterion Z'] }),
+    },
+    { atReview: [E2E] },
+  )
+  check('WH: the run halts in Implement', result.halted === true && result.tickets?.[0]?.state === 'unmet', JSON.stringify(result))
+  check('WH: the at-review baseline has settled by the time the halted run returns', timeline.includes('end baseline:at-review'), timeline.join(' | '))
+  check('WH: the halt says it waited on it', logs.some((l) => l.startsWith('Waiting for the at-review baseline to settle before halting')), logs.join(' | '))
+}
+
 // --- scenario H: the stack registers as it grows, not at finalize ----------
 // `gh stack link` takes a minimum of two arguments, so the first PR of a
 // layer-0-less run cannot register and the second must. Every call re-lists
@@ -689,6 +743,50 @@ const withBlockers = (blockers) => () => ({
   check('H5: finalize is told it is the first registration, and why', /first registration/.test(finalize.prompt) && /the last failure: #11/.test(finalize.prompt), finalize.prompt.slice(0, 1500))
 }
 
+// --- scenario BL: a baseline command that cannot run is a blocker ----------
+// The Workflow runner replays a completed call whose (prompt, opts) did not
+// change, so a resume is a run whose baseline prompt changed or did not.
+{
+  const halts = '/tmp/n/baseline-blockers.json'
+  rmSync(halts, { force: true })
+  const blocker = { subject: 'npm is not installed', tickets: [], why: 'npm t cannot start', evidence: 'npm t: command not found (exit 127)', check: 'npm --version' }
+  const blocked = { baseline: () => ({ commands: [{ command: SIM_CHECK, exit_code: 127, masked_command: '', failures: { tests: [], diagnostics: [] } }], blockers: [blocker] }) }
+  const promptOf = (r) => r.calls.find((c) => c.label === 'baseline:per-change').prompt
+  const first = await run(blocked)
+  const told = promptOf(first)
+  check('BL: the baseline is told a command that runs and fails from one that cannot run, and what to do with each', /It runs and fails: .*pre-existing failure: record it/.test(told) && /It cannot run: .*a mask would hide it: it is a \*\*blocker\*\*/.test(told), told)
+  check('BL: on the Workflow runner the baseline returns the blocker, nobody being there to clear it', /Nobody is in this session to clear it\. Return the blocker in `blockers`/.test(told) && !/needs_you/.test(told), '')
+  const onSession = promptOf(await run({}, { runner: 'session' }))
+  check('BL: on the session runner the baseline calls needs_you and carries on once it is cleared', /tool named `needs_you`, call it with the blocker/.test(onSession) && /carry on measuring and return as usual, with an empty `blockers`/.test(onSession), '')
+  check('BL: a blocked baseline halts the run before any dispatch, naming what, evidence and check', first.result.halted === true && ['npm is not installed', 'npm t: command not found (exit 127)', '`npm --version`'].every((s) => first.result.reason.includes(s)) && !first.calls.some((c) => c.label.startsWith('dispatch')), JSON.stringify(first.result))
+  const second = await run(blocked)
+  check('BL: a resume after the halt runs the baseline node again, told the blocker to check first', promptOf(second) !== told && /halted once before/.test(promptOf(second)) && promptOf(second).includes('1. npm is not installed — evidence: npm t: command not found (exit 127); check: `npm --version`'), promptOf(second))
+  const cleared = await run()
+  check('BL: a resume still blocked halts again, and the next one is again a call not made before', /halted 2 times before/.test(promptOf(cleared)) && cleared.result.state.startsWith('complete') && cleared.calls.some((c) => c.label === 'dispatch:#10'), JSON.stringify(cleared.result))
+  const replay = await run()
+  check('BL: once it succeeds, a later resume makes the same baseline call, so the runner replays its success', promptOf(replay) === promptOf(cleared), '')
+  rmSync(halts, { force: true })
+}
+
+// --- scenario BM: a ticket runs the recipe arming read, which the baseline measured
+// The baseline masks what arming extracted; a dispatcher that copies a
+// command otherwise (a second span, a rewrite) must not unmask it, or the
+// pre-existing failure is judged red against a record with no entry for it.
+{
+  const masked = `${SIM_CHECK} --test-skip-pattern flaky`
+  const { result, calls, logs } = await run(
+    {
+      baseline: () => ({ commands: [{ command: SIM_CHECK, exit_code: 1, masked_command: masked, failures: { tests: ['test/a.mjs::flaky'], diagnostics: [] } }], decisions_needed: [] }),
+      dispatch: (label) => ({ ticket_brief: 'the ticket in brief', validation: label.includes('#10') ? ['npm test', 'npm run e2e'] : [SIM_CHECK], review_validation: [], slices: [{ title: 'all of it', brief: 'do it', effort: 'medium' }] }),
+    },
+    { recipes: { 10: { perChange: [SIM_CHECK], atReview: [] }, 11: { perChange: [SIM_CHECK], atReview: [] } } },
+  )
+  const impl = calls.find((c) => c.label.startsWith('impl:#10')).prompt
+  check('BM: the implementer is told the masked form of the armed command, not the dispatcher\'s copy', impl.includes(`- \`${masked}\``) && !impl.includes('- `npm test`') && !impl.includes('- `npm run e2e`'), impl.slice(0, 1500))
+  check('BM: the gate reviewer is told the same masked command', !!calls.find((c) => c.label.startsWith('gate:#10'))?.prompt.includes(`- \`${masked}\``), '')
+  check('BM: the dispatcher\'s differing copy is logged, and the run completes', logs.some((l) => /#10: the dispatcher read commands arming did not.*npm test; npm run e2e/.test(l)) && result.state.startsWith('complete'), logs.join(' | '))
+}
+
 // --- scenario R: the Workflow runner reclaims, the Orca runner never does ---
 {
   const onRunner = async (runner, overrides = {}) => (await run(overrides, { runner }))
@@ -760,7 +858,8 @@ const withBlockers = (blockers) => () => ({
   check('S: the explorers still run side by side', calls.filter((c) => c.label.startsWith('explore')).some((c) => c.alongside > 0), '')
   check("S: each ticket's publish returns before the next ticket's dispatch starts", order.slice(1).every((n, i) => before(`end publish:#${order[i]}`, `start dispatch:#${n}`)), timeline.join(' | '))
   const publishes = calls.filter((c) => c.label.startsWith('publish:'))
-  check('S: no publisher prompt carries a rebase step', publishes.length === 6 && !publishes.some((c) => /git rebase/.test(c.prompt)), publishes.filter((c) => /git rebase/.test(c.prompt)).map((c) => c.label).join(' | '))
+  const rebasing = publishes.filter((c) => /git rebase/.test(c.prompt))
+  check("S: no publisher replays onto another ticket; only the bottom one may replay onto a moved START_REF", publishes.length === 6 && rebasing.length === 1 && rebasing[0].label === `publish:#${order[0]}` && rebasing[0].prompt.includes(`git rebase --onto origin/main ${PINNED}`) && !publishes.some((c) => /git rebase --onto ticket\//.test(c.prompt)), rebasing.map((c) => c.label).join(' | '))
   check('S: the whole-stack review and its integration fixes run one agent at a time', before('end review:spec-224', 'start integration:dispatch') && before('end integration:dispatch', 'start integration:s1') && before('end integration:s1', 'start integration:s2') && before('end integration:s2', 'start publish:integration'), timeline.join(' | '))
   check('S: the sequential run completes', result.state.startsWith('complete'), result.state)
 
@@ -769,8 +868,11 @@ const withBlockers = (blockers) => () => ({
   const first = ticketsOf(par.calls).slice(0, 4).sort((a, b) => a - b)
   check('S: parallel order still dispatches every takeable ticket at once', JSON.stringify(first) === '[11,12,13,15]' && par.calls.some((c) => c.label.startsWith('dispatch:#') && c.alongside > 0) && par.result.state.startsWith('complete'), JSON.stringify(ticketsOf(par.calls)))
 
+  const coding = calls.filter((c) => c.opts.isolation && !c.label.startsWith('baseline'))
   const isolations = (calls) => [...new Set(calls.filter((c) => c.opts.isolation).map((c) => c.opts.isolation))]
-  check('S: every agent that would get a worktree of its own runs in the chain worktree instead', JSON.stringify(isolations(calls)) === '["chain"]' && calls.filter((c) => c.opts.isolation).every((c) => /this run's one chain worktree/.test(c.prompt)), JSON.stringify(isolations(calls)))
+  check('S: every agent that would get a worktree of its own runs in the chain worktree instead', JSON.stringify(isolations(coding)) === '["chain"]' && coding.every((c) => /this run's one chain worktree/.test(c.prompt)), JSON.stringify(isolations(coding)))
+  const baseline = calls.find((c) => c.label.startsWith('baseline'))
+  check('S: the baseline, beside the explorers, keeps a worktree of its own', baseline?.opts.isolation === 'worktree' && !/chain worktree/.test(baseline.prompt), baseline?.opts.isolation)
   check('S: a parallel run still gives each its own', JSON.stringify(isolations(par.calls)) === '["worktree"]' && !par.calls.some((c) => /chain worktree/.test(c.prompt)), JSON.stringify(isolations(par.calls)))
 
   // A chain of blockers leaves a parallel run one order too: both publish the
