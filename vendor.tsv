@@ -8,3 +8,6 @@
 skills/engineering/code-review/SKILL.md	mattpocock/skills	skills/engineering/code-review/SKILL.md	e28d7acbf7b3bb4d7817b7eb5d9c105af03f6ec4
 skills/engineering/code-review/agents/openai.yaml	mattpocock/skills	skills/engineering/code-review/agents/openai.yaml	9076774ba327f49068db9273feceda03bfe940fa
 skills/productivity/handoff/SKILL.md	mattpocock/skills	skills/productivity/handoff/SKILL.md	unreviewed
+skills/engineering/pr/SKILL.md	mattpocock/skills	skills/engineering/pr/SKILL.md	84dd4fb2f068e9f6282690235d20dd505b418119
+skills/engineering/pr/CREDITS.md	mattpocock/skills	skills/engineering/pr/CREDITS.md	5314bda2fa6005e264c9b5c1de7c425e719dc91f
+skills/engineering/pr/agents/openai.yaml	mattpocock/skills	skills/engineering/pr/agents/openai.yaml	48286f48f53b937cc19c0e39899b5f956271a98d

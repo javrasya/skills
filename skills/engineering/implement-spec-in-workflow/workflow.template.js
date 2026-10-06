@@ -67,6 +67,7 @@ const RUNNER = '__RUNNER__'                        // 'session' on the session r
 const PER_CHANGE_COMMANDS = __PER_CHANGE_COMMANDS__ // every takeable ticket's `### Run per change` commands, each once: a JSON array of strings, rendered bare so no command text breaks the literal (ADR-0030)
 const AT_REVIEW_COMMANDS = __AT_REVIEW_COMMANDS__   // the same for `### Run at review`
 const TICKET_RECIPES = __TICKET_RECIPES__           // each takeable ticket's own recipe by its number, { perChange, atReview }, read by the same rule as the two sets above: what the run runs for that ticket
+const PR_GUIDE = String.raw`__PR_GUIDE__`
 // -------------------------------------------------------------------------
 
 const POINTERS = `Repo ${REPO}, checkout ${REPO_DIR}. Spec: \`gh issue view ${SPEC}\`. Research notes: ${NOTES_DIR}.`
@@ -1199,13 +1200,19 @@ ${cutFrom !== base ? `4. The tip moved since this ticket was cut. Replay its com
    ${inherit(impl.validated)}
 6. The branch already points at the work; nothing to move.`}
 7. Put it on origin for the first time. First \`git ls-remote --exit-code --heads origin ${impl.branch}\`: exit 0 means the branch is ALREADY on origin — an earlier run's, or someone's — and this run may not move it, not even fast-forward (publish-once, ADR-0005): stop, return \`published: false\`, and put in \`decisions_needed\` the branch, its origin sha and this run's sha, and that the operator must delete or rename the origin branch before the run can publish. Exit 2 (no such ref): \`git push origin ${impl.branch}\`. This CREATES the branch there — it overwrites nothing and needs no force. A rejected push means something you do not know about is going on: stop and report it.
-8. Open a DRAFT PR: \`gh pr create --draft --head ${impl.branch} --base ${base}\` — \`--base\` takes the branch name. Title = the ticket's title. The body must open with exactly this line:
+8. Open a DRAFT PR: \`gh pr create --draft --head ${impl.branch} --base ${base}\` — \`--base\` takes the branch name. Title = the ticket's title. Write the body by the PR-body guide at \`${PR_GUIDE}\`: read all of it first, then follow its template, its guidance for each section and its examples. Build the Summary from \`git diff ${ref(base)}...HEAD\`, not from memory. This run adds to the guide, and where the two differ this run wins. The body must open with exactly this line:
 
    ${layerLine(layers.length)}
 
-   and must also contain the line \`Closes #${t.number}\`, state that it is part of the stack for spec #${SPEC}, and carry one provenance line — \`Validated green at <sha> by <role>\` — naming the sha the validation recipe last passed on and who ran it (you, or the role you inherited it from). Directly under it, one line per waived check you return — \`passed: true\` over a non-zero \`exit_code\` — as \`Waived: <command> exited <exit_code>\`, the command in code formatting; with none, add nothing.${impl.decided.length ? ` Under a heading "Decided during implementation", list what the implementer settled itself where the ticket left it open:
-${impl.decided.map((d) => `   - ${d}`).join('\n')}
-  ` : ''} Leave it a DRAFT — every layer stays draft until the run finalizes, which is how the operator can tell the stack is still being built.
+   then the line \`Closes #${t.number}\`, then one line stating that it is part of the stack for spec #${SPEC}. Then the guide's sections, in this order:
+
+   - \`## Summary\`, as the guide says.
+   - \`## Evidence\`, as the guide says, ending with one provenance line — \`Validated green at <sha> by <role>\` — naming the sha the validation recipe last passed on and who ran it (you, or the role you inherited it from). Directly under it, one line per waived check you return — \`passed: true\` over a non-zero \`exit_code\` — as \`Waived: <command> exited <exit_code>\`, the command in code formatting; with none, add nothing.
+   - \`## Merge Danger\`, as the guide says.${impl.decided.length ? `
+   - \`## Decided during implementation\` — last, one bullet per thing the implementer settled itself where the ticket left it open:
+${impl.decided.map((d) => `     - ${d}`).join('\n')}` : ''}
+
+   Leave it a DRAFT — every layer stays draft until the run finalizes, which is how the operator can tell the stack is still being built.
 ${canLink
         ? `9. ${mirror(layers.slice(0, -1))}
 
