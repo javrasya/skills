@@ -30,6 +30,7 @@ function render(runner, runOrder = 'parallel', startRef = 'main', recipes = {}, 
     PER_CHANGE_COMMANDS: JSON.stringify([SIM_CHECK]),
     AT_REVIEW_COMMANDS: JSON.stringify(atReview),
     TICKET_RECIPES: JSON.stringify(recipes),
+    PR_GUIDE: '/tmp/skills/pr/SKILL.md',
   })
 }
 
@@ -487,6 +488,7 @@ const withBlockers = (blockers) => () => ({
   const publish = calls.find((c) => c.label === 'publish:#10').prompt
   check('C5: a decision the implementer made is put on its PR', /kept `--dry`/.test(publish), '')
   const order = ['## Summary', '## Evidence', '## Merge Danger', '## Decided during implementation'].map((h) => publish.indexOf(h))
+  check('C5: the publisher writes the body by the vendored pr skill', publish.includes('PR-body guide at `/tmp/skills/pr/SKILL.md`') && publish.includes('its examples'), '')
   check('C5: the PR body runs Summary, Evidence, Merge Danger, then the decisions last', order.every((i, k) => i >= 0 && (k === 0 || i > order[k - 1])), JSON.stringify(order))
   check('C5: the gate reviewer sees the decision', /kept `--dry`/.test(calls.find((c) => c.label === 'gate:#10:r1').prompt), '')
 }

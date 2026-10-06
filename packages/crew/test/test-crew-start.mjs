@@ -16,7 +16,7 @@ import { crewHost, waitWords } from '../src/crew-host.mjs'
 import { execProgram } from '../src/git.mjs'
 import { STACKS_DOCS, rememberAnswers, rememberedAnswers, startForm } from '../src/start-form.mjs'
 import { preflight } from '../src/headless.mjs'
-import { PLACEHOLDERS, hasValidationRecipe, recipeCommandSets, recipeCommands, launchRunner, newRunId, notesDirOf, renderRoles, renderTemplate, startCommand, startSummary, templatePath } from '../src/arm.mjs'
+import { PLACEHOLDERS, PR_GUIDES, hasValidationRecipe, recipeCommandSets, recipeCommands, launchRunner, newRunId, notesDirOf, prGuidePath, renderRoles, renderTemplate, startCommand, startSummary, templatePath } from '../src/arm.mjs'
 import { launchCommand } from '../src/harness.mjs'
 import { DEFAULTS } from '../src/crew-config.mjs'
 import { loadScript } from '../src/runner.mjs'
@@ -44,13 +44,14 @@ const VALUES = {
   PER_CHANGE_COMMANDS: JSON.stringify(['npm test', 'echo "`x`" ${HOME} \'q\' C:\\x $&']),
   AT_REVIEW_COMMANDS: '[]',
   TICKET_RECIPES: JSON.stringify({ 7: { perChange: ['npm test', '$& \\x'], atReview: [] } }),
+  PR_GUIDE: 'C:\\work\\skills\\skills\\engineering\\pr\\SKILL.md',
 }
 
 // A constant of a rendered script, as the script reads it.
 const renderedConst = (script, name) => new Function(`${script.split(/\r?\n/).find((l) => l.startsWith(`const ${name} = `))}\nreturn ${name}`)()
 
 test('render: the template with every value is what the skill renders, RUNNER session', () => {
-  assert.deepEqual(PLACEHOLDERS, ['SPEC', 'REPO', 'REPO_DIR', 'NOTES_DIR', 'BASE_REF', 'START_REF', 'BASE_SHA', 'STACK_MODE', 'RUN_ORDER', 'RUNNER', 'PER_CHANGE_COMMANDS', 'AT_REVIEW_COMMANDS', 'TICKET_RECIPES'])
+  assert.deepEqual(PLACEHOLDERS, ['SPEC', 'REPO', 'REPO_DIR', 'NOTES_DIR', 'BASE_REF', 'START_REF', 'BASE_SHA', 'STACK_MODE', 'RUN_ORDER', 'RUNNER', 'PER_CHANGE_COMMANDS', 'AT_REVIEW_COMMANDS', 'TICKET_RECIPES', 'PR_GUIDE'])
   const template = readFileSync(templatePath(), 'utf8')
   assert.doesNotMatch(template, /__VALIDATION__|VALIDATION_RAW|\bVALIDATION\b/)
   assert.equal(templatePath(), SKILL_TEMPLATE, "in a checkout the skill folder's template is the one rendered")
@@ -65,6 +66,14 @@ test('render: the template with every value is what the skill renders, RUNNER se
   assert.deepEqual(renderedConst(rendered, 'PER_CHANGE_COMMANDS'), JSON.parse(VALUES.PER_CHANGE_COMMANDS))
   assert.deepEqual(renderedConst(rendered, 'AT_REVIEW_COMMANDS'), [])
   assert.deepEqual(renderedConst(rendered, 'TICKET_RECIPES'), JSON.parse(VALUES.TICKET_RECIPES))
+  assert.equal(renderedConst(rendered, 'PR_GUIDE'), VALUES.PR_GUIDE, 'a Windows path survives the literal')
+})
+
+test("render: the PR-body guide is the vendored pr skill, in a checkout the repo's own copy", () => {
+  assert.equal(prGuidePath(), PR_GUIDES[1])
+  assert.match(PR_GUIDES[1], /skills[\\/]engineering[\\/]pr[\\/]SKILL\.md$/)
+  const guide = readFileSync(prGuidePath(), 'utf8')
+  for (const section of ['## Summary', '## Evidence', '## Merge Danger']) assert.ok(guide.includes(section), `the guide documents ${section}`)
 })
 
 test('render: a value is substituted as written, whatever it holds', () => {
@@ -466,6 +475,7 @@ test('crew start at a terminal: Enter through the form renders workflow.js into 
       PER_CHANGE_COMMANDS: '["npm test"]',
       AT_REVIEW_COMMANDS: '["npm test"]',
       TICKET_RECIPES: '{"101":{"perChange":["npm test"],"atReview":["npm test"]},"102":{"perChange":["npm test"],"atReview":["npm test"]}}',
+      PR_GUIDE: prGuidePath(),
     }),
   )
   assert.deepEqual(rememberedAnswers(w.paths, w.repoDir), { harness: 'claude', base: 'develop', stackMode: 'native', runOrder: 'parallel', permissionMode: 'auto', models: { claude: 'opus' } }, 'prior work is never remembered')

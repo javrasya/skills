@@ -15,7 +15,8 @@
   "files": [
     "bin/",
     "src/",
-    "workflow.template.js"
+    "workflow.template.js",
+    "pr-guide.md"
   ],
   "engines": {
     "node": ">=20"

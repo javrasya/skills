@@ -30,7 +30,17 @@ export function templatePath(candidates = TEMPLATES) {
   return found
 }
 
-export const PLACEHOLDERS = ['SPEC', 'REPO', 'REPO_DIR', 'NOTES_DIR', 'BASE_REF', 'START_REF', 'BASE_SHA', 'STACK_MODE', 'RUN_ORDER', 'RUNNER', 'PER_CHANGE_COMMANDS', 'AT_REVIEW_COMMANDS', 'TICKET_RECIPES']
+// The vendored `pr` skill the publisher writes each ticket PR's body by: the
+// copy `npm pack` bundles beside the template, else the repo's own.
+export const PR_GUIDES = [fileURLToPath(new URL('../pr-guide.md', import.meta.url)), fileURLToPath(new URL('../../../skills/engineering/pr/SKILL.md', import.meta.url))]
+
+export function prGuidePath(candidates = PR_GUIDES) {
+  const found = candidates.find((p) => existsSync(p))
+  if (!found) throw new Error(`no PR-body guide: looked at ${candidates.join(', ')}`)
+  return found
+}
+
+export const PLACEHOLDERS = ['SPEC', 'REPO', 'REPO_DIR', 'NOTES_DIR', 'BASE_REF', 'START_REF', 'BASE_SHA', 'STACK_MODE', 'RUN_ORDER', 'RUNNER', 'PER_CHANGE_COMMANDS', 'AT_REVIEW_COMMANDS', 'TICKET_RECIPES', 'PR_GUIDE']
 const PLACEHOLDER = new RegExp(`__(${PLACEHOLDERS.join('|')})__`, 'g')
 
 // SKILL.md step 3: substitute, never rewrite. One pass, so a value that
@@ -262,7 +272,7 @@ export function runOrchestrator({ paths, host = (cwd) => crewHost({ paths, cwd }
 // out of; `newId()` draws the run's
 // id (newRunId). A run folder that exists already is another run's: a new id
 // is drawn, `attempts` times in all, before the start is refused.
-export async function armRun({ target, answers, baseSha, roles, tickets, newId, attempts = 5, template = readFileSync(templatePath(), 'utf8'), launch }) {
+export async function armRun({ target, answers, baseSha, roles, tickets, newId, attempts = 5, template = readFileSync(templatePath(), 'utf8'), prGuide = prGuidePath(), launch }) {
   const { spec, repo, repoDir, notesDir, title } = target
   const recipe = recipeCommandSets(tickets)
   const render = (runFolder) =>
@@ -281,6 +291,7 @@ export async function armRun({ target, answers, baseSha, roles, tickets, newId, 
         PER_CHANGE_COMMANDS: JSON.stringify(recipe.perChange),
         AT_REVIEW_COMMANDS: JSON.stringify(recipe.atReview),
         TICKET_RECIPES: JSON.stringify(ticketRecipes(tickets)),
+        PR_GUIDE: prGuide,
       }),
       { runDefault: answers, roles },
     )

@@ -5,7 +5,7 @@
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { renderTemplate, templatePath } from '../../src/arm.mjs'
+import { prGuidePath, renderTemplate, templatePath } from '../../src/arm.mjs'
 
 export const PINNED = '0a1b2c3d4e5f60718293a4b5c6d7e8f901234567'
 
@@ -24,5 +24,6 @@ export const renderWith = (overrides = {}, template = readFileSync(templatePath(
     PER_CHANGE_COMMANDS: '[]',
     AT_REVIEW_COMMANDS: '[]',
     TICKET_RECIPES: '{}',
+    PR_GUIDE: prGuidePath(),
     ...overrides,
   })
