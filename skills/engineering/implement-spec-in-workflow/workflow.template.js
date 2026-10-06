@@ -24,7 +24,7 @@ export const meta = {
 // Claude `model` beside its `piModel` — e.g.
 // { harness: 'pi', piModel: 'openai/gpt-5', model: 'opus' } — and the same
 // rendered script runs on either runner.
-// `crew start` renders this table (packages/crew/src/arm.mjs, renderRoles):
+// `crew start` renders this table (javrasya/crew: src/arm.mjs, renderRoles):
 // RUN_DEFAULT becomes the harness and model its form chose, and a role named
 // in crew's per-repo `roles` config gets a row of its own in place of
 // RUN_DEFAULT. Keep RUN_DEFAULT's line and the `<role>: RUN_DEFAULT,` rows in
