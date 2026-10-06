@@ -16,7 +16,7 @@ import { crewHost, waitWords } from '../src/crew-host.mjs'
 import { execProgram } from '../src/git.mjs'
 import { STACKS_DOCS, rememberAnswers, rememberedAnswers, startForm } from '../src/start-form.mjs'
 import { preflight } from '../src/headless.mjs'
-import { PLACEHOLDERS, hasValidationRecipe, launchRunner, newRunId, notesDirOf, renderRoles, renderTemplate, startCommand, templatePath } from '../src/arm.mjs'
+import { PLACEHOLDERS, hasValidationRecipe, recipeCommandSets, recipeCommands, launchRunner, newRunId, notesDirOf, renderRoles, renderTemplate, startCommand, startSummary, templatePath } from '../src/arm.mjs'
 import { launchCommand } from '../src/harness.mjs'
 import { DEFAULTS } from '../src/crew-config.mjs'
 import { loadScript } from '../src/runner.mjs'
@@ -31,10 +31,26 @@ const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '')
 // as scripts/simulate-implement-spec-workflow.mjs renders it.
 const skillRender = (template, v) => PLACEHOLDERS.reduce((s, k) => s.split(`__${k}__`).join(String(v[k])), template)
 
-const VALUES = { SPEC: 94, REPO: 'acme/app', REPO_DIR: 'C:\\work\\app', NOTES_DIR: 'C:\\Users\\me\\.claude\\spec-notes\\app-94', BASE_REF: 'develop', START_REF: 'develop', STACK_MODE: 'native', RUN_ORDER: 'parallel' }
+const VALUES = {
+  SPEC: 94,
+  REPO: 'acme/app',
+  REPO_DIR: 'C:\\work\\app',
+  NOTES_DIR: 'C:\\Users\\me\\.claude\\spec-notes\\app-94',
+  BASE_REF: 'develop',
+  START_REF: 'develop',
+  BASE_SHA: '0a1b2c3d4e5f60718293a4b5c6d7e8f901234567',
+  STACK_MODE: 'native',
+  RUN_ORDER: 'parallel',
+  PER_CHANGE_COMMANDS: JSON.stringify(['npm test', 'echo "`x`" ${HOME} \'q\' C:\\x $&']),
+  AT_REVIEW_COMMANDS: '[]',
+  TICKET_RECIPES: JSON.stringify({ 7: { perChange: ['npm test', '$& \\x'], atReview: [] } }),
+}
 
-test('render: the template with the nine values is what the skill renders, RUNNER session', () => {
-  assert.deepEqual(PLACEHOLDERS, ['SPEC', 'REPO', 'REPO_DIR', 'NOTES_DIR', 'BASE_REF', 'START_REF', 'STACK_MODE', 'RUN_ORDER', 'RUNNER'])
+// A constant of a rendered script, as the script reads it.
+const renderedConst = (script, name) => new Function(`${script.split(/\r?\n/).find((l) => l.startsWith(`const ${name} = `))}\nreturn ${name}`)()
+
+test('render: the template with every value is what the skill renders, RUNNER session', () => {
+  assert.deepEqual(PLACEHOLDERS, ['SPEC', 'REPO', 'REPO_DIR', 'NOTES_DIR', 'BASE_REF', 'START_REF', 'BASE_SHA', 'STACK_MODE', 'RUN_ORDER', 'RUNNER', 'PER_CHANGE_COMMANDS', 'AT_REVIEW_COMMANDS', 'TICKET_RECIPES'])
   const template = readFileSync(templatePath(), 'utf8')
   assert.doesNotMatch(template, /__VALIDATION__|VALIDATION_RAW|\bVALIDATION\b/)
   assert.equal(templatePath(), SKILL_TEMPLATE, "in a checkout the skill folder's template is the one rendered")
@@ -46,6 +62,9 @@ test('render: the template with the nine values is what the skill renders, RUNNE
   assert.equal(diff.length, 1)
   assert.match(diff[0], /^const RUNNER = 'session'/)
   assert.throws(() => renderTemplate(template, { ...VALUES }), /no value for __RUNNER__/)
+  assert.deepEqual(renderedConst(rendered, 'PER_CHANGE_COMMANDS'), JSON.parse(VALUES.PER_CHANGE_COMMANDS))
+  assert.deepEqual(renderedConst(rendered, 'AT_REVIEW_COMMANDS'), [])
+  assert.deepEqual(renderedConst(rendered, 'TICKET_RECIPES'), JSON.parse(VALUES.TICKET_RECIPES))
 })
 
 test('render: a value is substituted as written, whatever it holds', () => {
@@ -184,12 +203,14 @@ const BARE = '## What to build\n\nIt.\n\n## Acceptance criteria\n\n- [ ] it\n'
 const ticket = (number, body, label = 'ready-for-agent', state = 'open') => ({ number, title: `Ticket ${number}`, state, body, labels: [label] })
 const TICKETS = [ticket(101, RECIPE), ticket(102, RECIPE)]
 
-// A repo on disk for git, and gh and pi answered from a table. `tickets` are
+// A repo on disk for git, with a bare repo of its own as origin holding both
+// its branches, and gh and pi answered from a table. `tickets` are
 // the spec's sub-issues, null for gh failing to list them; `validation`, when given, a validation.md left in
 // the notes dir from before ADR-0029.
 function world({ tickets = TICKETS, validation = null, stackInstalled = true } = {}) {
   const home = scratch('home')
   const repoDir = scratch('repo')
+  const originDir = scratch('origin')
   const git = (...args) => execProgram('git', ['-C', repoDir, ...args])
   const paths = crewPaths({ CREW_HOME: join(home, '.crew') })
   const notesDir = notesDirOf('acme/app', 94, home)
@@ -225,6 +246,8 @@ function world({ tickets = TICKETS, validation = null, stackInstalled = true } =
   return {
     home,
     repoDir,
+    originDir,
+    git,
     paths,
     notesDir,
     calls,
@@ -235,6 +258,9 @@ function world({ tickets = TICKETS, validation = null, stackInstalled = true } =
       await git('init', '-q', '-b', 'develop')
       await git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init')
       await git('branch', 'main')
+      await execProgram('git', ['-C', originDir, 'init', '-q', '--bare'])
+      await git('remote', 'add', 'origin', originDir)
+      await git('push', '-q', 'origin', 'develop', 'main')
     })(),
   }
 }
@@ -278,6 +304,72 @@ test('validation recipe: a ## Validation heading whose section holds ### Run per
   assert.equal(hasValidationRecipe('## Validation\n\nSee below.\n\n## Notes\n\n### Run per change\n'), false, 'the subsection under another section')
   assert.equal(hasValidationRecipe('### Run per change\n\n## Validation\n'), false, 'the subsection before the section')
   assert.equal(hasValidationRecipe('## Validation recipe\n\n### Run per change\n'), false, 'another heading')
+})
+
+test("recipe commands: each subsection line's backticked command; prose, other sections and lines with no command are none", () => {
+  const body = [
+    '## Validation',
+    '',
+    '### Run per change',
+    '- Tests: `npm test`',
+    '- Lint: `npx  biome lint` and then `ignored`',
+    '- Typecheck: absent: added by `#5`',
+    '- E2E: not applicable: no UI, `npm run e2e`',
+    '- Recipe measured 0:31 in total, budget 7m',
+    '- Needs: `docker`',
+    '- Deferred repo gate: `make all`',
+    '- Build with npm run build',
+    '1. ``echo "`date`"``',
+    '',
+    '### Notes',
+    '- `not a command`',
+    '',
+    '### Run at review',
+    '- `npm test -- --all`',
+    '',
+    '## Elsewhere',
+    '- `nope`',
+  ].join('\r\n')
+  assert.deepEqual(recipeCommands(body), { perChange: ['npm test', 'npx  biome lint', 'echo "`date`"'], atReview: ['npm test -- --all'] })
+  assert.deepEqual(recipeCommands('## Validation\n\n### Run per change\n- absent: added by #4\n\n### Run at review\nNothing.\n'), { perChange: [], atReview: [] })
+  assert.deepEqual(recipeCommands(null), { perChange: [], atReview: [] })
+  const sets = recipeCommandSets([{ body }, { body: '## Validation\n### Run per change\n- `npm  test`\n- `npx biome lint`\n- `npm run typecheck`\n### Run at review\n- ` npm test --  --all `\n- `npm test`\n' }])
+  assert.deepEqual(sets, { perChange: ['npm test', 'npx  biome lint', 'echo "`date`"', 'npm run typecheck'], atReview: ['npm test -- --all', 'npm test'] }, 'each once after whitespace normalisation, as first written')
+})
+
+const recipeOf = (perChange, atReview = []) => `## Validation\n\n### Run per change\n${perChange.map((c) => `- ${c}\n`).join('')}\n### Run at review\n${atReview.map((c) => `- ${c}\n`).join('')}`
+
+test("crew start: the takeable tickets' recipe commands are rendered into workflow.js, each once and exactly as written; closed and ready-for-human tickets add none", async () => {
+  const odd = 'echo "`date`" ${HOME} \'q\' C:\\x\\ $& __SPEC__'
+  const w = world({
+    tickets: [
+      ticket(101, recipeOf(['Tests: `npm test`', `Odd: \`\`${odd}\`\``], ['`npm test -- --all`'])),
+      ticket(102, recipeOf(['`npm   test`', 'absent: added by #101', '`npm run lint`'], ['Needs: `docker`', '`npm test -- --all`'])),
+      ticket(103, recipeOf(['`closed only`'], ['`closed review`']), 'ready-for-agent', 'closed'),
+      ticket(104, recipeOf(['`human only`'], ['`human review`']), 'ready-for-human'),
+      ticket(105, recipeOf([])),
+    ],
+  })
+  await w.ready
+  const armed = await w.start(['94', ...FLAGS])
+  const script = readFileSync(armed.script, 'utf8')
+  assert.deepEqual(renderedConst(script, 'PER_CHANGE_COMMANDS'), ['npm test', odd, 'npm run lint'])
+  assert.deepEqual(renderedConst(script, 'AT_REVIEW_COMMANDS'), ['npm test -- --all'])
+  assert.deepEqual(
+    renderedConst(script, 'TICKET_RECIPES'),
+    { 101: { perChange: ['npm test', odd], atReview: ['npm test -- --all'] }, 102: { perChange: ['npm   test', 'npm run lint'], atReview: ['npm test -- --all'] }, 105: { perChange: [], atReview: [] } },
+    "each takeable ticket's own recipe, read by the rule the sets are, so every command a ticket runs is one the baseline measured",
+  )
+  assert.match(script, /^const SPEC = 94\b/m, 'a command naming a placeholder is not substituted into')
+})
+
+test('crew start: a spec where no ticket has a command renders two empty sets and arms', async () => {
+  const w = world({ tickets: [ticket(101, recipeOf(['absent: added by #102'])), ticket(102, '## Validation\n\n### Run per change\n')] })
+  await w.ready
+  const armed = await w.start(['94', ...FLAGS])
+  const script = readFileSync(armed.script, 'utf8')
+  assert.deepEqual([renderedConst(script, 'PER_CHANGE_COMMANDS'), renderedConst(script, 'AT_REVIEW_COMMANDS')], [[], []])
+  assert.equal(w.launches.length, 1)
 })
 
 const REFUSED = [ticket(101, RECIPE), ticket(102, BARE), ticket(103, BARE, 'ready-for-human')]
@@ -357,7 +449,25 @@ test('crew start at a terminal: Enter through the form renders workflow.js into 
   assert.equal(armed.script, script)
   assert.deepEqual(w.launches, [{ script, stateDir, permissionMode: 'auto', cwd: w.repoDir, title: 'implement-spec #94: Crew, the session runner' }])
   const template = readFileSync(templatePath(), 'utf8')
-  assert.equal(readFileSync(script, 'utf8'), skillRender(template, { SPEC: 94, REPO: 'acme/app', REPO_DIR: w.repoDir, NOTES_DIR: runDir, BASE_REF: 'develop', START_REF: 'develop', STACK_MODE: 'native', RUN_ORDER: 'parallel', RUNNER: 'session' }))
+  const pinned = (await w.git('rev-parse', 'origin/develop')).stdout.trim()
+  assert.equal(
+    readFileSync(script, 'utf8'),
+    skillRender(template, {
+      SPEC: 94,
+      REPO: 'acme/app',
+      REPO_DIR: w.repoDir,
+      NOTES_DIR: runDir,
+      BASE_REF: 'develop',
+      START_REF: 'develop',
+      BASE_SHA: pinned,
+      STACK_MODE: 'native',
+      RUN_ORDER: 'parallel',
+      RUNNER: 'session',
+      PER_CHANGE_COMMANDS: '["npm test"]',
+      AT_REVIEW_COMMANDS: '["npm test"]',
+      TICKET_RECIPES: '{"101":{"perChange":["npm test"],"atReview":["npm test"]},"102":{"perChange":["npm test"],"atReview":["npm test"]}}',
+    }),
+  )
   assert.deepEqual(rememberedAnswers(w.paths, w.repoDir), { harness: 'claude', base: 'develop', stackMode: 'native', runOrder: 'parallel', permissionMode: 'auto', models: { claude: 'opus' } }, 'prior work is never remembered')
   assert.ok(!w.calls.some((c) => c.startsWith('gh extension install')), 'the extension is installed only when chosen')
 })
@@ -385,6 +495,57 @@ test('crew start by flags alone without --run-order: the run is parallel, as bef
   assert.equal(w.launches.length, 1)
   assert.match(readFileSync(w.launches[0].script, 'utf8'), /^const RUN_ORDER = 'parallel'/m)
   assert.equal(rememberedAnswers(w.paths, w.repoDir).runOrder, 'parallel')
+})
+
+// A commit on origin's `branch` made from a clone of its own, as another
+// machine would push it: the checkout has not fetched it. Its sha.
+async function pushedElsewhere(w, branch) {
+  const clone = join(scratch('clone'), 'app')
+  const git = (...args) => execProgram('git', ['-C', clone, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args])
+  await execProgram('git', ['clone', '-q', '-b', branch, w.originDir, clone])
+  await git('commit', '-q', '--allow-empty', '-m', `moved ${branch}`)
+  await git('push', '-q', 'origin', branch)
+  return (await git('rev-parse', 'HEAD')).stdout.trim()
+}
+const pinnedIn = (script) => /^const BASE_SHA = '([0-9a-f]{40})'/m.exec(readFileSync(script, 'utf8'))?.[1]
+
+test("crew start pins the base: after a fetch, origin/<base>'s sha, not the checkout's branch, is rendered into the workflow and shown in the start summary", async () => {
+  const w = world()
+  await w.ready
+  const moved = await pushedElsewhere(w, 'main')
+  await w.git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'local only')
+  const armed = await w.start(['94', ...FLAGS])
+  assert.equal(armed.baseSha, moved)
+  assert.equal(pinnedIn(armed.script), moved)
+  assert.equal(startSummary({ ...armed, session: { id: 's7', runDir: '/r/orca-run' } }), `crew start: armed ${armed.script}, every ticket cut from main at ${moved}; the runner is crew session s7; enter it from \`crew view "/r/orca-run"\``)
+})
+
+test("crew start with prior work named pins the prior-work branch's sha: origin's after a fetch, else, not pushed yet, the checkout's", async () => {
+  const w = world()
+  await w.ready
+  await w.git('branch', 'feature')
+  await w.git('push', '-q', 'origin', 'feature')
+  const moved = await pushedElsewhere(w, 'feature')
+  const onOrigin = await w.start(['94', ...FLAGS, '--start-ref', 'feature'])
+  assert.equal(pinnedIn(onOrigin.script), moved)
+  assert.match(readFileSync(onOrigin.script, 'utf8'), /^const START_REF = 'feature'/m)
+  await w.git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'unpushed prior work')
+  await w.git('branch', 'unpushed')
+  const local = (await w.git('rev-parse', 'unpushed')).stdout.trim()
+  const localOnly = await w.start(['94', ...FLAGS, '--start-ref', 'unpushed'])
+  assert.equal(pinnedIn(localOnly.script), local)
+  assert.equal(localOnly.baseSha, local)
+})
+
+test('crew start whose cut-from ref resolves to no commit refuses, naming the ref; nothing is rendered or launched', async () => {
+  const w = world()
+  await w.ready
+  await w.git('branch', 'unpushed')
+  await assert.rejects(w.start(['94', ...FLAGS, '--base', 'unpushed']), (e) => e.code === 1 && /^cannot pin the run's base: origin\/unpushed resolves to no commit on origin; nothing armed$/.test(e.message))
+  await w.git('remote', 'set-url', 'origin', join(w.originDir, 'gone'))
+  await assert.rejects(w.start(['94', ...FLAGS]), (e) => e.code === 1 && /^cannot pin the run's base, origin\/main: git fetch origin: .+; nothing armed$/s.test(e.message))
+  assert.equal(w.launches.length, 0)
+  assert.ok(!existsSync(join(w.notesDir, 'runs')))
 })
 
 // The rendered script's role table as the script itself evaluates it.

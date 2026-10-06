@@ -36,6 +36,7 @@ import { runView, runsView, bandOf, STATES, RUNNER_PATH, runnerAlive, runEnded }
 import { consoleRunsHelp, consoleTreeHelp, draw, drawRuns, helpLine, listRuns, strip, TREE_HELP, marqueeOffset, NAME_W } from '../src/run-view/draw.mjs'
 import { EventEmitter } from 'node:events'
 import { daemonGone } from '../src/daemon/client.mjs'
+import { renderWith } from './fixtures/render-with.mjs'
 
 // Every orca-cli: and fake orca: test is skipped for this reason; scripts/runner-contract-orca.workflow.js refuses to run for it.
 const ORCA_SKIPPED = 'Orca leg skipped: new work (#171) does not target Orca; Orca stays, its tests and contract are not run'
@@ -488,10 +489,7 @@ const haltsOrEnds = (start) =>
   })
 
 test('one run: the rendered workflow template names its spec in the Run objective', async () => {
-  const text = readFileSync(TEMPLATE, 'utf8')
-    .replace(/__SPEC__/g, '227')
-    .replace(/__RUN_ORDER__/g, 'parallel')
-    .replace(/__[A-Z_]+__/g, 'x')
+  const text = renderWith({ SPEC: 227, RUNNER: 'x' }, readFileSync(TEMPLATE, 'utf8'))
   const orca = fakeOrca({
     worker: async () => {
       throw new Error('agent died')
@@ -505,12 +503,7 @@ test('one run: the rendered workflow template names its spec in the Run objectiv
 })
 
 test("RUNNER: a script rendered with 'orca', RUNNER's value before 'session', runs as one rendered with 'session' does, and resumes", async () => {
-  const render = (runner) =>
-    readFileSync(TEMPLATE, 'utf8')
-      .replace(/__RUNNER__/g, runner)
-      .replace(/__SPEC__/g, '227')
-      .replace(/__RUN_ORDER__/g, 'parallel')
-      .replace(/__[A-Z_]+__/g, 'x')
+  const render = (runner) => renderWith({ SPEC: 227, RUNNER: runner }, readFileSync(TEMPLATE, 'utf8'))
   const trace = (orca) => orca.calls.filter((c) => ['runCreate', 'runUse', 'workerStart'].includes(c.verb)).map((c) => [c.verb, c.title ?? c.objective ?? null, c.placement ?? null])
   const runOn = async (runner, { clock = fakeClock(), orca = fakeOrca({ worker: withDoctor(diesPastCap), clock }), stateDir = tmp(), resume = false } = {}) => {
     await haltsOrEnds((onHalt) => runScript(render(runner), { host: orca, stateDir, out: () => {}, clock, transcripts: fakeTranscripts(orca), onHalt, resume }))
@@ -561,11 +554,7 @@ test('session host: no runner module names Orca in its code; only the Orca adapt
 })
 
 test("doctor: the rendered template's recover row is the doctor's harness and model on the Orca runner", async () => {
-  const text = readFileSync(TEMPLATE, 'utf8')
-    .replace(/__RUNNER__/g, 'orca')
-    .replace(/__SPEC__/g, '227')
-    .replace(/__RUN_ORDER__/g, 'parallel')
-    .replace(/__[A-Z_]+__/g, 'x')
+  const text = renderWith({ SPEC: 227, RUNNER: 'orca' }, readFileSync(TEMPLATE, 'utf8'))
   const clock = fakeClock()
   const orca = fakeOrca({ worker: withDoctor(diesPastCap), clock })
   await haltsOrEnds((onHalt) => runScript(text, { host: orca, stateDir: tmp(), out: () => {}, clock, transcripts: fakeTranscripts(orca), onHalt }))

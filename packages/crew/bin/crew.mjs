@@ -66,7 +66,7 @@ import { describeSession, runConsole, runsConsole } from '../src/console.mjs'
 import { parseFlags } from '../src/args.mjs'
 import { samePath } from '../src/paths.mjs'
 import { crewHost } from '../src/crew-host.mjs'
-import { launchRunner, runOrchestrator, startCommand } from '../src/arm.mjs'
+import { launchRunner, runOrchestrator, startCommand, startSummary } from '../src/arm.mjs'
 import { REGISTRY_PATH } from '../src/registry.mjs'
 import { runsView } from '../src/run-view-model.mjs'
 import { pauseCommand, removeCommand, resumeCommand } from '../src/run-commands.mjs'
@@ -320,7 +320,7 @@ const terminalSize = () => ({ cols: process.stdout.columns || 120, rows: process
 
 async function start(args) {
   try {
-    const { script, session: s } = await startCommand({
+    const armed = await startCommand({
       argv: args,
       paths,
       tty: !!(process.stdin.isTTY && process.stdout.isTTY),
@@ -328,7 +328,8 @@ async function start(args) {
       stdout: process.stdout,
       launch: (o) => launchRunner({ ...terminalSize(), ...o, paths }),
     })
-    console.log(`crew start: armed ${script}; the runner is crew session ${s.id}; enter it from \`crew view "${s.runDir}"\``)
+    const s = armed.session
+    console.log(startSummary(armed))
     // At a terminal the operator is taken to the run straight away. With none
     // (the skill's crew path, an agent's shell) the view would take over a
     // screen nobody watches, so only the command is printed.

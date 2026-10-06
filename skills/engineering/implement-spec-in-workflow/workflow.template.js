@@ -33,6 +33,7 @@ const RUN_DEFAULT = { harness: 'claude', model: 'opus' }
 const ROLES = {
   graph: RUN_DEFAULT,         // Graph: read the spec, return the ticket graph
   explore: RUN_DEFAULT,       // Explore: one research note
+  baseline: RUN_DEFAULT,
   unblock: RUN_DEFAULT,       // Unblock: guide the operator through the blockers (session runner only)
   layer0: RUN_DEFAULT,        // Setup: the layer-0 PR
   dispatch: RUN_DEFAULT,      // Implement: size a ticket into slices
@@ -59,12 +60,22 @@ const REPO_DIR = String.raw`__REPO_DIR__`          // main checkout
 const NOTES_DIR = String.raw`__NOTES_DIR__`        // research notes, outside the repo
 const BASE_REF = '__BASE_REF__'                    // branch the stack merges into
 const START_REF = '__START_REF__'                  // prior work the operator named at arm time: the stack's layer 0, or BASE_REF itself for none (ADR-0023). No agent of this run chooses it
+const BASE_SHA = '__BASE_SHA__'                    // the commit START_REF stood at when the run was armed, resolved once after a fetch: the run's pinned base (ADR-0030)
 const STACK_MODE = '__STACK_MODE__'                // 'native' (gh-stack + stacks API) or 'chain' (plain --base chain)
 const RUN_ORDER = '__RUN_ORDER__'                  // 'parallel' (the frontier at once) or 'sequential' (one ticket at a time, session runner only; ADR-0020)
 const RUNNER = '__RUNNER__'                        // 'session' on the session runner (crew, on Orca), and 'orca', its value before, still; anything else is the Workflow runner. The one line the two renderings differ in
+const PER_CHANGE_COMMANDS = __PER_CHANGE_COMMANDS__ // every takeable ticket's `### Run per change` commands, each once: a JSON array of strings, rendered bare so no command text breaks the literal (ADR-0030)
+const AT_REVIEW_COMMANDS = __AT_REVIEW_COMMANDS__   // the same for `### Run at review`
+const TICKET_RECIPES = __TICKET_RECIPES__           // each takeable ticket's own recipe by its number, { perChange, atReview }, read by the same rule as the two sets above: what the run runs for that ticket
 // -------------------------------------------------------------------------
 
 const POINTERS = `Repo ${REPO}, checkout ${REPO_DIR}. Spec: \`gh issue view ${SPEC}\`. Research notes: ${NOTES_DIR}.`
+// The baseline's record (ADR-0030): its per-change half written before
+// anything is dispatched, its at-review half joined before the whole-stack
+// review. Told to every role that runs a recipe, and only those: nothing
+// before the baseline returns could read it.
+const BASELINE_RECORD = `${NOTES_DIR}/pre-existing-failures.json`
+const RECIPE_POINTERS = `${POINTERS} What the recipe's commands already failed on at the run's pinned base: ${BASELINE_RECORD}.`
 // Every agent in this run works in a worktree LINKED to one clone — one object
 // store, one ref namespace — so a commit any agent makes is reachable by name
 // from every other the moment it lands. The shared clone, not origin, is how
@@ -78,6 +89,11 @@ const POINTERS = `Repo ${REPO}, checkout ${REPO_DIR}. Spec: \`gh issue view ${SP
 // another machine may have moved it, so it is fetched and addressed there.
 const runRefs = new Set()
 const ref = (r) => (runRefs.has(r) ? r : /^[0-9a-f]{7,40}$/.test(r) ? r : `origin/${r}`)
+// Where a ticket is cut from. A ticket on the stack's bottom is cut from the
+// pinned base, never from START_REF, which may move under a run: every one of
+// them then builds on the one commit the run was armed on (ADR-0030). A ticket
+// stacked on another is cut from that one's branch, as the tip names it.
+const cutRef = (r) => (r === START_REF ? BASE_SHA : ref(r))
 
 // Told to every agent that touches git. The first rule is why no push is
 // needed; the second is the one an agent cannot guess — git refuses to check
@@ -137,11 +153,12 @@ const ISOLATION = RUN_ORDER === 'sequential' ? 'chain' : 'worktree'
 // work was already on it. Now the operator names it or there is none, and the
 // graph agent's one job about it is to say which tickets it already covers.
 const hasLayer0 = START_REF !== BASE_REF
-const WORKTREE = ISOLATION === 'chain'
-  ? `Your worktree is this run's one chain worktree, made by its session host and worked in by its code agents one after another: the dependencies and build cache the agent before you left are yours to use. Leave nothing of your own in it uncommitted. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. Never remove it: the operator decides at the end of the run whether it is reclaimed.`
-  : ON_SESSION
+const OWN_WORKTREE = ON_SESSION
   ? `Your worktree is a child worktree of this run's worktree, per agent, made by this run's session host. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. Never remove it: the operator decides at the end of the run whether it is reclaimed.`
   : `Your worktree is throwaway and per agent. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. This run reclaims it — uncommitted leftovers included — once the work it holds is published.`
+const WORKTREE = ISOLATION === 'chain'
+  ? `Your worktree is this run's one chain worktree, made by its session host and worked in by its code agents one after another: the dependencies and build cache the agent before you left are yours to use. Leave nothing of your own in it uncommitted. Before you return, run \`git rev-parse --show-toplevel\` and return that absolute path as \`worktree\`. Never remove it: the operator decides at the end of the run whether it is reclaimed.`
+  : OWN_WORKTREE
 
 // --- the worktree ledger ---------------------------------------------------
 // Every path an isolated agent reports, keyed by what it worked on, beside the
@@ -236,29 +253,63 @@ const CONTRACT = `The acceptance contract for this ticket is its own acceptance 
 // — the agent does not judge, the exit code does — so the implementer runs
 // it, and the reviewer establishes it first: by inheriting the implementer's
 // result when the sha is unchanged (ADR-0009), else by re-running. The
-// commands are the ticket's own `### Run per change`, copied by its dispatcher
-// (ADR-0029); its `### Run at review` half runs once, on the stack tip, in the
+// commands are the ticket's own `### Run per change`, as arming read them
+// (ADR-0029, ADR-0030); its `### Run at review` half runs once, on the stack tip, in the
 // whole-stack review, and never reaches a per-ticket role.
 const validationLine = (cmds) => `${cmds.length
-  ? `Ticket validation — run per change. Run EVERY command below on your final commit and return one result per command, the command copied verbatim:\n${cmds.map((c) => `- \`${c}\``).join('\n')}`
+  ? `Ticket validation — run per change. Run EVERY command below on your final commit and return one result per command, the command copied verbatim:\n${cmds.map((c) => `- \`${maskOf(c)}\``).join('\n')}${unmasking(cmds)}`
   : `This ticket's validation recipe has no per-change commands. Run the repo's tests for what you touched and return each command you ran with its result.`}
+${JUDGING}
 ${RUNNING}`
+// The exit code decides every green; only a red is judged, and only against
+// the baseline record (ADR-0030). A non-zero exit judged green is a waived
+// check, and its exit code travels with it as the trace of that judgement.
+const JUDGING = `Each result carries the command's \`exit_code\`. A zero exit is \`passed: true\`, with no judgement. A non-zero exit is \`passed: true\` only when every failure in its output is pre-existing against the run's baseline record, \`${BASELINE_RECORD}\` — listed there for that command, a test by its id, a diagnostic by its tool, rule, file and snippet — and your work was not meant to fix it: that is a waived check. Any failure the record lacks, or a command it has no entry for, is \`passed: false\`.`
+// The checks a result judged green over a non-zero exit. They travel with the
+// validated sha, so the next role knows which ones it may not inherit.
+const waivedOf = (checks) => (checks || []).filter((k) => k.passed && k.exit_code !== 0).map((k) => ({ command: k.command, exit_code: k.exit_code }))
+const unionWaived = (a, b) => unionInto([...a], b, (k) => norm(k.command))
+const validatedBy = (r, by) => r.validated_sha ? { sha: r.validated_sha, by, waived: waivedOf(r.checks), cleared: (r.checks || []).filter((k) => k.passed && k.exit_code === 0).map((k) => norm(k.command)) } : null
 // A green result travels with the sha it was green on (ADR-0009). The agent
 // downstream checks the sha itself — one rev-parse — and inherits the result
 // when nothing changed, so the run pays for each tree once. Re-running on an
 // unchanged tree was 36 of 153 measured full-suite runs, provably; the same
-// rule is what ECONOMY asks for and could not enforce.
-const inherit = (v) => v && v.sha
-  ? `The branch was validated green at \`${v.sha}\` by ${v.by}. Run \`git rev-parse HEAD\`: if it matches and you have edited nothing, inherit that result — report every check with \`passed: true\` and \`validated_sha\` = \`${v.sha}\` — instead of re-running. If it differs, or you edited anything, run the recipe.`
-  : ''
+// rule is what ECONOMY asks for and could not enforce. A waived check is the
+// exception (ADR-0030): it is one agent's judgement, not an exit code, so the
+// next role re-runs it and judges it again — the cheapest second opinion.
+const inherit = (v) => {
+  if (!v || !v.sha) return ''
+  const waived = v.waived || []
+  return `The branch was validated green at \`${v.sha}\` by ${v.by}. Run \`git rev-parse HEAD\`: if it matches and you have edited nothing, inherit that result — report ${waived.length ? 'every other' : 'every'} check with \`passed: true\`, \`exit_code\` 0 and \`validated_sha\` = \`${v.sha}\` — instead of re-running.${waived.length ? ` Never inherit a waived check: whatever your HEAD, re-run each one below and judge it yourself against the record:\n${waived.map((k) => `- \`${k.command}\` exited ${k.exit_code}`).join('\n')}\n` : ''} If it differs, or you edited anything, run the recipe.`
+}
 // The commands a result set leaves red or missing. Whitespace-insensitive,
 // because agents copy imperfectly; anything looser would credit the wrong run.
+// It reads `passed` alone: a waived check is green, a `passed: false` red
+// whatever its exit code (ADR-0030).
 const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim()
-const readinessRed = (checks, cmds) => cmds.filter((c) => !(checks || []).some((k) => norm(k.command) === norm(c) && k.passed))
-// Appends to `into` each command of `cmds` it lacks, verbatim, with the same
-// whitespace tolerance as readiness: a command copied twice runs once.
-const unionInto = (into, cmds) => {
-  for (const c of cmds) if (norm(c) && !into.some((k) => norm(k) === norm(c))) into.push(c)
+// The baseline's masked forms, by the normalized original (ADR-0030): a
+// command that already failed at the pinned base reaches every role with
+// those failures deselected, so no ticket is sent to fix what it did not
+// break. Recipes keep the ticket's originals — what the gate's cross-check
+// compares with the ticket — and every prompt renders them through maskOf.
+const MASKED = new Map()
+const maskOf = (c) => MASKED.get(norm(c)) || c
+const unmasking = (cmds) => {
+  const masked = cmds.filter((c) => maskOf(c) !== c)
+  return masked.length
+    ? `\nMasked: ${masked.map((c) => `\`${maskOf(c)}\` is \`${c}\` with the tests that already failed at the run's pinned base deselected`).join('; ')} — see ${BASELINE_RECORD}. Those failures are not this ticket's to fix. If your work is meant to fix one of them — the ticket names that test, say — run the unmasked command in place of the masked one, report its check under the unmasked command, and say so in your result.`
+    : ''
+}
+// A masked line is satisfied by a check on either form: the unmasked one is
+// what a role meant to fix a masked failure runs. Red lines are named as the
+// roles were told them.
+const readinessRed = (checks, cmds) =>
+  cmds.filter((c) => !(checks || []).some((k) => k.passed && (norm(k.command) === norm(c) || norm(k.command) === norm(maskOf(c))))).map(maskOf)
+// Appends to `into` each of `items` it lacks, verbatim, compared by `key`: by
+// default a command, with the same whitespace tolerance as readiness, so a
+// command copied twice runs once.
+const unionInto = (into, items, key = norm) => {
+  for (const c of items) if (key(c) && !into.some((k) => key(k) === key(c))) into.push(c)
   return into
 }
 // One result per command. A single green boolean is what let a fixer report
@@ -269,10 +320,11 @@ const CHECKS_FIELD = {
     items: {
       type: 'object',
       additionalProperties: false,
-      required: ['command', 'passed'],
+      required: ['command', 'passed', 'exit_code'],
       properties: {
         command: { type: 'string', description: 'the exact command, copied verbatim from the validation recipe' },
         passed: { type: 'boolean' },
+        exit_code: { type: 'integer', description: 'the exit code the command returned; 0 for a result inherited by sha' },
       },
     },
     description: 'one entry per validation command run on the final commit',
@@ -460,11 +512,13 @@ const FINDINGS_FIELD = {
     },
   },
 }
+// The whole-stack review returns its at-review checks so a waived one reaches
+// the integration PR (ADR-0030).
 const REVIEW_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['findings', 'worktree'],
-  properties: { ...WORKTREE_FIELD, ...FINDINGS_FIELD },
+  required: ['checks', 'findings', 'worktree'],
+  properties: { checks: { ...CHECKS_FIELD.checks, description: 'one entry per at-review command run on the stack tip; empty when none was listed' }, ...WORKTREE_FIELD, ...FINDINGS_FIELD },
 }
 // The gate reviewer also establishes readiness before it reads a line — by
 // inheriting the implementer's result when the sha is unchanged (ADR-0009),
@@ -560,6 +614,59 @@ const EXPLORE_SCHEMA = {
   },
 }
 
+const baselineSchema = (commands) => ({
+  type: 'object',
+  additionalProperties: false,
+  required: ['commands', 'blockers', 'decisions_needed', 'worktree'],
+  properties: {
+    commands: {
+      type: 'array',
+      minItems: commands.length,
+      maxItems: commands.length,
+      description: 'one entry per command you were given, in the order given',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['command', 'exit_code', 'masked_command', 'failures'],
+        properties: {
+          command: { type: 'string', ...(commands.length && { enum: commands }), description: 'the command, copied verbatim' },
+          exit_code: { type: 'integer' },
+          masked_command: { type: 'string', description: 'the command with every failing test listed deselected, confirmed to exit 0; empty when none failed, the tool cannot deselect them, or a diagnostic fails it too' },
+          failures: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['tests', 'diagnostics'],
+            properties: {
+              tests: {
+                type: 'array',
+                items: { type: 'object', additionalProperties: false, required: ['id'], properties: { id: { type: 'string', description: 'the test id as the tool names it' } } },
+              },
+              diagnostics: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['tool', 'rule', 'file', 'snippet', 'message'],
+                  properties: {
+                    tool: { type: 'string' },
+                    rule: { type: 'string', description: 'the rule or error code; empty when the tool names none' },
+                    file: { type: 'string', description: 'repo-relative path' },
+                    snippet: { type: 'string', description: 'the five to six lines of code it points at, copied from the file' },
+                    message: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    ...BLOCKERS_FIELD,
+    decisions_needed: { type: 'array', items: { type: 'string' }, description: 'each blocker you return, named again, so the run holds this node until it is cleared; empty normally' },
+    ...WORKTREE_FIELD,
+  },
+})
+
 // The unblock agent's result: every blocker it saw verified clear, and, as a
 // node's decisions_needed, each it could not — which holds the node and halts
 // the run until a resume carries the same session on (ADR-0016, ADR-0021).
@@ -653,8 +760,93 @@ phase('Explore')
 const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'topic'
 const exploreNodes = graph.explorations.map((e, i, a) =>
   a.filter((x) => slug(x.label) === slug(e.label)).length > 1 ? `explore/${slug(e.label)}-${i + 1}` : `explore/${slug(e.label)}`)
-const notes = (await parallel(
-  graph.explorations.map((e, i) => () =>
+// The baseline measures two command sets (ADR-0030): the per-change ones
+// before dispatch, then, in the background, the at-review ones the per-change
+// set lacks, which only the whole-stack review waits on. Each is a node of its
+// own, so a resume keeps whichever succeeded. A halt on either is recorded on
+// the Workflow runner, where its next prompt names it: so a resume is a call
+// the runner has not made, and that node runs again.
+const AT_REVIEW_ONLY = unionInto([...PER_CHANGE_COMMANDS], AT_REVIEW_COMMANDS).slice(PER_CHANGE_COMMANDS.length)
+const MEASURED = {
+  'per-change': { commands: PER_CHANGE_COMMANDS, halts: `${NOTES_DIR}/baseline-blockers.json` },
+  'at-review': { commands: AT_REVIEW_ONLY, halts: `${NOTES_DIR}/baseline-at-review-blockers.json` },
+}
+const showBlocker = (b) => `${b.subject} — evidence: ${b.evidence}; check: \`${b.check}\``
+const fsOr = async (what, fn) => {
+  try {
+    return fn(await import('node:fs'))
+  } catch (e) {
+    log(`!! could not ${what}: ${e?.message ?? e}`)
+    return null
+  }
+}
+for (const m of Object.values(MEASURED))
+  m.halted = ON_SESSION ? [] : (await fsOr(`read ${m.halts}`, (fs) => (fs.existsSync(m.halts) ? JSON.parse(fs.readFileSync(m.halts, 'utf8')) : []))) || []
+// A measurement that came back with a blocker: recorded for the next prompt,
+// and named.
+const baselineHalt = async (set, r) => {
+  const named = r.blockers.length ? r.blockers.map(showBlocker).join('; ') : r.decisions_needed.join('; ')
+  const m = MEASURED[set]
+  if (!ON_SESSION)
+    await fsOr(`write ${m.halts}, so a resume replays this halt`, (fs) => {
+      fs.mkdirSync(NOTES_DIR, { recursive: true })
+      fs.writeFileSync(m.halts, JSON.stringify([...m.halted, { blockers: r.blockers }], null, 2) + '\n')
+    })
+  return named
+}
+const maskFrom = (commands) => {
+  for (const c of commands) if (norm(c.masked_command) && norm(c.masked_command) !== norm(c.command)) MASKED.set(norm(c.command), c.masked_command)
+}
+const writeRecord = (commands) =>
+  fsOr(`write ${BASELINE_RECORD}`, (fs) => {
+    fs.mkdirSync(NOTES_DIR, { recursive: true })
+    fs.writeFileSync(BASELINE_RECORD, JSON.stringify({ base_sha: BASE_SHA, commands }, null, 2) + '\n')
+    return true
+  })
+const redOf = (commands) => commands.filter((c) => c.exit_code !== 0)
+const cannotRun = `Tell a command that runs and fails from one that cannot run:
+- It runs and fails: it started, ran its tests or checks, and exits non-zero with failures you can read off its output. That is a pre-existing failure: record it as above.
+- It cannot run: the tool will not start (not found, a missing dependency, credential or service), it dies before any test or check ran, or its exit is not a check failure and nothing can be read from its output. That is a broken environment, not a pre-existing failure, and a mask would hide it: it is a **blocker**. Name what is missing in \`subject\`, \`tickets\` empty (the whole run needs it), what the command cannot do without it in \`why\`, the command and what it printed in \`evidence\`, and in \`check\` one command that succeeds once it is cleared.
+
+${ON_SESSION ? `If your session has a tool named \`needs_you\`, call it with the blocker as its reason — what is missing, the evidence and the check — then wait in this session for as long as it takes: the operator enters it and fixes the environment with you. Guide them; never install, configure or fetch anything yourself, and never handle a secret. Once its check passes and the command runs, carry on measuring and return as usual, with an empty \`blockers\`.
+Without that tool, return the blocker in \`blockers\`, its command's entry with the exit code you saw and no failures, and name it again in \`decisions_needed\`: the run holds this node until the operator clears it, and resuming the run carries this session on.` : `Nobody is in this session to clear it. Return the blocker in \`blockers\`, its command's entry with the exit code you saw and no failures, and measure the others as usual. The run halts with it named, and once the operator has cleared it, resuming the run starts this node again.`}`
+const baselinePrompt = (set) => {
+  const { commands, halted } = MEASURED[set]
+  const lastHalt = halted.at(-1)
+  return `${set === 'per-change'
+    ? `Measure what this run's per-change validation commands already fail on at its pinned base, before any ticket of spec #${SPEC} changes anything.`
+    : `Measure what this run's at-review validation commands already fail on at its pinned base. The tickets of spec #${SPEC} are being built meanwhile; only the whole-stack review waits on you.`}
+
+${POINTERS}
+${GIT}
+
+First: \`git fetch origin && git switch --detach ${BASE_SHA}\` — the run's pinned base. Every ticket of this run is cut from this commit, so what fails here is what the tickets inherit. Change nothing: edit no tracked file, commit nothing, move no branch.
+
+${commands.length ? `Run each command below once, from the worktree's top level, in the foreground, exactly as written:
+${commands.map((c) => `- \`${c}\``).join('\n')}
+
+Return one entry per command, in this order, the command copied verbatim, with its exit code and its failures:
+- A failing test goes in \`tests\`, by its id as the tool names it (\`path::test_name\`, \`module::test\`, a file and a test title).
+- Every other failure — a lint, typecheck, format or build diagnostic — goes in \`diagnostics\`: the tool, its rule or error code, the file, a snippet of the five to six lines of code it points at, copied from the file, and its message. Never a line number alone: lines move as agents edit, and the snippet is how a later agent finds the failure again.
+- \`masked_command\`: where the tool can deselect tests (pytest \`--deselect\`, \`cargo test -- --skip\`, \`node --test --test-skip-pattern\`, …), the command with every failing test you listed deselected. Run it once and keep it only if it exits 0; else, or when nothing failed, leave it empty.
+A command that exits 0 is \`exit_code\` 0 with no failures.
+
+${cannotRun}${lastHalt ? `
+
+This node has halted ${halted.length === 1 ? 'once' : `${halted.length} times`} before. The last time on these blockers, which the operator was to clear before resuming the run:
+${lastHalt.blockers.map((b, i) => `${i + 1}. ${showBlocker(b)}`).join('\n')}
+Run each one's check first. One that still fails is still a blocker: return it again.` : ''}` : 'This run has no per-change commands: run nothing, and return an empty `commands`.'}
+
+Never run a build-cache clean, and never launch a command in the background.
+
+${OWN_WORKTREE}
+
+Return the commands, your blockers (an empty list unless a command could not run), \`decisions_needed\`, and your worktree.`
+}
+const measure = (set) => agent(baselinePrompt(set), { ...ROLES.baseline, effort: 'medium', phase: 'Explore', schema: baselineSchema(MEASURED[set].commands), isolation: 'worktree', label: `baseline:${set}`, node: `baseline/${set}` })
+const [baseline, ...explored] = await parallel([
+  () => measure('per-change'),
+  ...graph.explorations.map((e, i) => () =>
     agent(
       `Research this question against the codebase and any external docs it needs, then save your findings as markdown.
 
@@ -674,8 +866,20 @@ Return the absolute path you wrote, and your blockers.`,
       { ...ROLES.explore, effort: 'low', phase: 'Explore', schema: EXPLORE_SCHEMA, label: `explore:${e.label}`, node: exploreNodes[i] },
     ),
   ),
-)).filter(Boolean)
+])
+const notes = explored.filter(Boolean)
 log(`${notes.length} research notes in ${NOTES_DIR}`)
+if (!baseline) throw new Error('the baseline of the per-change commands failed — nothing is dispatched without it')
+if (baseline.blockers.length || baseline.decisions_needed.length) {
+  const named = await baselineHalt('per-change', baseline)
+  log(`HALTED at Explore — the baseline cannot run a per-change command: ${named}`)
+  return { spec: SPEC, halted: true, reason: `the baseline cannot run a per-change command, a blocker: ${named}. Nothing was built. Clear it, then resume the run: the baseline runs again.`, blockers: baseline.blockers, published: [], notes: NOTES_DIR }
+}
+maskFrom(baseline.commands)
+if (await writeRecord(baseline.commands)) {
+  const red = redOf(baseline.commands)
+  log(`Baseline at ${BASE_SHA}: ${red.length ? `${red.length} of ${baseline.commands.length} per-change commands already red (${red.map((c) => c.command).join('; ')})` : 'every per-change command green'}; recorded in ${BASELINE_RECORD}`)
+}
 
 // --- step 2b: clear the blockers with the operator (ADR-0021) -------------
 // Everything discovery found missing is cleared before anything is built, so
@@ -726,6 +930,17 @@ End when every blocker's check passes: each in \`resolved\`, with the check you 
   if (cleared.decisions_needed.length) return haltOnBlockers(`the unblock session left some uncleared (${cleared.decisions_needed.join('; ')})`)
   log(`Unblocked: ${cleared.resolved.map((r) => r.subject).join('; ') || 'nothing left to clear'}`)
 }
+
+// The at-review baseline starts once the environment is cleared, and nothing
+// awaits it until the whole-stack review: the full suites never hold a ticket
+// up (ADR-0030). Not awaited until then, so a failure is caught here, not left
+// to reject unobserved.
+const atReviewMeasured = AT_REVIEW_ONLY.length
+  ? measure('at-review').catch((e) => {
+    log(`!! the at-review baseline failed: ${e?.message ?? e}`)
+    return null
+  })
+  : Promise.resolve({ commands: [], blockers: [], decisions_needed: [] })
 
 // --- step 3: layer 0 — prior work becomes the bottom of the stack --------
 // The stack's whole-stack merge lands on BASE_REF, and a `Closes #N` only fires
@@ -842,7 +1057,7 @@ Each brief is under 3,000 characters and has four sections, nothing else: (1) th
 
 Also return ticket_brief: one short paragraph on the whole ticket, for later fix agents.
 
-And return the ticket's validation recipe. Read exactly two subsections of the ticket's \`## Validation\` section, and nothing else for it — no CI config, no package scripts, no other ticket: \`### Run per change\` into \`validation\`, and \`### Run at review\` into \`review_validation\`. One array entry per command the subsection lists in backticks, copied character for character — never rewritten, merged, split, reordered or invented. A line that names no command ("absent: …", "not applicable: …", a measured time, "Needs: …") adds nothing. A subsection that is missing or lists no command is an empty array.`,
+And return the ticket's validation recipe. Read exactly two subsections of the ticket's \`## Validation\` section, and nothing else for it — no CI config, no package scripts, no other ticket: \`### Run per change\` into \`validation\`, and \`### Run at review\` into \`review_validation\`. One array entry per line of the subsection that names a command: the line's FIRST span in backticks, copied character for character — never rewritten, merged, split, reordered or invented; a later span on the same line is no command. A line with no span, or one that is prose ("absent: …", "not applicable: …", "Recipe measured …", "Needs: …", "Deferred repo gate: …", also after a label, as in "Typecheck: absent: …"), adds nothing. A subsection that is missing or lists no command is an empty array. It is the rule the run was armed with, and the run checks your copy against its own.`,
     { ...ROLES.dispatch, effort: 'high', phase: 'Implement', schema: DISPATCH_SCHEMA, label: `dispatch:#${t.number}${remainder ? ':re' : ''}`, node },
   )
 }
@@ -856,7 +1071,7 @@ async function runSlices(t, slices, { cutFrom, started, tag, node, validation })
     const r = await agent(
       `Implement one slice of ticket #${t.number}: ${s.title}${slices.length > 1 ? ` (slice ${i + 1} of ${slices.length})` : ''}.
 
-${POINTERS}
+${RECIPE_POINTERS}
 ${GIT}
 
 Your brief — which criteria you own, which files, which notes:
@@ -866,7 +1081,7 @@ Read the ticket for the wording of your criteria: \`gh issue view ${t.number}\`.
 
 You design the change: your brief names what to satisfy, not how. Read the code the criteria touch and decide the approach with it in front of you.
 
-First: \`git fetch origin && git switch --detach ${out.started ? `ticket/${t.number}\` — this run's own local branch, carrying what earlier slices of this same workflow committed minutes ago` : `${ref(cutFrom)}\` — your worktree starts on the wrong ref, and everything stacked before this ticket is reachable from there`}.
+First: \`git fetch origin && git switch --detach ${out.started ? `ticket/${t.number}\` — this run's own local branch, carrying what earlier slices of this same workflow committed minutes ago` : `${cutRef(cutFrom)}\` — your worktree starts on the wrong ref, and everything stacked before this ticket is reachable from there`}.
 
 Follow the repo's own conventions and CLAUDE.md, and stay inside the brief — the rest of the ticket belongs to other slices. Comments only where load-bearing: why-not-what, landmines, pointers to external context; never narrate what code does.
 
@@ -962,9 +1177,9 @@ function enqueuePublish(t, impl, cutFrom, single) {
     return agent(
       `Publish ticket #${t.number}'s branch as the next PR of the stack for spec #${SPEC}.
 
-${POINTERS}
+${RECIPE_POINTERS}
 ${GIT}
-Ticket branch: \`${impl.branch}\` — a LOCAL ref this run created. It is not on origin, and putting it there is your job. Cut from \`${ref(cutFrom)}\` (\`gh issue view ${t.number}\` for what it was meant to do).
+Ticket branch: \`${impl.branch}\` — a LOCAL ref this run created. It is not on origin, and putting it there is your job. Cut from \`${cutRef(cutFrom)}\` (\`gh issue view ${t.number}\` for what it was meant to do).
 Current stack tip: \`${ref(base)}\` — what your PR must be based on.
 Stack so far, bottom to top: ${stacked.length ? stacked.map((s) => `#${s.number} (${s.branch})`).join(' → ') : hasLayer0 ? `layer 0 (${START_REF})` : 'empty'}.
 
@@ -972,10 +1187,14 @@ Stack so far, bottom to top: ${stacked.length ? stacked.map((s) => `#${s.number}
 2. ${reclaimStep(toReclaim)}${toReclaim.length ? `
    This comes before any rebase on purpose: the check is that a worktree's HEAD sits on its branch, and a rebase would orphan every one of them from the branch they built.` : ''}
 3. \`git switch --detach ${impl.branch}\`. Then \`git rev-list --count ${ref(base)}..${impl.branch}\`: if it is 0 the branch adds nothing to \`${base}\` — the ticket's work was already there — and there is no PR to open. Stop here: return \`published: false\`, \`nothing_to_publish: true\`, an empty \`decisions_needed\`, and in \`note\` what \`git log --oneline -5 ${impl.branch}\` shows. Push nothing, remove nothing beyond step 2.
-${cutFrom !== base ? `4. The tip moved since this ticket was cut. Replay its commits onto the tip: \`git rebase --onto ${ref(base)} ${ref(cutFrom)}\`. This rewrites only local commits that have never left this clone, so it needs no force and destroys nothing. Resolve any conflict in favour of keeping BOTH tickets' behaviour.
+${cutFrom !== base ? `4. The tip moved since this ticket was cut. Replay its commits onto the tip: \`git rebase --onto ${ref(base)} ${cutRef(cutFrom)}\`. This rewrites only local commits that have never left this clone, so it needs no force and destroys nothing. Resolve any conflict in favour of keeping BOTH tickets' behaviour.
 5. The rebase produced a tree nobody has validated. ${validationLine(impl.validation)}
    Get every command green, committing any fix.
-6. Move the branch onto the rebased work: \`git update-ref refs/heads/${impl.branch} HEAD\`.` : `4. The tip has not moved: the branch already sits on \`${ref(base)}\`. No rebase.
+6. Move the branch onto the rebased work: \`git update-ref refs/heads/${impl.branch} HEAD\`.` : cutRef(base) !== ref(base) ? `4. This ticket was cut from the run's pinned base, \`${BASE_SHA}\`, but its PR goes on \`${base}\` as origin has it now, which may have moved since the run was armed. Decide by sha, never by name: \`git rev-parse ${ref(base)}\`. If it prints \`${BASE_SHA}\`, nothing moved: no rebase. Anything else: replay the ticket's commits onto it, \`git rebase --onto ${ref(base)} ${BASE_SHA}\`. This rewrites only local commits that have never left this clone, so it needs no force and destroys nothing. Resolve any conflict in favour of keeping both the ticket's behaviour and what landed on \`${base}\`.
+5. ${validationLine(impl.validation)}
+   Get every command green, committing any fix. After a rebase the tree is one nobody has validated, and HEAD no longer matches any validated sha.
+   ${inherit(impl.validated)}
+6. If you rebased or committed, move the branch onto that work: \`git update-ref refs/heads/${impl.branch} HEAD\`. Otherwise it already points at the work.` : `4. The tip has not moved: the branch already sits on \`${cutRef(base)}\`. No rebase.
 5. ${validationLine(impl.validation)}
    ${inherit(impl.validated)}
 6. The branch already points at the work; nothing to move.`}
@@ -984,7 +1203,7 @@ ${cutFrom !== base ? `4. The tip moved since this ticket was cut. Replay its com
 
    ${layerLine(layers.length)}
 
-   and must also contain the line \`Closes #${t.number}\`, state that it is part of the stack for spec #${SPEC}, and carry one provenance line — \`Validated green at <sha> by <role>\` — naming the sha the validation recipe last passed on and who ran it (you, or the role you inherited it from).${impl.decided.length ? ` Under a heading "Decided during implementation", list what the implementer settled itself where the ticket left it open:
+   and must also contain the line \`Closes #${t.number}\`, state that it is part of the stack for spec #${SPEC}, and carry one provenance line — \`Validated green at <sha> by <role>\` — naming the sha the validation recipe last passed on and who ran it (you, or the role you inherited it from). Directly under it, one line per waived check you return — \`passed: true\` over a non-zero \`exit_code\` — as \`Waived: <command> exited <exit_code>\`, the command in code formatting; with none, add nothing.${impl.decided.length ? ` Under a heading "Decided during implementation", list what the implementer settled itself where the ticket left it open:
 ${impl.decided.map((d) => `   - ${d}`).join('\n')}
   ` : ''} Leave it a DRAFT — every layer stays draft until the run finalizes, which is how the operator can tell the stack is still being built.
 ${canLink
@@ -1100,13 +1319,13 @@ async function runFixSlices(slices, { subject, branch, cutFrom, started, phase: 
     const r = await agent(
       `Fix one slice of the review findings on ${subject}: ${s.title}${slices.length > 1 ? ` (slice ${i + 1} of ${slices.length})` : ''}.
 
-${POINTERS}
+${RECIPE_POINTERS}
 ${GIT}
 
 Your brief — the work and its findings are already distilled into it, so run no \`gh issue view\`, read no spec, and re-read no review:
 ${s.brief}
 
-First: \`git fetch origin && git switch --detach ${out.landed ? `${branch}\` — this run's own local branch, carrying what earlier fix slices of this same workflow committed minutes ago` : `${ref(cutFrom)}\``}.
+First: \`git fetch origin && git switch --detach ${out.landed ? `${branch}\` — this run's own local branch, carrying what earlier fix slices of this same workflow committed minutes ago` : `${cutRef(cutFrom)}\``}.
 
 Fix what your brief owns and nothing else — the rest of the findings belong to other slices, and the branches below this one in the stack are published and must not be touched.
 
@@ -1132,7 +1351,7 @@ Return one verdict per finding in your brief you fixed or rejected, the \`locati
     // branch may be mid-change, so the round stops rather than building on it.
     if (!r) { out.died = s.title; break }
     noteWorktree(ledgerKey, branch, r)
-    out.validated = r.validated_sha ? { sha: r.validated_sha, by: 'a fix slice' } : null
+    out.validated = validatedBy(r, 'a fix slice')
     out.landed = true
     out.verdicts.push(...r.verdicts)
     out.unfinished.push(...r.unfinished)
@@ -1156,7 +1375,7 @@ Return one verdict per finding in your brief you fixed or rejected, the \`locati
 // reached only once nothing halts, so it passes none.
 async function fixFindings(findings, opts) {
   opts = { guard: () => ({}), ...opts }
-  const skimRef = opts.started ? opts.branch : ref(opts.cutFrom)
+  const skimRef = opts.started ? opts.branch : cutRef(opts.cutFrom)
   const go = opts.guard()
   if (!go) return { verdicts: [], unaccounted: findings, landed: opts.started, validated: opts.validated || null, stopped: true }
   const plan = await dispatchFix(findings, { ...opts, skimRef, go })
@@ -1237,22 +1456,22 @@ async function reviewGate(t, impl, cutFrom, ticketBrief, tk) {
     const r = await agent(
       `Review ticket #${t.number}'s branch before it is published as a PR${round > 1 ? ` — round ${round}, verifying the previous round's fixes` : ''}.
 
-${POINTERS}
+${RECIPE_POINTERS}
 ${GIT}
-Branch \`${impl.branch}\`, reviewed against \`${ref(cutFrom)}\` — that diff is the whole of this ticket's work.
+Branch \`${impl.branch}\`, reviewed against \`${cutRef(cutFrom)}\` — that diff is the whole of this ticket's work.
 What the ticket asked for: \`gh issue view ${t.number}\`. What the implementer says it did: ${impl.summary}
 
 \`git fetch origin && git switch --detach ${impl.branch}\`. Before you read a line of the diff, establish readiness. ${validationLine(impl.validation)}
 ${inherit(validated)}
 Return one result per command in \`checks\`, and the sha they hold for in \`validated_sha\`.
 
-The per-change commands above (${impl.validation.length ? `${impl.validation.length} of them` : 'none'}) are this run's copy of the ticket's recipe. Compare them with the commands the ticket's \`### Run per change\` subsection lists, under \`## Validation\` in \`gh issue view ${t.number}\`: put each command the ticket has that this prompt omits in \`missing_validation\`, copied verbatim from the ticket — never as a finding: the run adds it to the recipe and sends the branch back to implementation to run it.
+The per-change commands above (${impl.validation.length ? `${impl.validation.length} of them` : 'none'}) are this run's copy of the ticket's recipe. Compare them with the commands the ticket's \`### Run per change\` subsection lists, under \`## Validation\` in \`gh issue view ${t.number}\`: put each command the ticket has that this prompt omits in \`missing_validation\`, copied verbatim from the ticket — never as a finding: the run adds it to the recipe and sends the branch back to implementation to run it.${impl.validation.some((c) => maskOf(c) !== c) ? ' A command shown above in its masked form stands for the ticket\'s unmasked one it names: that one is not omitted.' : ''}
 
 If any check is red, or \`missing_validation\` is not empty, stop there and return no findings — the branch is not ready for review and goes back to implementation, not to a fixer.
 
 ${CONTRACT}
 ${round === 1
-        ? `Then invoke the \`code-review\` skill with \`${ref(cutFrom)}\` as the fixed point and ticket #${t.number} as the spec — both its axes, with the severities below overriding whatever the skill would assign. Judge acceptance criterion by acceptance criterion.`
+        ? `Then invoke the \`code-review\` skill with \`${cutRef(cutFrom)}\` as the fixed point and ticket #${t.number} as the spec — both its axes, with the severities below overriding whatever the skill would assign. Judge acceptance criterion by acceptance criterion.`
         : `Then verify, do not rediscover: the previous round's fixer claims to have fixed the findings below. Check each on the branch, and read the lines the fixer touched since the last review (\`git log -p\` for the newest commit(s)) for anything that fix broke. Do not re-review the rest of the diff — round 1 did, and the whole stack gets its own review later.
 
 Claimed fixed:
@@ -1287,13 +1506,13 @@ ${WORKTREE}`,
       continue
     }
     const red = readinessRed(r.checks, impl.validation)
-    const missing = unionInto([], r.missing_validation || []).filter((c) => !impl.validation.some((k) => norm(k) === norm(c)))
+    const missing = unionInto([], r.missing_validation || []).filter((c) => !impl.validation.some((k) => norm(k) === norm(c) || norm(maskOf(k)) === norm(c)))
     if (red.length || missing.length) {
       if (red.length) log(`#${t.number} gate round ${round}: not ready — validation red: ${red.join('; ')}`)
       if (missing.length) log(`#${t.number} gate round ${round}: not ready — the recipe omits the ticket's ${missing.join('; ')}`)
       return { readiness: red, missing }
     }
-    if (r.validated_sha) validated = { sha: r.validated_sha, by: validated && validated.sha === r.validated_sha ? validated.by : 'the gate reviewer' }
+    if (r.validated_sha) validated = validatedBy(r, validated && validated.sha === r.validated_sha ? validated.by : 'the gate reviewer')
     const blocking = r.findings.filter((f) => f.severity !== 'minor')
     if (!blocking.length) {
       log(`#${t.number} gate clean${round > 1 ? ` after ${round} rounds` : ''}${rejected.length ? `, ${rejected.length} finding(s) rejected` : ''}`)
@@ -1375,12 +1594,20 @@ async function implementTicket(t) {
   const plan = await dispatch(t, null, `ticket/${t.number}/dispatch`)
   if (!plan) throw new Error(`dispatcher for #${t.number} died`)
   if (plan.slices.length > 1) log(`#${t.number} dispatched as ${plan.slices.length} slices`)
-  // The first dispatch's copy of the recipe holds for the whole ticket, as its
-  // ticket_brief does: a re-dispatch re-slices, it does not re-read the ticket.
-  // Only the gate's cross-check grows it, with the commands the dispatcher
-  // dropped, so every later round runs the ticket's whole recipe.
-  const validation = unionInto([], plan.validation || [])
-  const reviewValidation = plan.review_validation || []
+  // The ticket's recipe is the one arming read off it, string for string the
+  // commands the baseline measured (ADR-0030), so the record and maskOf always
+  // know them. The dispatcher's copy stands in only for a ticket arming never
+  // read, and is otherwise a cross-check. The recipe holds for the whole
+  // ticket, as its ticket_brief does: a re-dispatch re-slices, it does not
+  // re-read the ticket. Only the gate's cross-check grows it, with the
+  // commands it lacks, so every later round runs the ticket's whole recipe.
+  const armed = TICKET_RECIPES[t.number]
+  if (armed) {
+    const unarmed = [...(plan.validation || []), ...(plan.review_validation || [])].filter((c) => ![...armed.perChange, ...armed.atReview].some((k) => norm(k) === norm(c)))
+    if (unarmed.length) log(`#${t.number}: the dispatcher read commands arming did not; the armed recipe runs: ${unarmed.join('; ')}`)
+  }
+  const validation = unionInto([], armed ? armed.perChange : plan.validation || [])
+  const reviewValidation = armed ? armed.atReview : plan.review_validation || []
   const tk = { single: false, gates: 0 }
   const stop = (detail) => {
     log(`#${t.number} stopped — ${detail}`)
@@ -1407,13 +1634,13 @@ async function implementTicket(t) {
     if (out.stopped) return stop(out.stopped)
     let unmet = out.unmet
     if (!unmet.length) {
-      gate = await reviewGate(t, { branch: `ticket/${t.number}`, summary: summaries.join(' '), decided, validated: last.validated_sha ? { sha: last.validated_sha, by: 'the implementer' } : null, validation }, cutFrom, plan.ticket_brief, tk)
+      gate = await reviewGate(t, { branch: `ticket/${t.number}`, summary: summaries.join(' '), decided, validated: validatedBy(last, 'the implementer'), validation }, cutFrom, plan.ticket_brief, tk)
       if (gate.stopped) return stop(gate.stopped)
       if (!gate.readiness) break
       unionInto(validation, gate.missing)
       unmet = [
         ...gate.readiness.map((c) => `validation red at the gate: ${c}`),
-        ...gate.missing.map((c) => `the ticket's per-change command \`${c}\` was never run: run it on the branch and make it green`),
+        ...gate.missing.map((c) => `the ticket's per-change command \`${maskOf(c)}\` was never run: run it on the branch and make it green`),
       ]
     }
     if (round === MAX_DISPATCH_ROUNDS) return halt(t, 'unmet', `after ${MAX_DISPATCH_ROUNDS} dispatch rounds: ${unmet.join('; ')}`, { unmet })
@@ -1430,7 +1657,7 @@ async function implementTicket(t) {
     checks: last.checks,
     // The gate's fixers may have moved the branch; the newest green sha is
     // what the publisher inherits or invalidates by rebasing.
-    validated: gate.validated || (last.validated_sha ? { sha: last.validated_sha, by: 'the implementer' } : null),
+    validated: gate.validated || validatedBy(last, 'the implementer'),
     decided,
     validation,
     review_validation: reviewValidation,
@@ -1459,6 +1686,7 @@ async function runInOrder() {
 phase('Implement')
 const outcomes = RUN_ORDER === 'sequential' ? await runInOrder() : await Promise.all(auto.map((t) => ticketDone(t.number)))
 const layer0Line = () => (hasLayer0 ? [`layer 0 (pre-existing): ${layer0.pr_url}`] : [])
+const publishedSoFar = () => [...layer0Line(), ...stacked.map((s) => `#${s.number}: ${s.pr_url}`)]
 
 // --- a halted run: no review, no finalize, nothing more on GitHub ----------
 // Review and finalize are for a stack every automated ticket reached. Anything
@@ -1472,12 +1700,14 @@ if (unpublished.length) {
   const cause = haltedBy || unpublished[0]
   log(`HALTED on #${cause.number} (${cause.state}) — ${unpublished.map((o) => `#${o.number} ${o.state}`).join(', ')}`)
   const localOnly = unpublished.filter((o) => runRefs.has(`ticket/${o.number}`)).map((o) => `ticket/${o.number}`)
+  if (AT_REVIEW_ONLY.length) log('Waiting for the at-review baseline to settle before halting, so no session outlives the run and a resume replays its result instead of measuring again')
+  await atReviewMeasured
   return {
     spec: SPEC,
     halted: true,
     reason: `#${cause.number} ${cause.state}: ${cause.detail}. No whole-stack review and no finalize until every automated ticket is published — resume the run to carry it on.`,
     tickets: unpublished.map((o) => ({ ticket: o.number, state: o.state, detail: o.detail, ...(o.questions ? { questions: o.questions } : {}) })),
-    published: [...layer0Line(), ...stacked.map((s) => `#${s.number}: ${s.pr_url}`)],
+    published: publishedSoFar(),
     deferred_to_human: deferred.map((t) => ({ ticket: t.number, reason: t.human_reason || 'downstream of a human ticket' })),
     gate_unfixed: outcomes
       .filter((o) => o.unfixed && o.unfixed.length)
@@ -1491,6 +1721,30 @@ if (unpublished.length) {
 }
 
 // --- step 7: review the whole stack; fixes land as the top PR -------------
+// The review runs the at-review commands, so it waits on their baseline, and a
+// review without it would read every pre-existing failure as the stack's.
+const atReview = await atReviewMeasured
+if (!atReview || atReview.blockers.length || atReview.decisions_needed.length) {
+  const named = atReview ? await baselineHalt('at-review', atReview) : 'its agent returned no result'
+  log(`HALTED before Review — the at-review baseline did not succeed: ${named}`)
+  return {
+    spec: SPEC,
+    halted: true,
+    reason: `the at-review baseline did not succeed${atReview ? ', a blocker' : ''}: ${named}. Every automated ticket is published; no whole-stack review and no finalize until it has. ${atReview ? 'Clear it, then resume' : 'Resume'} the run: the at-review baseline runs again.`,
+    blockers: atReview ? atReview.blockers : [],
+    published: publishedSoFar(),
+    deferred_to_human: deferred.map((t) => ({ ticket: t.number, reason: t.human_reason || 'downstream of a human ticket' })),
+    worktrees_kept: worktreesKept,
+    notes: NOTES_DIR,
+  }
+}
+if (atReview.commands.length) {
+  maskFrom(atReview.commands)
+  if (await writeRecord([...baseline.commands, ...atReview.commands])) {
+    const red = redOf(atReview.commands)
+    log(`At-review baseline at ${BASE_SHA}: ${red.length ? `${red.length} of ${atReview.commands.length} at-review commands already red (${red.map((c) => c.command).join('; ')})` : 'every at-review command green'}; joined to ${BASELINE_RECORD}`)
+  }
+}
 // Every published ticket's `### Run at review` commands, once each, on the
 // stack tip: the full suites no per-ticket role runs (ADR-0029).
 const publishedOutcomes = outcomes.filter((o) => o.state === 'published')
@@ -1514,9 +1768,10 @@ Every ticket was already reviewed alone on its own branch, so look hardest at wh
 
 ${reviewValidation.length
     ? `Run at review — the deduplicated union of every published ticket's \`### Run at review\` commands. Run each once, on the stack tip (\`git switch --detach ${ref(tip)}\`), in the foreground and exactly as written, never as a background job and never with a build-cache clean:
-${reviewValidation.map((c) => `- \`${c}\``).join('\n')}
-Each command that exits red is a \`blocker\` finding: the command in \`location\`, what failed in \`issue\`.`
-    : `No published ticket lists a command to run at review.`}
+${reviewValidation.map((c) => `- \`${maskOf(c)}\``).join('\n')}${unmasking(reviewValidation)}
+Return one check per command, the command copied verbatim as listed. ${JUDGING}
+Each check that is \`passed: false\` is a \`blocker\` finding: the command in \`location\`, what failed in \`issue\`. A waived check is no finding: every failure in it was there before the stack.`
+    : `No published ticket lists a command to run at review: return an empty \`checks\`.`}
 
 ${WORKTREE}`,
   { ...ROLES.review, phase: 'Review', schema: REVIEW_SCHEMA, isolation: ISOLATION, label: `review:spec-${SPEC}`, node: 'review' },
@@ -1525,6 +1780,8 @@ noteWorktree('review', tip, review)
 // Fail closed: a review that never returned is not a review with zero findings.
 const reviewMissing = !review
 const findings = review ? review.findings : []
+// The at-review checks the review judged green over a non-zero exit.
+const reviewWaived = waivedOf(review?.checks)
 log(reviewMissing ? 'code review: the whole-stack reviewer died — the stack is UNREVIEWED as a whole' : `code review: ${findings.length} findings`)
 
 // The stack's PRs are published: pushing fixes into them would force-update
@@ -1552,6 +1809,10 @@ if (findings.length) {
   })
   integrationVerdicts = out.verdicts
   integrationUnaccounted = out.unaccounted
+  // Every waived check behind this PR: the review's at-review ones, and the
+  // last fixer's over the union recipe.
+  const cleared = new Set(out.validated?.cleared || [])
+  const integrationWaived = unionWaived(out.validated?.waived || [], reviewWaived.filter((k) => !cleared.has(norm(k.command))))
   if (out.landed) {
     // Publishing is the one irreversible act of this phase, so it is its own
     // small agent rather than the last and most context-exhausted fixer's job.
@@ -1578,7 +1839,10 @@ Do not run \`gh stack link\` — finalize registers this layer.
 
 Findings it addresses:
 ${findings.map((f) => `- [${f.severity}] ${f.location} — ${f.issue}`).join('\n')}
-
+${integrationWaived.length ? `
+Under them, one line per waived check — judged green over a non-zero exit, every failure in it pre-existing at the run's pinned base (${BASELINE_RECORD}) — as \`Waived: <command> exited <exit_code>\`, the command in code formatting:
+${integrationWaived.map((k) => `- \`${k.command}\` exited ${k.exit_code}`).join('\n')}
+` : ''}
 After the PR exists:
 ${reclaimStep(integrationReclaim)}
 
@@ -1666,7 +1930,9 @@ ${stackDisabled
 2. Mark every PR of the stack ready for review, bottom to top: \`gh pr ready <number>\`. Draft PRs block a stack merge, so none may stay draft — and until this step the drafts are what tell the operator the run is still adding layers, so it must not happen earlier.
 ${complete
     ? `3. Append the line \`Closes #${SPEC}\` to the TOP PR's body (\`gh pr edit\` — keep the existing body, add the line). Merging the whole stack from the top then closes every ticket and the spec at once.`
-    : `3. Add NO \`Closes #${SPEC}\` anywhere — the spec is not complete. Comment on the TOP PR and on issue #${SPEC}: the stack in merge order (the PR list above), and what remains for a human: ${remains.join('; ')}. A later run stacks the remainder on top.`}
+    : `3. Add NO \`Closes #${SPEC}\` anywhere — the spec is not complete. Comment on the TOP PR and on issue #${SPEC}: the stack in merge order (the PR list above), and what remains for a human: ${remains.join('; ')}. A later run stacks the remainder on top.`}${!integration && reviewWaived.length ? `
+   The whole-stack review waived these at-review checks on the stack tip, the TOP PR's head — each judged green over a non-zero exit, every failure in it pre-existing at the run's pinned base (${BASELINE_RECORD}) — and no integration PR exists to list them. Append them to the TOP PR's body (\`gh pr edit\` — keep the existing body, add the lines; never rewrite it), one line each as \`Waived: <command> exited <exit_code>\`, the command in code formatting:
+${reviewWaived.map((k) => `   - \`${k.command}\` exited ${k.exit_code}`).join('\n')}` : ''}
 4. ${reclaimStep(finalReclaim)}
 ${ON_SESSION ? '' : `   The lane already reclaimed each published ticket's worktrees; these are the rest. ${strayStep()}
 `}   Touch no other worktree — the user's own checkout in particular — and delete no branches and close no PRs.
@@ -1707,6 +1973,8 @@ return {
   // also on its PR.
   decided: outcomes.filter((o) => o.decided && o.decided.length).map((o) => ({ ticket: o.number, decisions: o.decided })),
   review_findings: reviewMissing ? 'UNREVIEWED — the whole-stack reviewer died' : findings.length,
+  // The at-review checks the review waived; on the integration PR too when one opened.
+  review_waived: reviewWaived,
   integration_pr: integration ? integration.pr_url : null,
   integration_unfixed: [
     ...integrationUnaccounted.map((f) => `[${f.severity}] ${f.location} — ${f.issue} — no verdict came back`),
