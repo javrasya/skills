@@ -1199,13 +1199,19 @@ ${cutFrom !== base ? `4. The tip moved since this ticket was cut. Replay its com
    ${inherit(impl.validated)}
 6. The branch already points at the work; nothing to move.`}
 7. Put it on origin for the first time. First \`git ls-remote --exit-code --heads origin ${impl.branch}\`: exit 0 means the branch is ALREADY on origin — an earlier run's, or someone's — and this run may not move it, not even fast-forward (publish-once, ADR-0005): stop, return \`published: false\`, and put in \`decisions_needed\` the branch, its origin sha and this run's sha, and that the operator must delete or rename the origin branch before the run can publish. Exit 2 (no such ref): \`git push origin ${impl.branch}\`. This CREATES the branch there — it overwrites nothing and needs no force. A rejected push means something you do not know about is going on: stop and report it.
-8. Open a DRAFT PR: \`gh pr create --draft --head ${impl.branch} --base ${base}\` — \`--base\` takes the branch name. Title = the ticket's title. The body must open with exactly this line:
+8. Open a DRAFT PR: \`gh pr create --draft --head ${impl.branch} --base ${base}\` — \`--base\` takes the branch name. Title = the ticket's title. Write the body for a reviewer reading the diff cold: no preamble, brief prose, the repo's own domain words. It must open with exactly this line:
 
    ${layerLine(layers.length)}
 
-   and must also contain the line \`Closes #${t.number}\`, state that it is part of the stack for spec #${SPEC}, and carry one provenance line — \`Validated green at <sha> by <role>\` — naming the sha the validation recipe last passed on and who ran it (you, or the role you inherited it from). Directly under it, one line per waived check you return — \`passed: true\` over a non-zero \`exit_code\` — as \`Waived: <command> exited <exit_code>\`, the command in code formatting; with none, add nothing.${impl.decided.length ? ` Under a heading "Decided during implementation", list what the implementer settled itself where the ticket left it open:
-${impl.decided.map((d) => `   - ${d}`).join('\n')}
-  ` : ''} Leave it a DRAFT — every layer stays draft until the run finalizes, which is how the operator can tell the stack is still being built.
+   then the line \`Closes #${t.number}\`, then one line stating that it is part of the stack for spec #${SPEC}. Then these sections, in this order:
+
+   - \`## Summary\` — the smallest picture that makes the change clear, beside a sentence or two: pseudocode for logic, a call tree for control flow, a component or file tree for structure, Mermaid for how parts talk to each other, or a \`diff\` sketch when the point is what changed in a shape that already exists. Usually one, rarely more than two. Keep only the calls, files and states a reviewer needs. Build it from \`git diff ${ref(base)}...HEAD\`, not from memory.
+   - \`## Evidence\` — before and after: the test that failed before this change and passes now, named and sketched as pseudocode, or the output that changed; a screenshot when the change is visual and you can take one. Then one provenance line — \`Validated green at <sha> by <role>\` — naming the sha the validation recipe last passed on and who ran it (you, or the role you inherited it from). Directly under it, one line per waived check you return — \`passed: true\` over a non-zero \`exit_code\` — as \`Waived: <command> exited <exit_code>\`, the command in code formatting; with none, add nothing.
+   - \`## Merge Danger\` — \`**Door:** two-way\` when reverting the PR undoes it cleanly, \`**Door:** one-way\` when it migrates or deletes data, changes a contract others consume, or otherwise cannot be walked back. Then \`**Blast Radius:** <one word>\`, and when it is not trivial, one line on what breaks, and for whom, if this change is wrong.${impl.decided.length ? `
+   - \`## Decided during implementation\` — last, one bullet per thing the implementer settled itself where the ticket left it open:
+${impl.decided.map((d) => `     - ${d}`).join('\n')}` : ''}
+
+   Leave it a DRAFT — every layer stays draft until the run finalizes, which is how the operator can tell the stack is still being built.
 ${canLink
         ? `9. ${mirror(layers.slice(0, -1))}
 
