@@ -1,5 +1,0 @@
-# Copied from the skill folder by the pack step (scripts/pack-template.mjs).
-/workflow.template.js
-/pr-guide.md
-*.tgz
-node_modules/
