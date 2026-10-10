@@ -76,7 +76,7 @@ The norm that every skill in this repo must be free of personal info (individual
 
 ### Preflight
 
-The attended pass over a spec and its tickets **before** an unattended run, so the run never stops to ask. Separates **facts** (the agent's to find, proved by a **drill** — a small, harmless, real execution) from **decisions** (the operator's, settled by grilling) and **blockers** (ADR-0021). Every ticket leaves with its [[validation recipe]] — the optimal format, lint, typecheck, test and e2e checks, each cut to the narrowest scope that proves the ticket — inside the **validation budget** of 7 minutes, with full suites left to review. Held by the [[preflight]] skill.
+The attended pass over a spec and its tickets **before** an unattended run, so the run never stops to ask. Separates **facts** (the agent's to find, proved by a **drill** — a small, harmless, real execution) from **decisions** (the operator's, settled by grilling) and **blockers** (ADR-0021). It writes no validation into the tickets: the run picks each ticket's checks itself. Held by the [[preflight]] skill.
 
 ### Ralph (Wiggum) loop
 
