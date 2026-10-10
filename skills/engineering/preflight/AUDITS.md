@@ -1,6 +1,6 @@
 # Preflight audits
 
-Five read-only audits. Each sub-agent gets the spec, the ticket list in order with bodies and edges, and **only its own section**. Every finding carries: the ticket(s) it touches, the evidence (quote, file, command output), and a tag — **fact**, **decision** for the operator, or **blocker** with a check command that shows it cleared.
+Six read-only audits. Each sub-agent gets the spec, the ticket list in order with bodies and edges, and **only its own section**. Every finding carries: the ticket(s) it touches, the evidence (quote, file, command output), and a tag — **fact**, **decision** for the operator, or **blocker** with a check command that shows it cleared.
 
 ## Order
 

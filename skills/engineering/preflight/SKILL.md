@@ -24,9 +24,9 @@ Read the spec, every sub-issue in list order with its body and comments, each on
 
 ## 2. Audit
 
-Dispatch the five audits in [AUDITS.md](AUDITS.md) as parallel, read-only sub-agents, each handed the spec number, the ticket list and only its own section of that file. Each returns findings in the shape that section names, every finding tagged **fact**, **decision**, or **blocker**, with the ticket(s) it touches and its evidence.
+Dispatch the six audits in [AUDITS.md](AUDITS.md) as parallel, read-only sub-agents, each handed the spec number, the ticket list and only its own section of that file. Each returns findings in the shape that section names, every finding tagged **fact**, **decision**, or **blocker**, with the ticket(s) it touches and its evidence.
 
-Done when all five have reported. An audit that returns nothing states what it checked.
+Done when all six have reported. An audit that returns nothing states what it checked.
 
 ## 3. Drill
 
