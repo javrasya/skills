@@ -1,6 +1,6 @@
 # Preflight audits
 
-Six read-only audits. Each sub-agent gets the spec, the ticket list in order with bodies and edges, and **only its own section**. Every finding carries: the ticket(s) it touches, the evidence (quote, file, command output), and a tag — **fact**, **decision** for the operator, or **blocker** with a check command that shows it cleared.
+Five read-only audits. Each sub-agent gets the spec, the ticket list in order with bodies and edges, and **only its own section**. Every finding carries: the ticket(s) it touches, the evidence (quote, file, command output), and a tag — **fact**, **decision** for the operator, or **blocker** with a check command that shows it cleared.
 
 ## Order
 
@@ -41,19 +41,15 @@ Find every action the app, its installer, its tests or its build performs that m
 
 For each: what triggers it, on which OS, which ticket reaches it, and the smallest harmless action that would trigger the same prompt — the drill.
 
-## Validation
+## End to end
 
-Find how an implementation agent proves its work today: test runners and their per-file or per-package forms, e2e harnesses, component and visual tests, linters, formatters, type checkers, build steps, and the CI jobs that gate a PR. Read the repo's agent docs for any stated "how to validate".
+Find whether an implementation agent can drive the app end to end today: the e2e harnesses the repo has, and for a UI, which toolkit it uses and which driving tools fit it.
 
 Report:
 
-- Every command, with its scope (one file, one package, everything), the CI job it mirrors, and its last known wall time if CI records one.
-- Each **absent kind** (formatter, linter, type checker, unit, component, end-to-end) as its own finding, with the cheapest tool that fits the repo's language and dependency stance, so the main agent can measure its baseline.
-- Every **repo gate**: a rule in the repo's docs that names what must run before a change is done, with where it is written and what it costs.
-- How each tool **narrows**: changed-files mode, per-file or per-package targets, affected-test selection, test filters and tags, a single e2e spec, incremental or cached runs, parallel workers. These narrowed forms land in each ticket's `### Run per change`.
-- The **broadest** suite of each kind. These land in each ticket's `### Run at review`, run once on the stack tip, never per change.
-- Whether the repo can drive the app end to end today, and for a UI, which toolkit it uses and which driving tools fit it.
+- Whether the repo can drive the app end to end today, and the thinnest path it already supports, for the smoke e2e drill.
+- For a UI, its toolkit and the driving tools that fit it, for the UI driving drill.
 - Component-level test support for each surface (UI, backend, CLI): present, partial, absent.
-- Any validation that needs a credential, a running service or a device.
+- Anything end to end needs that is a blocker: a credential, a running service or a device.
 
-Run nothing long; the main agent times the commands in its drill step.
+Run nothing long. Which checks each ticket runs is not preflight's: the run picks them from the repo's validation catalogue.
