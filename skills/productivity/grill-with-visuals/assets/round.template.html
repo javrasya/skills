@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- TITLE: the topic, then the round, e.g. "Arming a workflow, round 2". Same words go to the publish call's title. -->
+<title>TOPIC, round N</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  /* layout: one column of question cards; inside each, Today | Proposed side by side, then the recommendation */
+  --bg: #f4f5f7;
+  --surface: #ffffff;
+  --ink: #1b2230;
+  --muted: #5b6577;
+  --line: #d9dde5;
+  --today: #b4432f;      /* what exists now */
+  --today-bg: #fbeee9;
+  --new: #13795b;        /* what is proposed */
+  --new-bg: #e6f4ee;
+  --rec: #2a56c6;        /* the recommendation */
+  --rec-bg: #e9effc;
+  --aside: #8a5a00;      /* a fourth meaning when a page needs one (a namespace, an owner, a risk); else drop its chip */
+  --aside-bg: #fbf1dc;
+  --code-bg: #f0f2f6;
+  --display: "IBM Plex Sans", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #11151c; --surface: #1a2029; --ink: #e6e9ef; --muted: #9aa3b4; --line: #2c3442;
+    --today: #f08a72; --today-bg: #34201b; --new: #5fd0a6; --new-bg: #15302a;
+    --rec: #8fb0ff; --rec-bg: #1c2742; --aside: #e8b75a; --aside-bg: #33290f; --code-bg: #141920;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #11151c; --surface: #1a2029; --ink: #e6e9ef; --muted: #9aa3b4; --line: #2c3442;
+  --today: #f08a72; --today-bg: #34201b; --new: #5fd0a6; --new-bg: #15302a;
+  --rec: #8fb0ff; --rec-bg: #1c2742; --aside: #e8b75a; --aside-bg: #33290f; --code-bg: #141920;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.55 var(--body); }
+main { max-width: 1040px; margin: 0 auto; padding: 32px 20px 64px; display: flex; flex-direction: column; gap: 28px; }
+h1, h2 { font-family: var(--display); text-wrap: balance; margin: 0; }
+h1 { font-size: 1.9rem; font-weight: 700; }
+h2 { font-size: 1.3rem; font-weight: 600; }
+p { margin: 0; max-width: 70ch; }
+a { color: var(--rec); }
+.sub { color: var(--muted); }
+code, pre { font-family: var(--mono); font-size: 0.86rem; }
+code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+pre { margin: 0; padding: 14px 16px; border-radius: 8px; overflow-x: auto; line-height: 1.5; background: var(--code-bg); }
+.legend { display: flex; flex-wrap: wrap; gap: 10px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 0.82rem; font-weight: 600; }
+.chip.today { background: var(--today-bg); color: var(--today); }
+.chip.new { background: var(--new-bg); color: var(--new); }
+.chip.rec { background: var(--rec-bg); color: var(--rec); }
+.chip.aside { background: var(--aside-bg); color: var(--aside); }
+.settled { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 20px; display: flex; flex-direction: column; gap: 10px; }
+.settled ul { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
+.settled li { color: var(--muted); }
+.settled li b { color: var(--ink); font-weight: 600; }
+.q { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 22px; display: flex; flex-direction: column; gap: 16px; scroll-margin-top: 16px; }
+.qhead { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+.qnum { font-family: var(--mono); font-weight: 600; color: var(--rec); font-size: 1.05rem; }
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.pane { border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 10px; border-left: 4px solid; min-width: 0; }
+.pane.today { background: var(--today-bg); border-color: var(--today); }
+.pane.new { background: var(--new-bg); border-color: var(--new); }
+.pane pre { background: var(--surface); }
+.pane h3, .opt h3 { margin: 0; font-size: 0.8rem; letter-spacing: 0.06em; text-transform: uppercase; }
+.pane.today h3 { color: var(--today); }
+.pane.new h3 { color: var(--new); }
+.opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+.opt { border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.opt h3 { color: var(--muted); }
+.opt.pick { border: 2px solid var(--rec); background: var(--rec-bg); }
+.opt.pick h3 { color: var(--rec); }
+.opt pre { background: var(--code-bg); }
+.opt.pick pre { background: var(--surface); }
+.rec { background: var(--rec-bg); border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; }
+.rec .label { color: var(--rec); font-weight: 700; font-size: 0.85rem; }
+.ask { font-weight: 600; }
+.t { color: var(--today); font-weight: 600; }
+.n { color: var(--new); font-weight: 600; }
+.r { color: var(--rec); font-weight: 600; }
+.s { color: var(--aside); font-weight: 600; }
+.m { color: var(--muted); }
+.note { font-size: 0.88rem; }
+.flow { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; font-size: 0.92rem; }
+.flow .k { font-family: var(--mono); font-size: 0.8rem; padding: 2px 8px; border-radius: 6px; align-self: start; background: var(--surface); }
+.flow .k.today { color: var(--today); }
+.flow .k.new { color: var(--new); }
+.foot { color: var(--muted); font-size: 0.9rem; }
+@media (max-width: 760px) { .pair { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <header style="display:flex;flex-direction:column;gap:10px">
+    <h1>TOPIC, round N</h1>
+    <!-- One or two sentences: what is being grilled, links to the ticket/issue/doc it hangs off. Keep the last sentence. -->
+    <p class="sub">CONTEXT. Answer each question in the chat: “yes” takes the blue recommendation.</p>
+    <!-- One chip per colour the page actually uses. glossary.mjs adds the glossary chip itself. -->
+    <div class="legend">
+      <span class="chip today">● today</span>
+      <span class="chip new">● proposed</span>
+      <span class="chip rec">● recommendation</span>
+      <span class="chip aside">● ASIDE MEANING</span>
+    </div>
+  </header>
+
+  <!-- SETTLED: every decision from earlier rounds, one line each, keyed by its Q number, as the user settled it
+       (their words where they changed the recommendation). Round 1 has no strip: delete the section. -->
+  <section class="settled" id="settled" aria-label="Settled so far">
+    <h2>Settled so far</h2>
+    <ul>
+      <li><b>Q1</b> DECISION, in one sentence.</li>
+    </ul>
+  </section>
+
+  <!-- QUESTION CARD, comparison form: Today | Proposed. Use when the question changes something that exists.
+       Q numbers continue across rounds (round 2 starts after round 1's last), so "Q7" always means one question. -->
+  <section class="q" id="q2">
+    <div class="qhead"><span class="qnum">Q2</span><h2>QUESTION TITLE</h2></div>
+    <p>WHY THIS IS A QUESTION: one or two sentences. Colour the words that name each side: <span class="t">today’s thing</span>, <span class="n">the proposed thing</span>.</p>
+    <div class="pair">
+      <div class="pane today">
+        <h3>Today</h3>
+<pre>a tree, a snippet, a command and its output
+<span class="t">the part that changes</span></pre>
+      </div>
+      <div class="pane new">
+        <h3>Proposed</h3>
+<pre>the same shape after the change
+<span class="n">the new part</span></pre>
+        <p class="m note">One line on what the picture does not show.</p>
+      </div>
+    </div>
+    <div class="rec"><span class="label">Recommended</span><p class="ask">Yes: THE RECOMMENDED ANSWER, worded so “yes” accepts it.</p></div>
+  </section>
+
+  <!-- QUESTION CARD, choice form: options side by side, the recommended one marked .pick. Use for A/B/C decisions. -->
+  <section class="q" id="q3">
+    <div class="qhead"><span class="qnum">Q3</span><h2>QUESTION TITLE</h2></div>
+    <p>WHAT IS BEING CHOSEN.</p>
+    <div class="opts">
+      <div class="opt"><h3>A · NAME</h3><p>What it means, and what it costs.</p></div>
+      <div class="opt pick"><h3>B · NAME</h3><p>What it means, and what it costs.</p></div>
+      <div class="opt"><h3>C · NAME</h3><p>What it means, and what it costs.</p></div>
+    </div>
+    <div class="rec"><span class="label">Recommended</span><p class="ask">Yes: B, because REASON.</p></div>
+  </section>
+
+  <!-- QUESTION CARD, flow form: steps as key | description rows, inside a pane or on their own. -->
+  <section class="q" id="q4">
+    <div class="qhead"><span class="qnum">Q4</span><h2>QUESTION TITLE</h2></div>
+    <div class="flow">
+      <span class="k new">step</span><span>what happens</span>
+      <span class="k new">step</span><span>what happens next</span>
+    </div>
+    <div class="rec"><span class="label">Recommended</span><p class="ask">Yes: THE RECOMMENDED ANSWER.</p></div>
+  </section>
+
+  <p class="foot">Answer each one in the chat, e.g. “q2 yes, q3 C because…”.</p>
+</main>
+</body>
+</html>
