@@ -28,6 +28,7 @@ Skills that depend on other skills carry them in-repo, so the link script instal
 | [implement-all](./skills/engineering/implement-all/SKILL.md) | all of the above — `gh`, worktrees, a workflow primitive, `docs/agents/frontier.md` — plus a **CI pipeline** on the target repo (the gate is a green build) and a `Monitor`-style long-poll primitive |
 | [preflight](./skills/engineering/preflight/SKILL.md) | `gh`, authenticated against the repo; a `docs/agents/frontier.md` and `docs/agents/issue-tracker.md` in the target repo |
 | [ralph-goal](./skills/productivity/ralph-goal/SKILL.md) | an agent CLI runnable headlessly in a shell loop |
+| [grill-with-visuals](./skills/productivity/grill-with-visuals/SKILL.md) | the `grilling` and `domain-modeling` skills installed (Matt Pocock's; not vendored here), Node 18+ for the glossary helper, and the claude-artifacts MCP server to publish each round |
 
 ## Reference
 
@@ -59,6 +60,7 @@ These split on one axis — who can invoke them. **User-invoked** skills are rea
 - **[handover-loop](./skills/productivity/handover-loop/SKILL.md)** — `handover` wrapped in an adversarial review loop: each round a fresh subagent does the work, the main agent reviews the real diff, looping until the review is clean.
 - **[handoff](./skills/productivity/handoff/SKILL.md)** — Compact the current conversation into a handoff document so another agent can continue the work. _Vendored from Matt Pocock's repo._
 - **[learn](./skills/productivity/learn/SKILL.md)** — Problem-first, fail-forward lesson on a system, concept, or codebase: five phases (orient, confront, reveal, practice, own it), leaving C4 diagrams and ADRs in the repo.
+- **[grill-with-visuals](./skills/productivity/grill-with-visuals/SKILL.md)** — A grilling whose every round is a published page: one card per question with today-vs-proposed visuals and a recommendation box, a settled-so-far strip that grows each round, and glossary terms that show their definition on hover. Composes `grilling` and `domain-modeling`, which own the questions; it owns only the page.
 
 **Model-invoked**
 
