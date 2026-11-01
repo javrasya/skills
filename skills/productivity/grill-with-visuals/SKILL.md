@@ -33,6 +33,7 @@ Call the Skill tool twice, for "grilling" and "domain-modeling". They own the co
 4. **Publish.** Before the session's first publish, call the artifacts `guide` tool for the topics `pages` and `design`.
    - Round 1: `publish_files` with the scratch file as `index.html`, title and icon. If it refuses to attach the file (a path outside what the client will send), call `publish_version` with the page as `content` instead.
    - Later rounds: republish **the same artifact**, with its slug and the `base_version` from the last publish result, by the same tool that worked in round 1. One grilling is one artifact: the user keeps one link open, the settled strip already carries every earlier round, and the artifact's version history keeps each round's page.
+   - **Open it, every round**, with the link from the publish result: `open <url>` on macOS, `xdg-open <url>` on Linux, `start "" <url>` on Windows. The user reads the round in the browser, not in the terminal. If the command fails or there is no desktop (a remote or headless session), say so in one line and go on: the link in step 5 is enough.
 
 5. **Post the round in chat**: the link, then one line per question, so answers can cite them:
 
@@ -43,4 +44,4 @@ Call the Skill tool twice, for "grilling" and "domain-modeling". They own the co
 
    Then wait for the answers.
 
-When grilling's frontier is empty, republish once more as the settled page: every decision in the strip, no question cards, the title ending in "settled".
+When grilling's frontier is empty, republish once more as the settled page, and open it: every decision in the strip, no question cards, the title ending in "settled".
