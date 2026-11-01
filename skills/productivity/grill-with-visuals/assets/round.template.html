@@ -58,7 +58,12 @@ pre { margin: 0; padding: 14px 16px; border-radius: 8px; overflow-x: auto; line-
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 0.82rem; font-weight: 600; }
 .chip.today { background: var(--today-bg); color: var(--today); }
 .chip.new { background: var(--new-bg); color: var(--new); }
-.chip.rec { background: var(--rec-bg); color: var(--rec); }
+.chip.opt[data-opt] { cursor: pointer; }
+.opt[aria-selected="true"] { outline: 2px solid var(--new); outline-offset: 2px; }
+.opt:focus-visible { outline: 3px solid var(--rec); outline-offset: 2px; }
+.opt .tag { font-size: 0.75rem; font-weight: 700; color: var(--rec); }
+.view[hidden] { display: none; }
+.rec { background: var(--rec-bg); color: var(--rec); }
 .chip.aside { background: var(--aside-bg); color: var(--aside); }
 .settled { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 20px; display: flex; flex-direction: column; gap: 10px; }
 .settled ul { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
@@ -96,6 +101,47 @@ pre { margin: 0; padding: 14px 16px; border-radius: 8px; overflow-x: auto; line-
 .flow .k.today { color: var(--today); }
 .flow .k.new { color: var(--new); }
 .foot { color: var(--muted); font-size: 0.9rem; }
+/* UI mockups: .term for a TUI, .ui for a web or desktop screen */
+.term { background: #0f141b; color: #d7dde8; border-radius: 10px; font-family: var(--mono); font-size: 0.8rem; line-height: 1.6; overflow-x: auto; }
+.term .bar { display: flex; gap: 6px; align-items: center; padding: 8px 12px; border-bottom: 1px solid #222b37; color: #7d8799; font-size: 0.72rem; }
+.term .dot { width: 9px; height: 9px; border-radius: 50%; background: #2c3442; }
+.term .body { padding: 10px 14px 12px; white-space: pre; }
+.term .hd { color: #8fb0ff; font-weight: 600; }
+.term .lbl { color: #7d8799; }
+.term .val { color: #e6e9ef; }
+.term .sel { background: #1c2742; color: #fff; }
+.term .off { color: #566070; }
+.term .why { color: #e8b75a; }
+.term .warn { color: #f08a72; }
+.term .ok { color: #5fd0a6; }
+.term .key { color: #0f141b; background: #7d8799; border-radius: 3px; padding: 0 4px; }
+.ui { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; font-size: 0.88rem; }
+.ui .hd { padding: 10px 14px; border-bottom: 1px solid var(--line); font-weight: 600; }
+.ui .row { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 8px 14px; border-bottom: 1px solid var(--line); }
+.ui .ft { display: flex; gap: 8px; justify-content: flex-end; padding: 10px 14px; }
+.ui .btn { border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; font-weight: 600; }
+.ui .btn.pri { background: var(--rec); border-color: var(--rec); color: var(--surface); }
+.ui .muted { color: var(--muted); }
+/* animation player */
+.player { display: flex; flex-direction: column; gap: 10px; }
+.player canvas { width: 100%; height: auto; border-radius: 10px; background: var(--code-bg); }
+.controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.controls button { font: 600 0.85rem var(--body); color: var(--rec); background: var(--rec-bg); border: 1px solid var(--rec); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+.controls button:focus-visible, .controls input:focus-visible { outline: 3px solid var(--rec); outline-offset: 2px; }
+.controls input[type=range] { flex: 1; min-width: 160px; accent-color: var(--rec); }
+.controls .clock { font-family: var(--mono); font-size: 0.85rem; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 5.5ch; }
+/* statecharts */
+.rules { display: flex; flex-direction: column; gap: 6px; }
+.rule { display: grid; grid-template-columns: max-content 1fr; gap: 10px; align-items: baseline; font-size: 0.92rem; }
+.rule b { font-family: var(--mono); color: var(--rec); }
+.chartbox { background: var(--surface); border-radius: 8px; padding: 8px; overflow-x: auto; }
+.paths { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 0.88rem; }
+.paths .bad { color: var(--today); font-weight: 600; }
+.paths .good { color: var(--new); font-weight: 600; }
+.marks { display: flex; flex-wrap: wrap; gap: 10px; font-size: 0.82rem; color: var(--muted); }
+.mk { display: inline-block; width: 14px; height: 10px; border-radius: 3px; vertical-align: -1px; margin-right: 4px; }
+.mk.breaks { background: #ffecee; border: 2px solid #e72e3b; }
+.mk.path { border: 2px solid #1680f3; }
 @media (max-width: 760px) { .pair { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -135,16 +181,30 @@ pre { margin: 0; padding: 14px 16px; border-radius: 8px; overflow-x: auto; line-
 <span class="t">the part that changes</span></pre>
       </div>
       <div class="pane new">
-        <h3>Proposed</h3>
-<pre>the same shape after the change
+        <h3>Proposed · <span data-shown>A</span></h3>
+        <!-- One .view per option, data-opt matching its option card. Clicking an option shows its view;
+             the recommended one shows first. A question with one proposal: a single view, no options. -->
+        <div class="view" data-opt="A">
+<pre>the same shape after option A
 <span class="n">the new part</span></pre>
+        </div>
+        <div class="view" data-opt="B">
+<pre>the same shape after option B
+<span class="n">its new part</span></pre>
+        </div>
         <p class="m note">One line on what the picture does not show.</p>
       </div>
+    </div>
+    <!-- Every choice grilling listed, lettered as grilling lettered them, the recommended one .pick. -->
+    <div class="opts">
+      <div class="opt pick" data-opt="A"><h3>A · NAME</h3><p>What it means, and what it costs.</p><span class="tag">Recommended</span></div>
+      <div class="opt" data-opt="B"><h3>B · NAME</h3><p>What it means, and what it costs.</p></div>
     </div>
     <div class="rec"><span class="label">Recommended</span><p class="ask">Yes: THE RECOMMENDED ANSWER, worded so “yes” accepts it.</p></div>
   </section>
 
-  <!-- QUESTION CARD, choice form: options side by side, the recommended one marked .pick. Use for A/B/C decisions. -->
+  <!-- QUESTION CARD, choice form: options with nothing to draw, side by side, the recommended one .pick.
+       Give options data-opt only when they have views to switch (see the comparison card). -->
   <section class="q" id="q3">
     <div class="qhead"><span class="qnum">Q3</span><h2>QUESTION TITLE</h2></div>
     <p>WHAT IS BEING CHOSEN.</p>
@@ -180,20 +240,218 @@ sequenceDiagram
     <div class="rec"><span class="label">Recommended</span><p class="ask">Yes: THE RECOMMENDED ANSWER.</p></div>
   </section>
 
+  <!-- QUESTION CARD, UI mockup form: how something looks or is used. Today's screen, then one view per option.
+       .term draws a TUI; .ui draws a web or desktop screen (.hd .row .ft .btn .btn.pri .muted). Check Today
+       against the code before drawing it. Keep data-no-glossary on every mockup. -->
+  <section class="q" id="q6">
+    <div class="qhead"><span class="qnum">Q6</span><h2>QUESTION TITLE</h2></div>
+    <p>WHAT ON SCREEN IS IN QUESTION.</p>
+    <div class="pair">
+      <div class="pane today">
+        <h3>Today</h3>
+<div class="term" data-no-glossary><div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span>the command</div><div class="body"><span class="hd">Screen title</span>
+
+<span class="lbl">Row     </span><span class="val">value</span>
+<span class="sel"><span class="lbl">Row     </span>▸ selected value </span>
+<span class="off">  unavailable value</span>  <span class="why">why</span>
+
+<span class="key">Enter</span> start  <span class="key">Esc</span> cancel</div></div>
+      </div>
+      <div class="pane new">
+        <h3>Proposed · <span data-shown>A</span></h3>
+        <div class="view" data-opt="A">
+<div class="ui" data-no-glossary>
+  <div class="hd">Screen title</div>
+  <div class="row"><span>Row</span><span class="muted">value</span></div>
+  <div class="row"><span>Changed row</span><span>new value</span></div>
+  <div class="ft"><span class="btn">Cancel</span><span class="btn pri">Start</span></div>
+</div>
+        </div>
+        <div class="view" data-opt="B">
+<div class="ui" data-no-glossary>
+  <div class="hd">Screen title</div>
+  <div class="row"><span>Row</span><span class="muted">value</span></div>
+  <div class="ft"><span class="btn pri">Start</span></div>
+</div>
+        </div>
+      </div>
+    </div>
+    <div class="opts">
+      <div class="opt pick" data-opt="A"><h3>A · NAME</h3><p>What it means, and what it costs.</p><span class="tag">Recommended</span></div>
+      <div class="opt" data-opt="B"><h3>B · NAME</h3><p>What it means, and what it costs.</p></div>
+    </div>
+    <div class="rec"><span class="label">Recommended</span><p class="ask">Yes: A, because REASON.</p></div>
+  </section>
+
+  <!-- QUESTION CARD, animation form: when things happen. One canvas, one draw(ctx, t) that renders any moment
+       from t alone, and the player below. Lanes in the reader's words; the number that matters on the canvas;
+       the whole story in aria-label. Never autoplays; reduced motion shows the last frame. -->
+  <section class="q" id="q7">
+    <div class="qhead"><span class="qnum">Q7</span><h2>QUESTION TITLE</h2></div>
+    <p>WHAT HAPPENS, AND WHEN. Press play.</p>
+    <div class="player">
+      <canvas id="anim-q7" width="960" height="220" role="img" aria-label="THE WHOLE ANIMATION IN ONE SENTENCE: what happens at which second."></canvas>
+      <div class="controls">
+        <button type="button" data-play>Play</button>
+        <input type="range" data-scrub min="0" max="20" step="0.1" value="0" aria-label="Time">
+        <span class="clock" data-clock>0.0 s</span>
+        <button type="button" data-speed aria-label="Playback speed">1×</button>
+      </div>
+    </div>
+    <div class="rec"><span class="label">Recommended</span><p class="ask">Yes: THE RECOMMENDED ANSWER.</p></div>
+    <script>
+      document.addEventListener('DOMContentLoaded', function () {
+        var css = getComputedStyle(document.documentElement);
+        function c(n) { return css.getPropertyValue(n).trim(); }
+        var LEN = 20, EVENT = 7, X0 = 170, X1 = 930;
+        function x(s) { return X0 + (X1 - X0) * s / LEN; }
+        function lane(cx, y, label, color, t) {
+          cx.fillStyle = c('--muted'); cx.font = '600 15px ' + c('--body'); cx.textAlign = 'left'; cx.fillText(label, 16, y + 5);
+          cx.strokeStyle = c('--line'); cx.lineWidth = 2; cx.beginPath(); cx.moveTo(X0, y); cx.lineTo(X1, y); cx.stroke();
+          cx.strokeStyle = color; cx.lineWidth = 4; cx.beginPath(); cx.moveTo(X0, y); cx.lineTo(x(t), y); cx.stroke();
+        }
+        function dot(cx, s, y, color, text) {
+          cx.beginPath(); cx.arc(x(s), y, 7, 0, Math.PI * 2); cx.fillStyle = color; cx.fill();
+          cx.fillStyle = color; cx.font = '13px ' + c('--mono'); cx.textAlign = 'center'; cx.fillText(text, x(s), y - 16);
+        }
+        player('anim-q7', LEN, function (cx, t) {
+          cx.clearRect(0, 0, 960, 220);
+          lane(cx, 70, 'today', c('--today'), t);
+          if (t >= 12) dot(cx, 12, 70, c('--today'), 'noticed at 12 s');
+          lane(cx, 160, 'proposed', c('--new'), t);
+          if (t >= EVENT) dot(cx, EVENT, 160, c('--new'), 'noticed at 7 s');
+          cx.strokeStyle = c('--rec'); cx.setLineDash([4, 4]); cx.beginPath(); cx.moveTo(x(t), 30); cx.lineTo(x(t), 200); cx.stroke(); cx.setLineDash([]);
+        });
+      });
+    </script>
+  </section>
+
+  <!-- QUESTION CARD, statechart form: which moves a thing can make, and which break a rule. Rules first, then one
+       stateDiagram-v2 per option as its view. Copy the two classDef lines into every chart that marks a break.
+       Under each chart: one line per break (rule, then path), or one line saying it breaks nothing, and what the
+       chart leaves out. About 20 arrows at most. -->
+  <section class="q" id="q8">
+    <div class="qhead"><span class="qnum">Q8</span><h2>QUESTION TITLE</h2></div>
+    <p>WHAT BEHAVIOUR IS IN QUESTION.</p>
+    <div class="rules">
+      <div class="rule"><b>R1</b><span>A RULE THE USER AGREES TO, IN ONE SENTENCE.</span></div>
+      <div class="rule"><b>R2</b><span>ANOTHER RULE.</span></div>
+    </div>
+    <div class="pane new">
+      <h3>Proposed · <span data-shown>A</span></h3>
+      <div class="view" data-opt="A">
+        <div class="chartbox">
+<pre class="mermaid">
+stateDiagram-v2
+    direction LR
+    state "What the reader sees" as Working
+    state "Another state" as Waiting
+    state "Done" as Done
+    [*] --> Working
+    Working --> Waiting: something happens
+    Waiting --> Working: you answer
+    Working --> Done: the work settles
+</pre>
+        </div>
+        <ul class="paths">
+          <li class="good">No state breaks R1 or R2.</li>
+          <li class="m">The chart leaves out WHAT IT HIDES.</li>
+        </ul>
+      </div>
+      <div class="view" data-opt="B">
+        <div class="chartbox">
+<pre class="mermaid">
+stateDiagram-v2
+    direction LR
+    state "What the reader sees" as Working
+    state "Another state" as Waiting
+    state "A state that breaks a rule" as Broken
+    [*] --> Working
+    Working --> Waiting: something happens
+    Waiting --> Working: you answer
+    Working --> Broken: something else happens [while a condition holds]
+    classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+    classDef bugPath stroke:#1680f3,stroke-width:2.5px
+    class Broken breaks
+    class Working bugPath
+</pre>
+        </div>
+        <ul class="paths">
+          <li class="bad">R2 breaks: What the reader sees → something else happens while a condition holds → A state that breaks a rule.</li>
+        </ul>
+      </div>
+      <div class="marks"><span><span class="mk breaks"></span>breaks a rule</span><span><span class="mk path"></span>on the shortest path to a break</span></div>
+    </div>
+    <div class="opts">
+      <div class="opt pick" data-opt="A"><h3>A · NAME</h3><p>What it means. Breaks neither rule.</p><span class="tag">Recommended</span></div>
+      <div class="opt" data-opt="B"><h3>B · NAME</h3><p>What it means. Breaks R2.</p></div>
+    </div>
+    <div class="rec"><span class="label">Recommended</span><p class="ask">Yes: A, because it breaks neither rule.</p></div>
+  </section>
+
   <p class="foot">Answer each one in the chat, e.g. “q2 yes, q3 C because…”.</p>
 </main>
 <script>
+  // An animation card: draw(t) renders any moment from the time alone; the player only moves t.
+  window.player = function (id, length, draw) {
+    var cv = document.getElementById(id), card = cv.closest('.player');
+    var play = card.querySelector('[data-play]'), scrub = card.querySelector('[data-scrub]');
+    var clock = card.querySelector('[data-clock]'), speedBtn = card.querySelector('[data-speed]');
+    var t = 0, speed = 1, running = false, last = 0;
+    scrub.max = length;
+    function render() { draw(cv.getContext('2d'), t); scrub.value = t.toFixed(1); clock.textContent = t.toFixed(1) + ' s'; }
+    function frame(now) {
+      if (!running) return;
+      t = Math.min(length, t + (now - last) / 1000 * speed); last = now; render();
+      if (t >= length) { running = false; play.textContent = 'Replay'; return; }
+      requestAnimationFrame(frame);
+    }
+    play.addEventListener('click', function () {
+      if (running) { running = false; play.textContent = 'Play'; return; }
+      if (t >= length) t = 0;
+      running = true; play.textContent = 'Pause'; last = performance.now(); requestAnimationFrame(frame);
+    });
+    scrub.addEventListener('input', function () { t = +scrub.value; render(); });
+    speedBtn.addEventListener('click', function () { speed = speed === 1 ? 4 : 1; speedBtn.textContent = speed + '×'; });
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) t = length;
+    render();
+  };
   (function () {
+    function options() {
+      document.querySelectorAll('section.q').forEach(function (card) {
+        var tabs = card.querySelectorAll('.opt[data-opt]');
+        var views = card.querySelectorAll('.view[data-opt]');
+        if (!tabs.length || !views.length) return;
+        card.querySelector('.opts').setAttribute('role', 'tablist');
+        var shown = card.querySelector('[data-shown]');
+        function show(key) {
+          tabs.forEach(function (t) { t.setAttribute('aria-selected', String(t.dataset.opt === key)); });
+          views.forEach(function (v) { v.hidden = v.dataset.opt !== key; });
+          if (shown) shown.textContent = key;
+        }
+        tabs.forEach(function (t) {
+          t.setAttribute('role', 'tab');
+          t.tabIndex = 0;
+          t.addEventListener('click', function () { show(t.dataset.opt); });
+          t.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); show(t.dataset.opt); }
+          });
+        });
+        show((card.querySelector('.opt.pick[data-opt]') || tabs[0]).dataset.opt);
+      });
+    }
+    // Mermaid lays out wrongly inside hidden elements, so every view stays visible until diagrams are drawn.
     var blocks = document.querySelectorAll('pre.mermaid');
-    if (!blocks.length) return;
+    if (!blocks.length) return options();
     var root = document.documentElement.getAttribute('data-theme');
     var dark = root ? root === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
     var s = document.createElement('script');
     s.src = 'https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.12.0/mermaid.min.js';
     s.onload = function () {
       mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'neutral', securityLevel: 'strict' });
-      mermaid.run({ nodes: blocks });
+      mermaid.run({ nodes: blocks }).then(options, options);
     };
+    s.onerror = options;
     document.body.appendChild(s);
   })();
 </script>
