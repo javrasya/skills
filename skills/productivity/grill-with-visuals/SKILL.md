@@ -49,7 +49,7 @@ Call the Skill tool twice, for "grilling" and "domain-modeling". They own the co
 
    Use the real paths, names and commands from the codebase, colouring only the part that changes. Draw everything but Mermaid with `<pre>` text and HTML.
 
-   **Diagrams that read.** `grill.js` lays every Mermaid diagram out with ELK, which keeps self-loops and labels apart where Mermaid's default layout piles them up. Keep each arrow label to about six words, put a condition in brackets after it, and give a chart `direction TB` when it has more than about six states side by side. Charts draw at their own size, so text reads the same in every chart, and one wider than its card scrolls sideways: when a chart scrolls, try `direction TB` or fewer states before keeping it.
+   **Diagrams that read.** `grill.js` lays every Mermaid diagram out with ELK, which keeps self-loops and labels apart where Mermaid's default layout piles them up. Keep each arrow label to about six words, and a self-loop's or self-message's to three or four (Mermaid clips a long one at the chart's edge); put a condition in brackets after it, and give a chart `direction TB` when it has more than about six states side by side. Charts draw at their own size, so text reads the same in every chart, and one wider than its card scrolls sideways: when a chart scrolls, try `direction TB` or fewer states before keeping it.
 
 3. **Explain the terms.** From the repo being grilled, run:
 
