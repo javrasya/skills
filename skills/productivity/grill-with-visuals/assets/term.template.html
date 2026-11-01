@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TERM}}, explained</title>
+<meta name="gl-explainers" content=".">
+<meta name="gl-self" content="{{SLUG}}">
+<link rel="stylesheet" href="../grill.css">
+</head>
+<body>
+<main>
+  <header style="display:flex;flex-direction:column;gap:10px">
+    <p class="sub"><a href="{{BACK}}">← Back to the round</a></p>
+    <h1>{{TERM}}</h1>
+    <!-- One chip per colour the picture uses. -->
+    <div class="legend">
+      <span class="chip today">● today</span>
+      <span class="chip new">● proposed</span>
+    </div>
+  </header>
+
+  <!-- The glossary's words, as written: glossary.mjs filled these in. -->
+  <section class="settled" aria-label="What it means" data-no-glossary>
+    <h2>What it means</h2>
+    <p>{{DEFINITION}}</p>
+    {{AVOID}}
+    <p class="m note">From the glossary: {{SECTION}}</p>
+  </section>
+
+  <section class="settled" aria-label="Where the round uses it" data-no-glossary>
+    <h2>Where the round uses it</h2>
+    <ul>
+      {{USED_IN}}
+    </ul>
+  </section>
+
+  <!-- THE PICTURE: what makes the term click, drawn with the same card kinds as the round page (Today | Proposed,
+       flow, diagram, UI mockup, animation, statechart): copy the card from round.template.html, drop its
+       question number, options and recommendation. Show the term at work in this codebase, with real names.
+       Replace this stub card; glossary.mjs reports every explainer that still has one. -->
+  <section class="q" id="picture" data-stub>
+    <div class="qhead"><h2>HOW IT WORKS</h2></div>
+    <p>ONE OR TWO SENTENCES THAT THE PICTURE BELOW MAKES CONCRETE.</p>
+<pre>THE PICTURE</pre>
+  </section>
+</main>
+<script src="../grill.js"></script>
+</body>
+</html>

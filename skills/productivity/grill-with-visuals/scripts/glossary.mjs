@@ -261,7 +261,7 @@ function formRegex(form) {
     .join('[\\s\\u00a0-]+');
 }
 
-function linkPage(html, terms, { max = 2, exclude = [] } = {}) {
+function linkPage(html, terms, { max = 2, exclude = [], hrefOf = (slug) => `#gl-${slug}` } = {}) {
   html = stripInjection(html);
   const excluded = new Set(exclude.map(norm));
   const forms = [];
@@ -313,10 +313,11 @@ function linkPage(html, terms, { max = 2, exclude = [] } = {}) {
       counts.set(slug, n + 1);
       used.add(slug);
       report.links.push(m);
-      return `<a class="gl" href="#gl-${slug}" data-gl="${slug}">${m}</a>`;
+      (report.slugs ||= new Set()).add(slug);
+      return `<a class="gl" href="${hrefOf(slug)}" data-gl="${slug}">${m}</a>`;
     });
   }
-  return { html: out, used: [...used], perScope: perScope.filter((s) => s.links.length) };
+  return { html: out, used: [...used], perScope: perScope.filter((s) => s.links.length), slugsOf: perScope.filter((s) => s.links.length).map((s) => ({ label: s.label, slugs: [...(s.slugs || [])] })) };
 }
 
 const CSS = `
@@ -331,6 +332,8 @@ a.gl:focus-visible { outline: 2px solid var(--gl); outline-offset: 2px; }
 #gl-tip[hidden] { display: none; }
 #gl-tip .gl-term { font-weight: 700; }
 #gl-tip .gl-sec { color: var(--gl-tip-muted); font-size: 0.78rem; }
+#gl-tip .gl-more { color: var(--gl-tip-ink); font-weight: 600; }
+.gl-terms dt a { color: inherit; }
 #gl-tip .gl-avoid { color: var(--gl-tip-avoid); font-size: 0.84rem; }
 #gl-tip code, .gl-terms code { font-size: 0.8rem; background: transparent; padding: 0; }
 .gl-terms { display: flex; flex-direction: column; gap: 10px; }
@@ -362,7 +365,8 @@ const JS = `
       if (cur) cur.removeAttribute('aria-describedby');
       tip.innerHTML = '<div><span class="gl-term"></span></div><div class="gl-def">' + d.html + '</div>' +
         (d.avoid ? '<div class="gl-avoid"><b>Avoid:</b> ' + d.avoid + '</div>' : '') +
-        (d.section && d.section.toLowerCase() !== d.term.toLowerCase() ? '<div class="gl-sec"></div>' : '');
+        (d.section && d.section.toLowerCase() !== d.term.toLowerCase() ? '<div class="gl-sec"></div>' : '') +
+        (d.href ? '<a class="gl-more" href="' + d.href + '">Open the explainer →</a>' : '');
       tip.querySelector('.gl-term').textContent = d.term;
       const sec = tip.querySelector('.gl-sec'); if (sec) sec.textContent = 'Glossary: ' + d.section;
       cur = a; a.setAttribute('aria-describedby', 'gl-tip');
@@ -401,18 +405,19 @@ const JS = `
 })();
 `;
 
-function inject(html, terms, used) {
+function inject(html, terms, used, hrefs = {}) {
   if (!used.length) return html;
   const data = {};
   const sorted = used.slice().sort((a, b) => terms[a].term.localeCompare(terms[b].term));
   for (const s of sorted) {
     const t = terms[s];
-    data[s] = { term: t.term, section: t.section, html: t.html, avoid: t.avoid };
+    data[s] = { term: t.term, section: t.section, html: t.html, avoid: t.avoid, href: hrefs[s] };
   }
   const list = sorted
     .map((s) => {
       const t = terms[s];
-      return `<dt id="gl-${s}">${escapeHtml(t.term)}</dt><dd>${t.html}${t.avoid ? `<span class="gl-avoid">Avoid: ${t.avoid}</span>` : ''}</dd>`;
+      const name = hrefs[s] ? `<a href="${hrefs[s]}">${escapeHtml(t.term)} →</a>` : escapeHtml(t.term);
+      return `<dt id="gl-${s}">${name}</dt><dd>${t.html}${t.avoid ? `<span class="gl-avoid">Avoid: ${t.avoid}</span>` : ''}</dd>`;
     })
     .join('\n      ');
   const json = JSON.stringify(data).replace(/</g, '\\u003c');
@@ -427,17 +432,19 @@ function inject(html, terms, used) {
 <script type="application/json" id="gl-data">${json}</script>
 <script>${JS}</script>`;
 
-  // The appendix goes at the end of <main> when there is one, the rest just before </body>.
-  const mainEnd = html.lastIndexOf('</main>');
-  if (mainEnd !== -1) {
-    html = html.slice(0, mainEnd) + `${START}\n  ${appendix}\n  ${END}\n` + html.slice(mainEnd);
+  // The list goes first: right after the page's <header>, else at the top of <main>; the rest before </body>.
+  const headerEnd = html.indexOf('</header>');
+  const mainStart = html.search(/<main[^>]*>/);
+  const at = headerEnd !== -1 ? headerEnd + '</header>'.length : mainStart !== -1 ? html.indexOf('>', mainStart) + 1 : -1;
+  const block = `${START}\n${tail}\n${END}\n`;
+  if (at !== -1) {
+    html = html.slice(0, at) + `\n  ${START}\n  ${appendix}\n  ${END}` + html.slice(at);
     const bodyEnd = html.lastIndexOf('</body>');
-    const block = `${START}\n${tail}\n${END}\n`;
     html = bodyEnd !== -1 ? html.slice(0, bodyEnd) + block + html.slice(bodyEnd) : html + block;
   } else {
     const bodyEnd = html.lastIndexOf('</body>');
-    const block = `${START}\n${appendix}\n${tail}\n${END}\n`;
-    html = bodyEnd !== -1 ? html.slice(0, bodyEnd) + block + html.slice(bodyEnd) : html + block;
+    const all = `${START}\n${appendix}\n${tail}\n${END}\n`;
+    html = bodyEnd !== -1 ? html.slice(0, bodyEnd) + all + html.slice(bodyEnd) : html + all;
   }
   // A legend chip that says what the dotted underline means.
   html = html.replace(/(<[a-z]+ [^>]*class="[^"]*\blegend\b[^"]*"[^>]*>)/, `$1\n      <span class="chip gl" data-gl-injected>glossary term: hover or tap</span>`);
@@ -447,6 +454,18 @@ function inject(html, terms, used) {
 const stripAll = stripInjection;
 
 // ---------- CLI ----------
+
+function explainerSetup(page, html) {
+  const meta = (name) => (new RegExp(`<meta name="${name}" content="([^"]*)"`).exec(html) || [])[1];
+  const rel = meta('gl-explainers');
+  if (rel === undefined) return { dir: null, self: null, href: () => null };
+  const dir = path.resolve(path.dirname(page), rel);
+  return {
+    dir,
+    self: meta('gl-self') || null,
+    href: (slug) => (fs.existsSync(path.join(dir, `${slug}.html`)) ? path.relative(path.dirname(page), path.join(dir, `${slug}.html`)) : null),
+  };
+}
 
 function parseArgs(argv) {
   const opts = { _: [] };
@@ -478,14 +497,50 @@ function main() {
     const terms = buildTerms(files);
     const max = Number(opts.max ?? 1);
     const exclude = typeof opts.exclude === 'string' ? opts.exclude.split(',').map((s) => s.trim()).filter(Boolean) : [];
-    const r = linkPage(stripAll(html), terms, { max, exclude });
-    fs.writeFileSync(target, inject(r.html, terms, r.used));
+    const ex = explainerSetup(page, html);
+    if (ex.self) exclude.push(...(terms[ex.self] ? [terms[ex.self].term] : []));
+    const r = linkPage(stripAll(html), terms, { max, exclude, hrefOf: (slug) => ex.href(slug) || `#gl-${slug}` });
+    const hrefs = Object.fromEntries(r.used.map((slug) => [slug, ex.href(slug)]).filter(([, h]) => h));
+    fs.writeFileSync(target, inject(r.html, terms, r.used, hrefs));
     console.error(`glossary: ${files.join(', ')} (${Object.keys(terms).length} terms)`);
     console.error(`linked ${r.used.length} distinct terms -> ${target}`);
     for (const s of r.perScope) console.error(`  ${s.label}: ${s.links.join(' · ')}`);
+    if (ex.dir) console.error(`explainers: ${Object.keys(hrefs).length} of ${r.used.length} terms have one in ${path.relative(process.cwd(), ex.dir) || '.'}`);
     return;
   }
-  console.error('usage: glossary.mjs terms [--glossary <file|dir>]\n       glossary.mjs link <page.html> [--glossary <file|dir>] [--out <file>] [--max 1] [--exclude a,b]');
+  if (cmd === 'explainers' && page) {
+    if (!files.length) { console.error('no glossary found: no explainers to write'); return; }
+    const html = fs.readFileSync(page, 'utf8');
+    const terms = buildTerms(files);
+    const ex = explainerSetup(page, html);
+    if (!ex.dir) { console.error('the page names no explainer folder (<meta name="gl-explainers">)'); process.exit(2); }
+    const r = linkPage(stripAll(html), terms, { max: Number(opts.max ?? 1) });
+    const usedIn = {};
+    for (const sc of r.slugsOf) for (const slug of sc.slugs) (usedIn[slug] ||= []).push(sc.label);
+    const tpl = fs.readFileSync(new URL('../assets/term.template.html', import.meta.url), 'utf8');
+    const back = path.relative(ex.dir, page);
+    fs.mkdirSync(ex.dir, { recursive: true });
+    const made = [], stubs = [];
+    for (const slug of r.used) {
+      const file = path.join(ex.dir, `${slug}.html`);
+      if (!fs.existsSync(file)) {
+        const t = terms[slug];
+        const where = (usedIn[slug] || []).map((l) => `<li><a href="${back}#${l}">${escapeHtml(l.toUpperCase())}</a></li>`).join('\n      ') || '<li>On the round page.</li>';
+        fs.writeFileSync(file, tpl
+          .replaceAll('{{TERM}}', escapeHtml(t.term)).replaceAll('{{SLUG}}', slug).replaceAll('{{BACK}}', back)
+          .replace('{{DEFINITION}}', t.html).replace('{{SECTION}}', escapeHtml(t.section || t.term))
+          .replace('{{AVOID}}', t.avoid ? `<p class="m">Avoid: ${t.avoid}</p>` : '')
+          .replace('{{USED_IN}}', where));
+        made.push(path.relative(process.cwd(), file));
+      }
+      if (/\sdata-stub\b/.test(fs.readFileSync(file, 'utf8'))) stubs.push(path.relative(process.cwd(), file));
+    }
+    console.error(`explainers: ${r.used.length} terms on the page, ${made.length} new`);
+    for (const f of made) console.error(`  new   ${f}`);
+    for (const f of stubs) console.error(`  needs its picture: ${f}`);
+    return;
+  }
+  console.error('usage: glossary.mjs terms [--glossary <file|dir>]\n       glossary.mjs link <page.html> [--glossary <file|dir>] [--out <file>] [--max 1] [--exclude a,b]\n       glossary.mjs explainers <page.html> [--glossary <file|dir>]');
   process.exit(2);
 }
 
