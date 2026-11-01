@@ -18,9 +18,19 @@ Call the Skill tool twice, for "grilling" and "domain-modeling". They own the co
      - something that exists and would change → **Today | Proposed** panes, the same kind of picture on both sides;
      - a pick between options → **option cards**, the recommended one marked `.pick`;
      - an order of steps → **flow** rows;
+     - who talks to whom, or how data moves → a **diagram** card;
      - a plain judgement call → text only, no picture.
 
-   A question about shape, layout or flow gets the shape, not a paragraph about it: a directory tree, the call tree, a code snippet, a command and its output, a diff. Use the real paths, names and commands from the codebase, colouring only the part that changes. Draw with `<pre>` text and HTML; the page loads nothing but Google Fonts.
+   **Decide per question whether a picture earns its place.** Ask what the user must see to answer it. When a sentence or two settles it, the card has no picture; that is the right answer for many questions. When the question is about a shape, a layout, a flow or a change, draw that shape instead of describing it, using the **smallest view that makes the key point clear**, the way the `show-me` skill does. Pick one view per card, two only when Today | Proposed needs the same view on both sides. Choose it by what the question turns on:
+     - logic or an algorithm → **pseudocode**;
+     - runtime control flow → a **call tree**;
+     - UI structure → a **component tree**, with the state and module boundaries that matter;
+     - file responsibility or a broad refactor → a shallow **file tree**;
+     - interaction or data flow between parts → a **Mermaid** diagram (`<pre class="mermaid">`; the template loads Mermaid only when a page has one);
+     - what changes in a shape that already exists → a **diff** of that shape (tree, call tree, state), or Today | Proposed panes holding the same view on both sides;
+     - a command → the command and its output.
+
+   Use the real paths, names and commands from the codebase, colouring only the part that changes. Draw everything but Mermaid with `<pre>` text and HTML.
 
 3. **Link glossary terms.** From the repo being grilled, run:
 
@@ -33,6 +43,7 @@ Call the Skill tool twice, for "grilling" and "domain-modeling". They own the co
 4. **Publish.** Before the session's first publish, call the artifacts `guide` tool for the topics `pages` and `design`.
    - Round 1: `publish_files` with the scratch file as `index.html`, title and icon. If it refuses to attach the file (a path outside what the client will send), call `publish_version` with the page as `content` instead.
    - Later rounds: republish **the same artifact**, with its slug and the `base_version` from the last publish result, by the same tool that worked in round 1. One grilling is one artifact: the user keeps one link open, the settled strip already carries every earlier round, and the artifact's version history keeps each round's page.
+   - **Open it, every round**, with the link from the publish result: `open <url>` on macOS, `xdg-open <url>` on Linux, `start "" <url>` on Windows. The user reads the round in the browser, not in the terminal. If the command fails or there is no desktop (a remote or headless session), say so in one line and go on: the link in step 5 is enough.
 
 5. **Post the round in chat**: the link, then one line per question, so answers can cite them:
 
@@ -43,4 +54,4 @@ Call the Skill tool twice, for "grilling" and "domain-modeling". They own the co
 
    Then wait for the answers.
 
-When grilling's frontier is empty, republish once more as the settled page: every decision in the strip, no question cards, the title ending in "settled".
+When grilling's frontier is empty, republish once more as the settled page, and open it: every decision in the strip, no question cards, the title ending in "settled".
