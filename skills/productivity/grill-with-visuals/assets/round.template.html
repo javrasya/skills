@@ -58,7 +58,12 @@ pre { margin: 0; padding: 14px 16px; border-radius: 8px; overflow-x: auto; line-
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 0.82rem; font-weight: 600; }
 .chip.today { background: var(--today-bg); color: var(--today); }
 .chip.new { background: var(--new-bg); color: var(--new); }
-.chip.rec { background: var(--rec-bg); color: var(--rec); }
+.chip.opt[data-opt] { cursor: pointer; }
+.opt[aria-selected="true"] { outline: 2px solid var(--new); outline-offset: 2px; }
+.opt:focus-visible { outline: 3px solid var(--rec); outline-offset: 2px; }
+.opt .tag { font-size: 0.75rem; font-weight: 700; color: var(--rec); }
+.view[hidden] { display: none; }
+.rec { background: var(--rec-bg); color: var(--rec); }
 .chip.aside { background: var(--aside-bg); color: var(--aside); }
 .settled { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 20px; display: flex; flex-direction: column; gap: 10px; }
 .settled ul { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
@@ -135,16 +140,30 @@ pre { margin: 0; padding: 14px 16px; border-radius: 8px; overflow-x: auto; line-
 <span class="t">the part that changes</span></pre>
       </div>
       <div class="pane new">
-        <h3>Proposed</h3>
-<pre>the same shape after the change
+        <h3>Proposed · <span data-shown>A</span></h3>
+        <!-- One .view per option, data-opt matching its option card. Clicking an option shows its view;
+             the recommended one shows first. A question with one proposal: a single view, no options. -->
+        <div class="view" data-opt="A">
+<pre>the same shape after option A
 <span class="n">the new part</span></pre>
+        </div>
+        <div class="view" data-opt="B">
+<pre>the same shape after option B
+<span class="n">its new part</span></pre>
+        </div>
         <p class="m note">One line on what the picture does not show.</p>
       </div>
+    </div>
+    <!-- Every choice grilling listed, lettered as grilling lettered them, the recommended one .pick. -->
+    <div class="opts">
+      <div class="opt pick" data-opt="A"><h3>A · NAME</h3><p>What it means, and what it costs.</p><span class="tag">Recommended</span></div>
+      <div class="opt" data-opt="B"><h3>B · NAME</h3><p>What it means, and what it costs.</p></div>
     </div>
     <div class="rec"><span class="label">Recommended</span><p class="ask">Yes: THE RECOMMENDED ANSWER, worded so “yes” accepts it.</p></div>
   </section>
 
-  <!-- QUESTION CARD, choice form: options side by side, the recommended one marked .pick. Use for A/B/C decisions. -->
+  <!-- QUESTION CARD, choice form: options with nothing to draw, side by side, the recommended one .pick.
+       Give options data-opt only when they have views to switch (see the comparison card). -->
   <section class="q" id="q3">
     <div class="qhead"><span class="qnum">Q3</span><h2>QUESTION TITLE</h2></div>
     <p>WHAT IS BEING CHOSEN.</p>
@@ -184,16 +203,41 @@ sequenceDiagram
 </main>
 <script>
   (function () {
+    function options() {
+      document.querySelectorAll('section.q').forEach(function (card) {
+        var tabs = card.querySelectorAll('.opt[data-opt]');
+        var views = card.querySelectorAll('.view[data-opt]');
+        if (!tabs.length || !views.length) return;
+        card.querySelector('.opts').setAttribute('role', 'tablist');
+        var shown = card.querySelector('[data-shown]');
+        function show(key) {
+          tabs.forEach(function (t) { t.setAttribute('aria-selected', String(t.dataset.opt === key)); });
+          views.forEach(function (v) { v.hidden = v.dataset.opt !== key; });
+          if (shown) shown.textContent = key;
+        }
+        tabs.forEach(function (t) {
+          t.setAttribute('role', 'tab');
+          t.tabIndex = 0;
+          t.addEventListener('click', function () { show(t.dataset.opt); });
+          t.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); show(t.dataset.opt); }
+          });
+        });
+        show((card.querySelector('.opt.pick[data-opt]') || tabs[0]).dataset.opt);
+      });
+    }
+    // Mermaid lays out wrongly inside hidden elements, so every view stays visible until diagrams are drawn.
     var blocks = document.querySelectorAll('pre.mermaid');
-    if (!blocks.length) return;
+    if (!blocks.length) return options();
     var root = document.documentElement.getAttribute('data-theme');
     var dark = root ? root === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
     var s = document.createElement('script');
     s.src = 'https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.12.0/mermaid.min.js';
     s.onload = function () {
       mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'neutral', securityLevel: 'strict' });
-      mermaid.run({ nodes: blocks });
+      mermaid.run({ nodes: blocks }).then(options, options);
     };
+    s.onerror = options;
     document.body.appendChild(s);
   })();
 </script>

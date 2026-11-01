@@ -1,6 +1,6 @@
 ---
 name: grill-with-visuals
-description: "Grill the user with each round shown as a published page: today-vs-proposed visuals per question, a recommendation box, a settled-so-far strip, and glossary terms that explain themselves on hover."
+description: "Grill the user with each round shown as a published page: every option of each question, each with its own view where they differ, a recommendation box, a settled-so-far strip, and glossary terms that explain themselves on hover."
 disable-model-invocation: true
 ---
 
@@ -14,11 +14,13 @@ Call the Skill tool twice, for "grilling" and "domain-modeling". They own the co
    - **Title and context**: the topic and round number; one or two sentences linking the ticket, issue or doc being grilled.
    - **Legend**: one chip per colour the page uses. Red is what exists today, green is the proposal, blue is the recommendation; the fourth colour is free for one meaning the page needs.
    - **Settled so far**: every decision from earlier rounds, one line each, keyed by Q number, as the user settled it (their wording where it changed the recommendation). The strip grows every round. Round 1 has none.
-   - **One card per question**, with the recommendation in the blue box, worded so "yes" accepts it. Pick the card form by what the question is about:
+   - **One card per question**, carrying everything grilling's question holds: its body, **every choice it lists**, and the recommendation in the blue box, worded so "yes" accepts it. The page shows the question; it never shrinks it to the recommendation.
+   - **The choices**: when grilling lists alternatives, the card shows each one as an option card (`.opts`), lettered A, B, C as grilling lettered them, each with what it means and what it costs, the recommended one marked `.pick`. They go in every card form that has them, under the picture when there is one. When the options differ in what they would look like, draw **one view per option** (`.view` with `data-opt` matching its option card) in the Proposed pane: the page shows the recommended option's view first, and clicking or pressing Enter on another option shows its tree, diff or diagram instead. Draw each view with the same kind of picture, so switching compares like with like. Options that would look the same get no views; their cards just sit under the picture. A question with no alternatives (a yes/no on one proposal) has no option cards. Clicking only changes the view: the user still answers in chat.
+   - **The picture**, if the question needs one, picks the card form by what the question is about:
      - something that exists and would change → **Today | Proposed** panes, the same kind of picture on both sides;
-     - a pick between options → **option cards**, the recommended one marked `.pick`;
      - an order of steps → **flow** rows;
      - who talks to whom, or how data moves → a **diagram** card;
+     - a pick between options with nothing to draw → the option cards alone;
      - a plain judgement call → text only, no picture.
 
    **Decide per question whether a picture earns its place.** Ask what the user must see to answer it. When a sentence or two settles it, the card has no picture; that is the right answer for many questions. When the question is about a shape, a layout, a flow or a change, draw that shape instead of describing it, using the **smallest view that makes the key point clear**, the way the `show-me` skill does. Pick one view per card, two only when Today | Proposed needs the same view on both sides. Choose it by what the question turns on:
@@ -45,10 +47,11 @@ Call the Skill tool twice, for "grilling" and "domain-modeling". They own the co
    - Later rounds: republish **the same artifact**, with its slug and the `base_version` from the last publish result, by the same tool that worked in round 1. One grilling is one artifact: the user keeps one link open, the settled strip already carries every earlier round, and the artifact's version history keeps each round's page.
    - **Open it, every round**, with the link from the publish result: `open <url>` on macOS, `xdg-open <url>` on Linux, `start "" <url>` on Windows. The user reads the round in the browser, not in the terminal. If the command fails or there is no desktop (a remote or headless session), say so in one line and go on: the link in step 5 is enough.
 
-5. **Post the round in chat**: the link, then one line per question, so answers can cite them:
+5. **Post the round in chat**: the link, then each question with its choices, so answers can cite a letter as well as "yes":
 
    ```
-   Q10 Where a run's files live: yes = ~/.crew/runs/<workflow>-<UTC>-<hex4>/, registry beside it
+   Q2 Same name in several places: A nearest wins, shadowing shown · B error until qualified · C built in always wins
+      yes = A
    Q11 What replaces the arming skill: yes = native `crew wait`, the skill deleted
    ```
 
