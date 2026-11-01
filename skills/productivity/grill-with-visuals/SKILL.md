@@ -18,9 +18,19 @@ Call the Skill tool twice, for "grilling" and "domain-modeling". They own the co
      - something that exists and would change → **Today | Proposed** panes, the same kind of picture on both sides;
      - a pick between options → **option cards**, the recommended one marked `.pick`;
      - an order of steps → **flow** rows;
+     - who talks to whom, or how data moves → a **diagram** card;
      - a plain judgement call → text only, no picture.
 
-   A question about shape, layout or flow gets the shape, not a paragraph about it: a directory tree, the call tree, a code snippet, a command and its output, a diff. Use the real paths, names and commands from the codebase, colouring only the part that changes. Draw with `<pre>` text and HTML; the page loads nothing but Google Fonts.
+   Inside a card, draw the **smallest view that makes the key point clear**, the way the `show-me` skill does. A question about shape, layout or flow gets the shape, not a paragraph about it:
+     - logic or an algorithm → **pseudocode**;
+     - runtime control flow → a **call tree**;
+     - UI structure → a **component tree**, with the state and module boundaries that matter;
+     - file responsibility or a broad refactor → a shallow **file tree**;
+     - interaction or data flow between parts → a **Mermaid** diagram (`<pre class="mermaid">`; the template loads Mermaid only when a page has one);
+     - what changes in a shape that already exists → a **diff** of that shape (tree, call tree, state), or Today | Proposed panes holding the same view on both sides;
+     - a command → the command and its output.
+
+   Use the real paths, names and commands from the codebase, colouring only the part that changes. Draw everything but Mermaid with `<pre>` text and HTML.
 
 3. **Link glossary terms.** From the repo being grilled, run:
 

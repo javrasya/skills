@@ -166,7 +166,36 @@ pre { margin: 0; padding: 14px 16px; border-radius: 8px; overflow-x: auto; line-
     <div class="rec"><span class="label">Recommended</span><p class="ask">Yes: THE RECOMMENDED ANSWER.</p></div>
   </section>
 
+  <!-- QUESTION CARD, diagram form: who talks to whom, or how data moves. Mermaid source in a pre.mermaid,
+       alone or inside a Today | Proposed pane. Delete this card, and the page loads no script. -->
+  <section class="q" id="q5">
+    <div class="qhead"><span class="qnum">Q5</span><h2>QUESTION TITLE</h2></div>
+<pre class="mermaid">
+sequenceDiagram
+    participant Operator
+    participant Crew
+    Operator->>Crew: crew run implement-spec --spec 122
+    Crew-->>Operator: run id
+</pre>
+    <div class="rec"><span class="label">Recommended</span><p class="ask">Yes: THE RECOMMENDED ANSWER.</p></div>
+  </section>
+
   <p class="foot">Answer each one in the chat, e.g. “q2 yes, q3 C because…”.</p>
 </main>
+<script>
+  (function () {
+    var blocks = document.querySelectorAll('pre.mermaid');
+    if (!blocks.length) return;
+    var root = document.documentElement.getAttribute('data-theme');
+    var dark = root ? root === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+    var s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.12.0/mermaid.min.js';
+    s.onload = function () {
+      mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'neutral', securityLevel: 'strict' });
+      mermaid.run({ nodes: blocks });
+    };
+    document.body.appendChild(s);
+  })();
+</script>
 </body>
 </html>
