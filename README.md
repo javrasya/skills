@@ -60,6 +60,7 @@ These split on one axis — who can invoke them. **User-invoked** skills are rea
 - **[handover-loop](./skills/productivity/handover-loop/SKILL.md)** — `handover` wrapped in an adversarial review loop: each round a fresh subagent does the work, the main agent reviews the real diff, looping until the review is clean.
 - **[handoff](./skills/productivity/handoff/SKILL.md)** — Compact the current conversation into a handoff document so another agent can continue the work. _Vendored from Matt Pocock's repo._
 - **[learn](./skills/productivity/learn/SKILL.md)** — Problem-first, fail-forward lesson on a system, concept, or codebase: five phases (orient, confront, reveal, practice, own it), leaving C4 diagrams and ADRs in the repo.
+- **[q](./skills/productivity/q/SKILL.md)** — Ask a quick question, get just the answer: `Yes.`/`No.` (plus one sentence at most when it helps) for yes/no questions, the bare answer otherwise.
 - **[grill-with-visuals](./skills/productivity/grill-with-visuals/SKILL.md)** — A grilling whose every round is a published page: one card per question with today-vs-proposed visuals and a recommendation box, a settled-so-far strip that grows each round, and glossary terms that show their definition on hover. Composes `grilling` and `domain-modeling`, which own the questions; it owns only the page.
 
 **Model-invoked**
