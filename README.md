@@ -28,7 +28,7 @@ Skills that depend on other skills carry them in-repo, so the link script instal
 | [implement-all](./skills/engineering/implement-all/SKILL.md) | all of the above — `gh`, worktrees, a workflow primitive, `docs/agents/frontier.md` — plus a **CI pipeline** on the target repo (the gate is a green build) and a `Monitor`-style long-poll primitive |
 | [preflight](./skills/engineering/preflight/SKILL.md) | `gh`, authenticated against the repo; a `docs/agents/frontier.md` and `docs/agents/issue-tracker.md` in the target repo |
 | [ralph-goal](./skills/productivity/ralph-goal/SKILL.md) | an agent CLI runnable headlessly in a shell loop |
-| [grill-with-visuals](./skills/productivity/grill-with-visuals/SKILL.md) | the `grilling` and `domain-modeling` skills installed (Matt Pocock's; not vendored here), Node 18+ for the glossary and screenshot helpers, and Chrome or Chromium for the screenshot check |
+| [grill-with-visuals](./skills/productivity/grill-with-visuals/SKILL.md) | the `grilling` and `domain-modeling` skills installed (Matt Pocock's; not vendored here), Node 18+ for the glossary and screenshot helpers, Chrome or Chromium for the screenshot check, and, for checked statecharts, pstack's `statechart` skill (TLC via mise; without it, charts are marked reasoned) |
 
 ## Reference
 
