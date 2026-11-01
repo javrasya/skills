@@ -21,7 +21,7 @@ Call the Skill tool twice, for "grilling" and "domain-modeling". They own the co
      - who talks to whom, or how data moves → a **diagram** card;
      - a plain judgement call → text only, no picture.
 
-   Inside a card, draw the **smallest view that makes the key point clear**, the way the `show-me` skill does. A question about shape, layout or flow gets the shape, not a paragraph about it:
+   **Decide per question whether a picture earns its place.** Ask what the user must see to answer it. When a sentence or two settles it, the card has no picture; that is the right answer for many questions. When the question is about a shape, a layout, a flow or a change, draw that shape instead of describing it, using the **smallest view that makes the key point clear**, the way the `show-me` skill does. Pick one view per card, two only when Today | Proposed needs the same view on both sides. Choose it by what the question turns on:
      - logic or an algorithm → **pseudocode**;
      - runtime control flow → a **call tree**;
      - UI structure → a **component tree**, with the state and module boundaries that matter;
