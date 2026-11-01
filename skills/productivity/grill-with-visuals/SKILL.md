@@ -1,6 +1,6 @@
 ---
 name: grill-with-visuals
-description: Grill the user with each round shown as a published page: today-vs-proposed visuals per question, a recommendation box, a settled-so-far strip, and glossary terms that explain themselves on hover.
+description: "Grill the user with each round shown as a published page: today-vs-proposed visuals per question, a recommendation box, a settled-so-far strip, and glossary terms that explain themselves on hover."
 disable-model-invocation: true
 ---
 
