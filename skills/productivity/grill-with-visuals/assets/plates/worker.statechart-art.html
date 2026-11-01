@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<!--
+  A statechart-art style plate: a worked example, not a template to fill blindly.
+  Style after kevintngo/statechart-art (MIT); this file is an imitation of the style, not its code.
+
+  The MODEL is the checked chart: every state, move, label, condition, break and bug path drawn here must come
+  from the statechart skill's chart.mmd and report (or, without it, from the round's reasoned statechart).
+  The plate adds nothing to the behaviour. To make one for another chart, keep the STYLE and redo the LAYOUT:
+    STYLE   cream paper (#f3ede1) with grain; ink lines with a slight wobble; pencil-grained fills; a typewriter
+            title, an italic subtitle and a small series line; italic, letter-spaced labels on open paper;
+            conditions in brackets, coloured like the layer they depend on; states as props from the domain
+            (tickets, signs, notes), a parent state as a container you can see into; a few small, cute props
+            around the chart, never inside it.
+    LAYOUT  hand-placed: give every label its own clear space, run lines through gaps, never across a prop.
+    BREAKS  broken(id, rule) marks a state that breaks a rule; draw the path to it with line(d, true).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A worker, statechart-art style</title>
+<link href="https://fonts.googleapis.com/css2?family=Cutive+Mono&family=Courier+Prime:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+<style>
+  /* one square plate of cream paper; the chart and its little world drawn in ink and coloured pencil */
+  :root { --paper: #f3ede1; --ink: #2b2622; --brick: #b4483c; --mustard: #d9a441; --slate: #6f8fb3; --sage: #8fb48c; --pink: #e7a9b4; --wood: #d4a25e; }
+  html, body { margin: 0; background: #e8e1d3; }
+  body { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 24px 12px 40px; font-family: "Courier Prime", monospace; color: var(--ink); }
+  svg { width: min(1080px, 100%); height: auto; box-shadow: 0 10px 30px rgba(60, 40, 20, .18); }
+  .player { display: flex; gap: 10px; align-items: center; font-size: 15px; }
+  .player button { font: 700 14px "Courier Prime", monospace; color: var(--ink); background: var(--paper); border: 1.5px solid var(--ink); border-radius: 4px; padding: 5px 12px; cursor: pointer; }
+  .player button:focus-visible { outline: 3px solid var(--brick); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<svg id="plate" viewBox="0 0 1080 1080" role="img" aria-label="A statechart of an implementer in a crew run, drawn as order tickets: working, needs you, died, held pending in the doctor's window, settled ok."></svg>
+<div class="player"><button type="button" id="back">◀ back</button><button type="button" id="next">next ▶</button><span id="say" aria-live="polite"></span></div>
+<script>
+(function () {
+  var NS = 'http://www.w3.org/2000/svg', svg = document.getElementById('plate');
+  function el(tag, a, p, text) { var e = document.createElementNS(NS, tag); for (var k in a) e.setAttribute(k, a[k]); if (text != null) e.textContent = text; (p || svg).appendChild(e); return e; }
+  var C = { paper: '#f3ede1', ink: '#2b2622', brick: '#b4483c', mustard: '#d9a441', slate: '#6f8fb3', sage: '#8fb48c', pink: '#e7a9b4', wood: '#d4a25e', card: '#fbf6ea' };
+  var SERIF = "'Cutive Mono', 'Courier Prime', monospace", ITAL = "'Courier Prime', monospace";
+
+  // ---- textures: paper grain over everything, a wobble on every ink line, a pencil grain in every fill ----
+  var defs = el('defs', {});
+  var f = el('filter', { id: 'wob', x: '-5%', y: '-5%', width: '110%', height: '110%' }, defs);
+  el('feTurbulence', { type: 'fractalNoise', baseFrequency: '0.04', numOctaves: '2', seed: '11', result: 'n' }, f);
+  el('feDisplacementMap', { in: 'SourceGraphic', in2: 'n', scale: '2.2' }, f);
+  var pen = el('filter', { id: 'pencil', x: '-5%', y: '-5%', width: '110%', height: '110%' }, defs);
+  el('feTurbulence', { type: 'fractalNoise', baseFrequency: '1.4', numOctaves: '2', seed: '5', result: 'g' }, pen);
+  el('feColorMatrix', { in: 'g', type: 'matrix', values: '0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 -1.1 1.05', result: 'mask' }, pen);
+  el('feComposite', { in: 'SourceGraphic', in2: 'mask', operator: 'in', result: 'grained' }, pen);
+  el('feTurbulence', { type: 'fractalNoise', baseFrequency: '0.035', numOctaves: '2', seed: '9', result: 'w' }, pen);
+  el('feDisplacementMap', { in: 'grained', in2: 'w', scale: '2.2' }, pen);
+  var grain = el('filter', { id: 'grain' }, defs);
+  el('feTurbulence', { type: 'fractalNoise', baseFrequency: '0.75', numOctaves: '3', seed: '2' }, grain);
+  el('feColorMatrix', { type: 'matrix', values: '0 0 0 0 0.35  0 0 0 0 0.27  0 0 0 0 0.18  0 0 0 0.10 0' }, grain);
+  var mk = el('marker', { id: 'arr', viewBox: '0 0 10 10', refX: '8', refY: '5', markerWidth: '9', markerHeight: '9', orient: 'auto-start-reverse' }, defs);
+  el('path', { d: 'M1 1.5 L8.5 5 L1 8.5', fill: 'none', stroke: C.ink, 'stroke-width': '1.5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, mk);
+  var mkr = el('marker', { id: 'arrR', viewBox: '0 0 10 10', refX: '8', refY: '5', markerWidth: '9', markerHeight: '9', orient: 'auto-start-reverse' }, defs);
+  el('path', { d: 'M1 1.5 L8.5 5 L1 8.5', fill: 'none', stroke: C.brick, 'stroke-width': '1.6', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, mkr);
+
+  el('rect', { width: 1080, height: 1080, fill: C.paper });
+  var art = el('g', { filter: 'url(#wob)' });            // ink: wobbling lines
+  var fills = el('g', { filter: 'url(#pencil)' });       // pencil colour, under the ink
+  svg.insertBefore(fills, art);
+
+  // ---- title block ----
+  el('text', { x: 62, y: 70, 'font-family': SERIF, 'font-size': 19, 'letter-spacing': 1, fill: C.ink }, null, 'the business of crew  ·  I');
+  el('text', { x: 56, y: 158, 'font-family': SERIF, 'font-size': 92, fill: C.ink }, null, 'A worker');
+  el('text', { x: 60, y: 202, 'font-family': ITAL, 'font-style': 'italic', 'font-size': 25, 'letter-spacing': 1, fill: C.ink }, null, 'from the frontier to a PR');
+
+  // ---- helpers: an order ticket, a taped note, ink lines with labels ----
+  var spots = {};
+  function ticket(id, cx, cy, w, label, pin) {
+    var x = cx - w / 2, y = cy - 40, h = 80, g = el('g', {}, art);
+    var zz = 'M' + x + ' ' + y + ' H' + (x + w) + ' V' + (y + h - 6);
+    for (var i = 0; i <= 16; i++) zz += ' L' + (x + w - i * w / 16) + ' ' + (y + h + (i % 2 ? 4 : -6));
+    zz += ' Z';
+    el('path', { d: zz, fill: C.card }, fills);
+    el('path', { d: zz, fill: 'none', stroke: C.ink, 'stroke-width': 1.8, 'stroke-linejoin': 'round' }, g);
+    el('line', { x1: x + 6, y1: y + 18, x2: x + w - 6, y2: y + 18, stroke: C.brick, 'stroke-width': 1 }, g);
+    el('text', { x: x + 10, y: y + 14, 'font-family': ITAL, 'font-size': 10, fill: C.brick }, g, 'No. 12');
+    el('text', { x: cx, y: cy + 15, 'text-anchor': 'middle', 'font-family': SERIF, 'font-size': 30, fill: C.ink }, g, label);
+    el('circle', { cx: cx, cy: y + 1, r: 7.5, fill: pin }, fills);
+    el('circle', { cx: cx, cy: y + 1, r: 7.5, fill: 'none', stroke: C.ink, 'stroke-width': 1.6 }, g);
+    el('circle', { cx: cx - 2.4, cy: y - 1.6, r: 2, fill: '#fff', opacity: .8 }, g);
+    spots[id] = { x: cx, y: cy, w: w, h: h, top: y, bottom: y + h, left: x, right: x + w };
+  }
+  function note(cx, cy, w, label, tilt) {
+    var g = el('g', { transform: 'rotate(' + tilt + ' ' + cx + ' ' + cy + ')' }, art);
+    el('rect', { x: cx - w / 2, y: cy - 30, width: w, height: 60, fill: '#fff8e3' }, fills);
+    el('rect', { x: cx - w / 2, y: cy - 30, width: w, height: 60, fill: 'none', stroke: C.ink, 'stroke-width': 1.6 }, g);
+    [[-1, -1], [1, -1]].forEach(function (s) {
+      el('rect', { x: cx + s[0] * (w / 2) - 14, y: cy - 38, width: 28, height: 13, fill: '#e9dcc0', opacity: .9, transform: 'rotate(' + (s[0] * 28) + ' ' + (cx + s[0] * (w / 2)) + ' ' + (cy - 31) + ')' }, fills);
+    });
+    el('text', { x: cx, y: cy + 9, 'text-anchor': 'middle', 'font-family': SERIF, 'font-size': 25, fill: C.ink }, g, label);
+  }
+  function line(d, red) { return el('path', { d: d, fill: 'none', stroke: red ? C.brick : C.ink, 'stroke-width': red ? 2 : 1.6, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'marker-end': red ? 'url(#arrR)' : 'url(#arr)' }, art); }
+  function say(x, y, text, guard, anchor) {
+    var t = el('text', { x: x, y: y, 'text-anchor': anchor || 'start', 'font-family': ITAL, 'font-style': 'italic', 'font-size': 23, 'letter-spacing': 1, fill: C.ink }, svg);
+    el('tspan', {}, t, text);
+    if (guard) el('tspan', { fill: C.slate, 'font-weight': 700 }, t, ' [' + guard + ']');
+    return t;
+  }
+
+  // ---- the chart ----
+  el('circle', { cx: 690, cy: 262, r: 12, fill: C.ink }, art);
+  el('circle', { cx: 690, cy: 262, r: 17, fill: 'none', stroke: C.ink, 'stroke-width': 1.6 }, art);
+  line('M690 281 V306');
+  ticket('working', 690, 352, 210, 'working', C.sage);
+  ticket('needs', 250, 352, 210, 'needs you', C.pink);
+  ticket('died', 690, 560, 170, 'died', C.brick);
+  ticket('settled', 940, 560, 200, 'settled ok', C.mustard);
+
+  // working <-> needs you: two tracks, a label on each, in the gap between the tickets
+  line('M583 336 H358'); say(470, 322, 'it asks you', null, 'middle');
+  line('M358 372 H583'); say(470, 400, 'your reply lands', null, 'middle');
+  // working -> died
+  line('M690 395 V512'); say(706, 462, 'it dies', null);
+  // working -> settled
+  line('M797 352 H940 V512'); say(838, 337, 'it settles', null);
+
+  // the doctor's window: a parent state you can see into
+  var wx = 520, wy = 708, ww = 340, wh = 300;
+  el('rect', { x: wx, y: wy, width: ww, height: wh, fill: '#dfe9ee' }, fills);
+  for (var i = 0; i < 4; i++) el('line', { x1: wx + 30 + i * 70, y1: wy + 20, x2: wx + 70 + i * 70, y2: wy + wh - 20, stroke: '#fff', 'stroke-width': 9, opacity: .55 }, fills);
+  el('rect', { x: wx, y: wy, width: ww, height: wh, fill: 'none', stroke: C.ink, 'stroke-width': 2 }, art);
+  el('rect', { x: wx - 8, y: wy - 6, width: ww + 16, height: 12, fill: C.slate }, fills);
+  el('rect', { x: wx - 8, y: wy - 6, width: ww + 16, height: 12, fill: 'none', stroke: C.ink, 'stroke-width': 1.6 }, art);
+  var aw = 'M' + (wx - 14) + ' ' + (wy - 6) + ' L' + (wx - 4) + ' ' + (wy - 62) + ' H' + (wx + ww + 4) + ' L' + (wx + ww + 14) + ' ' + (wy - 6);
+  for (var st = 0; st < 8; st++) {
+    var sx = wx - 14 + st * (ww + 28) / 8;
+    el('rect', { x: sx, y: wy - 62, width: (ww + 28) / 16, height: 56, fill: st % 2 ? C.card : C.brick }, fills);
+    el('rect', { x: sx + (ww + 28) / 16, y: wy - 62, width: (ww + 28) / 16, height: 56, fill: st % 2 ? C.brick : C.card }, fills);
+  }
+  el('path', { d: aw, fill: 'none', stroke: C.ink, 'stroke-width': 1.8 }, art);
+  el('rect', { x: wx + 75, y: wy - 52, width: 190, height: 36, fill: C.card }, fills);
+  el('rect', { x: wx + 75, y: wy - 52, width: 190, height: 36, fill: 'none', stroke: C.ink, 'stroke-width': 1.6 }, art);
+  el('text', { x: wx + ww / 2, y: wy - 26, 'text-anchor': 'middle', 'font-family': SERIF, 'font-size': 23, fill: C.ink }, art, 'held pending');
+  spots.held = { x: wx + ww / 2, y: wy + wh / 2, w: ww, h: wh, top: wy - 62, bottom: wy + wh, left: wx, right: wx + ww };
+  note(wx + 110, wy + 80, 140, 'round 1', -3);
+  note(wx + 230, wy + 165, 140, 'round 2', 2.5);
+  note(wx + 120, wy + 245, 140, 'round 3', -1.5);
+  line('M' + (wx + 110) + ' ' + (wy + 112) + ' C' + (wx + 120) + ' ' + (wy + 140) + ' ' + (wx + 160) + ' ' + (wy + 150) + ' ' + (wx + 158) + ' ' + (wy + 150));
+  line('M' + (wx + 230) + ' ' + (wy + 197) + ' C' + (wx + 225) + ' ' + (wy + 222) + ' ' + (wx + 200) + ' ' + (wy + 230) + ' ' + (wx + 192) + ' ' + (wy + 232));
+  // died -> held pending, its label to the left, clear of the awning
+  line('M690 603 V640');
+  say(674, 628, 'its doctor starts', null, 'end');
+  // held -> working: out of the window's left side, up the open space, into working from below
+  line('M' + wx + ' ' + (wy + 150) + ' H470 V452 H640 V398');
+  say(452, 520, 'the doctor carries it on', null, 'end');
+  say(452, 550, '', 'while the run runs', 'end');
+
+  // ---- the little world around the chart ----
+  // the implementer at a desk, laptop open
+  function person(x, y, shirt, hair, apron, hat) {
+    var g = el('g', {}, art);
+    el('rect', { x: x - 26, y: y + 30, width: 52, height: 58, rx: 12, fill: shirt }, fills);
+    if (apron) el('rect', { x: x - 18, y: y + 42, width: 36, height: 46, rx: 3, fill: apron }, fills);
+    el('rect', { x: x - 26, y: y + 30, width: 52, height: 58, rx: 12, fill: 'none', stroke: C.ink, 'stroke-width': 1.8 }, g);
+    el('circle', { cx: x, cy: y, r: 30, fill: '#fbf1e6' }, fills);
+    el('circle', { cx: x, cy: y, r: 30, fill: 'none', stroke: C.ink, 'stroke-width': 1.8 }, g);
+    el('path', { d: 'M' + (x - 30) + ' ' + (y - 2) + ' Q' + (x - 28) + ' ' + (y - 34) + ' ' + x + ' ' + (y - 32) + ' Q' + (x + 28) + ' ' + (y - 34) + ' ' + (x + 30) + ' ' + (y - 2) + ' Q' + (x + 10) + ' ' + (y - 16) + ' ' + (x - 30) + ' ' + (y - 2) + 'Z', fill: hair }, fills);
+    el('path', { d: 'M' + (x - 30) + ' ' + (y - 2) + ' Q' + (x - 28) + ' ' + (y - 34) + ' ' + x + ' ' + (y - 32) + ' Q' + (x + 28) + ' ' + (y - 34) + ' ' + (x + 30) + ' ' + (y - 2), fill: 'none', stroke: C.ink, 'stroke-width': 1.8 }, g);
+    if (hat) {
+      el('path', { d: 'M' + (x - 24) + ' ' + (y - 22) + ' Q' + x + ' ' + (y - 58) + ' ' + (x + 24) + ' ' + (y - 22) + ' Z', fill: hat }, fills);
+      el('path', { d: 'M' + (x - 24) + ' ' + (y - 22) + ' Q' + x + ' ' + (y - 58) + ' ' + (x + 24) + ' ' + (y - 22) + ' Z', fill: 'none', stroke: C.ink, 'stroke-width': 1.6 }, g);
+      el('path', { d: 'M' + (x - 5) + ' ' + (y - 40) + ' h10 M' + x + ' ' + (y - 45) + ' v10', stroke: C.brick, 'stroke-width': 2.4 }, g);
+    }
+    el('circle', { cx: x - 10, cy: y + 4, r: 2.6, fill: C.ink }, g);
+    el('circle', { cx: x + 10, cy: y + 4, r: 2.6, fill: C.ink }, g);
+    el('ellipse', { cx: x - 17, cy: y + 13, rx: 6, ry: 3.4, fill: C.pink, opacity: .85 }, fills);
+    el('ellipse', { cx: x + 17, cy: y + 13, rx: 6, ry: 3.4, fill: C.pink, opacity: .85 }, fills);
+    el('path', { d: 'M' + (x - 4) + ' ' + (y + 15) + ' q4 4 8 0', fill: 'none', stroke: C.ink, 'stroke-width': 1.4 }, g);
+  }
+  // desk
+  el('rect', { x: 50, y: 900, width: 340, height: 18, fill: C.wood }, fills);
+  el('rect', { x: 50, y: 900, width: 340, height: 18, fill: 'none', stroke: C.ink, 'stroke-width': 1.8 }, art);
+  el('rect', { x: 66, y: 918, width: 308, height: 110, fill: '#f6efe1' }, fills);
+  el('rect', { x: 66, y: 918, width: 308, height: 110, fill: 'none', stroke: C.ink, 'stroke-width': 1.8 }, art);
+  for (var v = 0; v < 7; v++) el('line', { x1: 90 + v * 44, y1: 928, x2: 90 + v * 44, y2: 1018, stroke: C.ink, 'stroke-width': .9, opacity: .55 }, art);
+  person(150, 802, C.slate, C.ink, C.sage);
+  // laptop
+  el('path', { d: 'M232 898 L262 838 H350 L326 898 Z', fill: '#c9ced6' }, fills);
+  el('path', { d: 'M232 898 L262 838 H350 L326 898 Z', fill: 'none', stroke: C.ink, 'stroke-width': 1.8 }, art);
+  el('path', { d: 'M222 900 H340', stroke: C.ink, 'stroke-width': 2.2 }, art);
+  el('text', { x: 290, y: 878, 'font-family': ITAL, 'font-size': 13, fill: C.sage, transform: 'skewX(-25)' }, art, '');
+  el('circle', { cx: 293, cy: 870, r: 5, fill: C.card }, fills);
+  // the bell, for "needs you"
+  el('path', { d: 'M212 470 Q212 432 250 432 Q288 432 288 470 Z', fill: C.mustard }, fills);
+  el('path', { d: 'M212 470 Q212 432 250 432 Q288 432 288 470 Z', fill: 'none', stroke: C.ink, 'stroke-width': 1.8 }, art);
+  el('rect', { x: 202, y: 470, width: 96, height: 10, rx: 4, fill: '#a77a3a' }, fills);
+  el('rect', { x: 202, y: 470, width: 96, height: 10, rx: 4, fill: 'none', stroke: C.ink, 'stroke-width': 1.6 }, art);
+  el('circle', { cx: 250, cy: 428, r: 5, fill: C.mustard, stroke: C.ink, 'stroke-width': 1.5 }, art);
+  ['M196 446 l-14 -8', 'M194 460 l-16 0', 'M304 446 l14 -8', 'M306 460 l16 0'].forEach(function (d) { el('path', { d: d, stroke: C.ink, 'stroke-width': 1.4 }, art); });
+  // the doctor, bag in hand, by the window
+  person(955, 850, '#fdfcf8', '#6b4a33', null, '#fdfcf8');
+  el('rect', { x: 980, y: 905, width: 62, height: 44, rx: 6, fill: C.brick }, fills);
+  el('rect', { x: 980, y: 905, width: 62, height: 44, rx: 6, fill: 'none', stroke: C.ink, 'stroke-width': 1.8 }, art);
+  el('path', { d: 'M998 905 v-10 h26 v10', fill: 'none', stroke: C.ink, 'stroke-width': 1.8 }, art);
+  el('path', { d: 'M1007 927 h8 M1011 923 v8', stroke: '#fff', 'stroke-width': 2.6 }, art);
+  el('path', { d: 'M890 1020 H1050', stroke: C.ink, 'stroke-width': 1.4 }, art);
+  // the parcel: a PR, done
+  el('path', { d: 'M905 670 L975 670 L1005 650 L935 650 Z', fill: '#e2c08c' }, fills);
+  el('rect', { x: 905, y: 670, width: 70, height: 56, fill: '#d4a86b' }, fills);
+  el('path', { d: 'M975 670 L1005 650 V706 L975 726 Z', fill: '#bf9255' }, fills);
+  el('path', { d: 'M905 670 L975 670 L1005 650 L935 650 Z M905 670 V726 H975 V670 M975 726 L1005 706 V650', fill: 'none', stroke: C.ink, 'stroke-width': 1.8, 'stroke-linejoin': 'round' }, art);
+  el('path', { d: 'M940 670 V726 M920 660 L990 660', stroke: C.brick, 'stroke-width': 2 }, art);
+  el('text', { x: 940, y: 752, 'text-anchor': 'middle', 'font-family': ITAL, 'font-style': 'italic', 'font-size': 18, fill: C.ink }, art, 'PR #43');
+  // a few stars and a moon, as in the plates
+  [[1000, 120], [1040, 160], [960, 170]].forEach(function (p) { el('path', { d: 'M' + (p[0] - 7) + ' ' + p[1] + ' h14 M' + p[0] + ' ' + (p[1] - 7) + ' v14', stroke: C.ink, 'stroke-width': 1.4 }, art); });
+  el('path', { d: 'M1000 230 a30 30 0 1 0 22 46 a24 24 0 1 1 -22 -46 Z', fill: C.mustard }, fills);
+  el('path', { d: 'M1000 230 a30 30 0 1 0 22 46 a24 24 0 1 1 -22 -46 Z', fill: 'none', stroke: C.ink, 'stroke-width': 1.6 }, art);
+  // paper grain on top
+  el('rect', { width: 1080, height: 1080, filter: 'url(#grain)', fill: '#fff', 'pointer-events': 'none' });
+
+  // ---- a break, when the checked chart has one, as in statechart-art's bug plate: the state pink with a red
+  // double outline, a "rule broken" stamp beside it, the rule on a card, the path to it drawn red ----
+  // at: where the stamp goes, [x, y]: the layout picks a clear spot for it, as for any label
+  function broken(id, rule, at) {
+    var sp = spots[id];
+    el('rect', { x: sp.left, y: sp.top, width: sp.w, height: sp.h, fill: C.pink, opacity: .45 }, fills);
+    el('rect', { x: sp.left - 7, y: sp.top - 7, width: sp.w + 14, height: sp.h + 14, rx: 8, fill: 'none', stroke: C.brick, 'stroke-width': 2.2 }, art);
+    var sx = at[0], sy = at[1];
+    var stamp = el('g', { transform: 'rotate(-8 ' + (sx + 52) + ' ' + (sy - 16) + ')' }, art);
+    el('rect', { x: sx, y: sy - 40, width: 104, height: 48, rx: 6, fill: 'none', stroke: C.brick, 'stroke-width': 2.4 }, stamp);
+    el('rect', { x: sx + 4, y: sy - 36, width: 96, height: 40, rx: 4, fill: 'none', stroke: C.brick, 'stroke-width': 1 }, stamp);
+    el('text', { x: sx + 52, y: sy - 20, 'text-anchor': 'middle', 'font-family': SERIF, 'font-size': 16, fill: C.brick }, stamp, 'rule');
+    el('text', { x: sx + 52, y: sy - 2, 'text-anchor': 'middle', 'font-family': SERIF, 'font-size': 16, fill: C.brick }, stamp, 'broken');
+    // the card sits above everything, sized to its rule
+    var card = el('g', { filter: 'url(#wob)' }, svg);
+    var box = el('rect', { x: 700, y: 40, width: 340, height: 130, rx: 6, fill: '#faf6ec', stroke: C.ink, 'stroke-width': 1.4 }, card);
+    el('text', { x: 722, y: 74, 'font-family': SERIF, 'font-size': 19, fill: C.ink }, card, 'the rule');
+    var words = rule.split(' '), lineText = '', ly = 104;
+    words.forEach(function (w) {
+      if ((lineText + ' ' + w).length > 30) { el('text', { x: 722, y: ly, 'font-family': ITAL, 'font-style': 'italic', 'font-size': 17, fill: C.ink }, card, lineText.trim()); lineText = ''; ly += 22; }
+      lineText += ' ' + w;
+    });
+    el('text', { x: 722, y: ly, 'font-family': ITAL, 'font-style': 'italic', 'font-size': 17, fill: C.ink }, card, lineText.trim());
+    el('path', { d: 'M722 ' + (ly + 30) + ' h44', stroke: C.brick, 'stroke-width': 2.4 }, card);
+    el('text', { x: 776, y: ly + 35, 'font-family': ITAL, 'font-size': 15, fill: C.ink }, card, 'the path to it');
+    box.setAttribute('height', ly + 52 - 40);
+  }
+
+  // ---- now: a red ink loop around the current state ----
+  var steps = [
+    ['working', 'the run starts'], ['needs', 'the implementer asks you'], ['working', 'your reply lands'],
+    ['died', 'it dies, recovery spent'], ['held', 'its doctor starts'], ['working', 'the doctor carries it on'], ['settled', 'it settles'],
+  ];
+  var nowG = el('g', { filter: 'url(#wob)' });
+  var k = 0, sayEl = document.getElementById('say');
+  function draw() {
+    nowG.textContent = '';
+    var sp = spots[steps[k][0]];
+    var rx = sp.w / 2 + 22, ry = sp.h / 2 + 24, cy = (sp.top + sp.bottom) / 2;
+    el('ellipse', { cx: sp.x, cy: cy, rx: rx, ry: ry, fill: 'none', stroke: C.brick, 'stroke-width': 2.4, transform: 'rotate(-3 ' + sp.x + ' ' + cy + ')', 'stroke-dasharray': (Math.PI * (rx + ry) * 1.04) + ' 999' }, nowG);
+    el('text', { x: sp.x + rx - 6, y: cy - ry + 4, 'font-family': ITAL, 'font-style': 'italic', 'font-size': 20, fill: C.brick, 'font-weight': 700 }, nowG, 'now');
+    sayEl.textContent = (k + 1) + '/' + steps.length + ' · ' + steps[k][1];
+  }
+  document.getElementById('back').onclick = function () { k = Math.max(0, k - 1); draw(); };
+  document.getElementById('next').onclick = function () { k = Math.min(steps.length - 1, k + 1); draw(); };
+  draw();
+})();
+</script>
+</body>
+</html>

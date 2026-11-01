@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<!--
+  A Colorfigures style object: a worked example, not a template to fill blindly.
+  Style after April Zhu's Colorfigures (MIT); this file is an imitation of the style, not the skill's output.
+
+  The MODEL is the checked chart: each gauge's states and each step's position come from the statechart skill's
+  chart and report (or the round's reasoned statechart). The object adds nothing to the behaviour.
+    STYLE   one object on warm off-white (#ece8df); true isometric (P(x, y, z)); flat saturated body colour with a
+            darker side and a lighter top; thick ink outlines with a slight wobble; a hard cobalt shadow to the
+            lower left; detail drawn onto the faces with the shear matrices (FRONT, SIDE), so lettering lies in
+            the plane; a see-through window onto the mechanism; callouts with leader lines, in plain screen space,
+            ordered so no two lines cross.
+    MOTION  needles and drawers ease toward the step's position; a part turns only while its state says it works.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The run, Colorfigures-style</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  /* one object on warm off-white: isometric, inked, flat colour, a hard cobalt shadow, labelled parts */
+  html, body { margin: 0; background: #ece8df; }
+  body { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 24px 12px 40px; font-family: "IBM Plex Mono", monospace; color: #1d1a17; }
+  svg { width: min(1080px, 100%); height: auto; }
+  .player { display: flex; gap: 10px; align-items: center; font-size: 14px; flex-wrap: wrap; justify-content: center; }
+  .player button { font: 600 13px "IBM Plex Mono", monospace; color: #1d1a17; background: #f7f4ee; border: 2px solid #1d1a17; border-radius: 6px; padding: 5px 12px; cursor: pointer; box-shadow: 2px 2px 0 #2f5bd3; }
+  .player button:focus-visible { outline: 3px solid #2f5bd3; outline-offset: 2px; }
+</style>
+</head>
+<body>
+<svg id="fig" viewBox="0 0 1080 900" role="img" aria-label="An isometric red cabinet labelled THE RUN, with three gauges for the run, the implementer and its worktree, a worktree drawer, and a see-through window onto the implementer's cog and the doctor."></svg>
+<div class="player"><button type="button" id="back">◀ back</button><button type="button" id="next">next ▶</button><button type="button" id="play">play</button><span id="say" aria-live="polite"></span></div>
+<script>
+(function () {
+  var NS = 'http://www.w3.org/2000/svg', svg = document.getElementById('fig');
+  function el(tag, a, p, text) { var e = document.createElementNS(NS, tag); for (var k in a) e.setAttribute(k, a[k]); if (text != null) e.textContent = text; (p || svg).appendChild(e); return e; }
+  var K = { bg: '#ece8df', ink: '#1d1a17', tomato: '#e4573d', tomatoDark: '#b5402c', tomatoTop: '#ee7d63', cobalt: '#2f5bd3', cream: '#f7f2e6', mint: '#58b894', mustard: '#e1a62b', blush: '#ef9fb0', steel: '#c9ced4' };
+  var MONO = "'IBM Plex Mono', monospace";
+  var c30 = Math.cos(Math.PI / 6), s30 = Math.sin(Math.PI / 6);
+  var S = 62, OX = 520, OY = 450;
+  function P(x, y, z) { return [OX + (x - y) * c30 * S, OY + (x + y) * s30 * S - z * S]; }
+  function pts(list) { return list.map(function (q) { var p = P(q[0], q[1], q[2]); return p[0].toFixed(1) + ',' + p[1].toFixed(1); }).join(' '); }
+
+  var defs = el('defs', {});
+  var f = el('filter', { id: 'wob', x: '-5%', y: '-5%', width: '110%', height: '110%' }, defs);
+  el('feTurbulence', { type: 'fractalNoise', baseFrequency: '0.03', numOctaves: '2', seed: '4', result: 'n' }, f);
+  el('feDisplacementMap', { in: 'SourceGraphic', in2: 'n', scale: '2.6' }, f);
+
+  // the cabinet: 3 deep (x, its side), 5 wide (y, its front), 6 tall
+  var W = 3, D = 5, H = 6;
+  var steps = [
+    { say: 'the run starts', run: 'running', agent: 'working', wt: 'held' },
+    { say: 'the implementer asks you', run: 'running', agent: 'needs you', wt: 'held' },
+    { say: 'your reply lands', run: 'running', agent: 'working', wt: 'held' },
+    { say: 'it dies, recovery spent', run: 'running', agent: 'died', wt: 'retained' },
+    { say: 'its doctor starts', run: 'running', agent: 'held pending', wt: 'borrowed' },
+    { say: 'the doctor carries it on', run: 'running', agent: 'working', wt: 'held' },
+    { say: 'every node settles', run: 'done', agent: 'settled ok', wt: 'reclaimable' },
+  ];
+  var gauges = [
+    { key: 'run', name: 'THE RUN', u: 62, states: ['running', 'halted', 'done'] },
+    { key: 'agent', name: 'IMPLEMENTER', u: 155, states: ['working', 'needs you', 'died', 'held pending', 'settled ok'] },
+    { key: 'wt', name: 'WORKTREE', u: 248, states: ['held', 'retained', 'borrowed', 'reclaimable'] },
+  ];
+  var tone = { 'needs you': K.blush, died: K.tomato, retained: K.tomato, halted: K.tomato, 'held pending': K.blush };
+  var k = 0, angle = 0, needle = { run: -60, agent: -72, wt: -60 }, drawer = 0;
+
+  // map panel pixel coords (u right, v down) onto a face
+  var FRONT = (function () { var o = P(W, D, H); return 'matrix(' + c30 + ',' + (-s30) + ',0,1,' + o[0] + ',' + o[1] + ')'; })();
+  var SIDE = (function () { var o = P(0, D, H); return 'matrix(' + c30 + ',' + s30 + ',0,1,' + o[0] + ',' + o[1] + ')'; })();
+  function onFront(u, v) { var o = P(W, D, H); return [o[0] + u * c30, o[1] - u * s30 + v]; }
+
+  function hull(points) {
+    points = points.slice().sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
+    function cross(o, a, b) { return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]); }
+    var lo = [], up = [];
+    points.forEach(function (p) { while (lo.length > 1 && cross(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); });
+    points.slice().reverse().forEach(function (p) { while (up.length > 1 && cross(up[up.length - 2], up[up.length - 1], p) <= 0) up.pop(); up.push(p); });
+    return lo.slice(0, -1).concat(up.slice(0, -1));
+  }
+
+  function draw() {
+    svg.textContent = ''; svg.appendChild(defs);
+    var st = steps[k];
+    el('rect', { width: 1080, height: 900, fill: K.bg });
+    // hard cobalt shadow, cast to the lower left
+    var foot = [[0, 0], [W, 0], [W, D], [0, D]], cast = [];
+    foot.forEach(function (q) { cast.push(P(q[0], q[1], 0)); cast.push(P(q[0] - 0.6 * H * 0.35, q[1] + 0.55 * H, 0)); });
+    el('polygon', { points: hull(cast).map(function (p) { return p.join(','); }).join(' '), fill: K.cobalt }, svg);
+    // a base plinth
+    var g = el('g', { filter: 'url(#wob)' });
+    function face(list, fill) { el('polygon', { points: pts(list), fill: fill, stroke: K.ink, 'stroke-width': 3, 'stroke-linejoin': 'round' }, g); }
+    face([[0, 0, H], [W, 0, H], [W, D, H], [0, D, H]], K.tomatoTop);
+    face([[W, 0, 0], [W, D, 0], [W, D, H], [W, 0, H]], K.tomato);
+    face([[0, D, 0], [W, D, 0], [W, D, H], [0, D, H]], K.tomatoDark);
+    // a rim on top, and two buttons
+    face([[0.25, 0.25, H + 0.18], [W - 0.25, 0.25, H + 0.18], [W - 0.25, D - 0.25, H + 0.18], [0.25, D - 0.25, H + 0.18]], K.tomatoTop);
+    [[1.5, 1.4], [1.5, 2.6]].forEach(function (b, i) {
+      var c = P(b[0], b[1], H + 0.18);
+      el('ellipse', { cx: c[0], cy: c[1] + 4, rx: 17, ry: 10, fill: K.ink }, g);
+      el('ellipse', { cx: c[0], cy: c[1], rx: 17, ry: 10, fill: i ? K.mint : K.cream, stroke: K.ink, 'stroke-width': 2.4 }, g);
+    });
+
+    // ---- the front panel: nameplate, three gauges, a slot for the drawer ----
+    var fp = el('g', { transform: FRONT }, g);
+    el('rect', { x: 18, y: 22, width: D * S - 36, height: 46, rx: 8, fill: K.cream, stroke: K.ink, 'stroke-width': 2.6 }, fp);
+    el('text', { x: D * S / 2, y: 54, 'text-anchor': 'middle', 'font-family': MONO, 'font-weight': 700, 'font-size': 23, 'letter-spacing': 4, fill: K.ink }, fp, 'THE RUN');
+    gauges.forEach(function (gg) {
+      var cx = gg.u, cy = 138, r = 40;
+      el('circle', { cx: cx, cy: cy, r: r + 6, fill: K.steel, stroke: K.ink, 'stroke-width': 2.6 }, fp);
+      el('circle', { cx: cx, cy: cy, r: r, fill: K.cream, stroke: K.ink, 'stroke-width': 2 }, fp);
+      var n = gg.states.length;
+      gg.states.forEach(function (s, i) {
+        var a = (-72 + i * 144 / Math.max(1, n - 1)) * Math.PI / 180;
+        var col = tone[s] || (gg.key === 'run' ? K.cobalt : gg.key === 'agent' ? K.mint : K.mustard);
+        el('line', { x1: cx + Math.sin(a) * (r - 4), y1: cy - Math.cos(a) * (r - 4), x2: cx + Math.sin(a) * (r - 13), y2: cy - Math.cos(a) * (r - 13), stroke: col, 'stroke-width': 5, 'stroke-linecap': 'round' }, fp);
+      });
+      var deg = needle[gg.key];
+      el('line', { x1: cx, y1: cy, x2: cx + Math.sin(deg * Math.PI / 180) * (r - 8), y2: cy - Math.cos(deg * Math.PI / 180) * (r - 8), stroke: K.ink, 'stroke-width': 3.2, 'stroke-linecap': 'round' }, fp);
+      el('circle', { cx: cx, cy: cy, r: 5, fill: K.ink }, fp);
+      el('text', { x: cx, y: cy + r + 26, 'text-anchor': 'middle', 'font-family': MONO, 'font-weight': 700, 'font-size': 11.5, 'letter-spacing': 1.5, fill: K.ink }, fp, gg.name);
+    });
+    // grille
+    for (var i = 0; i < 6; i++) el('line', { x1: 40, y1: 236 + i * 9, x2: D * S - 40, y2: 236 + i * 9, stroke: K.tomatoDark, 'stroke-width': 3, 'stroke-linecap': 'round' }, fp);
+    // the drawer's slot
+    el('rect', { x: 70, y: H * S - 100, width: D * S - 140, height: 62, rx: 6, fill: K.ink }, fp);
+
+    // ---- the side: a see-through window onto the mechanism ----
+    var sp = el('g', { transform: SIDE }, g);
+    var ww = W * S - 44, wh = 210;
+    el('rect', { x: 22, y: 70, width: ww, height: wh, rx: 10, fill: '#33302b', stroke: K.ink, 'stroke-width': 2.6 }, sp);
+    var working = st.agent === 'working' || st.agent === 'needs you';
+    var cogCol = st.agent === 'died' ? K.tomato : st.agent === 'settled ok' ? K.steel : K.mint;
+    var cx = 22 + ww * 0.36, cy = 70 + wh * 0.55, teeth = 10, R = 46, ptsCog = [];
+    for (var t = 0; t < teeth * 2; t++) { var a = angle + t * Math.PI / teeth, rr = t % 2 ? R : R * 1.22; ptsCog.push((cx + Math.cos(a) * rr).toFixed(1) + ',' + (cy + Math.sin(a) * rr).toFixed(1)); }
+    el('polygon', { points: ptsCog.join(' '), fill: cogCol, stroke: K.ink, 'stroke-width': 2.4 }, sp);
+    el('circle', { cx: cx, cy: cy, r: 14, fill: K.cream, stroke: K.ink, 'stroke-width': 2.2 }, sp);
+    if (st.agent === 'held pending') {
+      // the doctor, inside, reading
+      var dx = 22 + ww * 0.78, dy = 70 + wh * 0.58;
+      el('circle', { cx: dx, cy: dy - 26, r: 15, fill: '#fbefe2', stroke: K.ink, 'stroke-width': 2 }, sp);
+      el('path', { d: 'M' + (dx - 15) + ' ' + (dy - 32) + ' q15 -20 30 0', fill: K.cream, stroke: K.ink, 'stroke-width': 2 }, sp);
+      el('path', { d: 'M' + (dx - 4) + ' ' + (dy - 44) + ' h8 M' + dx + ' ' + (dy - 48) + ' v8', stroke: K.tomato, 'stroke-width': 2.4 }, sp);
+      el('rect', { x: dx - 18, y: dy - 10, width: 36, height: 40, rx: 9, fill: K.cream, stroke: K.ink, 'stroke-width': 2 }, sp);
+    }
+    // glass glare
+    el('path', { d: 'M' + (40) + ' ' + (260) + ' L' + (100) + ' ' + (90) + ' M' + (70) + ' ' + (268) + ' L' + (124) + ' ' + (110), stroke: '#fff', 'stroke-width': 7, opacity: .22, 'stroke-linecap': 'round' }, sp);
+    el('rect', { x: 22, y: 70, width: ww, height: wh, rx: 10, fill: 'none', stroke: K.ink, 'stroke-width': 3 }, sp);
+    // side lettering, sheared into the face
+    el('text', { x: W * S / 2, y: 318, 'text-anchor': 'middle', 'font-family': MONO, 'font-weight': 700, 'font-size': 17, 'letter-spacing': 3, fill: K.cream, opacity: .9 }, sp, 'crew');
+
+    // ---- the drawer: the worktree, sliding out of the front ----
+    var y0 = D - 4.0, y1 = D - 1.25, z0 = 0.62, z1 = 1.56, depth = 1.2, out = drawer;
+    var xf = W + out, wtCol = st.wt === 'retained' ? K.tomato : K.mustard;
+    if (out > 0.02) {
+      face([[xf - depth, y0, z1], [xf, y0, z1], [xf, y1, z1], [xf - depth, y1, z1]], '#f0c463');
+      face([[xf - depth, y1, z0], [xf, y1, z0], [xf, y1, z1], [xf - depth, y1, z1]], '#b9861f');
+    }
+    face([[xf, y0, z0], [xf, y1, z0], [xf, y1, z1], [xf, y0, z1]], wtCol);
+    var h1 = P(xf, y0 + 0.95, (z0 + z1) / 2), h2 = P(xf, y1 - 0.95, (z0 + z1) / 2);
+    el('line', { x1: h1[0], y1: h1[1], x2: h2[0], y2: h2[1], stroke: K.ink, 'stroke-width': 6, 'stroke-linecap': 'round' }, g);
+
+    // ---- labelled parts: callouts in plain screen space, leader lines to the parts ----
+    var lab = el('g', {});
+    function callout(px, py, lx, ly, title, value, col) {
+      el('path', { d: 'M' + px + ' ' + py + ' L' + (lx - 8) + ' ' + ly, stroke: K.ink, 'stroke-width': 1.4, fill: 'none' }, lab);
+      el('circle', { cx: px, cy: py, r: 3.5, fill: K.ink }, lab);
+      el('text', { x: lx, y: ly - 4, 'font-family': MONO, 'font-weight': 700, 'font-size': 12, 'letter-spacing': 1.5, fill: '#6b655c' }, lab, title);
+      var t = el('text', { x: lx, y: ly + 20, 'font-family': MONO, 'font-weight': 700, 'font-size': 21, fill: K.ink }, lab, value);
+      var w = value.length * 12.7 + 12;
+      el('rect', { x: lx - 6, y: ly + 2, width: w, height: 27, rx: 5, fill: col, opacity: .32 }, lab);
+      lab.appendChild(t);
+    }
+    var gr = onFront(gauges[0].u, 138), ga = onFront(gauges[1].u, 138), gw = onFront(gauges[2].u, 138);
+    callout(gw[0], gw[1], 830, 190, 'ITS WORKTREE', st.wt, tone[st.wt] || K.mustard);
+    callout(ga[0], ga[1], 830, 300, 'THE IMPLEMENTER', st.agent, tone[st.agent] || K.mint);
+    callout(gr[0], gr[1], 830, 410, 'THE RUN', st.run, st.run === 'halted' ? K.tomato : K.cobalt);
+    var dh = P(W + drawer, (y0 + y1) / 2, z0);
+    callout(dh[0], dh[1] + 4, 830, 640, 'THE DRAWER', st.wt === 'borrowed' ? 'out, being read' : st.wt === 'reclaimable' ? 'free to reclaim' : 'shut', K.mustard);
+    var win = P(0.9, D, H - 3.0);
+    callout(win[0], win[1], 60, 820, 'SEE-THROUGH: THE MECHANISM', st.agent === 'held pending' ? 'the doctor is in' : working ? 'the cog turns' : st.agent === 'died' ? 'the cog has stopped' : 'at rest', st.agent === 'died' ? K.tomato : K.mint);
+    document.getElementById('say').textContent = (k + 1) + '/' + steps.length + ' · ' + st.say;
+  }
+
+  // needles and the drawer ease toward where the current step puts them; the cog turns while it works
+  var target = {};
+  function aim() {
+    var st = steps[k];
+    gauges.forEach(function (gg) { var i = gg.states.indexOf(st[gg.key]), n = gg.states.length; target[gg.key] = -72 + i * 144 / Math.max(1, n - 1); });
+    target.drawer = st.wt === 'borrowed' ? 1.15 : 0;
+  }
+  var reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function tick() {
+    var st = steps[k], moved = false;
+    gauges.forEach(function (gg) { var d = target[gg.key] - needle[gg.key]; if (Math.abs(d) > 0.3) { needle[gg.key] += reduce ? d : d * 0.18; moved = true; } else needle[gg.key] = target[gg.key]; });
+    var dd = target.drawer - drawer; if (Math.abs(dd) > 0.005) { drawer += reduce ? dd : dd * 0.15; moved = true; } else drawer = target.drawer;
+    if ((st.agent === 'working' || st.agent === 'needs you') && !reduce) { angle += st.agent === 'working' ? 0.05 : 0.01; moved = true; }
+    if (moved) draw();
+    requestAnimationFrame(tick);
+  }
+  var timer = 0;
+  function go(n) { k = Math.max(0, Math.min(steps.length - 1, n)); aim(); draw(); }
+  document.getElementById('back').onclick = function () { stop(); go(k - 1); };
+  document.getElementById('next').onclick = function () { stop(); go(k + 1); };
+  function stop() { clearInterval(timer); timer = 0; document.getElementById('play').textContent = 'play'; }
+  document.getElementById('play').onclick = function () {
+    if (timer) return stop();
+    if (k === steps.length - 1) go(0);
+    document.getElementById('play').textContent = 'pause';
+    timer = setInterval(function () { if (k === steps.length - 1) return stop(); go(k + 1); }, 1800);
+  };
+  go(0);
+  requestAnimationFrame(tick);
+  window.__go = go;
+})();
+</script>
+</body>
+</html>
