@@ -28,7 +28,7 @@ Skills that depend on other skills carry them in-repo, so the link script instal
 | [implement-all](./skills/engineering/implement-all/SKILL.md) | all of the above — `gh`, worktrees, a workflow primitive, `docs/agents/frontier.md` — plus a **CI pipeline** on the target repo (the gate is a green build) and a `Monitor`-style long-poll primitive |
 | [preflight](./skills/engineering/preflight/SKILL.md) | `gh`, authenticated against the repo; a `docs/agents/frontier.md` and `docs/agents/issue-tracker.md` in the target repo |
 | [ralph-goal](./skills/productivity/ralph-goal/SKILL.md) | an agent CLI runnable headlessly in a shell loop |
-| [grill-with-visuals](./skills/productivity/grill-with-visuals/SKILL.md) | the `grilling` and `domain-modeling` skills installed (Matt Pocock's; not vendored here), Node 18+ for the glossary and screenshot helpers, Chrome or Chromium for the screenshot check, and, for checked statecharts, pstack's `statechart` skill (TLC via mise; without it, charts are marked reasoned) |
+| [grill-with-visuals](./skills/productivity/grill-with-visuals/SKILL.md) | the `grilling` and `domain-modeling` skills installed (Matt Pocock's; not vendored here), Node 18+ for the glossary and screenshot helpers, Chrome or Chromium for the screenshot check, and, for checked statecharts, pstack's `statechart` skill (TLC via mise; without it, charts are marked reasoned, and `scripts/chartcheck.mjs` names what is missing under each chart) |
 
 For grill-with-visuals' checked statecharts, install pstack's `statechart` skill and `mise`:
 
@@ -70,7 +70,7 @@ These split on one axis — who can invoke them. **User-invoked** skills are rea
 - **[handoff](./skills/productivity/handoff/SKILL.md)** — Compact the current conversation into a handoff document so another agent can continue the work. _Vendored from Matt Pocock's repo._
 - **[learn](./skills/productivity/learn/SKILL.md)** — Problem-first, fail-forward lesson on a system, concept, or codebase: five phases (orient, confront, reveal, practice, own it), leaving C4 diagrams and ADRs in the repo.
 - **[q](./skills/productivity/q/SKILL.md)** — Ask a quick question, get just the answer: `Yes.`/`No.` (plus one sentence at most when it helps) for yes/no questions, the bare answer otherwise.
-- **[grill-with-visuals](./skills/productivity/grill-with-visuals/SKILL.md)** — A grilling whose every round is a local HTML page: one card per question with every option and its own view (diagrams, UI mockups, animations, statecharts) and a recommendation box, a settled-so-far strip that grows each round, and glossary terms that show their definition on hover and open their own visual explainer page. Composes `grilling` and `domain-modeling`, which own the questions; it owns only the page.
+- **[grill-with-visuals](./skills/productivity/grill-with-visuals/SKILL.md)** — A grilling whose every round is a local HTML page: one card per question laid out as grilling posts it in chat (❓ question, its options as a list, the ➡️ recommendation), then a view per option (git-style diffs, diagrams, UI mockups, animations, statecharts), a settled-so-far strip that grows each round, and glossary terms that show their definition on hover and open their own visual explainer page. Composes `grilling` and `domain-modeling`, which own the questions; it owns only the page.
 
 **Model-invoked**
 

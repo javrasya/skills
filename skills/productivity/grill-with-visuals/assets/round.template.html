@@ -13,7 +13,7 @@
   <header style="display:flex;flex-direction:column;gap:10px">
     <h1>TOPIC, round N</h1>
     <!-- One or two sentences: what is being grilled, links to the ticket/issue/doc it hangs off. Keep the last sentence. -->
-    <p class="sub">CONTEXT. Answer each question in the chat: “yes” takes the blue recommendation.</p>
+    <p class="sub">CONTEXT. Answer each question in the chat: “yes” takes the ➡️ recommendation.</p>
     <!-- One chip per colour the page actually uses. glossary.mjs adds the glossary chip itself. -->
     <div class="legend">
       <span class="chip today">● today</span>
@@ -35,64 +35,77 @@
   <!-- QUESTION CARD, comparison form: Today | Proposed. Use when the question changes something that exists.
        Q numbers continue across rounds (round 2 starts after round 1's last), so "Q7" always means one question. -->
   <section class="q" id="q2">
-    <div class="qhead"><span class="qnum">Q2</span><h2>QUESTION TITLE</h2></div>
-    <p>WHY THIS IS A QUESTION: one or two sentences. Colour the words that name each side: <span class="t">today’s thing</span>, <span class="n">the proposed thing</span>.</p>
+    <!-- The question as grilling words it in chat: ❓, its number, its title in bold, then its body. -->
+    <p class="qline">❓ <span class="qnum">Q2</span> - <span class="qtitle">QUESTION TITLE</span>: WHY THIS IS A QUESTION: one or two sentences. Colour the words that name each side: <span class="t">today’s thing</span>, <span class="n">the proposed thing</span>.</p>
+    <!-- Every choice grilling listed, one line each, lettered as grilling lettered them, the recommended one .pick.
+         Options with their own view carry data-opt matching it; clicking one shows that view. -->
+    <ul class="opts">
+      <li class="opt pick" data-opt="A"><span class="letter">A</span><span><span class="name">NAME</span> <span class="cost">— what it means, and what it costs.</span></span></li>
+      <li class="opt" data-opt="B"><span class="letter">B</span><span><span class="name">NAME</span> <span class="cost">— what it means, and what it costs.</span></span></li>
+    </ul>
+    <!-- The ➡️ recommendation, right after the choices, worded so "yes" accepts it. -->
+    <div class="rec"><span class="arrow">➡️</span><p><b>A</b> — THE RECOMMENDED ANSWER, and why.</p></div>
+    <!-- The picture, below the question. -->
+    <div class="visual">
+    <span class="vlabel">WHAT THE PICTURE SHOWS</span>
     <div class="pair">
       <div class="pane today">
         <h3>Today</h3>
-<pre>a tree, a snippet, a command and its output
-<span class="t">the part that changes</span></pre>
+<!-- A shape that changes is a .diff: one span per line, .del on lines that go, the changed characters in <del>. -->
+<pre class="diff"><span>a tree, a snippet, a command and its output</span><span class="del">a line that changes: <del>old part</del></span><span class="del">a line that goes away</span></pre>
       </div>
       <div class="pane new">
         <h3>Proposed · <span data-shown>A</span></h3>
         <!-- One .view per option, data-opt matching its option card. Clicking an option shows its view;
              the recommended one shows first. A question with one proposal: a single view, no options. -->
         <div class="view" data-opt="A">
-<pre>the same shape after option A
-<span class="n">the new part</span></pre>
+<!-- The same lines after the option: .add on lines that change or appear, the changed characters in <ins>. -->
+<pre class="diff"><span>a tree, a snippet, a command and its output</span><span class="add">a line that changes: <ins>new part</ins></span></pre>
         </div>
         <div class="view" data-opt="B">
-<pre>the same shape after option B
-<span class="n">its new part</span></pre>
+<pre class="diff"><span>a tree, a snippet, a command and its output</span><span class="add">a line that changes: <ins>option B's part</ins></span><span class="add"><ins>a line option B adds</ins></span></pre>
         </div>
         <p class="m note">One line on what the picture does not show.</p>
       </div>
     </div>
-    <!-- Every choice grilling listed, lettered as grilling lettered them, the recommended one .pick. -->
-    <div class="opts">
-      <div class="opt pick" data-opt="A"><h3>A · NAME</h3><p>What it means, and what it costs.</p><span class="tag">Recommended</span></div>
-      <div class="opt" data-opt="B"><h3>B · NAME</h3><p>What it means, and what it costs.</p></div>
     </div>
-    <div class="rec"><span class="label">Recommended</span><p class="ask">Yes: THE RECOMMENDED ANSWER, worded so “yes” accepts it.</p></div>
   </section>
 
-  <!-- QUESTION CARD, choice form: options with nothing to draw, side by side, the recommended one .pick.
-       Give options data-opt only when they have views to switch (see the comparison card). -->
+  <!-- QUESTION CARD, choice form: options with nothing to draw, so no picture and no data-opt. -->
   <section class="q" id="q3">
-    <div class="qhead"><span class="qnum">Q3</span><h2>QUESTION TITLE</h2></div>
-    <p>WHAT IS BEING CHOSEN.</p>
-    <div class="opts">
-      <div class="opt"><h3>A · NAME</h3><p>What it means, and what it costs.</p></div>
-      <div class="opt pick"><h3>B · NAME</h3><p>What it means, and what it costs.</p></div>
-      <div class="opt"><h3>C · NAME</h3><p>What it means, and what it costs.</p></div>
-    </div>
-    <div class="rec"><span class="label">Recommended</span><p class="ask">Yes: B, because REASON.</p></div>
+    <p class="qline">❓ <span class="qnum">Q3</span> - <span class="qtitle">QUESTION TITLE</span>: WHAT IS BEING CHOSEN.</p>
+    <ul class="opts">
+      <li class="opt"><span class="letter">A</span><span><span class="name">NAME</span> <span class="cost">— what it means, and what it costs.</span></span></li>
+      <li class="opt pick"><span class="letter">B</span><span><span class="name">NAME</span> <span class="cost">— what it means, and what it costs.</span></span></li>
+      <li class="opt"><span class="letter">C</span><span><span class="name">NAME</span> <span class="cost">— what it means, and what it costs.</span></span></li>
+    </ul>
+    <div class="rec"><span class="arrow">➡️</span><p><b>B</b>, because REASON.</p></div>
+  </section>
+
+  <!-- QUESTION CARD, yes/no: one proposal, no options and no picture. -->
+  <section class="q" id="q3b">
+    <p class="qline">❓ <span class="qnum">Q3b</span> - <span class="qtitle">QUESTION TITLE</span>: THE PROPOSAL, put as a question.</p>
+    <div class="rec"><span class="arrow">➡️</span><p>Yes — THE RECOMMENDED ANSWER, and why.</p></div>
   </section>
 
   <!-- QUESTION CARD, flow form: steps as key | description rows, inside a pane or on their own. -->
   <section class="q" id="q4">
-    <div class="qhead"><span class="qnum">Q4</span><h2>QUESTION TITLE</h2></div>
+    <p class="qline">❓ <span class="qnum">Q4</span> - <span class="qtitle">QUESTION TITLE</span>: QUESTION BODY.</p>
+    <div class="rec"><span class="arrow">➡️</span><p>Yes — THE RECOMMENDED ANSWER.</p></div>
+    <div class="visual">
     <div class="flow">
       <span class="k new">step</span><span>what happens</span>
       <span class="k new">step</span><span>what happens next</span>
     </div>
-    <div class="rec"><span class="label">Recommended</span><p class="ask">Yes: THE RECOMMENDED ANSWER.</p></div>
+    </div>
   </section>
 
   <!-- QUESTION CARD, diagram form: who talks to whom, or how data moves. Mermaid source in a pre.mermaid,
        alone or inside a Today | Proposed pane. Delete this card, and the page loads no script. -->
   <section class="q" id="q5">
-    <div class="qhead"><span class="qnum">Q5</span><h2>QUESTION TITLE</h2></div>
+    <p class="qline">❓ <span class="qnum">Q5</span> - <span class="qtitle">QUESTION TITLE</span>: QUESTION BODY.</p>
+    <div class="rec"><span class="arrow">➡️</span><p>Yes — THE RECOMMENDED ANSWER.</p></div>
+    <div class="visual">
 <pre class="mermaid">
 sequenceDiagram
     participant Operator
@@ -100,15 +113,20 @@ sequenceDiagram
     Operator->>Crew: crew run implement-spec --spec 122
     Crew-->>Operator: run id
 </pre>
-    <div class="rec"><span class="label">Recommended</span><p class="ask">Yes: THE RECOMMENDED ANSWER.</p></div>
+    </div>
   </section>
 
   <!-- QUESTION CARD, UI mockup form: how something looks or is used. Today's screen, then one view per option.
        .term draws a TUI; .ui draws a web or desktop screen (.hd .row .ft .btn .btn.pri .muted). Check Today
        against the code before drawing it. Keep data-no-glossary on every mockup. -->
   <section class="q" id="q6">
-    <div class="qhead"><span class="qnum">Q6</span><h2>QUESTION TITLE</h2></div>
-    <p>WHAT ON SCREEN IS IN QUESTION.</p>
+    <p class="qline">❓ <span class="qnum">Q6</span> - <span class="qtitle">QUESTION TITLE</span>: WHAT ON SCREEN IS IN QUESTION.</p>
+    <ul class="opts">
+      <li class="opt pick" data-opt="A"><span class="letter">A</span><span><span class="name">NAME</span> <span class="cost">— what it means, and what it costs.</span></span></li>
+      <li class="opt" data-opt="B"><span class="letter">B</span><span><span class="name">NAME</span> <span class="cost">— what it means, and what it costs.</span></span></li>
+    </ul>
+    <div class="rec"><span class="arrow">➡️</span><p><b>A</b>, because REASON.</p></div>
+    <div class="visual">
     <div class="pair">
       <div class="pane today">
         <h3>Today</h3>
@@ -139,18 +157,16 @@ sequenceDiagram
         </div>
       </div>
     </div>
-    <div class="opts">
-      <div class="opt pick" data-opt="A"><h3>A · NAME</h3><p>What it means, and what it costs.</p><span class="tag">Recommended</span></div>
-      <div class="opt" data-opt="B"><h3>B · NAME</h3><p>What it means, and what it costs.</p></div>
     </div>
-    <div class="rec"><span class="label">Recommended</span><p class="ask">Yes: A, because REASON.</p></div>
   </section>
 
   <!-- QUESTION CARD, animation form: when things happen. One canvas, one draw(ctx, t) that renders any moment
        from t alone, and the player below. Lanes in the reader's words; the number that matters on the canvas;
        the whole story in aria-label. Never autoplays; reduced motion shows the last frame. -->
   <section class="q" id="q7">
-    <div class="qhead"><span class="qnum">Q7</span><h2>QUESTION TITLE</h2></div>
+    <p class="qline">❓ <span class="qnum">Q7</span> - <span class="qtitle">QUESTION TITLE</span>: QUESTION BODY.</p>
+    <div class="rec"><span class="arrow">➡️</span><p>Yes — THE RECOMMENDED ANSWER.</p></div>
+    <div class="visual">
     <p>WHAT HAPPENS, AND WHEN. Press play.</p>
     <div class="player">
       <canvas id="anim-q7" width="960" height="220" role="img" aria-label="THE WHOLE ANIMATION IN ONE SENTENCE: what happens at which second."></canvas>
@@ -161,7 +177,7 @@ sequenceDiagram
         <button type="button" data-speed aria-label="Playback speed">1×</button>
       </div>
     </div>
-    <div class="rec"><span class="label">Recommended</span><p class="ask">Yes: THE RECOMMENDED ANSWER.</p></div>
+    </div>
     <script>
       document.addEventListener('DOMContentLoaded', function () {
         var css = getComputedStyle(document.documentElement);
@@ -192,10 +208,16 @@ sequenceDiagram
   <!-- QUESTION CARD, statechart form: which moves a thing can make, and which break a rule. Rules first, then one
        stateDiagram-v2 per option as its view. Copy the two classDef lines into every chart that marks a break.
        Under each chart: one line per break (rule, then path), or one line saying it breaks nothing, and what the
-       chart leaves out. About 20 arrows at most. -->
+       chart leaves out. About 20 arrows at most. Last, the .chartsrc line that `chartcheck.mjs --html` prints:
+       whether the charts were model-checked by pstack's statechart, or reasoned and why (what is missing). -->
   <section class="q" id="q8">
-    <div class="qhead"><span class="qnum">Q8</span><h2>QUESTION TITLE</h2></div>
-    <p>WHAT BEHAVIOUR IS IN QUESTION.</p>
+    <p class="qline">❓ <span class="qnum">Q8</span> - <span class="qtitle">QUESTION TITLE</span>: WHAT BEHAVIOUR IS IN QUESTION.</p>
+    <ul class="opts">
+      <li class="opt pick" data-opt="A"><span class="letter">A</span><span><span class="name">NAME</span> <span class="cost">— what it means. Breaks neither rule.</span></span></li>
+      <li class="opt" data-opt="B"><span class="letter">B</span><span><span class="name">NAME</span> <span class="cost">— what it means. Breaks R2.</span></span></li>
+    </ul>
+    <div class="rec"><span class="arrow">➡️</span><p><b>A</b>, because it breaks neither rule.</p></div>
+    <div class="visual">
     <div class="rules">
       <div class="rule"><b>R1</b><span>A RULE THE USER AGREES TO, IN ONE SENTENCE.</span></div>
       <div class="rule"><b>R2</b><span>ANOTHER RULE.</span></div>
@@ -245,11 +267,8 @@ stateDiagram-v2
       </div>
       <div class="marks"><span><span class="mk breaks"></span>breaks a rule</span><span><span class="mk path"></span>on the shortest path to a break</span></div>
     </div>
-    <div class="opts">
-      <div class="opt pick" data-opt="A"><h3>A · NAME</h3><p>What it means. Breaks neither rule.</p><span class="tag">Recommended</span></div>
-      <div class="opt" data-opt="B"><h3>B · NAME</h3><p>What it means. Breaks R2.</p></div>
+    <div class="chartsrc reasoned" data-no-glossary><span class="badge">Reasoned, not model-checked</span><span>Drawn with plain Mermaid from the code and the decisions so far: no TLC run.</span><span class="why">WHAT IS MISSING</span><span class="fix">To check charts: <code>THE INSTALL COMMAND</code></span></div>
     </div>
-    <div class="rec"><span class="label">Recommended</span><p class="ask">Yes: A, because it breaks neither rule.</p></div>
   </section>
 
   <p class="foot">Answer each one in the chat, e.g. “q2 yes, q3 C because…”.</p>
