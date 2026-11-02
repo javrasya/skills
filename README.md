@@ -30,6 +30,15 @@ Skills that depend on other skills carry them in-repo, so the link script instal
 | [ralph-goal](./skills/productivity/ralph-goal/SKILL.md) | an agent CLI runnable headlessly in a shell loop |
 | [grill-with-visuals](./skills/productivity/grill-with-visuals/SKILL.md) | the `grilling` and `domain-modeling` skills installed (Matt Pocock's; not vendored here), Node 18+ for the glossary and screenshot helpers, Chrome or Chromium for the screenshot check, and, for checked statecharts, pstack's `statechart` skill (TLC via mise; without it, charts are marked reasoned) |
 
+For grill-with-visuals' checked statecharts, install pstack's `statechart` skill and `mise`:
+
+```bash
+npx skills add https://github.com/cursor/plugins/tree/main/pstack -g -s statechart
+brew install mise
+```
+
+The first chart's run uses `mise` to fetch TLC and the Java it runs on, so it needs the network; you install no JDK yourself.
+
 ## Reference
 
 These split on one axis — who can invoke them. **User-invoked** skills are reachable only when you type them (e.g. `/pull-spiderman`); their job is to orchestrate. **Model-invoked** skills can be invoked by you _or_ reached for automatically by the agent when the task fits; they hold the reusable discipline. A user-invoked skill may invoke model-invoked skills, but never another user-invoked one.
