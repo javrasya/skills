@@ -51,8 +51,6 @@
     // Mermaid lays out wrongly inside hidden elements, so every view stays visible until diagrams are drawn.
     var blocks = document.querySelectorAll('pre.mermaid');
     if (!blocks.length) return options();
-    var root = document.documentElement.getAttribute('data-theme');
-    var dark = root ? root === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
     // ELK lays out self-loops and crowded labels cleanly; Mermaid's default layout overlaps them.
     Promise.all([
       import('https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs'),
@@ -60,7 +58,7 @@
     ]).then(function (m) {
       var mermaid = m[0].default;
       mermaid.registerLayoutLoaders(m[1].default);
-      mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'neutral', securityLevel: 'strict', layout: 'elk' });
+      mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'strict', layout: 'elk' });
       // One at a time, each into a string before any is on the page: with ELK, two charts that share state
       // names lay each other out if the first is already in the document.
       var src = Array.prototype.map.call(blocks, function (b) { return b.textContent; });

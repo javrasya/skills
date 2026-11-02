@@ -322,8 +322,6 @@ function linkPage(html, terms, { max = 2, exclude = [], hrefOf = (slug) => `#gl-
 
 const CSS = `
 :root { --gl: #6a4bc4; --gl-bg: #efeafb; --gl-tip-bg: #1d1a2b; --gl-tip-ink: #f3f1fa; --gl-tip-muted: #b9b2d3; --gl-tip-avoid: #ffb4a3; }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --gl: #b8a4ff; --gl-bg: #262040; --gl-tip-bg: #f4f2fb; --gl-tip-ink: #1b1830; --gl-tip-muted: #5d5680; --gl-tip-avoid: #a3341c; } }
-:root[data-theme="dark"] { --gl: #b8a4ff; --gl-bg: #262040; --gl-tip-bg: #f4f2fb; --gl-tip-ink: #1b1830; --gl-tip-muted: #5d5680; --gl-tip-avoid: #a3341c; }
 a.gl { color: inherit; text-decoration: underline dotted var(--gl); text-decoration-thickness: 2px; text-underline-offset: 3px; cursor: help; border-radius: 3px; }
 a.gl:hover, a.gl[aria-describedby] { background: var(--gl-bg); color: var(--gl); }
 a.gl:focus-visible { outline: 2px solid var(--gl); outline-offset: 2px; }

@@ -1,7 +1,9 @@
 /* grill-with-visuals: shared by every round page and term explainer. Copied once next to the pages. */
 @import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap");
 :root {
-  /* layout: one column of question cards; inside each, Today | Proposed side by side, then the recommendation */
+  /* layout: one column of question cards; in each, the question, its choices and the recommendation as chat
+     shows them, then the picture. Light only, whatever the system's colour scheme. */
+  color-scheme: light;
   --bg: #f4f5f7;
   --surface: #ffffff;
   --ink: #1b2230;
@@ -20,27 +22,13 @@
   --body: "IBM Plex Sans", system-ui, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
 }
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    color-scheme: dark;
-    --bg: #11151c; --surface: #1a2029; --ink: #e6e9ef; --muted: #9aa3b4; --line: #2c3442;
-    --today: #f08a72; --today-bg: #34201b; --new: #5fd0a6; --new-bg: #15302a;
-    --rec: #8fb0ff; --rec-bg: #1c2742; --aside: #e8b75a; --aside-bg: #33290f; --code-bg: #141920;
-  }
-}
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --bg: #11151c; --surface: #1a2029; --ink: #e6e9ef; --muted: #9aa3b4; --line: #2c3442;
-  --today: #f08a72; --today-bg: #34201b; --new: #5fd0a6; --new-bg: #15302a;
-  --rec: #8fb0ff; --rec-bg: #1c2742; --aside: #e8b75a; --aside-bg: #33290f; --code-bg: #141920;
-}
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.55 var(--body); }
-main { max-width: 1040px; margin: 0 auto; padding: 32px 20px 64px; display: flex; flex-direction: column; gap: 28px; }
+main { max-width: 1560px; margin: 0 auto; padding: 32px 20px 64px; display: flex; flex-direction: column; gap: 28px; }
 h1, h2 { font-family: var(--display); text-wrap: balance; margin: 0; }
 h1 { font-size: 1.9rem; font-weight: 700; }
 h2 { font-size: 1.3rem; font-weight: 600; }
-p { margin: 0; max-width: 70ch; }
+p { margin: 0; max-width: 110ch; }
 a { color: var(--rec); }
 .sub { color: var(--muted); }
 code, pre { font-family: var(--mono); font-size: 0.86rem; }
@@ -50,10 +38,6 @@ pre { margin: 0; padding: 14px 16px; border-radius: 8px; overflow-x: auto; line-
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 0.82rem; font-weight: 600; }
 .chip.today { background: var(--today-bg); color: var(--today); }
 .chip.new { background: var(--new-bg); color: var(--new); }
-.chip.opt[data-opt] { cursor: pointer; }
-.opt[aria-selected="true"] { outline: 2px solid var(--new); outline-offset: 2px; }
-.opt:focus-visible { outline: 3px solid var(--rec); outline-offset: 2px; }
-.opt .tag { font-size: 0.75rem; font-weight: 700; color: var(--rec); }
 .view[hidden] { display: none; }
 .rec { background: var(--rec-bg); color: var(--rec); }
 .chip.aside { background: var(--aside-bg); color: var(--aside); }
@@ -64,24 +48,36 @@ pre { margin: 0; padding: 14px 16px; border-radius: 8px; overflow-x: auto; line-
 .q { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 22px; display: flex; flex-direction: column; gap: 16px; scroll-margin-top: 16px; }
 .qhead { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
 .qnum { font-family: var(--mono); font-weight: 600; color: var(--rec); font-size: 1.05rem; }
+/* a question reads as it does in chat: ❓ Qn - title: body, the choices as a list, then the ➡️ recommendation */
+.q { gap: 14px; }
+.qline { font-size: 1.05rem; line-height: 1.6; }
+.qline .qnum { font-size: 1rem; font-weight: 700; }
+.qtitle { font-weight: 700; }
+.opts { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.opt { display: flex; gap: 10px; align-items: baseline; padding: 6px 10px; border-left: 3px solid transparent; border-radius: 0 6px 6px 0; min-width: 0; }
+.opt .letter { font-family: var(--mono); font-weight: 700; color: var(--muted); min-width: 1.6ch; }
+.opt .name { font-weight: 600; }
+.opt .cost { color: var(--muted); }
+.opt.pick { border-left-color: var(--rec); }
+.opt.pick .letter, .opt.pick .name { color: var(--rec); }
+.opt[data-opt] { cursor: pointer; }
+.opt[data-opt]:hover { background: var(--code-bg); }
+.opt[aria-selected="true"] { background: var(--new-bg); }
+.opt:focus-visible { outline: 3px solid var(--rec); outline-offset: 2px; }
+div.rec { display: flex; gap: 10px; align-items: baseline; padding: 12px 16px; border-left: 4px solid var(--rec); border-radius: 0 10px 10px 0; }
+div.rec .arrow { font-size: 1.1rem; }
+div.rec p { color: var(--ink); }
+/* the picture sits below the question, under a quiet divider */
+.visual { border-top: 1px dashed var(--line); padding-top: 14px; display: flex; flex-direction: column; gap: 10px; }
+.vlabel { font-size: 0.75rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 700; }
 .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .pane { border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 10px; border-left: 4px solid; min-width: 0; }
 .pane.today { background: var(--today-bg); border-color: var(--today); }
 .pane.new { background: var(--new-bg); border-color: var(--new); }
 .pane pre { background: var(--surface); }
-.pane h3, .opt h3 { margin: 0; font-size: 0.8rem; letter-spacing: 0.06em; text-transform: uppercase; }
+.pane h3 { margin: 0; font-size: 0.8rem; letter-spacing: 0.06em; text-transform: uppercase; }
 .pane.today h3 { color: var(--today); }
 .pane.new h3 { color: var(--new); }
-.opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
-.opt { border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-.opt h3 { color: var(--muted); }
-.opt.pick { border: 2px solid var(--rec); background: var(--rec-bg); }
-.opt.pick h3 { color: var(--rec); }
-.opt pre { background: var(--code-bg); }
-.opt.pick pre { background: var(--surface); }
-.rec { background: var(--rec-bg); border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; }
-.rec .label { color: var(--rec); font-weight: 700; font-size: 0.85rem; }
-.ask { font-weight: 600; }
 .t { color: var(--today); font-weight: 600; }
 .n { color: var(--new); font-weight: 600; }
 .r { color: var(--rec); font-weight: 600; }
@@ -93,6 +89,16 @@ pre { margin: 0; padding: 14px 16px; border-radius: 8px; overflow-x: auto; line-
 .flow .k.today { color: var(--today); }
 .flow .k.new { color: var(--new); }
 .foot { color: var(--muted); font-size: 0.9rem; }
+/* git-style diff: each line one span; .del red, .add green, plain unchanged; the changed characters wrapped in <del>/<ins> */
+pre.diff { padding: 10px 0; }
+pre.diff > span { display: block; padding: 0 16px 0 34px; position: relative; }
+pre.diff > .add { background: #e6ffec; }
+pre.diff > .del { background: #ffebe9; }
+pre.diff > .add::before, pre.diff > .del::before { position: absolute; left: 14px; }
+pre.diff > .add::before { content: "+"; color: #1a7f37; }
+pre.diff > .del::before { content: "-"; color: #cf222e; }
+pre.diff ins { text-decoration: none; background: #abf2bc; border-radius: 3px; }
+pre.diff del { text-decoration: none; background: #ffcecb; border-radius: 3px; }
 /* UI mockups: .term for a TUI, .ui for a web or desktop screen */
 .term { background: #0f141b; color: #d7dde8; border-radius: 10px; font-family: var(--mono); font-size: 0.8rem; line-height: 1.6; overflow-x: auto; }
 .term .bar { display: flex; gap: 6px; align-items: center; padding: 8px 12px; border-bottom: 1px solid #222b37; color: #7d8799; font-size: 0.72rem; }
@@ -135,4 +141,12 @@ pre.mermaid { overflow-x: auto; }
 .mk { display: inline-block; width: 14px; height: 10px; border-radius: 3px; vertical-align: -1px; margin-right: 4px; }
 .mk.breaks { background: #ffecee; border: 2px solid #e72e3b; }
 .mk.path { border: 2px solid #1680f3; }
+/* under every statechart: was it model-checked by pstack's statechart, or reasoned? (scripts/chartcheck.mjs) */
+.chartsrc { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: baseline; font-size: 0.85rem; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); }
+.chartsrc .badge { font-weight: 700; font-size: 0.75rem; letter-spacing: 0.04em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; }
+.chartsrc.checked .badge { background: var(--new-bg); color: var(--new); }
+.chartsrc.reasoned { border-color: var(--aside); background: var(--aside-bg); }
+.chartsrc.reasoned .badge { background: var(--surface); color: var(--aside); }
+.chartsrc .why { color: var(--muted); flex-basis: 100%; }
+.chartsrc .fix { flex-basis: 100%; }
 @media (max-width: 760px) { .pair { grid-template-columns: 1fr; } }
