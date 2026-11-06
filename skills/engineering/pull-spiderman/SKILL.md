@@ -6,15 +6,16 @@ description: >-
   review on this PR", "go through the PR review comments", "triage the review on PR N". Works
   for review comments left by any reviewer — an agent (Copilot, Claude, etc.) or a human. When
   the PR is one layer of a stack, it sweeps the layers above before judging any comment, never
-  edits the layer, and lands agreed fixes as one PR on the stack's tip. It vets each comment
-  with adversarial double-challenge and posts NOTHING (no reply, no resolve, no code fix, no
+  edits the layer, and lands agreed fixes as one PR on the stack's tip. It proves each comment's
+  claim with a test and code evidence, vets it with adversarial double-challenge, and posts NOTHING (no reply, no resolve, no code fix, no
   ticket) without per-comment human approval.
 ---
 
 # Pull Spiderman
 
 Drive a PR's review comments to a vetted decision and a reply. A reviewer makes a claim; we
-adversarially challenge it twice (once in a subagent, once on the main agent with full
+first **prove** it — a test that goes red or stays green on the claim, plus the code read that
+backs it — then adversarially challenge it twice (once in a subagent, once on the main agent with full
 conversation context) before deciding whether it is right — two Spider-Men pointing until one
 claim is confirmed. Every reply, resolve, and code fix is gated behind explicit per-comment
 user approval. The reviewer may be a bot or a human; the skill treats them the same.
@@ -42,10 +43,38 @@ behaves exactly as it always has.
   The script enforces the filter. Log what it skipped.
 - **Fixes are gated like replies.** A code fix is *proposed* by the `handover-loop` skill; it is not
   committed until approved in the same per-comment gate.
+- **No verdict without proof.** Every verdict rests on the evidence in **Proof** below — a run
+  test where the claim is testable, cited code always. A challenge pass judges the proof; it
+  does not stand in for it.
 - **A layer of a stack is never edited.** When the PR has a parent or a child, no fix is
   committed to its branch. Agreed fixes go to one new PR based on the stack's tip, and the
   reply on the original comment says so. The tip itself is a layer: a comment on the tip still
   gets a PR on top of it.
+
+## Proof — what every verdict rests on
+
+A claim is "this code does X" (or "fails on Y", "is dead", "races"). Proof is what the code
+*actually* does, shown, not argued. Each comment's proof has two parts:
+
+- **Proof test.** Use the `tdd` skill's discipline to write the smallest test that pins the
+  claim: it goes **red** if the reviewer is right and stays **green** if they are wrong. Run it
+  and keep the command and its output. Write it through the PR's public interface where one
+  exists, so the test fails for the reviewer's reason, not for a mock's. It lives in a scratch
+  worktree off the head the comment was made on (`origin/<pr head>`), never the user's working
+  copy and never committed by the proof step. A red proof test is the regression test the fix
+  must turn green (step 6).
+- **Code evidence.** The reads that explain the result: `path:line` excerpts of the code under
+  the comment, its callers and callees (grep for every call site), the config or types that
+  constrain it, and `git log -L` / blame when the claim is about history or intent. Cite what you
+  read; "probably" is not evidence.
+
+A claim with no executable behaviour — naming, docs, style, a design preference — gets code
+evidence only, and the proof records `no test applies: <reason>`. A testable claim that could not
+be tested (no harness, needs live infra) records what blocked it and the closest substitute run
+(a REPL call, a script, a type-check). Either way the gap is stated, never hidden.
+
+The proof outcome per comment is one of: `red` (claim proven), `green` (claim disproven),
+`code-only` (no test applies), `blocked` (testable, not tested — with reason).
 
 ## Reply voice — how every posted reply must read
 
@@ -72,7 +101,9 @@ Rules for the posted reply:
   If unsure whether a word is plain, it isn't — pick the simpler one. Technical terms that are
   exact (identifiers, type names, protocol names) stay; fancy *English* goes.
 - **Keep the three things that make a review useful:** what is wrong, why / proof, what to do.
-  Caveman trims connective tissue, never the substance.
+  Caveman trims connective tissue, never the substance. The "proof" is the step-3 evidence in
+  one clause: the `path:line` that shows it, or what the test showed ("test with empty list
+  returns 0").
 - **Lead with the verdict.** "Agree.", "Disagree.", "Real bug.", "Dead code." — first word.
 - **Length cap: ~3 short sentences.** If longer, cut, don't polish.
 - **Politeness floor (do not cross into curt/rude).** It is a colleague's PR, permanent and public.
@@ -114,14 +145,16 @@ Three facts from it steer the rest of the run:
 - **Similar threads.** Run `fetch-comments.sh` once per other layer in the map (parents and
   children, and any fork or sibling). Keep the results: step 4 matches them.
 
-### 3. First `/handover` — gather, sweep, challenge (subagent)
-Invoke the `handover` skill. The subagent's task: read each in-scope comment against the actual
-code; in stack mode, hand each comment to the `stack-sweep` skill as a construct (the lines it
+### 3. First `/handover` — prove, sweep, challenge (subagent)
+Invoke the `handover` skill. The subagent's task: for each in-scope comment, build its **Proof**
+(section above) first — proof test written and run in the scratch worktree, code evidence
+collected — and only then judge it; in stack mode, hand each comment to the `stack-sweep` skill as a construct (the lines it
 marks plus what the reviewer asks of them) and record the outcome — *addressed downstream*,
 *unchanged through the tip*, or *changed but not addressed* — with the layer and evidence; then
 run the `challenge` skill on each comment to stress whether the claim holds. It returns
-structured findings — per comment: what the reviewer claims, what the code actually does, the
-sweep outcome and its evidence, whether the claim is valid, a proposed response, and whether a
+structured findings — per comment: what the reviewer claims, the proof outcome (`red` / `green`
+/ `code-only` / `blocked`) with the test's path, run command and output, the cited code
+evidence, the sweep outcome and its evidence, whether the claim is valid, a proposed response, and whether a
 real code fix is warranted. The subagent writes its conclusions via `/handoff`; read that doc
 when it returns.
 
@@ -133,7 +166,11 @@ the same verdict it would on a lone PR.
 ### 4. Adversarial re-challenge (main agent)
 You hold the full conversation the handoff doc could not capture. For each finding, run the
 `challenge` skill again against the subagent's decision — cold-eyes, looking for what it got wrong
-or what intent it missed. Challenge the sweep too: an "addressed downstream" that rests on a
+or what intent it missed. Challenge the proof first: re-run every proof test yourself and confirm
+the output matches the handoff, then check the test pins *the reviewer's* claim — a test that
+asserts on a mock, on a different input than the comment names, or that would go red for an
+unrelated reason proves nothing. Spot-check the cited `path:line` excerpts against the real
+file. A proof that does not hold is rebuilt before any verdict. Challenge the sweep too: an "addressed downstream" that rests on a
 renamed string rather than on behaviour is the classic miss. Produce a final per-comment verdict:
 
 - `agree-and-fix` — the claim holds, no layer above addresses it, and we fix it now.
@@ -143,6 +180,10 @@ renamed string rather than on behaviour is the classic miss. Produce a final per
 - `agree-addressed-downstream` — stack mode only: the claim holds and layer `#N` already does
   what it asks. The reply points at that layer. No ticket, no fix.
 - `disagree-with-reason`.
+
+The verdict follows the proof: `red` supports an `agree-*` verdict, `green` supports
+`disagree-with-reason`. A verdict that goes against its proof outcome (agreeing despite a green
+test, say, because the test cannot reach the case) states why in one line, and the gate shows it.
 
 A *changed but not addressed* outcome does not change the verdict; it adds one sentence to the
 reply naming what the later layer did instead, and a conflict-hazard line to the fix task.
@@ -175,6 +216,10 @@ plain `/handover`. Each round a fresh subagent makes the fix and the main agent 
 the real diff — stubs, fake-done, fallbacks, weakened tests, missed edge cases — looping with a new
 subagent until the review comes back clean. This hardens the fix before a human ever sees it.
 
+The loop task carries each comment's red proof test: it joins the fix diff as the regression
+test, and the loop is clean only when that test, unchanged in what it asserts, now goes green
+and the rest of the suite still passes.
+
 The loop produces the diff but does **not** commit it — per the hard rules the fix stays uncommitted
 until approved in the per-comment gate (step 7). The loop task must say: produce the fix in the working
 tree, do not commit; the per-comment gate owns the commit.
@@ -197,6 +242,9 @@ For each in-scope comment, ask a single, well-structured question containing:
 - **The code:** `path:line` plus the `diff_hunk` (or a file excerpt) it points at.
 - **In plain terms:** what the code does and what the reviewer's point means, explained for a
   reader who may not know this codebase's language — avoid unexplained jargon.
+- **Proof:** the outcome (`red` / `green` / `code-only` / `blocked`), the proof test's code and the
+  run command with its key output lines, and the cited `path:line` evidence. For `code-only` and
+  `blocked`, the reason.
 - **Stack:** (stack mode) the sweep outcome in one line, with the layer it names.
 - **Our response:** the drafted reply (written in the **Reply voice** above — caveman, simple,
   ≤3 short sentences, politeness floor), and the proposed fix diff if any. In stack mode the
@@ -238,7 +286,7 @@ Then, per approved comment, write the reply body to a temp file and:
 - **Skip reply** → record it, post nothing.
 
 ### 9. Final summary
-A table: each comment → sweep outcome (stack mode) → final verdict → action taken (replied /
+A table: each comment → proof outcome → sweep outcome (stack mode) → final verdict → action taken (replied /
 replied+resolved / replied on N threads / skipped) → link. Below it, in stack mode: the ticket
 number, the fix PR number and its base, whether it was linked into the registered stack, and the
 sweep's freshness line. State what the scope filter skipped and why.
@@ -253,6 +301,10 @@ sweep's freshness line. State what the scope filter skipped and why.
 - Calling a comment "addressed downstream" because a later layer renamed the string it mentions.
   The sweep counts behaviour.
 - Opening one fix PR per comment in stack mode. One run, one ticket, one PR.
+- Reaching a verdict by reasoning about the code instead of running a proof test on it.
+- A proof test that asserts on a mock or a different input than the comment names, so its red
+  or green says nothing about the claim.
+- Trusting the subagent's proof output without re-running the test on the main agent.
 - Touching threads that are already resolved or already have your reply.
 - Resolving a thread without posting a reply, or resolving a thread on a PR the user did not name.
 - Leaving unexplained jargon in the plain-language explanation — the reader may not know this codebase's language.
@@ -261,6 +313,9 @@ sweep's freshness line. State what the scope filter skipped and why.
 - [ ] PR resolved; `fetch-comments.sh` run; empty scope → stopped
 - [ ] `stack-map.sh` run; mode (single-PR / stack) and, in stack mode, tip, registered flag, spec and freshness noted
 - [ ] Stack mode: `fetch-comments.sh` run per other layer for similar-thread matching
+- [ ] Every comment has a proof: test written and run in a scratch worktree (or `code-only` / `blocked` with reason) plus cited `path:line` evidence
+- [ ] Main agent re-ran every proof test and spot-checked the cited code before any verdict
+- [ ] Each `agree-and-fix` red proof test went green in the fix loop, unchanged in what it asserts
 - [ ] First `/handover` ran; subagent used `stack-sweep` (stack mode) and the `challenge` skill; conclusions read
 - [ ] Main agent re-challenged each finding (and each sweep outcome) with the `challenge` skill; verdicts produced
 - [ ] Fixes (if any) produced via the `handover-loop` skill (reviewed until clean), NOT committed by the subagent; stack mode: one loop, branch `ticket/<M>` off `origin/<tip>`, in a worktree
