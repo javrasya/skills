@@ -29,6 +29,7 @@ Skills that depend on other skills carry them in-repo, so the link script instal
 | [preflight](./skills/engineering/preflight/SKILL.md) | `gh`, authenticated against the repo; a `docs/agents/frontier.md` and `docs/agents/issue-tracker.md` in the target repo |
 | [ralph-goal](./skills/productivity/ralph-goal/SKILL.md) | an agent CLI runnable headlessly in a shell loop |
 | [grill-with-visuals](./skills/productivity/grill-with-visuals/SKILL.md) | the `grilling` and `domain-modeling` skills installed (Matt Pocock's; not vendored here), Node 18+ for the glossary and screenshot helpers, Chrome or Chromium for the screenshot check, and, for checked statecharts, pstack's `statechart` skill (TLC via mise; without it, charts are marked reasoned, and `scripts/chartcheck.mjs` names what is missing under each chart) |
+| [wayfinder-with-visuals](./skills/productivity/wayfinder-with-visuals/SKILL.md) | Matt Pocock's `wayfinder` skill installed (not vendored here) in `~/.claude/skills` or `~/.agents/skills`, plus everything grill-with-visuals needs |
 
 For grill-with-visuals' checked statecharts, install pstack's `statechart` skill and `mise`:
 
@@ -71,6 +72,7 @@ These split on one axis — who can invoke them. **User-invoked** skills are rea
 - **[learn](./skills/productivity/learn/SKILL.md)** — Problem-first, fail-forward lesson on a system, concept, or codebase: five phases (orient, confront, reveal, practice, own it), leaving C4 diagrams and ADRs in the repo.
 - **[q](./skills/productivity/q/SKILL.md)** — Ask a quick question, get just the answer: `Yes.`/`No.` (plus one sentence at most when it helps) for yes/no questions, the bare answer otherwise.
 - **[grill-with-visuals](./skills/productivity/grill-with-visuals/SKILL.md)** — A grilling whose every round is a local HTML page: one card per question laid out as grilling posts it in chat (❓ question, its options as a list, the ➡️ recommendation), then a view per option (git-style diffs, diagrams, UI mockups, animations, statecharts), a settled-so-far strip that grows each round, and glossary terms that show their definition on hover and open their own visual explainer page. Composes `grilling` and `domain-modeling`, which own the questions; it owns only the page.
+- **[wayfinder-with-visuals](./skills/productivity/wayfinder-with-visuals/SKILL.md)** — `wayfinder` with one swap: a `wayfinder:grilling` ticket is worked through `grill-with-visuals`, so each round is a local HTML page. Every other ticket type, and charting a new map, runs as plain wayfinder. Reads both skills' files directly, since neither is reachable through the Skill tool.
 
 **Model-invoked**
 
