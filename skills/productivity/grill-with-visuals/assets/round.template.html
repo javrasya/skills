@@ -13,7 +13,7 @@
   <header style="display:flex;flex-direction:column;gap:10px">
     <h1>TOPIC, round N</h1>
     <!-- One or two sentences: what is being grilled, links to the ticket/issue/doc it hangs off. Keep the last sentence. -->
-    <p class="sub">CONTEXT. Answer each question in the chat: “yes” takes the ➡️ recommendation.</p>
+    <p class="sub">CONTEXT. Pick an answer on each card and add anything in its box, then copy them all with the button at the bottom right and paste them in the chat.</p>
     <!-- One chip per colour the page actually uses. glossary.mjs adds the glossary chip itself. -->
     <div class="legend">
       <span class="chip today">● today</span>
@@ -271,7 +271,9 @@ stateDiagram-v2
     </div>
   </section>
 
-  <p class="foot">Answer each one in the chat, e.g. “q2 yes, q3 C because…”.</p>
+  <!-- grill.js adds the answer box to the end of every question card (Yes / No buttons when it has no options, then a
+       note box), makes each option line choosable, and adds the floating copy button. Write none of it here. -->
+  <p class="foot">Or answer in the chat, e.g. “q2 yes, q3 C because…”.</p>
 </main>
 <script src="grill.js"></script>
 </body>

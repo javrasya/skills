@@ -150,3 +150,27 @@ pre.mermaid { overflow-x: auto; }
 .chartsrc .why { color: var(--muted); flex-basis: 100%; }
 .chartsrc .fix { flex-basis: 100%; }
 @media (max-width: 760px) { .pair { grid-template-columns: 1fr; } }
+/* answers: a choice per card (the option lines, or Yes / No), a note box last, and the floating copy button */
+.opt.choice { cursor: pointer; }
+.opt.choice:hover { background: var(--code-bg); }
+.opt.chosen, .opt.chosen[aria-selected="true"] { background: var(--rec-bg); border-left-color: var(--rec); box-shadow: inset 0 0 0 1px var(--rec); }
+.opt.chosen .letter { color: var(--surface); background: var(--rec); border-radius: 4px; text-align: center; padding: 0 4px; }
+.opt.chosen::after { content: "✓ your answer"; margin-left: auto; padding-left: 12px; white-space: nowrap; font-size: 0.78rem; font-weight: 700; color: var(--rec); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.answer { border-top: 1px dashed var(--line); padding-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+.yn { display: flex; gap: 8px; }
+.yn .opt { font: 600 0.95rem var(--body); color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--line); border-radius: 0 6px 6px 0; padding: 6px 16px; }
+.yn .opt.chosen { color: var(--rec); border-color: var(--rec); }
+.yn .opt.chosen::after { content: " ✓"; padding-left: 4px; }
+.notelabel { font-size: 0.75rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 700; }
+.note-in { width: 100%; min-height: 3.2em; resize: vertical; font: 0.95rem/1.5 var(--body); color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
+.note-in:focus { outline: 3px solid var(--rec-bg); border-color: var(--rec); background: var(--surface); }
+.yn .opt:focus-visible { outline: 3px solid var(--rec); outline-offset: 2px; }
+.q.answered .qnum::after { content: " ✓"; color: var(--new); }
+.copydock { position: fixed; right: 24px; bottom: 24px; z-index: 50; display: flex; align-items: center; gap: 10px; }
+.copyall { width: 52px; height: 52px; border-radius: 50%; border: 0; display: grid; place-items: center; cursor: pointer; color: var(--surface); background: var(--rec); box-shadow: 0 6px 18px rgba(27, 34, 48, 0.25); }
+.copyall:hover { filter: brightness(1.1); }
+.copyall:focus-visible { outline: 3px solid var(--ink); outline-offset: 3px; }
+.copied { font-size: 0.85rem; font-weight: 600; color: var(--surface); background: var(--ink); border-radius: 8px; padding: 6px 10px; opacity: 0; transform: translateX(6px); transition: opacity 0.15s, transform 0.15s; pointer-events: none; }
+.copydock.show .copied { opacity: 1; transform: none; }
+main { padding-bottom: 110px; }
