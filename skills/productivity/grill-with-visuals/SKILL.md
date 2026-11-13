@@ -1,10 +1,10 @@
 ---
 name: grill-with-visuals
-description: "Grill the user with each round shown as a local HTML page: every option of each question, each with its own view where they differ, a recommendation box, a settled-so-far strip, and glossary terms that open their own visual explainer pages."
+description: "Grill the user with each round shown as a local HTML page: every option of each question, each with its own view where they differ, a recommendation box, a settled-so-far strip, glossary terms that open their own visual explainer pages, and answers picked on the page and copied to the chat in one go."
 disable-model-invocation: true
 ---
 
-Call the Skill tool twice, for "grilling" and "domain-modeling". They own the conversation: the design tree, each round's frontier, the recommendations, the facts you look up, and the glossary and ADR updates. This skill owns only how a round is **shown**: one local HTML page per round, opened in the browser, with an explainer page for each glossary term on it, and a terse text copy in chat. The pages stay local files: never publish them as artifacts. Answers still come back in chat, and the next round is still grilling's to compute.
+Call the Skill tool twice, for "grilling" and "domain-modeling". They own the conversation: the design tree, each round's frontier, the recommendations, the facts you look up, and the glossary and ADR updates. This skill owns only how a round is **shown**: one local HTML page per round, opened in the browser, with an explainer page for each glossary term on it, and a terse text copy in chat. The pages stay local files: never publish them as artifacts. Answers still come back in chat (the user answers on the page and pastes them all at once, or types them), and the next round is still grilling's to compute.
 
 ## Each round
 
@@ -15,7 +15,7 @@ Call the Skill tool twice, for "grilling" and "domain-modeling". They own the co
    - **Legend**: one chip per colour the page uses. Red is what exists today, green is the proposal, blue is the recommendation; the fourth colour is free for one meaning the page needs.
    - **Settled so far**: every decision from earlier rounds, one line each, keyed by Q number, as the user settled it (their wording where it changed the recommendation). The strip grows every round. Round 1 has none.
    - **One card per question**, carrying everything grilling's question holds, in the order grilling posts it in chat: the question line `❓ Qn - **title**: body`, **every choice it lists**, then the `➡️` recommendation, worded so "yes" accepts it. The picture, if any, comes after all three, under a divider (`.visual`). The page shows the question; it never shrinks it to the recommendation.
-   - **The choices**: when grilling lists alternatives, the card lists each one on its own line (`ul.opts`, one `li.opt` each, never side-by-side cards), lettered A, B, C as grilling lettered them, each with its name and what it means and costs, the recommended one marked `.pick`. When the options differ in what they would look like, draw **one view per option** (`.view` with `data-opt` matching its option line) in the Proposed pane: the page shows the recommended option's view first, and clicking or pressing Enter on another option shows its tree, diff or diagram instead. Draw each view with the same kind of picture, so switching compares like with like. Options that would look the same get no views and no `data-opt`. A question with no alternatives (a yes/no on one proposal) has no option list: just the question line and the `➡️` banner. Clicking only changes the view: the user still answers in chat.
+   - **The choices**: when grilling lists alternatives, the card lists each one on its own line (`ul.opts`, one `li.opt` each, never side-by-side cards), lettered A, B, C as grilling lettered them, each with its name and what it means and costs, the recommended one marked `.pick`. When the options differ in what they would look like, draw **one view per option** (`.view` with `data-opt` matching its option line) in the Proposed pane: the page shows the recommended option's view first, and clicking or pressing Enter on another option shows its tree, diff or diagram instead. Draw each view with the same kind of picture, so switching compares like with like. Options that would look the same get no views and no `data-opt`. A question with no alternatives (a yes/no on one proposal) has no option list: just the question line and the `➡️` banner.
    - **The picture**, if the question needs one, picks the card form by what the question is about:
      - something that exists and would change → **Today | Proposed** panes, the same kind of picture on both sides; when it is text (a tree, a snippet, config, a command's output), draw it as a git-style **diff** (`pre.diff`): one `<span>` per line, `.del` on Today's lines that change or go (red), `.add` on the proposal's lines that change or appear (green), unchanged lines plain, and the characters that actually change wrapped in `<del>` / `<ins>`, so they show darker within the line;
      - an order of steps → **flow** rows;
@@ -42,6 +42,14 @@ Call the Skill tool twice, for "grilling" and "domain-modeling". They own the co
      - [`run.colorfigures.html`](assets/plates/run.colorfigures.html), after Colorfigures: the thing as one isometric object with gauges, a drawer and a see-through window whose parts move with each step, flat colour, thick ink, a hard cobalt shadow, and callouts with leader lines.
 
      Save a plate as `terms/<term>.plate.html` beside the term's explainer, and link it from the explainer's picture card ("See the plate →"); it is a page of its own, so the explainer keeps its own picture too. A plate is hand-placed, so it costs far more than a card: make one only for a term central to the grilling, and only when the user wants it. Screenshot it like any page (step 5) and fix every label that touches another.
+
+   **Answers on the page.** `grill.js` lets the user answer every card where they read it, so they paste one block instead of going back to the terminal per question. Write none of it into the page:
+     - clicking an option line (or Enter on it) chooses it, marked "✓ your answer", and shows its view if it has one; clicking it again clears the choice. A card with no option list gets Yes / No buttons;
+     - every question card ends with an "Anything to add" box, for a reason, a condition, or an answer the options don't cover;
+     - a floating copy button, icon only, sits bottom right on every scroll. It copies every answered question, unanswered ones left out, as `Qn - title: <letter>, <name>` (or `Yes` / `No`), the note on the lines below, a blank line between questions, and says how many it copied and which are still open;
+     - answers are kept in the browser's localStorage per page and question, so a reload keeps them.
+
+     Read a pasted block as the answers to those Q numbers: a choice with no note is a plain pick, a note changes or conditions it, a note with no choice is the answer in the user's words. A Q missing from the block is still open: ask it again next round.
 
    **Decide per question whether a picture earns its place.** Ask what the user must see to answer it. When a sentence or two settles it, the card has no picture; that is the right answer for many questions. When the question is about a shape, a layout, a flow or a change, draw that shape instead of describing it, using the **smallest view that makes the key point clear**, the way the `show-me` skill does. Pick one view per card, two only when Today | Proposed needs the same view on both sides. Choose it by what the question turns on:
      - logic or an algorithm → **pseudocode**;
@@ -100,6 +108,6 @@ Call the Skill tool twice, for "grilling" and "domain-modeling". They own the co
    ➡️ Yes
    ```
 
-   Then wait for the answers.
+   Then say in one line that they can answer on the page and paste the copied block, and wait for the answers.
 
 When grilling's frontier is empty, rewrite `index.html` once more as the settled page, and open it: every decision in the strip, no question cards, the title ending in "settled".
