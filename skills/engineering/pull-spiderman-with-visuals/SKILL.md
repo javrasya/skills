@@ -25,7 +25,7 @@ A card is on the **frontier** when everything it shows exists. Use `grill-review
 
 On verdict and gate cards, mark what was **run** (a reproduction, a test, the script on made-up input) apart from what was only read, with the legend's fourth colour.
 
-Two answers put a card back on the next round's frontier under the same Q number: **Explain more**, with a longer In plain terms; and a note that changes the reply, with the new draft. A reply is posted only as the user last saw it.
+Two answers put a card back on the next round's frontier under the same Q number: **Explain more**, with a longer In plain terms; and a note that changes the reply, with the new draft. Wait for a fresh answer to the revised card. Post only the reply shown on the card the user approves.
 
 ## Steps
 

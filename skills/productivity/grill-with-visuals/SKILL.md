@@ -10,8 +10,8 @@ Call the Skill tool twice, for "grilling" and "domain-modeling". They own the co
 
 1. **Compute the round** as grilling says. Number questions across the whole session: round 2 starts after round 1's last number, so a Q number names one question for good.
 
-2. **Write the page** (light, whatever the system's colour scheme) from [`assets/round.template.html`](assets/round.template.html). Once per grilling, make a folder `grill-<topic>/` in the session's working folder (or the job's scratch folder), and copy into it `assets/grill.css` and `assets/grill.js`, which every page links to, and the template as `index.html`. Rewrite `index.html` each round. The template's comments say what each slot holds. Fill:
-   - **Title and context**: the topic and round number; one or two sentences linking the ticket, issue or doc being grilled.
+2. **Write the page** (light, whatever the system's colour scheme) from [`assets/round.template.html`](assets/round.template.html). Start each grilling in a fresh `grill-<topic>/` folder in the session's working folder (or the job's scratch folder); add a suffix if the folder already exists. Copy `assets/grill.css` into it once. Each round, copy in the current `assets/grill.js` and rewrite `index.html` from the template. The template's comments say what each slot holds. Fill:
+   - **Title and context**: put the topic and round number in both `<title>` and `<h1>`, then one or two sentences linking the ticket, issue or doc being grilled. The browser uses `<title>` to tell rounds apart.
    - **Legend**: one chip per colour the page uses. Red is what exists today, green is the proposal, blue is the recommendation; the fourth colour is free for one meaning the page needs.
    - **Settled so far**: every decision from earlier rounds, one line each, keyed by Q number, as the user settled it (their wording where it changed the recommendation). The strip grows every round. Round 1 has none.
    - **One card per question**, carrying everything grilling's question holds, in the order grilling posts it in chat: the question line `❓ Qn - **title**: body`, **every choice it lists**, then the `➡️` recommendation, worded so "yes" accepts it. The picture, if any, comes after all three, under a divider (`.visual`). The page shows the question; it never shrinks it to the recommendation.
@@ -47,7 +47,7 @@ Call the Skill tool twice, for "grilling" and "domain-modeling". They own the co
      - clicking an option line (or Enter on it) chooses it, marked "✓ your answer", and shows its view if it has one; clicking it again clears the choice. A card with no option list gets Yes / No buttons;
      - every question card ends with an "Anything to add" box, for a reason, a condition, or an answer the options don't cover;
      - a floating copy button, icon only, sits bottom right on every scroll. It copies every answered question, unanswered ones left out, as `Qn - title: <letter>, <name>` (or `Yes` / `No`), the note on the lines below, a blank line between questions, and says how many it copied and which are still open;
-     - answers are kept in the browser's localStorage per page and question, so a reload keeps them.
+     - draft choices and notes survive a reload of the same round and question. Each new round starts with blank inputs, including when a question keeps its Q number.
 
      Read a pasted block as the answers to those Q numbers: a choice with no note is a plain pick, a note changes or conditions it, a note with no choice is the answer in the user's words. A Q missing from the block is still open: ask it again next round.
 

@@ -81,14 +81,17 @@
     }).then(options, options);
   })();
   // Answers: pick a choice on each question card and add a note in its box; the floating button copies every
-  // answer as one block for the chat. Kept in localStorage per page and question, so a reload keeps them.
+  // answer as one block for the chat. Drafts survive reloads of the same round and question.
   (function () {
     var cards = Array.prototype.filter.call(document.querySelectorAll('section.q'), function (c) { return c.querySelector('.qline'); });
     if (!cards.length) return;
     var store; try { store = window.localStorage; } catch (e) { store = null; }
-    function key(id) { return 'grill:' + location.pathname + ':' + id; }
-    function load(id) { try { return JSON.parse(store.getItem(key(id))) || {}; } catch (e) { return {}; } }
-    function save(id, a) { try { store.setItem(key(id), JSON.stringify(a)); } catch (e) { /* no storage: answers live until reload */ } }
+    function draftKey(card) {
+      // Rounds share index.html and may reuse card IDs. The title changes each round, and the question line includes its Q number and wording.
+      return 'grill:draft:' + JSON.stringify([location.pathname, document.title, text(card.querySelector('.qline'))]);
+    }
+    function load(key) { try { return JSON.parse(store.getItem(key)) || {}; } catch (e) { return {}; } }
+    function save(key, a) { try { store.setItem(key, JSON.stringify(a)); } catch (e) { /* no storage: answers live until reload */ } }
     function text(el) { return el ? el.textContent.replace(/\s+/g, ' ').trim() : ''; }
     function el(tag, cls, txt) { var e = document.createElement(tag); if (cls) e.className = cls; if (txt) e.textContent = txt; return e; }
     function icon(paths) {
@@ -100,8 +103,8 @@
     }
 
     var answers = cards.map(function (card) {
-      var num = text(card.querySelector('.qnum')), id = card.id || num;
-      var a = { num: num, title: text(card.querySelector('.qtitle')), state: load(id), choices: [] };
+      var num = text(card.querySelector('.qnum')), id = card.id || num, key = draftKey(card);
+      var a = { num: num, title: text(card.querySelector('.qtitle')), state: load(key), choices: [] };
       var box = el('div', 'answer');
       var opts = card.querySelectorAll('.opts .opt');
       if (opts.length) {
@@ -121,7 +124,7 @@
       function choose(target) {
         var c = a.choices.find(function (x) { return x.el === target; });
         a.state.choice = a.state.choice === c.value ? null : c.value;  // clicking the chosen one again clears it
-        paint(); save(id, a.state);
+        paint(); save(key, a.state);
       }
       function paint() {
         a.choices.forEach(function (c) {
@@ -139,7 +142,7 @@
       note.placeholder = a.choices.length ? 'A reason, a condition, or a different answer…' : 'Your answer…';
       note.value = a.state.note || '';
       function grow() { note.style.height = 'auto'; note.style.height = note.scrollHeight + 2 + 'px'; }
-      note.addEventListener('input', function () { a.state.note = note.value; grow(); paint(); save(id, a.state); });
+      note.addEventListener('input', function () { a.state.note = note.value; grow(); paint(); save(key, a.state); });
       box.appendChild(label); box.appendChild(note);
       card.appendChild(box);
       paint(); requestAnimationFrame(grow);
