@@ -15,6 +15,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // ---------- glossary discovery ----------
 
@@ -78,7 +79,7 @@ function excerpt(md, maxSentences = 2, maxChars = 420) {
   return balance(out);
 }
 
-const escapeHtml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+export const escapeHtml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 function mdInline(md) {
   const codes = [];
@@ -449,8 +450,6 @@ function inject(html, terms, used, hrefs = {}) {
   return html;
 }
 
-const stripAll = stripInjection;
-
 // ---------- CLI ----------
 
 function explainerSetup(page, html) {
@@ -461,7 +460,7 @@ function explainerSetup(page, html) {
   return {
     dir,
     self: meta('gl-self') || null,
-    href: (slug) => (fs.existsSync(path.join(dir, `${slug}.html`)) ? path.relative(path.dirname(page), path.join(dir, `${slug}.html`)) : null),
+    href: (slug) => (fs.existsSync(path.join(dir, `${slug}.html`)) ? path.relative(path.dirname(page), path.join(dir, `${slug}.html`)).split(path.sep).join('/') : null),
   };
 }
 
@@ -475,12 +474,94 @@ function parseArgs(argv) {
   return opts;
 }
 
+function link(page, html, terms, { max = 1, exclude = [] } = {}) {
+  const ex = explainerSetup(page, html);
+  const self = ex.self && terms[ex.self];
+  const options = { max, exclude: self ? [...exclude, self.term] : exclude };
+  const r = linkPage(html, terms, { ...options, hrefOf: (slug) => ex.href(slug) || `#gl-${slug}` });
+  const hrefs = Object.fromEntries(r.used.map((slug) => [slug, ex.href(slug)]).filter(([, h]) => h));
+  return { ...r, ex, hrefs, html: inject(r.html, terms, r.used, hrefs) };
+}
+
+function reportLinks(target, { ex, used, perScope, hrefs }) {
+  console.error(`linked ${used.length} distinct terms -> ${target}`);
+  for (const s of perScope) console.error(`  ${s.label}: ${s.links.join(' · ')}`);
+  if (ex.dir) console.error(`explainers: ${Object.keys(hrefs).length} of ${used.length} terms have one in ${path.relative(process.cwd(), ex.dir) || '.'}`);
+}
+
+function explain(page, html, terms, options) {
+  const ex = explainerSetup(page, html);
+  if (!ex.dir) throw new Error('the page names no explainer folder (<meta name="gl-explainers">)');
+  const r = linkPage(html, terms, options);
+  const usedIn = new Map(r.used.map((slug) => [slug, []]));
+  for (const sc of r.slugsOf) {
+    if (/^q[0-9]+$/i.test(sc.label)) for (const slug of sc.slugs) usedIn.get(slug).push(sc.label);
+  }
+  if (!r.used.length) return [];
+  const tpl = fs.readFileSync(new URL('../assets/term.template.html', import.meta.url), 'utf8');
+  const back = path.relative(ex.dir, path.resolve(page)).split(path.sep).join('/');
+  fs.mkdirSync(ex.dir, { recursive: true });
+  return r.used.map((slug) => {
+    const file = path.join(ex.dir, `${slug}.html`);
+    const made = !fs.existsSync(file);
+    let content;
+    const where = usedIn.get(slug).map((id) => `<li><a href="${escapeHtml(back)}#${id}">${id.toUpperCase()}</a></li>`).join('\n      ') || '<li>On the round page.</li>';
+    if (made) {
+      const t = terms[slug];
+      const slots = {
+        TERM: escapeHtml(t.term), SLUG: slug, BACK: escapeHtml(back), DEFINITION: t.html,
+        SECTION: escapeHtml(t.section || t.term), AVOID: t.avoid ? `<p class="m">Avoid: ${t.avoid}</p>` : '',
+        USED_IN: where,
+      };
+      content = tpl.replace(/\{\{([A-Z_]+)\}\}/g, (_, slot) => slots[slot]);
+      fs.writeFileSync(file, content);
+    } else {
+      content = fs.readFileSync(file, 'utf8');
+      // index.html advances each round; keep its backlinks current without touching the authored picture.
+      const updated = content.replace(/(<!-- used-in:start -->)[\s\S]*?(<!-- used-in:end -->)/, (_, start, end) => `${start}\n      ${where}\n      ${end}`);
+      if (updated !== content) fs.writeFileSync(file, updated);
+      content = updated;
+    }
+    return { file, content, made, stub: /\sdata-stub\b/.test(content) };
+  });
+}
+
+function reportExplainers(pages) {
+  console.error(`explainers: ${pages.length} terms on the page, ${pages.filter((page) => page.made).length} new`);
+  for (const p of pages) {
+    const file = path.relative(process.cwd(), p.file);
+    if (p.made) console.error(`  new   ${file}`);
+    if (p.stub) console.error(`  needs its picture: ${file}`);
+  }
+}
+
+// Use one glossary scan for the round, its new explainers and all their links.
+export function linkRound(page, html, exclude) {
+  const files = findGlossary(process.cwd());
+  if (!files.length) return html;
+  const terms = buildTerms(files);
+  const options = { exclude };
+  const pages = explain(page, html, terms, options);
+  reportExplainers(pages);
+  for (const p of pages) {
+    const linked = link(p.file, p.content, terms, options).html;
+    if (linked !== p.content) fs.writeFileSync(p.file, linked);
+  }
+  const linked = link(page, html, terms, options);
+  reportLinks(page, linked);
+  return linked.html;
+}
+
 function main() {
   const opts = parseArgs(process.argv.slice(2));
   const [cmd, page] = opts._;
   const files = findGlossary(opts.glossary || process.cwd());
+  const terms = buildTerms(files);
+  const options = {
+    max: Number(opts.max ?? 1),
+    exclude: typeof opts.exclude === 'string' ? opts.exclude.split(',').map((s) => s.trim()).filter(Boolean) : [],
+  };
   if (cmd === 'terms') {
-    const terms = files.length ? buildTerms(files) : {};
     process.stdout.write(JSON.stringify({ sources: files, terms }, null, 2) + '\n');
     return;
   }
@@ -488,58 +569,26 @@ function main() {
     const html = fs.readFileSync(page, 'utf8');
     const target = opts.out || page;
     if (!files.length) {
-      if (target !== page) fs.writeFileSync(target, stripAll(html));
+      if (target !== page) fs.writeFileSync(target, stripInjection(html));
       console.error('no glossary found: page left without term links');
       return;
     }
-    const terms = buildTerms(files);
-    const max = Number(opts.max ?? 1);
-    const exclude = typeof opts.exclude === 'string' ? opts.exclude.split(',').map((s) => s.trim()).filter(Boolean) : [];
-    const ex = explainerSetup(page, html);
-    if (ex.self) exclude.push(...(terms[ex.self] ? [terms[ex.self].term] : []));
-    const r = linkPage(stripAll(html), terms, { max, exclude, hrefOf: (slug) => ex.href(slug) || `#gl-${slug}` });
-    const hrefs = Object.fromEntries(r.used.map((slug) => [slug, ex.href(slug)]).filter(([, h]) => h));
-    fs.writeFileSync(target, inject(r.html, terms, r.used, hrefs));
+    const linked = link(page, html, terms, options);
+    fs.writeFileSync(target, linked.html);
     console.error(`glossary: ${files.join(', ')} (${Object.keys(terms).length} terms)`);
-    console.error(`linked ${r.used.length} distinct terms -> ${target}`);
-    for (const s of r.perScope) console.error(`  ${s.label}: ${s.links.join(' · ')}`);
-    if (ex.dir) console.error(`explainers: ${Object.keys(hrefs).length} of ${r.used.length} terms have one in ${path.relative(process.cwd(), ex.dir) || '.'}`);
+    reportLinks(target, linked);
     return;
   }
   if (cmd === 'explainers' && page) {
     if (!files.length) { console.error('no glossary found: no explainers to write'); return; }
     const html = fs.readFileSync(page, 'utf8');
-    const terms = buildTerms(files);
-    const ex = explainerSetup(page, html);
-    if (!ex.dir) { console.error('the page names no explainer folder (<meta name="gl-explainers">)'); process.exit(2); }
-    const r = linkPage(stripAll(html), terms, { max: Number(opts.max ?? 1) });
-    const usedIn = {};
-    for (const sc of r.slugsOf) for (const slug of sc.slugs) (usedIn[slug] ||= []).push(sc.label);
-    const tpl = fs.readFileSync(new URL('../assets/term.template.html', import.meta.url), 'utf8');
-    const back = path.relative(ex.dir, page);
-    fs.mkdirSync(ex.dir, { recursive: true });
-    const made = [], stubs = [];
-    for (const slug of r.used) {
-      const file = path.join(ex.dir, `${slug}.html`);
-      if (!fs.existsSync(file)) {
-        const t = terms[slug];
-        const where = (usedIn[slug] || []).map((l) => `<li><a href="${back}#${l}">${escapeHtml(l.toUpperCase())}</a></li>`).join('\n      ') || '<li>On the round page.</li>';
-        fs.writeFileSync(file, tpl
-          .replaceAll('{{TERM}}', escapeHtml(t.term)).replaceAll('{{SLUG}}', slug).replaceAll('{{BACK}}', back)
-          .replace('{{DEFINITION}}', t.html).replace('{{SECTION}}', escapeHtml(t.section || t.term))
-          .replace('{{AVOID}}', t.avoid ? `<p class="m">Avoid: ${t.avoid}</p>` : '')
-          .replace('{{USED_IN}}', where));
-        made.push(path.relative(process.cwd(), file));
-      }
-      if (/\sdata-stub\b/.test(fs.readFileSync(file, 'utf8'))) stubs.push(path.relative(process.cwd(), file));
-    }
-    console.error(`explainers: ${r.used.length} terms on the page, ${made.length} new`);
-    for (const f of made) console.error(`  new   ${f}`);
-    for (const f of stubs) console.error(`  needs its picture: ${f}`);
+    if (!explainerSetup(page, html).dir) { console.error('the page names no explainer folder (<meta name="gl-explainers">)'); process.exit(2); }
+    reportExplainers(explain(page, html, terms, options));
     return;
   }
-  console.error('usage: glossary.mjs terms [--glossary <file|dir>]\n       glossary.mjs link <page.html> [--glossary <file|dir>] [--out <file>] [--max 1] [--exclude a,b]\n       glossary.mjs explainers <page.html> [--glossary <file|dir>]');
+  console.error('usage: glossary.mjs terms [--glossary <file|dir>]\n       glossary.mjs link <page.html> [--glossary <file|dir>] [--out <file>] [--max 1] [--exclude a,b]\n       glossary.mjs explainers <page.html> [--glossary <file|dir>] [--exclude a,b]');
   process.exit(2);
 }
 
-main();
+const entry = process.argv[1];
+if (entry && fs.existsSync(entry) && fs.realpathSync(entry) === fileURLToPath(import.meta.url)) main();
